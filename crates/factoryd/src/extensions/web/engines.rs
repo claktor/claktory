@@ -107,7 +107,10 @@ impl Engine {
     pub(crate) fn policy(self) -> Policy {
         let (gap_ms, jitter_ms, per_hour, limited_max_ms) = match self {
             Engine::DuckDuckGo | Engine::DuckDuckGoLite => (3_000, 2_000, 60, HOUR),
-            Engine::Bing | Engine::Yahoo => (4_000, 3_000, 60, 6 * HOUR),
+            Engine::Bing => (4_000, 3_000, 60, 6 * HOUR),
+            // Took 60 an hour from one IP without a challenge (live run,
+            // #257); raised a step at a time while it keeps answering.
+            Engine::Yahoo => (4_000, 3_000, 90, 6 * HOUR),
             Engine::Ecosia => (5_000, 3_000, 40, 6 * HOUR),
             Engine::Brave => (20_000, 5_000, 15, 6 * HOUR),
             // A one-person project: asked least.
@@ -403,6 +406,10 @@ pub(crate) mod tests {
         // a session, nonce or challenge id.
         let token = regex::Regex::new(r"(?:[?&;]|\\u0026)[A-Za-z_]+=([0-9A-Fa-f]{32})\b").expect("regex");
         let session = regex::Regex::new(r#"(?:^|[^A-Za-z])(?:IG|CID|sid|fclid)[=:]"?([A-Za-z0-9-]{8,})|clientId":"([A-Za-z0-9]+)""#).expect("regex");
+        // Keys a page hands its own scripts (Yahoo's hashKey; Ecosia's
+        // DataDome key, also as ddjskey, and its Braze and Tag Manager
+        // keys), which gitleaks takes for secrets.
+        let key = regex::Regex::new(r#"(?:hashKey|[A-Za-z]*SdkKey|[A-Za-z]*ClientSideKey|ddjskey|gtmAuth)\\?"?\s*[=:]\s*\\?"?([A-Za-z0-9_-]+)"#).expect("regex");
         for entry in std::fs::read_dir(&dir).expect("fixtures") {
             let path = entry.expect("entry").path();
             let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -428,6 +435,9 @@ pub(crate) mod tests {
             for found in session.captures_iter(&page) {
                 let id = found.get(1).or_else(|| found.get(2)).map_or("", |id| id.as_str());
                 assert!(id.chars().all(|c| c == '0' || c == '-'), "{name}: a session id, {}", &found[0]);
+            }
+            for found in key.captures_iter(&page) {
+                assert!(found[1].chars().all(|c| c == '0' || c == '-'), "{name}: a key, {}", &found[0]);
             }
         }
     }

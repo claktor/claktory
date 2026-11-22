@@ -132,7 +132,7 @@ fn propose(factory: &Arc<Factory>, agent: &str, args: ProposeArgs) -> Result<Too
     let (grantee, name) = named(factory, &args.agent)?;
     // A liaison, limited to a pipe, would bridge the other Claktory to the
     // person's app (Fugo's review).
-    if factory.pipes.quarantined(&grantee) {
+    if factory.pipes.contained(&grantee) {
         return Err(format!("{name} is limited to a pipe, so it can't be given access to {person}'s apps. Nothing was proposed."));
     }
     let Some(app) = user_apps::app(args.app.trim()) else {
@@ -235,7 +235,7 @@ fn untainted(factory: &Factory, agent: &str) -> Result<(), String> {
     if factory.pipes.tainted(agent).is_empty() {
         Ok(())
     } else {
-        let person = factory.lock().config.person_capitalized().to_owned();
+        let person = factory.person_capitalized();
         let read = crate::pipes::agents::what_was_read(factory, agent);
         Err(format!(
             "You've read {read}, so you can't propose access to {person}'s apps: what you read there may be someone else's instructions. Nothing was proposed."

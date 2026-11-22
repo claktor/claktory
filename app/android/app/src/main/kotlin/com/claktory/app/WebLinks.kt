@@ -181,7 +181,8 @@ class LinkActivity : Activity() {
 /**
  * factory/links, as on the Mac (app/macos/Runner/AppDelegate.swift's
  * Links): claktory://add?code=… (claktory-dev:// for Claktory Dev,
- * claktory-debug:// for a debug build) opens the app. Links that come
+ * claktory-debug:// for a debug build), or a pairing code itself
+ * (factory://?t=…, from a Mac's QR code), opens the app. Links that come
  * before the app's Flutter asks ("listen") wait and are its answer; after
  * that each is sent ("opened") as it comes. A launch from Recents doesn't
  * bring its old link again.
@@ -215,7 +216,8 @@ class LinksChannel(messenger: BinaryMessenger, activity: Activity) :
     private fun take(intent: Intent): Boolean {
         if (intent.action != Intent.ACTION_VIEW) return false
         val link = intent.dataString ?: return false
-        if (WebAuthCore.schemeOf(link) != scheme) return false
+        val linkScheme = WebAuthCore.schemeOf(link)
+        if (linkScheme != scheme && linkScheme != PAIRING_SCHEME) return false
         heard?.invoke(link)
         if (listening) channel.invokeMethod("opened", link) else waiting += link
         return true
@@ -224,6 +226,9 @@ class LinksChannel(messenger: BinaryMessenger, activity: Activity) :
     override fun close() = channel.setMethodCallHandler(null)
 
     companion object {
+        /** A pairing code's own scheme, which every build takes, as the iPhone's do. */
+        const val PAIRING_SCHEME = "factory"
+
         /** Each link taken, for tests. */
         @Volatile
         internal var heard: ((String) -> Unit)? = null

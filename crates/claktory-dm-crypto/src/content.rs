@@ -48,6 +48,10 @@ pub mod kind {
     /// The person's pins for their friends, from their devices to a
     /// Claktory, in its channel (§2: a Claktory pins only what they give it).
     pub const PINS: &str = "pins";
+    /// A new device asking the person's device that added it to send its
+    /// history again (E8, "Try again"), in the self group: the asking
+    /// device is the sender's leaf, and nothing else is in it.
+    pub const HISTORY_AGAIN: &str = "history_again";
 }
 
 /// Which agent wrote a message the person approved (§6): signed by the

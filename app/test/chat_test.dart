@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:factory_app/agent_view.dart';
+import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/device_account.dart';
 import 'package:factory_app/inbox.dart';
 import 'package:factory_app/people/chat.dart';
@@ -9,11 +10,13 @@ import 'package:factory_app/people/chat_view.dart';
 import 'package:factory_app/people/contacts.dart';
 import 'package:factory_app/people/e2ee.dart';
 import 'package:factory_app/people/people_view.dart';
+import 'package:factory_app/people/report_form.dart';
 import 'package:factory_app/people/review.dart';
 import 'package:factory_app/people/review_view.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/scanner.dart';
 import 'package:factory_app/tunnel/api/dm.dart'
-    show DmContent, DmLeafKind, DmMember, DmMembers;
+    show DmByAgent, DmContent, DmLeafKind, DmMember, DmMembers;
 import 'package:factory_app/user_apps/session.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
@@ -93,7 +96,7 @@ class _Service {
         'proposals': proposals,
         'agent_drafts': [
           for (final draft in agentDrafts)
-            {...draft, 'conversation_id': 'v1'}..remove('body'),
+            {...draft, 'conversation_id': 'v1'}..remove('envelope'),
         ],
         'cursor': 'c$_cursor',
       };
@@ -133,6 +136,16 @@ class _Service {
         return {'proposal_id': id, 'state': 'declined'};
       case 'delete':
         return {'deleted_seq': rest['through_seq']};
+      case 'reports':
+        return {
+          'id': 'r1',
+          'about': {'name': 'Ana', 'avatar_seed': 'aaaa', 'tag': 'K7QF2M'},
+          'subject': 'contact',
+          'reason': rest['reason'],
+          'state': 'received',
+          'created_ms': _now,
+          'message': '',
+        };
     }
     throw StateError('no route for $method $path');
   }
@@ -177,6 +190,12 @@ class _World {
       await endpoint.e2ee.start();
       await endpoint.e2ee.setUpFirst();
     }
+    // Matt's Claktory, enrolled, with its channel.
+    matt.e2ee.claktory = FakeClaktoryLink(worker, 'matt', leafId: 'mac-mini#1');
+    await matt.e2ee.sync();
+    _channel = matt.e2ee.groups.values
+        .singleWhere((each) => each.kind == 'channel')
+        .groupId;
   }
 
   ChatApi api() => ChatApi(matt.e2ee.session);
@@ -219,6 +238,8 @@ Map<String, Object?> _proposal({
   String text = 'See you at 6',
   String agentName = 'June',
   String conversation = 'v1',
+  String? sealedFor,
+  String from = _mini,
 }) => {
   'id': id,
   'revision': revision,
@@ -231,12 +252,81 @@ Map<String, Object?> _proposal({
     'agent_incarnation': 'inc-1',
     'agent_name': agentName,
   },
-  'text': text,
+  // Sealed by the Claktory's leaf in Matt's channel with it.
+  'envelope': jsonDecode(
+    FakeDmDevice.claktorySays(
+      _channel,
+      from,
+      DmContent(
+        kind: 'proposal',
+        clientMessageId: 'cm-$id-$revision',
+        text: text,
+        extraJson: jsonEncode({
+          'conversation_id': sealedFor ?? conversation,
+          'contact_generation': 3,
+          'agent_id': 'june',
+          'incarnation': 'inc-1',
+          'agent_name': agentName,
+          'sequence': revision,
+        }),
+      ),
+    ),
+  ),
+  'epoch': 1,
   // The service's word, which approving never takes.
-  'content_hash': 'f' * 64,
+  'proposal_digest': 'f' * 64,
   'created_ms': _now,
   'expires_ms': _now + 3 * 86400000,
 };
+
+/// Matt's channel with his Claktory mac-mini, and its leaf there.
+var _channel = '';
+const _mini = 'matt/mac-mini#1';
+
+/// An agent's draft in [conversation], as the service lists it.
+Map<String, Object?> _agentDraft({
+  String id = 'd1',
+  String name = 'June',
+  String text = 'Maybe Friday?',
+  String conversation = 'v1',
+}) => {
+  'id': id,
+  'agent': {'name': name, 'claktory_id': 'mac-mini'},
+  'revision': 1,
+  'envelope': jsonDecode(
+    FakeDmDevice.claktorySays(
+      _channel,
+      _mini,
+      DmContent(
+        kind: 'agent_draft',
+        clientMessageId: id,
+        text: text,
+        byAgent: DmByAgent(
+          claktoryId: 'mac-mini',
+          agentId: name.toLowerCase(),
+          incarnation: 'inc-1',
+          name: name,
+        ),
+        extraJson: jsonEncode({
+          'draft_id': id,
+          'conversation_id': conversation,
+          'contact_generation': 3,
+        }),
+      ),
+    ),
+  ),
+};
+
+/// What Matt's device sent approving: its body, and the message sealed in
+/// it as the conversation's group has it.
+({Map<String, Object?> body, Map<String, Object?> sealed}) _approval(
+  String line,
+) {
+  final body = jsonDecode(
+    line.substring('POST approve '.length),
+  ) as Map<String, Object?>;
+  return (body: body, sealed: readFake(jsonEncode(body['envelope'])));
+}
 
 const _ana = PeoplePerson(
   name: 'Ana',
@@ -436,8 +526,13 @@ void main() {
   });
 
   test('who can read the chat changed: a quiet line per leaf', () {
-    DmMember member(String account, String name, DmLeafKind kind) =>
-        DmMember(account: account, leafId: name, kind: kind, name: name);
+    DmMember member(String account, String name, DmLeafKind kind) => DmMember(
+      account: account,
+      leafId: name,
+      kind: kind,
+      name: name,
+      sinceMs: BigInt.zero,
+    );
     expect(
       memberLines(
         DmMembers(
@@ -448,11 +543,13 @@ void main() {
             member('matt', 'studio', DmLeafKind.claktory),
           ],
           removed: [member('ana', 'Old phone', DmLeafKind.device)],
+          keyChanged: ['ana', 'matt'],
         ),
         me: 'matt',
         friend: 'Ana',
       ),
       [
+        "Ana's security key changed",
         'Ana added a device: Pixel',
         "Ana's Claktory mac-mini can now read this chat",
         'You added a device: iPad',
@@ -463,25 +560,6 @@ void main() {
   });
 
   group("agents' suggestions (D3d)", () {
-    test('the review hash is worked out here, as the golden vector says', () {
-      const proposal = DmProposal(
-        id: '0123456789abcdef0123456789abcdef',
-        revision: 2,
-        state: 'pending',
-        conversationId: 'c0ffee',
-        generation: 1,
-        claktoryId: 'mac-mini',
-        agentId: 'june',
-        incarnation: 'inc-1',
-        agentName: 'June',
-        text: 'Sounds good \u2014 see you at 6 \u202Eok',
-      );
-      expect(
-        reviewHash(proposal),
-        'a93bb7251af328211f8bee5cb78eed29f2a66553887be93dfa295c474da0aea6',
-      );
-    });
-
     test('hidden characters show by their codes; the rest as it is', () {
       expect(reviewRuns('a\u202Eb\u200Bc\nd\u{E0041}'), [
         (text: 'a', hidden: false),
@@ -508,8 +586,9 @@ void main() {
       expect(hasHidden('a\u2800b'), isTrue, reason: 'the braille blank');
     });
 
-    test("only this conversation's waiting proposals; approving sends this "
-        "device's own hash, never the service's", () async {
+    test("only this conversation's waiting proposals, opened here; "
+        'approving seals exactly what was opened, by its agent, with the '
+        "digest of what came, never the service's", () async {
       final service = world.service
         ..proposals.addAll([
           _proposal(),
@@ -523,11 +602,51 @@ void main() {
       final approval = service.log.firstWhere(
         (l) => l.startsWith('POST approve'),
       );
+      final (:body, :sealed) = _approval(approval);
+      expect(body['revision'], 1);
+      expect(body['proposal_digest'], DmProposal.fromJson(_proposal()).digest);
+      expect(body['proposal_digest'], isNot('f' * 64));
+      expect(sealed['g'], world.group);
+      final said = sealed['c']! as Map<String, Object?>;
+      expect((said['id'], said['text']), ('cm-p1-1', 'See you at 6'));
+      expect((said['by']! as Map)['agent_id'], 'june');
+      expect(thread.proposals, isEmpty);
+      // Not sent any other way meanwhile.
+      await world.matt.e2ee.sync();
       expect(
-        approval,
-        'POST approve ${jsonEncode({'revision': 1, 'content_hash': reviewHash(DmProposal.fromJson(_proposal()))})}',
+        world.worker
+            .mailboxOf(world.group)
+            .where((m) => m['kind'] == 'application'),
+        isEmpty,
       );
-      expect(approval, isNot(contains('f' * 64)));
+    });
+
+    test("what doesn't open as its Claktory's, for this conversation, "
+        "isn't shown", () async {
+      world.service.proposals.addAll([
+        _proposal(id: 'p1', sealedFor: 'v2'),
+        _proposal(id: 'p2', from: 'matt/tablet'),
+        _proposal(id: 'p3', from: 'ana/mac-mini#1'),
+        _proposal(id: 'p4'),
+      ]);
+      final thread = world.thread();
+      await thread.load();
+      await _settle();
+      expect(thread.proposals.map((p) => p.id), ['p4']);
+    });
+
+    test('the group moved on first: sealed again, then approved', () async {
+      final service = world.service..proposals.add(_proposal());
+      final thread = world.thread();
+      await thread.load();
+      await _settle();
+      var tries = 0;
+      service.onApprove = (_) => ++tries == 1
+          ? const AccountServiceError(409, 'epoch', '', {'epoch': 2})
+          : null;
+      await thread.approve(thread.proposals.single);
+      expect(tries, 2);
+      expect(thread.reviewProblem, isNull);
       expect(thread.proposals, isEmpty);
     });
 
@@ -573,12 +692,9 @@ void main() {
       () async {
         // Abbacchio's D3d pass: the card stayed, Decline and Edit live.
         final service = world.service..proposals.add(_proposal());
-        service.agentDrafts.add({
-          'id': 'd1',
-          'agent': {'name': 'June', 'claktory_id': 'mac-mini'},
-          'revision': 1,
-          'body': {'text': 'Maybe Friday?'},
-        });
+        service.agentDrafts.add(
+          _agentDraft(id: 'd1', name: 'June', text: 'Maybe Friday?'),
+        );
         final thread = world.thread();
         unawaited(world.matt.e2ee.follow());
         unawaited(thread.follow());
@@ -611,12 +727,9 @@ void main() {
         ]);
         await _settle();
         expect(thread.proposals.single.id, 'p1');
-        service.agentDrafts.add({
-          'id': 'd1',
-          'agent': {'name': 'June', 'claktory_id': 'mac-mini'},
-          'revision': 1,
-          'body': {'text': 'Maybe Friday?'},
-        });
+        service.agentDrafts.add(
+          _agentDraft(id: 'd1', name: 'June', text: 'Maybe Friday?'),
+        );
         service.push([
           {'kind': 'agent_draft', 'conversation_id': 'v1'},
         ]);
@@ -635,10 +748,14 @@ void main() {
       e2eeFor = null;
     });
 
-    Future<void> show(WidgetTester tester, DmConversation conversation) async {
+    Future<Harness> show(
+      WidgetTester tester,
+      DmConversation conversation,
+    ) async {
       chatApi = (_) => world.api();
       e2eeFor = (_) => world.matt.e2ee;
-      await Harness(Workspace()).show(
+      final harness = Harness(Workspace());
+      await harness.show(
         tester,
         home: Center(
           child: SizedBox(
@@ -649,6 +766,7 @@ void main() {
         ),
       );
       await settle(tester);
+      return harness;
     }
 
     Future<void> close(WidgetTester tester) async {
@@ -666,7 +784,8 @@ void main() {
       expect(
         find.text(
           'End-to-end encrypted: only you and your friends can read these '
-          'messages, on your devices and any Claktory you give a chat to. '
+          'messages, on your devices and any Claktory either of you gives a chat '
+          'to. '
           "Claktory's servers see who you talk to and when, but not what you "
           'say.',
         ),
@@ -689,6 +808,20 @@ void main() {
         (await world.ana.e2ee.history(world.group)).last.content.text,
         'hi Ana',
       );
+      await close(tester);
+    });
+
+    testWidgets("a friend's words and name show what reorders text by its "
+        'code', (tester) async {
+      expect(
+        PeoplePerson.fromJson({'name': 'A\u202Ena', 'tag': 'K7QF2M'}).label,
+        r'A\u{202E}na · K7QF2M',
+      );
+      await show(tester, _conversation());
+      await world.fromAna(['open evil\u202Etxt.exe']);
+      await settle(tester);
+      expect(find.text(r'open evil\u{202E}txt.exe'), findsOneWidget);
+      expect(find.textContaining('\u202E', findRichText: true), findsNothing);
       await close(tester);
     });
 
@@ -734,6 +867,171 @@ void main() {
       await close(tester);
     });
 
+    testWidgets('a change under a key not served yet: waiting, then Join '
+        'again a day on', (tester) async {
+      await show(tester, _conversation());
+      await world.fromAna(['before']);
+      await settle(tester);
+      final group = world.group;
+      world.worker.deliver(
+        group,
+        fakeEnvelope({
+          't': 'commit',
+          'g': group,
+          'epoch': world.worker.epochOf(group),
+          'from': 'ana/pixel',
+          'members': ['matt/phone', 'ana/pixel'],
+          'id': dmB64(List.filled(32, 77)),
+        }),
+      );
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      const waiting = 'Waiting for the new security key to reach this device.';
+      expect(find.text(waiting), findsOneWidget);
+      expect(find.text('Join again'), findsNothing);
+      world.matt.now += E2ee.heldFor.inMilliseconds;
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      expect(find.text('Join again'), findsOneWidget);
+      await tester.tap(find.text('Join again'));
+      await settle(tester);
+      expect(find.text(waiting), findsNothing);
+      expect(world.matt.e2ee.held, isEmpty);
+      await close(tester);
+    });
+
+    testWidgets('Report: the messages ticked go with it, as shown here; at '
+        'most 50', (tester) async {
+      await world.matt.e2ee.conversationGroup('v1', 3, 'ana');
+      await world.fromAna([for (var i = 1; i <= 55; i++) 'spam $i']);
+      e2eeFor = (_) => world.matt.e2ee;
+      await Harness(Workspace()).show(
+        tester,
+        home: Center(
+          child: SizedBox(
+            width: 480,
+            height: 800,
+            child: ReportForm(
+              api: ContactsApi(world.matt.e2ee.session),
+              person: _ana,
+              contactId: 'c1',
+              conversationId: 'v1',
+              close: () {},
+            ),
+          ),
+        ),
+      );
+      await settle(tester);
+      await settle(tester);
+      expect(find.text('Include messages'), findsOneWidget);
+      expect(find.text('Ana: spam 55'), findsOneWidget);
+      expect(find.text('Ana: spam 25'), findsNothing);
+      await tester.tap(find.text('Show earlier'));
+      await settle(tester);
+      expect(find.text('Ana: spam 25'), findsOneWidget);
+      for (var i = 55; i >= 6; i--) {
+        final row = find.text('Ana: spam $i');
+        await tester.ensureVisible(row);
+        await tester.tap(row);
+      }
+      await tester.pump();
+      expect(find.text('50 messages included'), findsOneWidget);
+      expect(find.text('You can include up to 50 messages.'), findsOneWidget);
+      // The 51st stays out.
+      await tester.ensureVisible(find.text('Ana: spam 5'));
+      await tester.tap(find.text('Ana: spam 5'));
+      await tester.pump();
+      expect(find.text('50 messages included'), findsOneWidget);
+      await tester.tap(find.text('Ana: spam 6'));
+      await tester.pump();
+      expect(find.text('49 messages included'), findsOneWidget);
+      await tester.ensureVisible(find.text('Choose a reason'));
+      await tester.tap(find.text('Choose a reason'));
+      await settle(tester);
+      await tester.tap(find.text('Spam').last);
+      await settle(tester);
+      await tester.tap(find.text('Send report'));
+      await settle(tester);
+      final sent = service.log.firstWhere((l) => l.startsWith('POST reports'));
+      final body = jsonDecode(
+        sent.substring('POST reports '.length),
+      ) as Map<String, Object?>;
+      final messages = body['messages']! as List;
+      expect(messages, hasLength(49));
+      expect(messages.last, containsPair('text', 'spam 55'));
+      expect((messages.last as Map)['from'], 'them');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('Verify: the security code, then marked verified', (
+      tester,
+    ) async {
+      await show(tester, _conversation());
+      expect(find.text('Verify…'), findsOneWidget);
+      await tester.tap(find.text('Verify…'));
+      await settle(tester);
+      expect(find.text('Verify Ana'), findsOneWidget);
+      final digits = world.matt.e2ee.safety('ana')!.digits.split(' ');
+      expect(find.text(digits.take(4).join('  ')), findsOneWidget);
+      // Ana's device shows the same numbers.
+      await world.ana.e2ee.sync();
+      expect(world.ana.e2ee.safety('matt')!.digits, digits.join(' '));
+      await tester.tap(find.text('Mark as verified'));
+      await settle(tester);
+      expect(world.matt.e2ee.pin('ana')!.verified, isTrue);
+      expect(find.text('Verify…'), findsNothing);
+      expect(find.textContaining('Verified', findRichText: true), findsWidgets);
+      await close(tester);
+    });
+
+    testWidgets("Verify by scanning: a match marks it, another code doesn't", (
+      tester,
+    ) async {
+      final harness = await show(tester, _conversation());
+      harness.camera.state = CameraAccess.granted;
+      await world.ana.e2ee.sync();
+      await tester.tap(find.text('Verify…'));
+      await settle(tester);
+      await settle(tester);
+      await tester.tap(find.text("Scan Ana's code"));
+      await settle(tester);
+      // Someone else's code.
+      harness.camera.scan(
+        '$dmSafetyPrefix${dmB64(utf8.encode('ana=AAAA|matt=BBBB'))}',
+      );
+      await settle(tester);
+      expect(
+        find.text("These don't match. Don't mark Ana as verified."),
+        findsOneWidget,
+      );
+      expect(world.matt.e2ee.pin('ana')!.verified, isFalse);
+      // Ana's own.
+      await tester.tap(find.text("Scan Ana's code"));
+      await settle(tester);
+      final theirs = world.ana.e2ee.safety('matt')!;
+      harness.camera.scan('$dmSafetyPrefix${dmB64(theirs.qr)}');
+      await settle(tester);
+      await settle(tester);
+      expect(world.matt.e2ee.pin('ana')!.verified, isTrue);
+      expect(find.text('Verify Ana'), findsNothing);
+      await close(tester);
+    });
+
+    testWidgets('verified, then the key changed: no longer verified, and '
+        'Verify… on the note', (tester) async {
+      await show(tester, _conversation());
+      await world.matt.e2ee.verify('ana');
+      world.worker.keys['ana']!['identity_key'] = dmB64(List.filled(32, 9));
+      await world.matt.e2ee.refreshKeys('ana');
+      await settle(tester);
+      expect(
+        find.text("Ana's security key changed, so Ana is no longer verified."),
+        findsOneWidget,
+      );
+      expect(find.text('Verify…'), findsNWidgets(2));
+      await close(tester);
+    });
+
     testWidgets("an agent's proposed message: to whom, as it is, hidden "
         'characters shown; Send sends it as reviewed', (tester) async {
       service.proposals.add(
@@ -761,11 +1059,13 @@ void main() {
       expect(find.text('Ana sees it as sent by your agent.'), findsOneWidget);
       await tester.tap(find.text('Send').first);
       await settle(tester);
+      final (:body, :sealed) = _approval(
+        service.log.firstWhere((l) => l.startsWith('POST approve')),
+      );
+      expect(body['revision'], 1);
       expect(
-        service.log,
-        contains(
-          'POST approve ${jsonEncode({'revision': 1, 'content_hash': reviewHash(DmProposal.fromJson(_proposal(text: 'Sounds good \u202Eko')))})}',
-        ),
+        (sealed['c']! as Map<String, Object?>)['text'],
+        'Sounds good \u202Eko',
       );
       expect(
         find.text(
@@ -781,18 +1081,8 @@ void main() {
         'way; an agent\'s draft too, or Dismiss', (tester) async {
       service.proposals.add(_proposal());
       service.agentDrafts.addAll([
-        {
-          'id': 'd1',
-          'agent': {'name': 'June', 'claktory_id': 'mac-mini'},
-          'revision': 1,
-          'body': {'text': 'Maybe Friday?'},
-        },
-        {
-          'id': 'd2',
-          'agent': {'name': 'Mike', 'claktory_id': 'mac-mini'},
-          'revision': 1,
-          'body': {'text': 'Not this week.'},
-        },
+        _agentDraft(id: 'd1', name: 'June', text: 'Maybe Friday?'),
+        _agentDraft(id: 'd2', name: 'Mike', text: 'Not this week.'),
       ]);
       await show(tester, _conversation());
       expect(
@@ -1051,6 +1341,16 @@ void main() {
       find.text('Read it in the chat, then send it there.'),
       findsOneWidget,
     );
+    // Opening the chat is the action: one button, on the card, and no
+    // second link under it (#325).
+    expect(
+      find.descendant(
+        of: find.byType(Button),
+        matching: find.text('Open chat'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Open chat'), findsOneWidget);
     await tester.ensureVisible(find.text('Open chat'));
     await settle(tester);
     await tester.tap(find.text('Open chat'));
@@ -1125,12 +1425,9 @@ void main() {
         await world.fromAna(['message 1']);
         // An agent's proposal and draft wait too: their cards fit.
         service.proposals.add(_proposal(text: 'See you at 6 \u202Eok'));
-        service.agentDrafts.add({
-          'id': 'd1',
-          'agent': {'name': 'June', 'claktory_id': 'mac-mini'},
-          'revision': 1,
-          'body': {'text': 'Maybe Friday?'},
-        });
+        service.agentDrafts.add(
+          _agentDraft(id: 'd1', name: 'June', text: 'Maybe Friday?'),
+        );
         chatApi = (_) => world.api();
         e2eeFor = (_) => world.matt.e2ee;
         final harness = Harness(workspace());

@@ -463,7 +463,7 @@ impl Factory {
             db.query_row(
                 "SELECT layer, revision FROM ink_saves WHERE device_id = ?1 AND client_save_id = ?2",
                 params![saver.device_id, save_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u32>(1)?)),
+                crate::store::row2::<i64, u32>,
             )
             .optional()
         };
@@ -706,7 +706,7 @@ fn prune(transaction: &Transaction<'_>, now: i64) -> rusqlite::Result<Vec<String
     let old: Vec<(i64, u32)> = {
         let mut statement =
             transaction.prepare("SELECT layer, revision FROM ink_revisions WHERE superseded IS NOT NULL AND superseded < ?1")?;
-        statement.query_map([now - SUPERSEDED_KEPT_MS], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+        statement.query_map([now - SUPERSEDED_KEPT_MS], crate::store::row2)?.collect::<rusqlite::Result<_>>()?
     };
     let mut freed = BTreeSet::new();
     for (layer, revision) in old {

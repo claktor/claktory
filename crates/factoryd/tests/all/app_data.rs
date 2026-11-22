@@ -228,7 +228,7 @@ async fn an_app_reads_only_what_the_person_granted_and_only_to_read() {
     // The review says what it asks to read, and why.
     let bundle = clapp(MANIFEST, b"\0asm\x01\0\0\0 data", &SigningKey::from_bytes(&[11; 32]));
     let install = |approve: bool, sha256: &str| {
-        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: bundle.clone() })
+        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: bundle.clone(), ..Default::default() })
     };
     let Body::AppPermissions(permissions) = client.request(install(false, "")).await.body else { panic!("permissions") };
     let asked: Vec<(&str, &str, &str)> =
@@ -331,7 +331,7 @@ async fn an_app_that_pushes_too_much_fails_its_views() {
     let (mut client, _, _) = Client::connect(addr).await;
     let bundle = clapp(MANIFEST, b"\0asm\x01\0\0\0 data", &SigningKey::from_bytes(&[11; 32]));
     let install = |approve: bool, sha256: &str| {
-        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: bundle.clone() })
+        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: bundle.clone(), ..Default::default() })
     };
     let Body::AppPermissions(permissions) = client.request(install(false, "")).await.body else { panic!("permissions") };
     client.ok(install(true, &permissions.sha256)).await;

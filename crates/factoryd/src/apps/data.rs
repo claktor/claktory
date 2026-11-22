@@ -182,6 +182,12 @@ pub(crate) async fn query(factory: &Arc<Factory>, asked: wire::DataQuery) -> wir
         }
         source
     };
+    // A curator's database holds friends' words: an app could pass them to
+    // an agent untainted (pipes-automation.md §6). The person reads it in
+    // the app instead.
+    if source.kind == v1::AppDataKind::AgentDatabase && factory.pipes.curator(&source.agent) {
+        return answer(DataError::NotGranted, format!("{} holds reports from other Claktories, so apps can't read it.", source.label));
+    }
     let home = factory.home.clone();
     let ran = tokio::task::spawn_blocking(move || {
         let target = source.target();

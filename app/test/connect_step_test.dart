@@ -113,8 +113,37 @@ void main() {
     await pumpFrames(tester);
     await tester.tap(find.text('Connect'));
     await pumpFrames(tester);
+    // Asked first, as every way a code comes in is (Fugo).
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    expect(connections.current, isNull);
+    await tester.tap(find.text('Connect').last);
+    await pumpFrames(tester);
     expect(connections.current?.code, _box);
     expect(find.byType(ConnectStep), findsNothing);
+  });
+
+  testWidgets('a claktory:// code is taken as a factory:// one, asking '
+      'first', (tester) async {
+    final (_, connections) = await showApp(
+      tester,
+      local: false,
+      results: {
+        'install --check': const InstallResult(result: 'not_installed'),
+      },
+    );
+    final code = _box.replaceFirst('factory://', 'claktory://');
+    await tester.enterText(_field, code);
+    await pumpFrames(tester);
+    expect(find.text("That isn't a Claktory code."), findsNothing);
+    // A quick double click asks once (Abbacchio).
+    await tester.tap(find.text('Connect'));
+    await tester.tap(find.text('Connect'));
+    await pumpFrames(tester);
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    expect(connections.current, isNull);
+    await tester.tap(find.text('Connect').last);
+    await pumpFrames(tester);
+    expect(connections.current?.code, code);
   });
 
   testWidgets('Set up Claktory on this Mac sets it up, without asking '

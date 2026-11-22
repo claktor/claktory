@@ -27,6 +27,11 @@ import 'zoom.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // The Mac draws Claktory Dev's mark itself, over the whole window
+  // (MainFlutterWindow.swift): see [DevMark].
+  if (isDevBuild && nativeDevMark) {
+    unawaited(AppZoom.window.invokeMethod<void>('devMark'));
+  }
   // Third-party licences the app ships, before anything can list them.
   registerLicenses();
   // What this device is (an iPad, a phone), before the first frame: so
@@ -349,10 +354,18 @@ class _ScrollBehavior extends ScrollBehavior {
 /// person's Factory. Set by `scripts/dev.sh` and `scripts/release.sh --dev`.
 const isDevBuild = bool.fromEnvironment('FACTORY_DEV');
 
+/// Whether the window draws Claktory Dev's mark natively rather than
+/// [DevMark]: on the Mac, where anything Flutter paints over a native view
+/// (the PDF viewer, say) takes its clicks and wheel, even under
+/// IgnorePointer.
+final nativeDevMark = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+
 /// In Factory Dev, a faint "DEV VERSION" across the window, so it's never
-/// mistaken for the real Factory. It never takes a click.
+/// mistaken for the real Factory. It never takes a click. On the Mac it
+/// paints nothing: the window draws it ([nativeDevMark]).
 class DevMark extends StatelessWidget {
-  const DevMark({super.key, required this.child, this.enabled = isDevBuild});
+  DevMark({super.key, required this.child, bool? enabled})
+    : enabled = enabled ?? (isDevBuild && !nativeDevMark);
 
   final Widget child;
   final bool enabled;

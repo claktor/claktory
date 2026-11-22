@@ -29,6 +29,10 @@
 #                              commit (its `source`), replacing it: for a fix
 #                              in how releases are built, before anyone has
 #                              installed it.
+#   --no-channel               a real release without an update channel
+#                              (FACTORY_UPDATE_URL): refused without it, since
+#                              a Claktory that installs one never hears of
+#                              another release. Only on purpose.
 #   --adhoc                    with either of those: allows a real release
 #                              signed ad hoc. Without it, one that this Mac
 #                              can't sign with the Developer ID and notarize
@@ -40,8 +44,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/lib.sh"
 
-usage() { echo "usage: scripts/release.sh [--dev | [--out DIR] [--adhoc] [--rebuild]]" >&2; exit 2; }
-RELEASES="$HOME/.factory/releases"; APP_NAME="Factory.app"; DEFINES=(); ADHOC=false; REBUILD=false
+usage() { echo "usage: scripts/release.sh [--dev | [--out DIR] [--adhoc] [--rebuild] [--no-channel]]" >&2; exit 2; }
+RELEASES="$HOME/.factory/releases"; APP_NAME="Factory.app"; DEFINES=(); ADHOC=false; REBUILD=false; NO_CHANNEL=false
 while (($#)); do
   case "$1" in
     --dev) RELEASES="$HOME/.factory-dev/releases"; APP_NAME="Factory Dev.app"; DEFINES=(--dart-define=FACTORY_PORT=7421 --dart-define=FACTORY_DEV=true); shift ;;
@@ -55,13 +59,24 @@ while (($#)); do
       ;;
     --adhoc) ADHOC=true; shift ;;
     --rebuild) REBUILD=true; shift ;;
+    --no-channel) NO_CHANNEL=true; shift ;;
     *) usage ;;
   esac
 done
-if [[ "$APP_NAME" == "Factory Dev.app" ]] && { [[ "$RELEASES" != "$HOME/.factory-dev/releases" ]] || $ADHOC || $REBUILD; }; then usage; fi
+if [[ "$APP_NAME" == "Factory Dev.app" ]] && { [[ "$RELEASES" != "$HOME/.factory-dev/releases" ]] || $ADHOC || $REBUILD || $NO_CHANNEL; }; then usage; fi
 if [[ "$APP_NAME" == "Factory.app" ]] && ! $ADHOC && [[ "$(signing_mode)" == adhoc ]]; then
   echo "a real release is signed with the Developer ID and notarized, and this Mac can't now: it needs the \"Developer ID Application\" identity and the App Store Connect key (scripts/sign-release.sh says where). An ad hoc app is another app to macOS, and can't read what the person's app keeps in the Keychain. Build it ad hoc anyway only on purpose, with --adhoc." >&2
   exit 1
+fi
+# Direct messages keep their keys in the data-protection keychain, in the
+# group only the app's Developer ID provisioning profile grants: a release
+# signed without it would leave every Mac unable to keep them (Fugo, E6).
+if [[ "$APP_NAME" == "Factory.app" ]] && ! $ADHOC; then
+  MAC_PROFILE="${CLAKTORY_MAC_PROFILE:-$HOME/.appstoreconnect/claktory-mac.provisionprofile}"
+  [[ -f "$MAC_PROFILE" ]] || {
+    echo "a real release carries the Mac app's Developer ID provisioning profile, and there's none at $MAC_PROFILE (CLAKTORY_MAC_PROFILE names another): without it the app can't keep direct-message keys. scripts/sign-release.sh says what it must be." >&2
+    exit 1
+  }
 fi
 # The browser helper in a real release only as a rehearsal (--out DIR) until
 # browser control passes B6b (Fugo): a stray variable can't publish it.
@@ -96,6 +111,14 @@ if [[ "$APP_NAME" == "Factory.app" ]]; then
       echo "a release is built from main's commit only; this checkout is at $(git -C "$ROOT" rev-parse --short HEAD), main at $(git -C "$ROOT" rev-parse --short main)" >&2
       exit 1
     fi
+  fi
+  # The person's release checks a channel for its successors
+  # (FACTORY_UPDATE_URL, stamped into its backend): built without one, a
+  # Claktory that installs it never hears of another release (v0.1.17's first
+  # build, 2026-11-22). Only on purpose, with --no-channel.
+  if [[ "$RELEASES" == "$HOME/.factory/releases" && -z "${FACTORY_UPDATE_URL:-}" ]] && ! $NO_CHANNEL; then
+    echo "a release of the real Claktory needs its update channel: FACTORY_UPDATE_URL=https://github.com/claktor/claktory/releases/latest/download/latest.json scripts/release.sh (or --no-channel, only on purpose)" >&2
+    exit 1
   fi
   # Publishing it pushes its source, which the secret check must pass: find
   # out now, at the freeze, not once it's built and tried.
@@ -171,6 +194,8 @@ else
   cp "$ROOT/docs/CHANGELOG.md" "$partial/CHANGELOG.md"
 fi
 take_build "$SRC_ROOT/app/build/macos/Build/Products/Release/Factory.app" "$partial/$APP_NAME"
+# Claktory's own apps (apps/dist), checked: offered in Settings -> Apps.
+bundled_apps "$SRC_ROOT" "$partial"
 if [[ "$APP_NAME" == "Factory Dev.app" ]]; then
   # The browser helper, for trying browser control in Claktory Dev.
   add_browser_host "$partial/$APP_NAME" dev release

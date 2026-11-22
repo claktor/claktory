@@ -11,6 +11,7 @@ import 'characters/character.dart';
 import 'controls.dart';
 import 'explorer.dart' show shortPath;
 import 'extensions.dart' show StatusMark, statusLabel;
+import 'find.dart' show FindHighlight;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
 import 'mobile/metrics.dart';
@@ -22,6 +23,7 @@ import 'scope.dart';
 import 'selection.dart' show Unselectable;
 import 'state.dart';
 import 'transcript.dart' show AgentTints;
+import 'visible_codes.dart';
 
 /// Compact views of extensions' tool calls in the conversation, by tool
 /// name: what the call did in the app's words, with what a person scans for
@@ -61,7 +63,10 @@ ToolView? toolViewFor(ToolCallInfo call) {
   return applies == null || applies(call) ? view : null;
 }
 
-/// A tool call as its view reads it.
+/// A tool call as its view reads it. Every string in its input and
+/// details shows what could make it read as something else by its code
+/// ([visibleCodes]; the words under [proseKeys] what reorders them,
+/// [proseCodes]): an agent chose them (Fugo).
 class ToolCallInfo {
   factory ToolCallInfo(ToolCall call, {int seq = 0}) {
     final input = _object(call.input);
@@ -126,7 +131,11 @@ class ToolCallInfo {
       final value = input[key];
       return value is String ? value : value?.toString();
     }
-    return partialJsonString(call.input, key);
+    final partial = partialJsonString(call.input, key);
+    if (partial == null) return null;
+    return proseKeys.contains(key)
+        ? proseCodes(partial)
+        : visibleCodes(partial);
   }
 
   /// The list argument [key]; empty while it's being written.
@@ -136,7 +145,9 @@ class ToolCallInfo {
     if (json.trim().isEmpty) return null;
     try {
       final decoded = jsonDecode(json);
-      return decoded is Map<String, Object?> ? decoded : null;
+      return decoded is Map<String, Object?>
+          ? visibleCodesIn(decoded) as Map<String, Object?>
+          : null;
     } on FormatException {
       return null;
     }
@@ -260,6 +271,14 @@ class ToolViewScope extends InheritedWidget {
 // ---------------------------------------------------------------------------
 // Pieces the views are built from.
 
+/// Whether a find went to this entry (the [FindHighlight] above it is
+/// current, with a query), and, given [text], whether the query is in it.
+bool findWentHere(BuildContext context, [String? text]) {
+  final find = context.dependOnInheritedWidgetOfExactType<FindHighlight>();
+  if (find == null || !find.current || find.query.isEmpty) return false;
+  return text == null || text.toLowerCase().contains(find.query.toLowerCase());
+}
+
 /// A line's words: [lead] muted, then [subject] in the text color (mono
 /// when it's [code]), then [after] faint, on one line.
 class ToolLine extends StatelessWidget {
@@ -280,25 +299,28 @@ class ToolLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     return Text.rich(
-      TextSpan(
-        children: [
-          TextSpan(text: lead),
-          if (subject.isNotEmpty)
-            TextSpan(
-              text: lead.isEmpty ? subject : ' $subject',
-              style:
-                  (code
-                          ? TypeScale.of(context).code
-                          : TypeScale.of(context).body)
-                      .copyWith(color: palette.text),
-            ),
-          if (after.isNotEmpty)
-            TextSpan(
-              text: '  $after',
-              style: TypeScale.of(context).caption
-                  .copyWith(color: palette.textFaint),
-            ),
-        ],
+      FindHighlight.mark(
+        context,
+        TextSpan(
+          children: [
+            TextSpan(text: lead),
+            if (subject.isNotEmpty)
+              TextSpan(
+                text: lead.isEmpty ? subject : ' $subject',
+                style:
+                    (code
+                            ? TypeScale.of(context).code
+                            : TypeScale.of(context).body)
+                        .copyWith(color: palette.text),
+              ),
+            if (after.isNotEmpty)
+              TextSpan(
+                text: '  $after',
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textFaint),
+              ),
+          ],
+        ),
       ),
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
@@ -336,17 +358,20 @@ class _Link extends StatelessWidget {
     final color = this.color ?? Palette.of(context).text;
     return Pressable(
       onTap: onTap,
-      builder: (context, hovered) => Text(
-        text,
+      builder: (context, hovered) => Text.rich(
+        FindHighlight.markText(
+          context,
+          text,
+          TypeScale.of(context).body.copyWith(
+            color: color,
+            decoration: hovered && onTap != null
+                ? TextDecoration.underline
+                : null,
+            decorationColor: color,
+          ),
+        ),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: TypeScale.of(context).body.copyWith(
-          color: color,
-          decoration: hovered && onTap != null
-              ? TextDecoration.underline
-              : null,
-          decorationColor: color,
-        ),
       ),
     );
   }
@@ -458,8 +483,16 @@ class _ShowMoreState extends State<ShowMore> {
   var _whole = false;
   var _taller = false;
 
+  /// Whether a find had gone to its entry at the last build.
+  var _found = false;
+
   @override
   Widget build(BuildContext context) {
+    // A find going to its entry shows it whole, once; the person's own
+    // Show less wins after.
+    final found = findWentHere(context);
+    if (found && !_found) _whole = true;
+    _found = found;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -635,12 +668,15 @@ class _Faint extends StatelessWidget {
   final Color? color;
 
   @override
-  Widget build(BuildContext context) => Text(
-    text,
+  Widget build(BuildContext context) => Text.rich(
+    FindHighlight.markText(
+      context,
+      text,
+      TypeScale.of(context).caption
+          .copyWith(color: color ?? Palette.of(context).textMuted),
+    ),
     maxLines: lines,
     overflow: TextOverflow.ellipsis,
-    style: TypeScale.of(context).caption
-        .copyWith(color: color ?? Palette.of(context).textMuted),
   );
 }
 
@@ -841,6 +877,9 @@ class FirstLine extends StatefulWidget {
 class _FirstLineState extends State<FirstLine> {
   var _open = false;
 
+  /// Whether a find had gone to a match in it at the last build.
+  var _found = false;
+
   /// The first line with something on it, without its Markdown.
   static String _first(String text) {
     for (final line in text.split('\n')) {
@@ -863,6 +902,10 @@ class _FirstLineState extends State<FirstLine> {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    // A find going to a match in it opens it, once.
+    final found = findWentHere(context, widget.text);
+    if (found && !_found) _open = true;
+    _found = found;
     Widget toggle(String label) =>
         _Toggle(label: label, onTap: () => setState(() => _open = !_open));
     if (_open) {
@@ -904,11 +947,10 @@ class _FirstLineState extends State<FirstLine> {
         return Row(
           children: [
             Flexible(
-              child: Text(
-                first,
+              child: Text.rich(
+                FindHighlight.markText(context, first, style),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: style,
               ),
             ),
             if (more) ...[const SizedBox(width: Space.s), toggle('Show more')],
@@ -1018,9 +1060,12 @@ class TalkCard extends StatelessWidget {
     final name = agent?.name ?? talk.name;
     final rows = <Widget>[
       if (talk.reason.isNotEmpty)
-        Text(
-          talk.reason,
-          style: TypeScale.of(context).body.copyWith(color: palette.text),
+        Text.rich(
+          FindHighlight.markText(
+            context,
+            talk.reason,
+            TypeScale.of(context).body.copyWith(color: palette.text),
+          ),
         ),
       if (talk.message.isNotEmpty) ...[
         const SizedBox(height: Space.xs),
@@ -1236,7 +1281,7 @@ class _ItemRow extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text.rich(
-            TextSpan(children: words),
+            FindHighlight.mark(context, TextSpan(children: words)),
             style: TypeScale.of(context).body,
           ),
           if (note.isNotEmpty) _Faint(note),
@@ -1378,7 +1423,7 @@ Widget? _memoryReadBody(BuildContext context, ToolCallInfo call) {
   final slug = _string(call.details['slug']).ifEmpty(call.argument('note'));
   if (slug.isEmpty || !call.done) return null;
   // The note's text follows its heading line and a blank line.
-  final output = call.call.output;
+  final output = proseCodes(call.call.output);
   final at = output.indexOf('\n\n');
   final text = at < 0 ? '' : output.substring(at + 2).trim();
   if (text.isEmpty) return null;
@@ -1878,10 +1923,13 @@ Widget? _sqlBody(BuildContext context, ToolCallInfo call) {
         3 *
         TypeScale.of(context).code.fontSize! *
         TypeScale.of(context).code.height!,
-    child: Text(
-      sql,
-      style: TypeScale.of(context).code
-          .copyWith(color: Palette.of(context).textMuted),
+    child: Text.rich(
+      FindHighlight.markText(
+        context,
+        sql,
+        TypeScale.of(context).code
+            .copyWith(color: Palette.of(context).textMuted),
+      ),
     ),
   );
 }

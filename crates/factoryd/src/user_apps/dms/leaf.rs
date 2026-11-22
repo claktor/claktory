@@ -13,6 +13,10 @@
 //!   which could otherwise swap in its own key.
 //! - **One leaf a registration:** signing in again or moving (a new epoch)
 //!   starts the store over; the person's device enrolls the new leaf.
+//! - **A new security key** (dms-e2ee.md §2.1): a device enrolls the same
+//!   leaf key again, under a certificate from the new identity and with pins
+//!   that retired the old one; the loop then moves the leaf to it in every
+//!   group (`process::rotate`), and it sends nothing from under the old one.
 //! - **Trust comes from the person's devices,** never the service: the pins
 //!   given at enrollment, and later ones sent in the channel (`pins`).
 //! - **One writer:** every use is a `step`, one transaction on the store
@@ -41,6 +45,13 @@ pub(crate) struct State {
     /// Tests only: this Factory stands for a process that has ended, so
     /// its leaf never opens the store again (`dms::stop_leaf`).
     stopped: std::sync::atomic::AtomicBool,
+    /// A full round is wanted now (an enrollment), not at the next one.
+    pub(super) round_now: std::sync::atomic::AtomicBool,
+    /// The channel stopped at a commit under the person's new security key,
+    /// which this Claktory hasn't been given yet (`process`): nothing is
+    /// sent there until it reads on. Known again after a restart at the
+    /// first catch-up.
+    pub(super) channel_waits: std::sync::atomic::AtomicBool,
 }
 
 impl State {
@@ -64,6 +75,13 @@ pub(crate) enum Unready {
     NotEnrolled,
     /// Enrolled, but not in its channel yet.
     NoChannel,
+    /// The person made a new security key (dms-e2ee.md §2.1): this
+    /// Claktory waits until a device of theirs enrolls it under the new one,
+    /// then moves to it in every group, and sends nothing meanwhile.
+    Rotating,
+    /// A friend's security key changed in a conversation, and the person's
+    /// devices haven't passed the new one on yet: the conversation waits.
+    FriendsNewKey,
 }
 
 impl Unready {
@@ -77,6 +95,10 @@ impl Unready {
                 "A newer version of Claktory set up direct messages here; this one can't use them. Update Claktory to use them again.".to_owned()
             }
             Unready::NotEnrolled | Unready::NoChannel => format!("{person} hasn't finished giving this Claktory the chat yet."),
+            Unready::Rotating => format!("{person} changed their security key, and this Claktory is catching up. Try again in a few minutes."),
+            Unready::FriendsNewKey => {
+                format!("Their security key changed, and this Claktory waits until {person}'s devices pass the new one on. Try again later.")
+            }
         }
     }
 }
@@ -143,6 +165,7 @@ pub(crate) struct Step<'a> {
     tx: &'a Transaction<'a>,
     store: &'a StoreKeys<'a>,
     registration: (String, String, u64),
+    channel_waits: bool,
 }
 
 /// The store's key and cryptography, apart from its connection.
@@ -212,7 +235,8 @@ pub(crate) fn step<T>(factory: &Factory, f: impl FnOnce(&mut Step<'_>) -> Result
     let Store { db, key, crypto } = store;
     let tx = db.transaction()?;
     let keys = StoreKeys { key, crypto };
-    let mut step = Step { tx: &tx, store: &keys, registration };
+    let channel_waits = factory.dm_leaf.channel_waits.load(std::sync::atomic::Ordering::SeqCst);
+    let mut step = Step { tx: &tx, store: &keys, registration, channel_waits };
     let out = f(&mut step)?;
     drop(step);
     tx.commit()?;
@@ -339,6 +363,11 @@ impl Step<'_> {
     /// channel, at its current epoch.
     pub(crate) fn channel_send(&mut self, content: &Content) -> Result<Envelope, StepError> {
         let (leaf, mut group) = self.channel()?;
+        // Nothing goes from its place under a replaced key (the person's
+        // devices would drop it), nor while the channel waits for the new one.
+        if self.channel_waits || !group.holds(&leaf.me)? {
+            return Err(StepError::Unready(Unready::Rotating));
+        }
         let bytes = group.send(&self.provider()?, &leaf.me, &content.encode()?)?;
         Ok(Envelope::new(bytes)?)
     }
@@ -513,7 +542,9 @@ pub(crate) fn enroll(factory: &Arc<Factory>, request: &v1::DmEnrollLeaf) -> Resu
     });
     match enrolled {
         Ok(()) => {
-            super::process::wake();
+            // A new certificate (the person's new security key) is moved to
+            // in every group at once: a full round now.
+            super::process::wake(factory);
             Ok(())
         }
         Err(StepError::Failed(why)) => Err(format!("This Claktory couldn't take the certificate: {why}.")),

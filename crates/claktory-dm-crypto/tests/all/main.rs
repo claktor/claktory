@@ -4,6 +4,7 @@ mod envelope;
 mod formats;
 mod golden;
 mod groups;
+mod hostile;
 mod interop;
 mod interop_primitives;
 mod storage;

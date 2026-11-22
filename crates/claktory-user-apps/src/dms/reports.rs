@@ -5,11 +5,13 @@
 //!
 //! A report keeps only what the person chose to send: always why (a reason)
 //! and what it's about (a request, a friendship or a block, with its times);
-//! their own words and the name and avatar the person reported showed them
-//! only if they add them. Never anything else of theirs, and (until there
-//! are messages to choose from, D2) no message. What they chose is sealed
-//! with a data key of the report's own, forgotten when the report goes, 30
-//! days after it was made.
+//! their own words, the name and avatar the person reported showed them,
+//! and, about a contact, messages of their conversation, only if they add
+//! them. Never anything else of theirs. Messages are end-to-end encrypted,
+//! so those are the text the reporter's device shows, which nobody here can
+//! check (dms-e2ee.md §7: no franking in v1); operators see them labelled
+//! so. What they chose is sealed with a data key of the report's own,
+//! forgotten when the report goes, 30 days after it was made.
 //!
 //! Operators read open reports with `claktory-user-apps reports`, which
 //! records who looked at each and when, and close them there.
@@ -64,6 +66,13 @@ const REPORTS_PER_DAY: i64 = 20;
 const MAX_NOTE: usize = 1000;
 /// Why someone reports.
 const REASONS: [&str; 4] = ["spam", "harassment", "impersonation", "other"];
+/// Messages a report carries at most, the most text in one (in bytes, the
+/// content's own cap), and in all.
+const MAX_MESSAGES: usize = 50;
+const MAX_MESSAGE_TEXT: usize = 16 * 1024;
+const MAX_MESSAGES_TEXT: usize = 64 * 1024;
+/// What operators see beside a report's messages.
+const MESSAGES_LABEL: &str = "As the reporter's device shows them; not verifiable.";
 /// What every report is answered with.
 const RECEIVED: &str = "Report sent. Claktory's team will look at it. They won't know you reported them.";
 
@@ -87,9 +96,25 @@ struct Report {
     /// Whether to send the name and avatar the person reported shows them.
     #[serde(default)]
     include_profile: bool,
+    /// Messages of the conversation with a contact they chose, oldest
+    /// first: as their device shows them.
+    #[serde(default)]
+    messages: Vec<Quoted>,
     #[serde(default)]
     #[allow(dead_code)]
     request_nonce: Option<String>,
+}
+
+/// One message the reporter chose: its place in the conversation, its text
+/// as their device shows it, who sent it ("you", the reporter, or "them")
+/// and when.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Quoted {
+    seq: i64,
+    text: String,
+    from: String,
+    sent_ms: i64,
 }
 
 /// What a report keeps, sealed: only what the person chose.
@@ -102,6 +127,8 @@ struct Evidence {
     note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     profile: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    messages: Vec<Quoted>,
 }
 
 fn not_found() -> Refusal {
@@ -137,18 +164,52 @@ pub fn answer(db: &mut Connection, keys: &Keys, method: &str, account: &str, byt
     Ok(answer)
 }
 
+/// A control character but a line break, or one that changes direction or
+/// hides.
+fn hidden(c: char) -> bool {
+    (c.is_control() && c != '\n')
+        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}')
+}
+
 /// The clean note: trimmed, at most 1000 characters, no control characters
 /// but line breaks, nothing that changes direction or hides.
 fn clean_note(note: &str) -> Result<Option<String>, Refusal> {
-    let hidden = |c: char| {
-        (c.is_control() && c != '\n')
-            || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}')
-    };
     let note = note.trim();
     if note.chars().any(hidden) || note.chars().count() > MAX_NOTE {
         return Err(invalid("A note has at most 1000 characters, and no hidden or direction-changing ones."));
     }
     Ok((!note.is_empty()).then(|| note.to_owned()))
+}
+
+/// The messages a report carries: only about a contact, at most 50, oldest
+/// first, each with its text. What the text says is kept as it is, hidden
+/// characters too, since they may be what's reported; operators see them
+/// as codes.
+fn check_messages(report: &Report) -> Result<(), Refusal> {
+    let messages = &report.messages;
+    if messages.is_empty() {
+        return Ok(());
+    }
+    if report.contact_id.is_none() {
+        return Err(invalid("Messages go only with a contact_id."));
+    }
+    if messages.len() > MAX_MESSAGES {
+        return Err(invalid("A report has at most 50 messages."));
+    }
+    let rising = messages.windows(2).all(|pair| pair[0].seq < pair[1].seq);
+    let each = messages.iter().all(|message| {
+        message.seq >= 1
+            && message.sent_ms >= 0
+            && matches!(message.from.as_str(), "you" | "them")
+            && (1..=MAX_MESSAGE_TEXT).contains(&message.text.len())
+    });
+    if !rising || !each {
+        return Err(invalid("Each message has its seq (oldest first), its text (up to 16 KiB), from \"you\" or \"them\", and sent_ms."));
+    }
+    if messages.iter().map(|message| message.text.len()).sum::<usize>() > MAX_MESSAGES_TEXT {
+        return Err(invalid("A report's messages have at most 64 KiB of text in all."));
+    }
+    Ok(())
 }
 
 fn report(transaction: &Transaction<'_>, keys: &Keys, account: &str, report: Report, now_ms: i64) -> Result<Value, Refusal> {
@@ -161,6 +222,7 @@ fn report(transaction: &Transaction<'_>, keys: &Keys, account: &str, report: Rep
         return Err(invalid("reason is spam, harassment, impersonation or other."));
     }
     let note = clean_note(report.note.as_deref().unwrap_or(""))?;
+    check_messages(&report)?;
     // A retry: the same report.
     let earlier: Option<String> = transaction
         .query_row("SELECT id FROM dm_reports WHERE reporter = ?1 AND action_id = ?2", params![account, report.action_id], |row| row.get(0))
@@ -212,7 +274,8 @@ fn report(transaction: &Transaction<'_>, keys: &Keys, account: &str, report: Rep
     let shown = json!({"name": name, "avatar_seed": avatar_seed});
     let profile = report.include_profile.then(|| shown.clone());
     let id = hex(&random::<16>());
-    let evidence = zeroize::Zeroizing::new(serde_json::to_vec(&Evidence { about, note, profile }).unwrap_or_default());
+    let evidence =
+        zeroize::Zeroizing::new(serde_json::to_vec(&Evidence { about, note, profile, messages: report.messages }).unwrap_or_default());
     let sealed = keys.seal(transaction, &purpose(&id), field(&id, "evidence"), &evidence, now_ms)?;
     let shown = zeroize::Zeroizing::new(serde_json::to_vec(&shown).unwrap_or_default());
     let shown = keys.seal(transaction, &purpose(&id), field(&id, "about"), &shown, now_ms)?;
@@ -321,7 +384,8 @@ pub fn review(db: &mut Connection, keys: &Keys, operator: &str, now_ms: i64) -> 
     let mut shown = Vec::new();
     for (id, reporter, reported, subject, reason, sealed, created) in rows {
         let opened = keys.open(&transaction, field(&id, "evidence"), &sealed)?;
-        let evidence: Value = serde_json::from_slice(opened.bytes()).map_err(|_| Refused::DoesntOpen)?;
+        let mut evidence: Value = serde_json::from_slice(opened.bytes()).map_err(|_| Refused::DoesntOpen)?;
+        labelled(&mut evidence);
         transaction.execute(
             "INSERT INTO dm_report_views (report, operator, action, at) VALUES (?1, ?2, 'read', ?3)",
             params![id, operator, now_ms],
@@ -338,6 +402,25 @@ pub fn review(db: &mut Connection, keys: &Keys, operator: &str, now_ms: i64) -> 
     }
     transaction.commit()?;
     Ok(shown)
+}
+
+/// A report's messages, for operators: labelled as the reporter's device
+/// shows them, and each one's hidden characters named by their codes.
+fn labelled(evidence: &mut Value) {
+    let Some(messages) = evidence.get_mut("messages").and_then(Value::as_array_mut) else { return };
+    for message in messages.iter_mut() {
+        let codes: Vec<String> = message["text"]
+            .as_str()
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| hidden(*c))
+            .map(|c| format!("U+{:04X}", u32::from(c)))
+            .collect();
+        if !codes.is_empty() {
+            message["hidden"] = json!(codes);
+        }
+    }
+    evidence["messages_label"] = json!(MESSAGES_LABEL);
 }
 
 /// For operators: closes an open report (the person who made it sees it
@@ -500,6 +583,66 @@ mod tests {
         assert_eq!(left, 0);
         let views: i64 = world.db.query_row("SELECT COUNT(*) FROM dm_report_views", [], |row| row.get(0)).expect("count");
         assert_eq!(views, 0);
+    }
+
+    #[test]
+    fn messages_the_person_chose_go_sealed_and_labelled_as_not_verifiable() {
+        let mut world = World::new();
+        let request = requested(&mut world);
+        let (_, contact) = world.accept("bo", &request);
+        let contact = contact["id"].as_str().expect("id").to_owned();
+        let said = |seq: i64, text: &str, from: &str| json!({"seq": seq, "text": text, "from": from, "sent_ms": 1_000 + seq});
+        let ask =
+            |n: u32, messages: Value| json!({"action_id": action(n), "contact_id": contact, "reason": "harassment", "messages": messages});
+        // Kept as the device shows them, a direction change too.
+        let chosen = json!([said(3, "you again", "them"), said(4, "stop", "you"), said(7, "no\u{202E}won", "them")]);
+        let (status, report) = world.call("bo", "POST", "reports", ask(1, chosen.clone()));
+        assert_eq!(status, 200, "{report}");
+        let id = report["id"].as_str().expect("id").to_owned();
+        assert_eq!(world.call("bo", "POST", "reports", ask(1, chosen.clone())).1["id"], id.as_str(), "a retry is the same report");
+        let sealed: Vec<u8> = world.db.query_row("SELECT evidence FROM dm_reports WHERE id = ?1", [&id], |row| row.get(0)).expect("row");
+        assert!(!String::from_utf8_lossy(&sealed).contains("you again"));
+
+        // Operators see them labelled, with the hidden character's code.
+        let shown = review(&mut world.db, &world.keys, "lena", world.now).expect("reviewed");
+        let evidence = &shown[0]["evidence"];
+        assert_eq!(evidence["messages_label"], MESSAGES_LABEL);
+        assert_eq!(evidence["messages"][0], said(3, "you again", "them"));
+        assert_eq!(evidence["messages"][1]["from"], "you");
+        assert_eq!(
+            (evidence["messages"][2]["text"].as_str(), &evidence["messages"][2]["hidden"]),
+            (Some("no\u{202E}won"), &json!(["U+202E"]))
+        );
+        // Without messages, no label.
+        let plain = world.call("bo", "POST", "reports", ask(2, json!([]))).1["id"].clone();
+        let shown = review(&mut world.db, &world.keys, "lena", world.now).expect("reviewed");
+        let plain = shown.iter().find(|report| report["id"] == plain).expect("shown");
+        assert_eq!(plain["evidence"].get("messages_label"), None);
+
+        // Not with a request or a block; at most 50, oldest first, each
+        // with its text up to 16 KiB, 64 KiB in all, from you or them.
+        let on_request = json!({"action_id": action(3), "request_id": request, "reason": "spam", "messages": [said(1, "hi", "them")]});
+        assert_eq!(world.call("bo", "POST", "reports", on_request).0, 400);
+        let many: Vec<Value> = (1..=51).map(|seq| said(seq, "x", "them")).collect();
+        let big = "x".repeat(MAX_MESSAGE_TEXT);
+        let too_much: Vec<Value> = (1..=5).map(|seq| said(seq, &big, "them")).collect();
+        let refused = [
+            json!(many),
+            json!([said(4, "a", "them"), said(3, "b", "them")]),
+            json!([said(3, "a", "them"), said(3, "b", "them")]),
+            json!([said(0, "a", "them")]),
+            json!([said(1, "", "them")]),
+            json!([said(1, &"x".repeat(MAX_MESSAGE_TEXT + 1), "them")]),
+            json!(too_much),
+            json!([said(1, "a", "ana")]),
+            json!([{"seq": 1, "text": "a", "from": "them", "sent_ms": -1}]),
+            json!([{"seq": 1, "text": "a", "from": "them", "sent_ms": 1, "verified": true}]),
+        ];
+        for (n, messages) in refused.into_iter().enumerate() {
+            assert_eq!(world.call("bo", "POST", "reports", ask(10 + n as u32, messages.clone())).0, 400, "{messages}");
+        }
+        let fifty: Vec<Value> = (1..=50).map(|seq| said(seq, "x", "them")).collect();
+        assert_eq!(world.call("bo", "POST", "reports", ask(30, json!(fifty))).0, 200);
     }
 
     #[test]

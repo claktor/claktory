@@ -3,6 +3,7 @@
 //! anything flows, signed messages with files delivered in order and
 //! acked, refusals heard back, the queue while the peer is away, close.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -23,11 +24,23 @@ enum Event {
     Delivered { pipe: String, msg_id: String },
     Refused { pipe: String, msg_id: String, reason: String },
     PeerClosed { pipe: String },
+    Identity { pipe: String, endpoint: String, identity: String },
 }
 
 fn events() -> &'static Mutex<Vec<(String, Event)>> {
     static EVENTS: OnceLock<Mutex<Vec<(String, Event)>>> = OnceLock::new();
     EVENTS.get_or_init(Mutex::default)
+}
+
+/// (home, pipe): whose agents' messages wait (`holds_agents`): the peer
+/// is another account than the person accepted.
+fn holding() -> &'static Mutex<HashSet<(String, String)>> {
+    static HOLDING: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+    HOLDING.get_or_init(Mutex::default)
+}
+
+fn of(factory: &Factory, pipe: &str) -> (String, String) {
+    (factory.home().root().display().to_string(), pipe.to_owned())
 }
 
 fn record(factory: &Arc<Factory>, event: Event) {
@@ -62,6 +75,16 @@ impl pipe_link::Store for TestStore {
         record(factory, Event::PeerClosed { pipe: pipe.to_owned() });
     }
     fn link_changed(&self, _factory: &Arc<Factory>, _pipe: &str, _status: LinkStatus) {}
+    fn identity(&self, factory: &Arc<Factory>, pipe: &str, endpoint: &str, identity: &str) {
+        record(factory, Event::Identity { pipe: pipe.to_owned(), endpoint: endpoint.to_owned(), identity: identity.to_owned() });
+    }
+    /// Who this Factory is, by its home: a stand-in for its statement.
+    fn own_identity(&self, factory: &Arc<Factory>) -> Option<String> {
+        Some(format!("vouched:{}", factory.home().root().display()))
+    }
+    fn holds_agents(&self, factory: &Arc<Factory>, pipe: &str) -> bool {
+        holding().lock().expect("holding").contains(&of(factory, pipe))
+    }
 }
 
 /// Waits for an event of this Factory's passing `pick`; what it picked.
@@ -150,6 +173,25 @@ async fn two_claktories_pair_approve_and_talk_through_a_pipe() {
     assert!(matches!(pipe_link::send(&b, "p-b", note("m0", "hi")), Err(PipeError::NotOpen)), "Ana approved alone");
     pipe_link::approve(&a, "p-a").expect("Matt approves");
     wait_for(&b, |event| matches!(event, Event::PeerApproved { pipe } if pipe == "p-b").then_some(())).await;
+
+    // Each says who it is on its pings, and in answer to the other's: what
+    // each hears is the other's, from the key pinned to the pipe.
+    let heard = |factory: &Arc<Factory>, pipe: &'static str| {
+        let factory = factory.clone();
+        async move {
+            wait_for(&factory, |event| match event {
+                Event::Identity { pipe: of, endpoint, identity } if of == pipe => Some((endpoint.clone(), identity.clone())),
+                _ => None,
+            })
+            .await
+        }
+    };
+    let (from_b, b_is) = heard(&a, "p-a").await;
+    let (from_a, a_is) = heard(&b, "p-b").await;
+    assert_eq!(b_is, format!("vouched:{}", b.home().root().display()));
+    assert_eq!(a_is, format!("vouched:{}", a.home().root().display()));
+    assert_eq!(from_b, knocked.endpoint_id);
+    assert_eq!(from_a, peer.endpoint_id);
 
     // A message with a file, signed, delivered once, acked.
     let report = dir_a.join("report.txt");
@@ -240,6 +282,51 @@ async fn a_message_waits_out_the_peer_being_away_and_a_wrong_secret_gets_nothing
     wait_for(&b, |event| matches!(event, Event::Received { pipe, message } if pipe == "pipe" && message.msg_id == "m1").then_some(()))
         .await;
     wait_for(&a, |event| matches!(event, Event::Delivered { pipe, msg_id } if pipe == "pipe" && msg_id == "m1").then_some(())).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_messages_wait_while_the_peer_is_another_account() {
+    let (dir_a, dir_b) = (temp_dir(), temp_dir());
+    let a = claktory(&dir_a).await;
+    let b = claktory(&dir_b).await;
+    let (code, _) = pipe_link::invite(&a, "held", &side("Matt")).await.expect("a code");
+    pipe_link::join(&b, "held", &code, &side("Ana")).await.expect("joined");
+    pipe_link::approve(&a, "held").expect("approved");
+    pipe_link::approve(&b, "held").expect("approved");
+    wait_for(&a, |event| matches!(event, Event::PeerApproved { pipe } if pipe == "held").then_some(())).await;
+    wait_for(&b, |event| matches!(event, Event::PeerApproved { pipe } if pipe == "held").then_some(())).await;
+
+    // Ana's Claktory turns out to be another account (as a ping's answer
+    // says) while an agent's message and then Matt's wait to go: neither
+    // goes, Matt's being behind the agent's.
+    let message = |id: &str, via: Via| Outgoing { msg_id: id.to_owned(), via, text: format!("message {id}"), files: Vec::new() };
+    holding().lock().expect("holding").insert(of(&a, "held"));
+    pipe_link::send(&a, "held", message("m1", Via::Agent { name: "Lea".into(), role: "Copywriter".into() })).expect("queued");
+    pipe_link::send(&a, "held", message("m2", Via::Person { name: "Matt".into() })).expect("queued");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let arrived = |id: &'static str| {
+        let home = b.home().root().display().to_string();
+        events().lock().expect("events").iter().any(|(at, event)| {
+            *at == home && matches!(event, Event::Received { pipe, message } if pipe == "held" && message.msg_id == id)
+        })
+    };
+    assert!(!arrived("m1") && !arrived("m2"), "a held agent's message, or one behind it, went");
+    assert_eq!(pipe_link::status(&a, "held").queued, 2);
+
+    // Accepted: they go, in order, and what's written after them too.
+    holding().lock().expect("holding").remove(&of(&a, "held"));
+    pipe_link::send(&a, "held", message("m3", Via::Person { name: "Matt".into() })).expect("queued");
+    let seq = |id: &'static str| {
+        let b = b.clone();
+        async move {
+            wait_for(&b, |event| match event {
+                Event::Received { pipe, message } if pipe == "held" && message.msg_id == id => Some(message.seq),
+                _ => None,
+            })
+            .await
+        }
+    };
+    assert_eq!((seq("m1").await, seq("m2").await, seq("m3").await), (1, 2, 3));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

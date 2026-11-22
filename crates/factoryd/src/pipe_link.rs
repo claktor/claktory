@@ -191,6 +191,18 @@ pub trait Store: Send + Sync {
     fn peer_closed(&self, factory: &Arc<Factory>, pipe: &str);
     /// `status` changed: online, last seen, or the queue.
     fn link_changed(&self, factory: &Arc<Factory>, pipe: &str, status: LinkStatus);
+    /// What the peer (pinned to `endpoint`) presents as who it is, on a ping
+    /// or its answer: the account service's statement, "" when it says it
+    /// has none (signed out); never called for a peer that sends nothing (a
+    /// Claktory from before). Unchecked: the store checks it.
+    fn identity(&self, factory: &Arc<Factory>, pipe: &str, endpoint: &str, identity: &str);
+    /// What this side presents as who it is (as `identity` takes it); None
+    /// to send nothing.
+    fn own_identity(&self, factory: &Arc<Factory>) -> Option<String>;
+    /// Whether agents' messages wait for now (the peer is another account
+    /// than the person accepted): queued ones stay, in order, with what's
+    /// behind them, until it says otherwise and `wake`s the link.
+    fn holds_agents(&self, factory: &Arc<Factory>, pipe: &str) -> bool;
 }
 
 const SCHEMA_SQL: &str = "
@@ -232,6 +244,12 @@ CREATE TABLE pipe_outbox (
     frame BLOB NOT NULL
 );
 CREATE INDEX pipe_outbox_pipe ON pipe_outbox (pipe, n);
+";
+
+/// Which queued messages an agent wrote, which wait while the peer is
+/// another account than the person accepted (`Store::holds_agents`).
+pub(crate) const OUTBOX_AGENT_SQL: &str = "
+ALTER TABLE pipe_outbox ADD COLUMN agent INTEGER NOT NULL DEFAULT 0;
 ";
 
 static STORE: OnceLock<Box<dyn Store>> = OnceLock::new();
@@ -501,6 +519,10 @@ struct Payload {
     /// join and ping: where the sender can be reached now.
     relays: Vec<String>,
     addresses: Vec<String>,
+    /// ping: who the sender is, as the account service vouches
+    /// (`Store::identity`); absent from a Claktory from before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -524,6 +546,9 @@ struct Reply {
     side: Option<Side>,
     relays: Vec<String>,
     addresses: Vec<String>,
+    /// ping: who the answering side is, as a ping says it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<String>,
 }
 
 impl Reply {
@@ -810,7 +835,8 @@ pub(crate) fn reload(factory: &Arc<Factory>) {
     }
 }
 
-fn wake(factory: &Factory, pipe: &str) {
+/// The link's worker looks at its queue again now.
+pub(crate) fn wake(factory: &Factory, pipe: &str) {
     if let Some(worker) = lock(&factory.remote.pipes.workers).get(pipe) {
         worker.wake.notify_one();
     }
@@ -1055,6 +1081,7 @@ pub fn send(factory: &Arc<Factory>, pipe: &str, message: Outgoing) -> Result<u64
         let mut link = load_from(&db, pipe).ok_or(PipeError::NotFound)?;
         open(&link)?;
         let seq = link.next_seq as u64;
+        let by_agent = matches!(message.via, Via::Agent { .. });
         let payload = Payload {
             v: 1,
             wire: link.wire.clone(),
@@ -1072,7 +1099,10 @@ pub fn send(factory: &Arc<Factory>, pipe: &str, message: Outgoing) -> Result<u64
         let transaction = db.transaction().map_err(other)?;
         link.save(&transaction).map_err(other)?;
         transaction
-            .execute("INSERT INTO pipe_outbox (pipe, control, msg_id, frame) VALUES (?1, 0, ?2, ?3)", params![pipe, message.msg_id, bytes])
+            .execute(
+                "INSERT INTO pipe_outbox (pipe, control, msg_id, frame, agent) VALUES (?1, 0, ?2, ?3, ?4)",
+                params![pipe, message.msg_id, bytes, by_agent],
+            )
             .map_err(other)?;
         transaction.commit().map_err(other)?;
         seq
@@ -1142,15 +1172,23 @@ fn forget(factory: &Arc<Factory>, pipe: &str) {
 }
 
 /// The next frame to send: the first control, or else, while messages
-/// flow, the first message. (n, a message's id or "", the frame.)
-fn next_frame(factory: &Factory, link: &Link) -> Option<(i64, String, Vec<u8>)> {
+/// flow, the first message; while agents' are held (`hold_agents`), only
+/// those queued before the first of them. (n, a message's id or "", the
+/// frame.)
+fn next_frame(factory: &Factory, link: &Link, hold_agents: bool) -> Option<(i64, String, Vec<u8>)> {
     let db = factory.store.db();
-    let query = if link.flowing() {
-        "SELECT n, msg_id, frame FROM pipe_outbox WHERE pipe = ?1 ORDER BY control DESC, n LIMIT 1"
+    let found = if link.flowing() {
+        db.query_row(
+            "SELECT n, msg_id, frame FROM pipe_outbox WHERE pipe = ?1 AND (control = 1 OR NOT ?2
+                 OR n < (SELECT COALESCE(MIN(n), 9223372036854775807) FROM pipe_outbox WHERE pipe = ?1 AND control = 0 AND agent = 1))
+             ORDER BY control DESC, n LIMIT 1",
+            params![&link.pipe, hold_agents],
+            crate::store::row3,
+        )
     } else {
-        "SELECT n, msg_id, frame FROM pipe_outbox WHERE pipe = ?1 AND control = 1 ORDER BY n LIMIT 1"
+        db.query_row("SELECT n, msg_id, frame FROM pipe_outbox WHERE pipe = ?1 AND control = 1 ORDER BY n LIMIT 1", [&link.pipe], crate::store::row3)
     };
-    db.query_row(query, [&link.pipe], crate::store::row3).optional().unwrap_or_else(|error| {
+    found.optional().unwrap_or_else(|error| {
         tracing::error!(%error, "could not read a pipe's queue");
         None
     })
@@ -1191,6 +1229,10 @@ fn set_status(factory: &Arc<Factory>, pipe: &str, worker: &Worker, change: impl 
 /// answered, and checks every `PING` that the peer is there.
 async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
     let mut connection: Option<Connection> = None;
+    // Whether the peer has answered a ping on this connection: until it
+    // has, no message goes, so who it is now (its identity, which may hold
+    // agents' messages) is heard before anything queued meanwhile.
+    let mut pinged = false;
     let mut backoff = Duration::from_secs(1);
     let mut contact = tokio::time::Instant::now() - PING;
     loop {
@@ -1204,7 +1246,8 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
             status.queued = queue;
             status.last_seen_ms = link.last_seen;
         });
-        let next = next_frame(&strong, &link);
+        let hold_agents = store().is_some_and(|store| store.holds_agents(&strong, &pipe));
+        let next = next_frame(&strong, &link, hold_agents);
         if link.closed && (next.is_none() || now_ms() - link.closed_at > CLOSE_TRIES) {
             // Its close was heard (or never will be).
             forget(&strong, &pipe);
@@ -1221,7 +1264,10 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
         }
         if connection.is_none() {
             match dial(&strong, &link.peer, &link.relays, &link.addresses).await {
-                Ok(dialed) => connection = Some(dialed),
+                Ok(dialed) => {
+                    connection = Some(dialed);
+                    pinged = false;
+                }
                 Err(error) => {
                     tracing::debug!(pipe, %error, "can't reach a pipe's peer");
                     set_status(&strong, &pipe, &worker, |status| offline(status, &error));
@@ -1233,6 +1279,7 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
             }
         }
         let Some(open) = connection.clone() else { continue };
+        let next = next.filter(|(_, msg_id, _)| pinged || msg_id.is_empty());
         let bytes = match &next {
             Some((_, _, frame)) => frame.clone(),
             None => {
@@ -1244,6 +1291,7 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
                     relays,
                     addresses,
                     sent_at: now_ms(),
+                    identity: store().and_then(|store| store.own_identity(&strong)),
                     ..Payload::default()
                 };
                 match key(&strong) {
@@ -1291,6 +1339,12 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
             }
             forget(&strong, &pipe);
             return;
+        }
+        if let (Some(identity), Some(store)) = (reply.identity.as_deref(), store()) {
+            store.identity(&strong, &pipe, &link.peer, identity);
+        }
+        if next.is_none() {
+            pinged = true;
         }
         let Some((n, msg_id, _)) = next else { continue };
         match reply.code.as_str() {
@@ -1394,7 +1448,7 @@ fn joined(factory: &Arc<Factory>, peer: &str, payload: Payload) -> Reply {
         return Reply::code("bad");
     }
     let (relays, addresses) = here(factory);
-    let accepted = Reply { code: "ok".to_owned(), side: Some(link.mine.clone()), relays, addresses, reason: String::new() };
+    let accepted = Reply { code: "ok".to_owned(), side: Some(link.mine.clone()), relays, addresses, ..Reply::default() };
     if !link.peer.is_empty() {
         // Its answer was lost, and it asks again.
         return if link.peer == peer { accepted } else { Reply::code("used") };
@@ -1458,7 +1512,13 @@ async fn received(factory: &Arc<Factory>, peer: &str, payload: Payload, files: V
                 link.relays = relays;
                 link.addresses = addresses;
             }
-            Reply::code("ok")
+            let store = store();
+            if let (Some(identity), Some(store)) = (payload.identity.as_deref(), &store) {
+                store.identity(factory, &pipe, &link.peer, identity);
+            }
+            // Ours back, from a Claktory that says who it is.
+            let identity = payload.identity.is_some().then(|| store.and_then(|store| store.own_identity(factory))).flatten();
+            Reply { identity, ..Reply::code("ok") }
         }
         KIND_APPROVE | KIND_PAUSE | KIND_RESUME | KIND_CLOSE => {
             if payload.seq as i64 <= link.received_cseq {
@@ -1557,7 +1617,7 @@ async fn keep_files(factory: &Factory, pipe: &str, seq: u64, metas: &[FileMeta],
     .map_err(std::io::Error::other)?
 }
 
-fn sanitize(text: &str) -> String {
+pub(crate) fn sanitize(text: &str) -> String {
     text.chars().map(|char| if char.is_ascii_alphanumeric() || char == '-' { char } else { '_' }).collect()
 }
 

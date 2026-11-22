@@ -375,7 +375,8 @@ struct InkTests {
       #expect(r.minX > 72.0 / 612 && r.minX < 110.0 / 612, "\(match)")
       #expect(abs(r.minY - 100.0 / 792) < 0.03, "\(match)")
     }
-    #expect(paper.pdf.highlightedSelections?.count == 2)
+    #expect(paper.found.values.reduce(0) { $0 + $1.count } == 2)
+    #expect(Set(paper.found.keys) == [3, 5])
     // At most what was asked, and said so.
     let one = await events.call("search", ["query": "gradient", "max_results": 1]) as? [String: Any]
     #expect((one?["matches"] as? [[String: Any]])?.count == 1)
@@ -383,7 +384,52 @@ struct InkTests {
     // An empty query clears.
     let none = await events.call("search", ["query": " "]) as? [String: Any]
     #expect((none?["matches"] as? [Any])?.isEmpty == true)
+    #expect(paper.found.isEmpty)
+    _ = window
+  }
+
+  @available(iOS 16.0, *)
+  @Test func aSearchWashesItsMatchesOnThePagesAndClearingTakesThemOff() async throws {
+    // As an iPhone shows it: nothing draws (Zucchero's row 75 was there).
+    let (paper, events, window) = try await Self.openPaper()
+    _ = await events.call("setDrawingPolicy", ["drawing_policy": "none"])
+    _ = await events.call("goToPage", ["page_1based": 3])
+    await Self.settle(0.5)
+    let canvas = try #require(paper.liveCanvases.first { $0.tag == 3 })
+    _ = await events.call("search", ["query": "gradient", "max_results": 200])
+    // Page 3's "the vanishing gradient", 72 pt in, ~100 pt from the top.
+    let rect = try #require(canvas.found.first)
+    #expect(canvas.found.count == 1)
+    #expect(rect.minX > 100 && rect.minX < 200 && abs(rect.minY - 90) < 20, "\(rect)")
+    #expect(canvas.foundLayer?.superlayer === canvas.layer)
+    // Not PDFKit's own, which drew red and stayed.
     #expect(paper.pdf.highlightedSelections?.isEmpty ?? true)
+    // Another search shows only its own.
+    _ = await events.call("search", ["query": "page 3", "max_results": 200])
+    #expect(canvas.found.count == 1 && canvas.found.first != rect)
+    // Going to a match marks it apart and brings it into the view's upper
+    // part, clear of a find bar and keyboard below (Zucchero's row 91).
+    let answer = try #require(
+      await events.call("search", ["query": "vanishing gradient", "max_results": 200])
+        as? [String: Any])
+    let last = try #require((answer["matches"] as? [[String: Any]])?.last)
+    #expect(last["page_1based"] as? Int == 5)
+    _ = await events.call(
+      "goToPage", ["page_1based": 5, "region": last["region"]!, "match": true])
+    await Self.settle(0.3)
+    let five = try #require(paper.liveCanvases.first { $0.tag == 5 })
+    #expect(five.current != nil && five.currentLayer != nil)
+    #expect(paper.liveCanvases.filter { $0.current != nil }.count == 1)
+    let page5 = try #require(paper.pdf.document?.page(at: 4))
+    let shown = paper.pdf.convert(
+      PaperView.pageRect(try #require(InkRegion.rect(last["region"])), on: page5), from: page5)
+    let height = paper.pdf.bounds.height
+    #expect(shown.minY >= 0 && shown.maxY <= height * 0.5, "\(shown) in \(height)")
+    // Cleared: nothing on any page.
+    _ = await events.call("search", ["query": ""])
+    #expect(paper.liveCanvases.allSatisfy { $0.current == nil })
+    #expect(paper.found.isEmpty)
+    #expect(paper.liveCanvases.allSatisfy { $0.found.isEmpty && $0.foundLayer == nil })
     _ = window
   }
 

@@ -487,4 +487,47 @@ void main() {
       });
     }
   }
+
+  testWidgets('an error that comes after the person scrolled down to the '
+      'end is scrolled into sight (Zucchero, row 56)', (tester) async {
+    String? error;
+    await _showForm(
+      tester,
+      (close) => StatefulBuilder(
+        builder: (context, setState) => _form(
+          error: error,
+          onSubmit: () => setState(
+            () => error =
+                'This file isn’t the one '
+                'you reviewed.',
+          ),
+          fields: [
+            for (var i = 0; i < 30; i++)
+              Field(label: 'Line $i', child: const SizedBox(height: 40)),
+          ],
+        ),
+      ),
+    );
+    await tester.dragUntilVisible(
+      find.text('Line 29'),
+      find.text('Line 0'),
+      const Offset(0, -300),
+    );
+    await pumpFrames(tester);
+    await tester.tap(find.text('Create'));
+    await tester.pumpAndSettle();
+    final shown = tester.getRect(
+      find.text(
+        'This file isn’t the one you '
+        'reviewed.',
+      ),
+    );
+    expect(shown.top, greaterThan(0));
+    expect(shown.bottom, lessThan(phone.height));
+    expect(
+      shown.top,
+      greaterThan(tester.getRect(find.text('Create')).bottom),
+      reason: 'under the bar, not behind it',
+    );
+  });
 }

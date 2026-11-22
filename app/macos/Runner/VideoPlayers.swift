@@ -100,7 +100,10 @@ final class VideoPlayer: NSObject, FlutterTexture {
   var frameAvailable: (() -> Void)?
   var changed: (([String: Any]) -> Void)?
 
-  private let item: AVPlayerItem
+  /// The file's own asset, sound and all.
+  private let asset: AVURLAsset
+  /// What plays: the picture alone until the first play, if it has sound.
+  private var item: AVPlayerItem
   private let player: AVPlayer
   private let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
     kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
@@ -118,20 +121,84 @@ final class VideoPlayer: NSObject, FlutterTexture {
   private var quarterTurns = 0
   /// The frame's size in pixels, before it's turned.
   private var size = CGSize.zero
+  /// Whether its sound is still left out: only the picture plays until the
+  /// first play. An item with sound opens the sound output as it loads,
+  /// and where that output is also a microphone (a USB headset, a dock, a
+  /// virtual machine's one sound device) macOS takes that for using the
+  /// microphone and asks for it, while the video only loads (Abbacchio's
+  /// rows 492 and 495: turning its sound tracks off as they come was too
+  /// late). Left out until then, a prompt there comes as its sound starts.
+  private var soundLeftOut = false
+  /// Where it was when its sound went in, until the whole file is there.
+  private var swappingAt: CMTime?
+
+  /// Whether what plays now has sound, for the check.
+  var soundEnabled: Bool { !item.asset.tracks(withMediaType: .audio).isEmpty }
 
   init(url: URL) {
-    item = AVPlayerItem(asset: AVURLAsset(url: url))
+    asset = AVURLAsset(url: url)
+    // A file on this device: its tracks are read at once.
+    let picture = asset.tracks(withMediaType: .audio).isEmpty ? nil : Self.picture(of: asset)
+    soundLeftOut = picture != nil
+    item = AVPlayerItem(asset: picture ?? asset)
     player = AVPlayer(playerItem: item)
     player.actionAtItemEnd = .pause
     super.init()
     item.add(output)
   }
 
+  /// [asset]'s picture without its sound; nil if it can't be made.
+  private static func picture(of asset: AVAsset) -> AVAsset? {
+    let videos = asset.tracks(withMediaType: .video)
+    guard !videos.isEmpty else { return nil }
+    let composition = AVMutableComposition()
+    let range = CMTimeRange(start: .zero, duration: asset.duration)
+    for video in videos {
+      guard
+        let track = composition.addMutableTrack(
+          withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+        (try? track.insertTimeRange(range, of: video, at: .zero)) != nil
+      else { return nil }
+      track.preferredTransform = video.preferredTransform
+    }
+    return composition
+  }
+
+  /// Puts the sound in: the whole file plays from where the picture was,
+  /// then [then].
+  private func addSound(then: @escaping () -> Void) {
+    soundLeftOut = false
+    let at = player.currentTime()
+    // Meanwhile (macOS may be asking for the microphone) it still says
+    // where it was, not the new item's start.
+    swappingAt = at
+    let whole = AVPlayerItem(asset: asset)
+    item.remove(output)
+    whole.add(output)
+    item = whole
+    player.replaceCurrentItem(with: whole)
+    var done = false
+    observations.append(
+      whole.observe(\.status, options: [.initial, .new]) { [weak self] whole, _ in
+        DispatchQueue.main.async {
+          guard let self, !done, whole.status != .unknown else { return }
+          done = true
+          self.player.seek(to: at, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+            DispatchQueue.main.async {
+              self.swappingAt = nil
+              then()
+            }
+          }
+        }
+      })
+  }
+
   /// Calls back once with nil when ready to play, or with why it can't be.
   func load(_ done: @escaping (String?) -> Void) {
     var answered = false
+    let loading = item
     observations.append(
-      item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+      loading.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
         DispatchQueue.main.async {
           guard let self, !answered else { return }
           switch item.status {
@@ -139,6 +206,21 @@ final class VideoPlayer: NSObject, FlutterTexture {
             answered = true
             self.ready()
             done(nil)
+          case .failed where self.soundLeftOut && item === self.item:
+            // Its picture alone wouldn't play here: the whole file, sound
+            // and all, as before (a duplex output may ask for the
+            // microphone now).
+            answered = true
+            NSLog(
+              "Claktory video: its picture alone can't play (%@); playing it whole",
+              String(describing: item.error))
+            self.soundLeftOut = false
+            let whole = AVPlayerItem(asset: self.asset)
+            item.remove(self.output)
+            whole.add(self.output)
+            self.item = whole
+            self.player.replaceCurrentItem(with: whole)
+            self.load(done)
           case .failed:
             answered = true
             done(item.error?.localizedDescription ?? "Claktory can't play this video.")
@@ -150,7 +232,7 @@ final class VideoPlayer: NSObject, FlutterTexture {
 
   private func ready() {
     size = item.presentationSize
-    if let track = item.asset.tracks(withMediaType: .video).first {
+    if let track = asset.tracks(withMediaType: .video).first {
       size = track.naturalSize
       let transform = track.preferredTransform
       let turns = Int((atan2(transform.b, transform.a) * 2 / .pi).rounded())
@@ -170,6 +252,7 @@ final class VideoPlayer: NSObject, FlutterTexture {
   }
 
   func play() {
+    if soundLeftOut { return addSound { [weak self] in self?.play() } }
     // From the start again once it's played to the end.
     if let duration = seconds(item.duration), seconds(player.currentTime()) ?? 0 >= duration {
       player.seek(to: .zero)
@@ -231,7 +314,7 @@ final class VideoPlayer: NSObject, FlutterTexture {
   func state() -> [String: Any] {
     [
       "playing": player.timeControlStatus != .paused,
-      "position": seconds(player.currentTime()) ?? 0,
+      "position": seconds(swappingAt ?? player.currentTime()) ?? 0,
       "duration": seconds(item.duration) ?? 0,
       "width": Double(size.width),
       "height": Double(size.height),

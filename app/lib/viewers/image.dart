@@ -13,6 +13,7 @@ import '../mobile/metrics.dart';
 import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
+import '../review_answer.dart' show ReviewAnswering;
 import 'registry.dart';
 
 /// An image: fitted to the pane (never enlarged past its pixels), over a
@@ -445,7 +446,10 @@ class _ImageViewerState extends State<ImageViewer>
         if (file != null && file.error.isEmpty) formatBytes(file.size),
       ].join(' · '),
     );
-    final comments = _commentable ? this.comments : null;
+    // Answering a review, nothing but the answer: no comments meanwhile.
+    final comments = _commentable && !ReviewAnswering.of(context)
+        ? this.comments
+        : null;
     final phone = isPhoneLayout(context);
     Widget glyphButton(String label, String icon, VoidCallback onTap) =>
         GlyphButton(
@@ -514,7 +518,8 @@ class _ImageViewerState extends State<ImageViewer>
           return Stack(
             children: [
               Positioned.fill(
-                child: CallbackShortcuts(
+                // Not while a comment or an answer is being typed.
+                child: ViewerKeys(
                   bindings: {
                     const SingleActivator(LogicalKeyboardKey.equal, meta: true):
                         _zoomIn,

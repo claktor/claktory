@@ -7,12 +7,15 @@ import 'backend.dart';
 import 'characters/character.dart';
 import 'chats.dart' show ChatGlyph, chatTitle, openChat;
 import 'controls.dart';
+import 'find.dart' show FindScope;
 import 'identity.dart';
 import 'mobile/metrics.dart';
 import 'pipe_timeline.dart' show pipeItemKey, pipeLiaison;
 import 'pipes.dart' show PortalGlyph, pipeChatRevealId, pipeColor;
 import 'protocol/factory/v1/factory.pb.dart';
+import 'report_types.dart' show recordHasReportTypes, showReportTypeRecord;
 import 'scope.dart';
+import 'selection.dart' show CopyShape, Unselectable;
 import 'taint_label.dart';
 import 'usage.dart' show formatAge;
 
@@ -37,6 +40,9 @@ class NeedsYouHistoryList extends StatefulWidget {
 class _NeedsYouHistoryListState extends State<NeedsYouHistoryList> {
   late final Backend _backend = AppScope.of(context);
   final _search = TextEditingController();
+
+  /// The search field's focus: ⌘F goes to it.
+  final _field = FocusNode(debugLabel: 'Search history');
   Timer? _typing;
 
   /// What's shown, and whether there's more before it.
@@ -66,6 +72,7 @@ class _NeedsYouHistoryListState extends State<NeedsYouHistoryList> {
   void dispose() {
     _typing?.cancel();
     _search.dispose();
+    _field.dispose();
     super.dispose();
   }
 
@@ -156,62 +163,84 @@ class _NeedsYouHistoryListState extends State<NeedsYouHistoryList> {
         child: child,
       ),
     );
-    return ListView(
-      padding: padding,
-      children: [
-        column(
-          TextField(
-            controller: _search,
-            placeholder: 'Search by agent or words',
-            semanticsLabel: 'Search history',
-          ),
-        ),
-        const SizedBox(height: Space.m),
-        if (_records.isEmpty) column(below),
-        // Keyed on the list's own children, so a row keeps its place.
-        for (final record in _records)
-          KeyedSubtree(
-            key: ValueKey(
-              '${record.kind}/${record.agentId}${record.chatId}'
-              '/${record.seq}/${record.decidedMs}',
-            ),
-            child: column(HistoryRow(record: record)),
-          ),
-        if (_records.isNotEmpty && _more)
+    // ⌘F (and a phone's Search) goes to its own search field.
+    return FindScope.field(
+      field: _field,
+      words: _search,
+      child: ListView(
+        padding: padding,
+        children: [
+          // Kept out of what's selected: its placeholder isn't history.
           column(
-            Padding(
-              padding: const EdgeInsets.only(top: Space.s),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: _loading
-                    ? Text('Loading…', style: caption)
-                    : Button(
-                        label: 'Show earlier',
-                        onPressed: () => _load(earlier: true),
-                      ),
+            Unselectable(
+              child: TextField(
+                controller: _search,
+                focusNode: _field,
+                placeholder: 'Search by agent or words',
+                semanticsLabel: 'Search history',
               ),
             ),
           ),
-        if (_records.isNotEmpty && _failed != null)
-          column(
-            Padding(
-              padding: const EdgeInsets.only(top: Space.s),
-              child: Text(
-                _failed!,
-                style: TextStyles.caption.copyWith(color: palette.danger),
+          const SizedBox(height: Space.m),
+          if (_records.isEmpty) column(below),
+          // Keyed on the list's own children, so a row keeps its place.
+          for (final record in _records)
+            KeyedSubtree(
+              key: ValueKey(
+                '${record.kind}/${record.agentId}${record.chatId}'
+                '/${record.seq}/${record.decidedMs}',
+              ),
+              // Copied, its rows on lines of their own and a blank line
+              // after it, apart from the next; selected where the pointer is
+              // at any zoom, however far it's scrolled.
+              child: column(
+                ScrolledSelection(
+                  child: CopyShape(
+                    lines: true,
+                    trail: '\n\n',
+                    child: HistoryRow(record: record),
+                  ),
+                ),
               ),
             ),
-          ),
-      ],
+          if (_records.isNotEmpty && _more)
+            column(
+              Padding(
+                padding: const EdgeInsets.only(top: Space.s),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: _loading
+                      ? Text('Loading…', style: caption)
+                      : Button(
+                          label: 'Show earlier',
+                          onPressed: () => _load(earlier: true),
+                        ),
+                ),
+              ),
+            ),
+          if (_records.isNotEmpty && _failed != null)
+            column(
+              Padding(
+                padding: const EdgeInsets.only(top: Space.s),
+                child: Text(
+                  _failed!,
+                  style: TextStyles.caption.copyWith(color: palette.danger),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
 
 /// Whether [record] is a pipe's own decision (a held message, a loop
-/// pause) rather than an agent's or chat's card.
+/// pause, where its reports go) rather than an agent's or chat's card.
 bool _ofPipe(NeedsYouRecord record) =>
     record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_HELD ||
-    record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_LOOP;
+    record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_LOOP ||
+    (record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_FORWARD &&
+        record.pipeId.isNotEmpty);
 
 /// What a record's outcome is called: as its card's buttons said it; ""
 /// for one this app doesn't know (a newer Claktory's).
@@ -278,7 +307,18 @@ class HistoryRow extends StatelessWidget {
         : workspace.pipes.where((pipe) => pipe.id == agent.pipeId).firstOrNull;
     final agentName =
         agent?.name ?? (record.agentName.isEmpty ? null : record.agentName);
-    final who = record.chatId.isNotEmpty
+    // Where a project's new pipes' reports go, changed by the person: the
+    // title says it all.
+    final yours =
+        (record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_FORWARD &&
+            record.agentId.isEmpty &&
+            record.pipeId.isEmpty) ||
+        // A kind of report the person made, changed or deleted.
+        (record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_REPORT_TYPE &&
+            record.agentId.isEmpty);
+    final who = yours
+        ? 'You'
+        : record.chatId.isNotEmpty
         ? (chat == null ? 'A chat' : chatTitle(chat))
         : _ofPipe(record) && agentName == null
         ? pipe?.name ?? 'A pipe'
@@ -297,6 +337,8 @@ class HistoryRow extends StatelessWidget {
     final decided = record.decidedMs.toInt();
     final where = record.chatId.isNotEmpty
         ? 'Open chat'
+        : record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_REPORT_TYPE
+        ? 'Show what crosses'
         : _ofPipe(record)
         ? 'Open pipe'
         : 'Open conversation';
@@ -374,6 +416,30 @@ class HistoryRow extends StatelessWidget {
                           color: palette.textMuted,
                         ),
                       ),
+                    // Kinds of report: a change that lets more cross says
+                    // so; the kinds a pipe was set to forward open apart
+                    // from the pipe.
+                    if (record.widens)
+                      Text(
+                        'Lets more of their words through',
+                        style: TextStyles.caption.copyWith(
+                          color: palette.text,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    if (record.kind ==
+                            NeedsYouRecordKind
+                                .NEEDS_YOU_RECORD_KIND_PIPE_FORWARD &&
+                        record.reportTypes.isNotEmpty)
+                      Pressable(
+                        onTap: () => showReportTypeRecord(context, record),
+                        builder: (context, hovered) => Text(
+                          'See what comes through',
+                          style: TextStyles.caption.copyWith(
+                            color: hovered ? palette.text : palette.signal,
+                          ),
+                        ),
+                      ),
                     if (excerpt.isNotEmpty)
                       Text(
                         '“$excerpt”',
@@ -424,6 +490,11 @@ class HistoryRow extends StatelessWidget {
 void openHistoryRecord(BuildContext context, NeedsYouRecord record) {
   final backend = AppScope.of(context);
   final workspace = backend.workspace.workspace;
+  // A kind of report made, changed or deleted: what crosses with it.
+  if (record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_REPORT_TYPE) {
+    if (recordHasReportTypes(record)) showReportTypeRecord(context, record);
+    return;
+  }
   if (record.chatId.isNotEmpty) {
     final chat = workspace.chats
         .where((chat) => chat.id == record.chatId)
@@ -534,8 +605,13 @@ class NeedsYouTabs extends StatelessWidget {
                               ),
                               boxShadow: chosen ? floatingShadow : null,
                             ),
-                            child: Text(
+                            // At the largest text a word shrinks to fit
+                            // rather than break.
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              child: Text(
                               _labels[i],
+                              maxLines: 1,
                               style: type.secondary.copyWith(
                                 fontWeight: chosen
                                     ? FontWeight.w600
@@ -544,6 +620,7 @@ class NeedsYouTabs extends StatelessWidget {
                                     ? palette.text
                                     : palette.textMuted,
                               ),
+                            ),
                             ),
                           ),
                         );
@@ -556,7 +633,9 @@ class NeedsYouTabs extends StatelessWidget {
         ),
       );
     }
-    return Row(
+    // At the largest text in a narrow window the second tab goes under
+    // the first rather than past the edge.
+    return Wrap(
       spacing: Space.m,
       children: [
         for (var i = 0; i < _labels.length; i++)
@@ -568,7 +647,7 @@ class NeedsYouTabs extends StatelessWidget {
               builder: (context, hovered) {
                 final chosen = history == (i == 1);
                 return Container(
-                  height: 28,
+                  constraints: const BoxConstraints(minHeight: 28),
                   padding: const EdgeInsets.symmetric(horizontal: Space.xs),
                   decoration: BoxDecoration(
                     border: Border(

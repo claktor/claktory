@@ -231,6 +231,17 @@ class DocumentSurface extends ChangeNotifier {
   ({int page, int count})? get page => _page;
   ({int page, int count})? _page;
 
+  /// The page shown when the pane last went from the window (another
+  /// agent shown, the columns hid it): its view, made again, opens there
+  /// rather than on page 1. In memory only.
+  int? _resumePage;
+
+  /// What the person typed in answer to each question on this file, by
+  /// the ask's seq, while the pane stays in the agent's layout: showing
+  /// another agent and coming back keeps it (Prosciutto's S5). In memory
+  /// only, never kept on the device.
+  final answers = <int, String>{};
+
   /// Keeps what's drawn on the backend, once the file is here; says
   /// whether it's kept ([InkLayerSync.state]).
   InkLayerSync? get sync => _sync;
@@ -662,8 +673,14 @@ class DocumentSurface extends ChangeNotifier {
           unawaited(_quietly(sync.ready(controller, sourceSha256: shown)));
         }
         unawaited(_quietly(controller.setTool(tools.choice)));
+        final resume = _resumePage;
+        _resumePage = null;
         if (surface == InkSurfaceKind.pdf && pageCount > 0) {
-          _page = (page: _page?.page ?? 1, count: pageCount);
+          _page = (page: resume ?? _page?.page ?? 1, count: pageCount);
+          // A view made again goes back to the page it was on.
+          if (resume != null && resume > 1 && resume <= pageCount) {
+            goTo(resume);
+          }
         }
       case InkPageChanged(:final page1based, :final pageCount):
         _page = (page: page1based, count: pageCount);
@@ -739,7 +756,10 @@ class DocumentSurface extends ChangeNotifier {
   /// The pane went from the window (hidden by the columns, or the window
   /// narrowed): whatever native holds is sent before its view goes, and
   /// saved now.
-  void hidden() => unawaited(_hide());
+  void hidden() {
+    _resumePage = _page?.page;
+    unawaited(_hide());
+  }
 
   Future<void> _hide() async {
     await _quietly(controller.setActive(false));

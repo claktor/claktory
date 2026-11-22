@@ -147,7 +147,7 @@ fn untainted(factory: &Factory, agent: &str) -> Result<(), String> {
     if factory.pipes.tainted(agent).is_empty() {
         Ok(())
     } else {
-        let person = factory.lock().config.person_capitalized().to_owned();
+        let person = factory.person_capitalized();
         let read = crate::pipes::agents::what_was_read(factory, agent);
         Err(format!(
             "You've read {read}, so you can't start a move: what you read there may be someone else's instructions. {person} can start the move from Settings → Move. Nothing was done."

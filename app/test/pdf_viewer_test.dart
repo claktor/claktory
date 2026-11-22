@@ -5,6 +5,7 @@
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
+import 'package:factory_app/find.dart';
 import 'package:factory_app/ipad/ink_bridge.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/viewers/pdf.dart';
@@ -218,72 +219,120 @@ void main() {
     variant: mac,
   );
 
-  testWidgets(
-    'Search and ⌘F put a field in the header; Return and ⇧Return go from '
-    'match to match, Escape closes it',
-    (tester) async {
-      _Cache();
-      final native = _Native();
-      await _show(tester, _pdf('a paper'));
-      await native.send('pageChanged', {'page_1based': 1, 'page_count': 9});
-      await tester.pump();
+  testWidgets("Search and ⌘F open the app's find bar over the page; Return and "
+      '⇧Return go from match to match, Escape closes it', (tester) async {
+    _Cache();
+    final native = _Native();
+    await _show(tester, _pdf('a paper'));
+    await native.send('pageChanged', {'page_1based': 1, 'page_count': 9});
+    await tester.pump();
 
-      expect(find.byKey(const ValueKey('pdf-find')), findsNothing);
-      await tester.tap(find.text('Search'));
-      await tester.pump();
-      await tester.pump();
-      expect(find.byKey(const ValueKey('pdf-find')), findsOneWidget);
+    final bar = find.byType(FindBar);
+    Finder field() =>
+        find.descendant(of: bar, matching: find.byType(EditableText));
+    expect(bar, findsNothing);
+    await tester.tap(find.text('Search'));
+    await tester.pump();
+    await tester.pump();
+    expect(bar, findsOneWidget);
+    // Over the page, the PDF's own find.
+    expect(
+      find.ancestor(of: bar, matching: find.byType(PdfViewer)),
+      findsOneWidget,
+    );
+    expect(find.text('Search this PDF'), findsOneWidget);
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'Find');
 
-      await tester.enterText(find.byKey(const ValueKey('pdf-find')), 'river');
-      await tester.pump(const Duration(milliseconds: 300));
-      await tester.pump();
-      final search = native.calls.lastWhere((c) => c.method == 'search');
-      expect(search.arguments, {'query': 'river', 'max_results': 200});
-      // The first match is shown.
-      var go = native.calls.lastWhere((c) => c.method == 'goToPage');
-      expect((go.arguments as Map)['page_1based'], 2);
-      expect((go.arguments as Map)['region'], isNotNull);
-      expect(find.text('1 of 2'), findsOneWidget);
+    await tester.enterText(field(), 'river');
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump();
+    final search = native.calls.lastWhere((c) => c.method == 'search');
+    expect(search.arguments, {'query': 'river', 'max_results': 200});
+    // The first match is shown.
+    var go = native.calls.lastWhere((c) => c.method == 'goToPage');
+    expect((go.arguments as Map)['page_1based'], 2);
+    expect((go.arguments as Map)['region'], isNotNull);
+    // The find's match: marked apart, and brought into sight.
+    expect((go.arguments as Map)['match'], isTrue);
+    expect(find.text('1 of 2'), findsOneWidget);
+    // The count showing doesn't take the field away: typing goes on.
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'Find');
+    final editable = tester.state<EditableTextState>(
+      find.descendant(of: bar, matching: find.byType(EditableText)),
+    );
+    await tester.enterText(field(), 'rivers');
+    await tester.enterText(field(), 'river');
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump();
+    expect(find.text('1 of 2'), findsOneWidget);
+    expect(
+      tester.state<EditableTextState>(
+        find.descendant(of: bar, matching: find.byType(EditableText)),
+      ),
+      same(editable),
+    );
 
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      await tester.pump();
-      go = native.calls.lastWhere((c) => c.method == 'goToPage');
-      expect((go.arguments as Map)['page_1based'], 5);
-      expect(find.text('2 of 2'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    go = native.calls.lastWhere((c) => c.method == 'goToPage');
+    expect((go.arguments as Map)['page_1based'], 5);
+    expect(find.text('2 of 2'), findsOneWidget);
 
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
-      await tester.pump();
-      expect(find.text('1 of 2'), findsOneWidget);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+    expect(find.text('1 of 2'), findsOneWidget);
 
-      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
-      await tester.pump();
-      expect(find.byKey(const ValueKey('pdf-find')), findsNothing);
-      // The highlights go with it.
-      expect(native.calls.last.method, 'search');
-      expect((native.calls.last.arguments as Map)['query'], '');
+    // The bar's arrows do the same, the field keeping the keys.
+    await tester.tap(find.bySemanticsLabel('Next match'));
+    await tester.pump();
+    expect(find.text('2 of 2'), findsOneWidget);
+    await tester.tap(find.bySemanticsLabel('Previous match'));
+    await tester.pump();
+    expect(find.text('1 of 2'), findsOneWidget);
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'Find');
 
-      // ⌘F pressed with the page focused: native sends it on.
-      await native.send('findRequested', {'forward': null});
-      await tester.pump();
-      await tester.pump();
-      expect(find.byKey(const ValueKey('pdf-find')), findsOneWidget);
-      // ⌘F in the pane itself.
-      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
-      await tester.pump();
-      expect(find.byKey(const ValueKey('pdf-find')), findsNothing);
-      await tester.tap(find.text('Page 1 of 9'));
-      await tester.pump();
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
-      await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
-      await tester.pump();
-      await tester.pump();
-      expect(find.byKey(const ValueKey('pdf-find')), findsOneWidget);
-    },
-    variant: mac,
-  );
+    // ⌘G and ⇧⌘G pressed with the page focused: native sends them on.
+    await native.send('findRequested', {'forward': true});
+    await tester.pump();
+    expect(find.text('2 of 2'), findsOneWidget);
+    await native.send('findRequested', {'forward': false});
+    await tester.pump();
+    expect(find.text('1 of 2'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(bar, findsNothing);
+    // The highlights go with it.
+    expect(native.calls.last.method, 'search');
+    expect((native.calls.last.arguments as Map)['query'], '');
+
+    // ⌘F pressed with the page focused: native sends it on, and the
+    // words come back, found again.
+    await native.send('findRequested', {'forward': null});
+    await tester.pump();
+    await tester.pump();
+    expect(bar, findsOneWidget);
+    expect(native.calls.last.method, 'goToPage');
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(bar, findsNothing);
+
+    // ⌘F after a click on the page, in Flutter's keys.
+    await tester.tapAt(tester.getCenter(find.byType(AppKitView)));
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pump();
+    await tester.pump();
+    expect(bar, findsOneWidget);
+    expect(
+      find.ancestor(of: bar, matching: find.byType(PdfViewer)),
+      findsOneWidget,
+    );
+  }, variant: mac);
 
   testWidgets(
     'a link in the PDF opens only when asked to; others are not offered',

@@ -1328,9 +1328,7 @@ pub fn delete_moved(place: &Place) -> Result<String, Refused> {
 
 /// A time as the person reads it.
 fn when(ms: i64) -> String {
-    jiff::Timestamp::from_millisecond(ms)
-        .map(|at| at.to_zoned_datetime(jiff::tz::TimeZone::system()).strftime("%B %-d at %H:%M").to_string())
-        .unwrap_or_default()
+    crate::transcript::local_time(ms, "%B %-d at %H:%M")
 }
 
 /// "812 MB", "3.4 GB".

@@ -9,6 +9,7 @@ import 'attachments.dart' show LocalFile;
 import 'backend.dart';
 import 'controls.dart';
 import 'extensions.dart' show logTime;
+import 'find.dart' show ClearOfFindBar;
 import 'forms.dart';
 import 'identity.dart';
 import 'inbox.dart' show NeedsYouChip;
@@ -16,6 +17,7 @@ import 'message_box.dart';
 import 'mobile/header.dart';
 import 'mobile/input.dart' show InputKind;
 import 'mobile/metrics.dart';
+import 'mobile/page_find.dart' show phonePageSearch;
 import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'model_step.dart' show showConnectModel;
 import 'protocol/factory/v1/factory.pb.dart';
@@ -85,18 +87,33 @@ Future<void> deleteChat(BuildContext context, Chat chat) async {
   fireAndLog(backend.deleteChat(chat.id));
 }
 
-/// What can be done with [chat] from its "…": Rename… and Delete….
+/// What can be done with [chat] from its "…": on a phone, Search (its
+/// find bar); Rename… and Delete….
 Future<void> _chatActions(BuildContext context, Chat chat) async {
+  final search = phonePageSearch(context);
   final action = await showActions<String>(
     context,
     title: chatTitle(chat),
-    actions: const [
-      SheetAction('Rename…', 'rename'),
-      SheetAction('Delete…', 'delete', destructive: true),
+    actions: [
+      if (search != null)
+        SheetAction(
+          'Search',
+          'search',
+          glyph: (color) => ExtensionGlyph(
+            icon: 'search',
+            name: 'Search',
+            color: color,
+            size: 16,
+          ),
+        ),
+      const SheetAction('Rename…', 'rename'),
+      const SheetAction('Delete…', 'delete', destructive: true),
     ],
   );
   if (!context.mounted) return;
   switch (action) {
+    case 'search':
+      search?.call();
     case 'rename':
       await renameChat(context, chat);
     case 'delete':
@@ -338,7 +355,8 @@ class _ChatViewState extends State<ChatView> {
                       bottom: Space.m,
                       child: Align(
                         alignment: Alignment.topRight,
-                        child: NeedsYouChip(),
+                        // Aside while the chat's find bar is open there.
+                        child: ClearOfFindBar(child: NeedsYouChip()),
                       ),
                     ),
                 ],

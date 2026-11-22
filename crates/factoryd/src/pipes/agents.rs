@@ -73,15 +73,23 @@ fn section(factory: &Factory, config: &Config, record: &Record, agent: &str) -> 
     if !record.purpose.is_empty() {
         let _ = writeln!(text, "{} says it's for: {}", config.person_capitalized(), record.purpose);
     }
-    let lead = config.agent(&record.lead).map(|lead| lead.name.clone());
-    if record.lead == agent {
-        text.push_str("You are its lead: each message that arrives reaches you as an event (source \"pipe\"); answer with pipe_send when it calls for an answer.\n");
-    } else {
-        let _ = writeln!(
-            text,
-            "You're one of its agents: read it with pipe_read when your work needs it; {} answers what arrives.",
-            lead.as_deref().unwrap_or("its lead")
-        );
+    let lead = super::lead::effective(config, record).and_then(|lead| config.agent(&lead)).map(|lead| (lead.id.clone(), lead.name.clone()));
+    match lead {
+        Some((id, _)) if id == agent => text.push_str(
+            "You are its lead: each message that arrives reaches you as an event (source \"pipe\"); answer with pipe_send when it calls for an answer.\n",
+        ),
+        Some((_, name)) => {
+            let _ = writeln!(
+                text,
+                "You're one of its agents: read it with pipe_read when your work needs it; {name}, its lead, is told of each message that arrives and answers it."
+            );
+        }
+        None => {
+            let _ = writeln!(
+                text,
+                "You're one of its agents: read it with pipe_read when your work needs it. No agent is told of what arrives: {person} reads it in the app and answers it."
+            );
+        }
     }
     if let Some(folder) = super::folder_of(config, record) {
         let _ = writeln!(
@@ -283,6 +291,9 @@ fn send(factory: &Arc<Factory>, agent: &str, args: SendArgs) -> Result<ToolResul
     let record = resolve(factory, agent, args.pipe.as_deref())?;
     if record.state != State::Open {
         return Err(super::not_open(&record));
+    }
+    if super::identity::changed_account(factory, &record.id) {
+        return Err(super::identity::refusal(factory));
     }
     let text = args.text.trim().to_owned();
     let wanted = args.files.unwrap_or_default();
@@ -536,6 +547,25 @@ pub(crate) fn wake(factory: &Arc<Factory>, pipe: &str) {
     });
 }
 
+/// The messages from the other side let in since the lead was last told.
+pub(crate) fn untold(factory: &Factory, record: &Record) -> Vec<Message> {
+    super::messages(factory, &record.id, 0, 1000)
+        .0
+        .into_iter()
+        .filter(|message| {
+            (message.seq > record.told || record.untold.contains(&message.seq))
+                && message.author.incoming()
+                && message.state == MessageState::Received
+        })
+        .collect()
+}
+
+/// A new lead: told now of what arrived since a lead was last told, not at
+/// the next message's wake (`super::lead`).
+pub(crate) fn catch_up(factory: &Arc<Factory>, pipe: &str) {
+    deliver(factory, pipe);
+}
+
 /// Hands the lead every message that arrived since it was last told, as
 /// one event.
 fn deliver(factory: &Arc<Factory>, pipe: &str) {
@@ -545,19 +575,26 @@ fn deliver(factory: &Arc<Factory>, pipe: &str) {
     }
     let (lead, person) = {
         let inner = factory.lock();
-        let lead = inner.config.agent(&record.lead).filter(|_| record.members.contains(&record.lead)).map(|lead| lead.id.clone());
-        (lead, inner.config.person().to_owned())
+        (super::lead::effective(&inner.config, &record), inner.config.person().to_owned())
     };
-    let Some(lead) = lead else { return };
-    let fresh: Vec<Message> = super::messages(factory, pipe, 0, 1000)
-        .0
-        .into_iter()
-        .filter(|message| {
-            (message.seq > record.told || record.untold.contains(&message.seq))
-                && message.author.incoming()
-                && message.state == MessageState::Received
-        })
-        .collect();
+    let Some(lead) = lead else {
+        // No agent of this side is told (none the pipe could choose): what
+        // arrived waits for the person (Pipe.unanswered_seqs), and the pipe
+        // says so once.
+        if !record.no_lead_said && !untold(factory, &record).is_empty() {
+            super::change(factory, pipe, |record| record.no_lead_said = true);
+            super::line(factory, pipe, super::lead::no_lead_line(&record.peer_who()));
+        }
+        factory.broadcast_workspace(&factory.lock());
+        return;
+    };
+    // A liaison past its spend cap for today: the messages wait, untold,
+    // until midnight or a higher cap (`spend`); the app counts them.
+    if super::spend::holds(factory, &lead) {
+        factory.broadcast_workspace(&factory.lock());
+        return;
+    }
+    let fresh = untold(factory, &record);
     let Some(last) = fresh.last().map(|message| message.seq) else { return };
     super::change(factory, pipe, |record| {
         record.told = record.told.max(last);
@@ -866,6 +903,13 @@ pub(crate) fn gate(factory: &Arc<Factory>, agent: &str) -> factory_agent::agent:
     Arc::new(move |name, args| {
         let (weak, agent) = (weak.clone(), agent.clone());
         Box::pin(async move {
+            // A pipe's files taint as the pipe does (`files`).
+            if name == "read_file" || name == "read_image" || name == "edit_file" {
+                if let Some(factory) = weak.upgrade() {
+                    super::files::reading(&factory, &agent, &args);
+                }
+                return None;
+            }
             if name != "bash" {
                 return None;
             }

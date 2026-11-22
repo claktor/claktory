@@ -4,13 +4,13 @@
 // ipad/ink_surface.dart's surface, without ink). The trackpad scrolls and
 // zooms its pages, their text selects and copies as anywhere on the Mac,
 // and its links never open by themselves: the pane asks first, as on the
-// iPad. Search (or ⌘F) puts a field in the header; Return and ⇧Return go
-// from match to match, Escape closes it.
+// iPad. Find is the app's own (find.dart): Search or ⌘F opens its bar at
+// the pane's top right, PDFKit's search behind it ([_PdfFind]).
 //
 // An iPhone shows it the same way, as a page of its own, through PDFKit's
 // iOS view with nothing drawing (ink_surface.dart's surface, its drawing
 // policy none): a finger scrolls, zooms and selects. Search is in More,
-// and opens a find bar at the page's foot (mobile/find_bar.dart).
+// and opens the same find, whose bar the phone's page shows at its foot.
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -21,11 +21,11 @@ import 'package:url_launcher/url_launcher.dart' show launchUrl;
 
 import '../backend.dart';
 import '../controls.dart';
+import '../find.dart';
 import '../identity.dart';
 import '../ipad/ink_bridge.dart';
 import '../ipad/ink_surface.dart';
 import '../pane_chrome.dart';
-import '../mobile/find_bar.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../scope.dart';
 import 'registry.dart';
@@ -68,30 +68,18 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
   /// Brings the file again whenever asked to reload.
   var _generation = 0;
 
-  // Find.
-  var _finding = false;
-  final _query = TextEditingController();
-  final _field = FocusNode(debugLabel: 'Search this PDF');
-  final _pane = FocusNode(debugLabel: 'PDF');
-  Timer? _typing;
-  String _searched = '';
-  InkSearchResult? _found;
-  var _at = -1;
+  /// Find's engine: PDFKit's search in the page's surface.
+  late final _find = _PdfFind(() => _controller);
 
-  @override
-  void initState() {
-    _query.addListener(_queryChanged);
-    super.initState();
-  }
+  /// This pane's find, whose bar the app shows (find.dart); null before
+  /// its scope is built.
+  FindSession? get _session => FindSessions.instance.within(context);
 
   @override
   void dispose() {
-    _typing?.cancel();
+    _find.dispose();
     _generation++;
     _drop();
-    _query.dispose();
-    _field.dispose();
-    _pane.dispose();
     super.dispose();
   }
 
@@ -261,12 +249,9 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
       _events = controller.events.listen(_on);
       _params = params;
       _surfaceKey = ValueKey('pdf ${params.document.sha256}');
-      _found = null;
-      _searched = '';
-      _at = -1;
     });
-    // The field stays open on a new version, finding the same words.
-    if (_finding && _query.text.trim().isNotEmpty) unawaited(_search());
+    // The bar stays open on a new version, finding the same words.
+    _find.again();
   }
 
   void _on(InkEvent event) {
@@ -310,108 +295,12 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
           when method == 'findRequested':
         final forward = arguments['forward'];
         if (forward is bool) {
-          _step(forward ? 1 : -1);
+          _session?.step(forward ? 1 : -1);
         } else {
-          _openFind();
+          _session?.open();
         }
       default:
         return;
-    }
-  }
-
-  // MARK: Find
-
-  void _openFind() {
-    if (_params == null) return;
-    setState(() => _finding = true);
-    _query.selection = TextSelection(
-      baseOffset: 0,
-      extentOffset: _query.text.length,
-    );
-    // The field is built this frame.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _finding) _field.requestFocus();
-    });
-  }
-
-  void _closeFind() {
-    if (!_finding) return;
-    _typing?.cancel();
-    setState(() {
-      _finding = false;
-      _found = null;
-      _searched = '';
-      _at = -1;
-    });
-    unawaited(_quietly(_controller?.search('')));
-    _pane.requestFocus();
-  }
-
-  void _typed(String _) {
-    _typing?.cancel();
-    _typing = Timer(const Duration(milliseconds: 250), () => _search());
-  }
-
-  /// Finds the field's words, highlighting them, and shows the first.
-  Future<void> _search() async {
-    final controller = _controller;
-    if (controller == null) return;
-    final query = _query.text.trim();
-    _typing?.cancel();
-    _searched = query;
-    if (query.isEmpty) {
-      setState(() {
-        _found = null;
-        _at = -1;
-      });
-      await _quietly(controller.search(''));
-      return;
-    }
-    try {
-      final found = await controller.search(query);
-      if (!mounted || found.superseded || query != _searched) return;
-      setState(() {
-        _found = found;
-        _at = -1;
-      });
-      _step(1);
-    } catch (_) {
-      // The page went meanwhile.
-    }
-  }
-
-  /// The next match ([by] 1) or the one before (-1), round the ends.
-  void _step(int by) {
-    if (!_finding) return _openFind();
-    final found = _found;
-    if (found == null || _query.text.trim() != _searched) {
-      unawaited(_search());
-      return;
-    }
-    final matches = found.matches;
-    if (matches.isEmpty) return;
-    final at = (_at + by) % matches.length;
-    setState(() => _at = at);
-    final match = matches[at];
-    unawaited(
-      _quietly(_controller?.goToPage(match.page1based, region: match.region)),
-    );
-  }
-
-  String _findCount() {
-    final found = _found;
-    if (found == null || _query.text.trim().isEmpty) return '';
-    final n = found.matches.length;
-    if (n == 0) return 'No matches';
-    final more = found.truncated ? '+' : '';
-    return _at < 0 ? '$n$more matches' : '${_at + 1} of $n$more';
-  }
-
-  Future<void> _quietly(Future<Object?>? command) async {
-    try {
-      await command;
-    } catch (_) {
-      // A surface that went: nothing to tell anyone.
     }
   }
 
@@ -460,114 +349,144 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
               },
             ),
           Expanded(
-            child: InkSurface(
-              key: _surfaceKey!,
-              params: params,
-              controller: controller,
+            // The bar floats over the page, under a link's line.
+            child: FindScope(
+              target: _find,
+              child: InkSurface(
+                key: _surfaceKey!,
+                params: params,
+                controller: controller,
+              ),
             ),
           ),
         ],
       );
     }
     final showing = params != null && problem == null;
-    final phone = PaneChrome.of(context)?.phone != null;
-    final count = _findCount();
-    final controls = <Widget>[
-      if (showing && _finding) ...[
-        if (count.isNotEmpty)
-          Text(
-            count,
-            key: const ValueKey('pdf-find-count'),
-            style: TextStyles.caption.copyWith(
-              color: palette.textMuted,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
-        SizedBox(
-          width: 180,
-          child: CallbackShortcuts(
-            bindings: {
-              const SingleActivator(LogicalKeyboardKey.enter): () => _step(1),
-              const SingleActivator(
-                LogicalKeyboardKey.enter,
-                shift: true,
-              ): () =>
-                  _step(-1),
-              const SingleActivator(LogicalKeyboardKey.escape): _closeFind,
-            },
-            child: TextField(
-              key: const ValueKey('pdf-find'),
-              controller: _query,
-              focusNode: _field,
-              placeholder: 'Search this PDF',
-              semanticsLabel: 'Search this PDF',
-              onSubmitted: (_) => _step(1),
-            ),
-          ),
-        ),
-        HeaderTextButton('Done', _closeFind),
-      ] else if (showing)
-        HeaderTextButton('Search', _openFind),
-      reloadButton(),
-    ];
-    return CallbackShortcuts(
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.keyF, meta: true): _openFind,
-        const SingleActivator(LogicalKeyboardKey.keyG, meta: true): () =>
-            _step(1),
-        const SingleActivator(
-          LogicalKeyboardKey.keyG,
-          meta: true,
-          shift: true,
-        ): () =>
-            _step(-1),
-        const SingleActivator(LogicalKeyboardKey.escape): _closeFind,
-      },
-      child: Focus(
-        focusNode: _pane,
-        // A tap in the pane (its header, say) brings the keys here, for
-        // ⌘F; a tap on the find field keeps them there. The page's own
-        // keys are AppKit's, which sends ⌘F on (findRequested).
-        child: Listener(
-          behavior: HitTestBehavior.translucent,
-          onPointerDown: (_) => scheduleMicrotask(() {
-            if (mounted && !_pane.hasFocus) _pane.requestFocus();
-          }),
-          child: PaneScaffold(
-            details: details(
-              page == null || !showing
-                  ? ''
-                  : 'Page ${_count(page.page)} of ${_count(page.count)}',
-            ),
-            controls: controls,
-            // On a phone, at the page's foot, above the keyboard.
-            toolbar: showing && _finding && phone
-                ? PhoneFindBar(
-                    controller: _query,
-                    focusNode: _field,
-                    placeholder: 'Search this PDF',
-                    count: count,
-                    onStep: _step,
-                    onDone: _closeFind,
-                  )
-                : null,
-            actions: [
-              if (showing) PaneAction('Search', _openFind, active: _finding),
-              PaneAction('Reload', reload),
-            ],
-            body: ColoredBox(color: palette.canvas, child: body),
-          ),
+    void openFind() => _session?.open();
+    return PaneScaffold(
+      details: details(
+        page == null || !showing
+            ? ''
+            : 'Page ${_count(page.page)} of ${_count(page.count)}',
+      ),
+      controls: [
+        if (showing) HeaderTextButton('Search', openFind),
+        reloadButton(),
+      ],
+      actions: [PaneAction('Reload', reload)],
+      body: ColoredBox(color: palette.canvas, child: body),
+    );
+  }
+}
+
+/// Find in a PDF: PDFKit's search in the page's surface, its matches
+/// highlighted there and each gone to in turn, top to bottom.
+class _PdfFind extends FindTarget {
+  _PdfFind(this._surface);
+
+  final InkSurfaceController? Function() _surface;
+
+  InkSearchResult? _found;
+  var _at = -1;
+  var _query = '';
+  var _searching = false;
+
+  /// Which search an answer is for: an older one's is dropped.
+  var _generation = 0;
+
+  @override
+  String get placeholder => 'Search this PDF';
+
+  @override
+  int get count => _found?.matches.length ?? 0;
+
+  @override
+  bool get capped => _found?.truncated ?? false;
+
+  @override
+  int get current => _at;
+
+  @override
+  bool get searching => _searching;
+
+  @override
+  bool get searched => _found != null;
+
+  @override
+  void search(String query) {
+    _query = query;
+    final generation = ++_generation;
+    _found = null;
+    _at = -1;
+    final surface = _surface();
+    if (query.isEmpty || surface == null) {
+      _searching = false;
+      notifyListeners();
+      if (surface != null) unawaited(_quietly(surface.search('')));
+      return;
+    }
+    _searching = true;
+    notifyListeners();
+    surface
+        .search(query)
+        .then(
+          (found) {
+            if (generation != _generation || found.superseded) return;
+            _found = found;
+            _searching = false;
+            notifyListeners();
+            step(1);
+          },
+          onError: (Object _) {
+            // The page went meanwhile.
+            if (generation != _generation) return;
+            _searching = false;
+            notifyListeners();
+          },
+        );
+  }
+
+  /// A new version of the file: its matches found again.
+  void again() {
+    if (_query.isNotEmpty) search(_query);
+  }
+
+  @override
+  void step(int by) {
+    final matches = _found?.matches ?? const <InkSearchMatch>[];
+    if (matches.isEmpty) return;
+    _at = (_at + by) % matches.length;
+    notifyListeners();
+    final match = matches[_at];
+    unawaited(
+      _quietly(
+        _surface()?.goToPage(
+          match.page1based,
+          region: match.region,
+          match: true,
         ),
       ),
     );
   }
 
-  /// What's typed: found as it's typed, a moment after the last key.
-  String _lastTyped = '';
-  void _queryChanged() {
-    if (_query.text == _lastTyped) return;
-    _lastTyped = _query.text;
-    _typed(_query.text);
+  @override
+  void clear() {
+    _query = '';
+    _generation++;
+    _found = null;
+    _at = -1;
+    _searching = false;
+    notifyListeners();
+    unawaited(_quietly(_surface()?.search('')));
+  }
+}
+
+Future<void> _quietly(Future<Object?>? command) async {
+  try {
+    await command;
+  } catch (_) {
+    // A surface that went: nothing to tell anyone.
   }
 }
 

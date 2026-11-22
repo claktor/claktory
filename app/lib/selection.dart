@@ -1,4 +1,9 @@
-import 'package:flutter/rendering.dart' show Selectable, SelectedContent;
+import 'dart:async' show scheduleMicrotask;
+import 'dart:math' as math;
+
+import 'package:flutter/gestures.dart' show HitTestResult, PointerDeviceKind;
+import 'package:flutter/rendering.dart'
+    show RenderBox, Selectable, SelectedContent;
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
@@ -18,7 +23,7 @@ final selectionControls = _Controls();
 /// inside keep out of it ([Unselectable]). On an iPhone it's iOS's own:
 /// touch and hold selects, with handles, the magnifier and the system's
 /// toolbar (Copy, Select All, Look Up…) plus [extra].
-class SelectableArea extends StatelessWidget {
+class SelectableArea extends StatefulWidget {
   const SelectableArea({
     super.key,
     required this.child,
@@ -62,21 +67,182 @@ class SelectableArea extends StatelessWidget {
   }
 
   @override
+  State<SelectableArea> createState() => _SelectableAreaState();
+}
+
+class _SelectableAreaState extends State<SelectableArea> {
+  final _focus = FocusNode(debugLabel: 'SelectableArea');
+
+  /// Every area on show, for where ⌘A goes once the one it went to is gone.
+  static final _shown = <_SelectableAreaState>{};
+
+  /// The pane it's in, whose clicks outside it are its own.
+  _SelectionPaneState? _pane;
+
+  @override
+  void initState() {
+    super.initState();
+    _shown.add(this);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final pane = context.dependOnInheritedWidgetOfExactType<_PaneScope>()?.pane;
+    if (pane != _pane) {
+      _pane?._leave(this);
+      _pane = pane?.._area = this;
+    }
+  }
+
+  @override
+  void deactivate() {
+    // Gone with ⌘A's focus (its pane closed, a tab changed): once the new
+    // frame is up, ⌘A goes to what shows instead, unless something there
+    // took focus.
+    if (_focus.hasFocus) {
+      SchedulerBinding.instance
+        ..addPostFrameCallback((_) => _refocus())
+        ..ensureVisualUpdate();
+    }
+    _shown.remove(this);
+    super.deactivate();
+  }
+
+  @override
+  void activate() {
+    super.activate();
+    _shown.add(this);
+  }
+
+  @override
+  void dispose() {
+    _shown.remove(this);
+    _pane?._leave(this);
+    _focus.dispose();
+    super.dispose();
+  }
+
+  /// With nothing focused, the largest area on show takes ⌘A: the
+  /// conversation, beside whatever closed. Only one in the scope that has
+  /// focus, and in sight: never one under a dialog or sheet that's open
+  /// (its scrim over it), whose own area takes it then.
+  static void _refocus() {
+    final primary = FocusManager.instance.primaryFocus;
+    if (primary != null && primary is! FocusScopeNode) return;
+    _SelectableAreaState? largest;
+    var most = 0.0;
+    for (final area in _shown) {
+      if (!area.mounted) continue;
+      if (primary != null && !area._focus.ancestors.contains(primary)) {
+        continue;
+      }
+      final box = area.context.findRenderObject();
+      if (box is! RenderBox || !box.attached || !box.hasSize) continue;
+      if (!_inSight(area.context, box)) continue;
+      final size = box.size.width * box.size.height;
+      if (size > most) (largest, most) = (area, size);
+    }
+    largest?._focus.requestFocus();
+  }
+
+  /// Whether a click at [box]'s middle would reach it, nothing over it.
+  static bool _inSight(BuildContext context, RenderBox box) {
+    final result = HitTestResult();
+    WidgetsBinding.instance.hitTestInView(
+      result,
+      box.localToGlobal(box.size.center(Offset.zero)),
+      View.of(context).viewId,
+    );
+    return result.path.any((entry) => entry.target == box);
+  }
+
+  /// A click anywhere in it, a card's button included, makes it the one
+  /// ⌘A selects, as a click on its text does, rather than the selection
+  /// clicked in before (a click outside a text field already takes its
+  /// focus). Focus already inside it, in a field of its own, stays; and
+  /// only a mouse or trackpad's counts: a touch that scrolls mustn't put
+  /// the keyboard away.
+  void _pressed(PointerDownEvent event) {
+    if (event.kind != PointerDeviceKind.mouse &&
+        event.kind != PointerDeviceKind.trackpad) {
+      return;
+    }
+    final primary = FocusManager.instance.primaryFocus;
+    if (primary == _focus || (primary?.ancestors.contains(_focus) ?? false)) {
+      return;
+    }
+    // Once the press is handled: a text field outside lets go of focus
+    // as it sees it, which would undo it.
+    scheduleMicrotask(() {
+      if (mounted) _focus.requestFocus();
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     final native = nativeTextSelection(context);
-    final items = menuItems;
-    return SelectableRegion(
-      selectionControls: native.controls ?? selectionControls,
-      contextMenuBuilder:
-          nativeSelectableMenu(extra: extra) ??
-          (items == null
-              ? menu
-              : (context, region) => menu(context, region, more: items())),
-      magnifierConfiguration: native.magnifier,
-      onSelectionChanged: onSelectionChanged,
-      child: child,
+    final items = widget.menuItems;
+    final extra = widget.extra;
+    final child = widget.child;
+    return Listener(
+      onPointerDown: _pressed,
+      child: SelectableRegion(
+        focusNode: _focus,
+        selectionControls: native.controls ?? selectionControls,
+        contextMenuBuilder:
+            nativeSelectableMenu(extra: extra) ??
+            (items == null
+                ? SelectableArea.menu
+                : (context, region) =>
+                      SelectableArea.menu(context, region, more: items())),
+        magnifierConfiguration: native.magnifier,
+        onSelectionChanged: widget.onSelectionChanged,
+        // What's copied ends where the selection does, not at the line
+        // break an item's [CopyShape.trail] leaves after it.
+        child: CopyShape(trimEnd: true, child: child),
+      ),
     );
   }
+}
+
+/// A pane with a selectable area and more around it (a header, tabs): a
+/// click anywhere in the pane makes its area the one ⌘A selects, as a
+/// click in the area does.
+class SelectionPane extends StatefulWidget {
+  const SelectionPane({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  State<SelectionPane> createState() => _SelectionPaneState();
+}
+
+class _SelectionPaneState extends State<SelectionPane> {
+  /// Its area on show, the latest to join.
+  _SelectableAreaState? _area;
+
+  void _leave(_SelectableAreaState area) {
+    if (_area == area) _area = null;
+  }
+
+  @override
+  Widget build(BuildContext context) => Listener(
+    onPointerDown: (event) {
+      final area = _area;
+      if (area != null && area.mounted) area._pressed(event);
+    },
+    child: _PaneScope(pane: this, child: widget.child),
+  );
+}
+
+class _PaneScope extends InheritedWidget {
+  const _PaneScope({required this.pane, required super.child});
+
+  final _SelectionPaneState pane;
+
+  @override
+  bool updateShouldNotify(_PaneScope old) => pane != old.pane;
 }
 
 /// What a selection shouldn't take: a control's label.
@@ -245,19 +411,29 @@ class _MenuLayout extends SingleChildLayoutDelegate {
 /// led by [lead] (a list item's "• " or "2. ") with the lines after the
 /// first indented under the text, as a pasted email or list needs. With
 /// [cells], parts side by side are a table's row, joined by tabs, and rows
-/// by line breaks.
+/// by line breaks; with [lines], parts side by side are joined by a space
+/// and rows by line breaks, as a card's lines read. [trail] follows it when
+/// the selection runs to its end (a list's items, which a scrolling list
+/// would otherwise run together), and [trimEnd] drops line breaks at the
+/// very end (a selection area's root).
 class CopyShape extends StatefulWidget {
   const CopyShape({
     super.key,
     this.separator = '',
     this.lead = '',
     this.cells = false,
+    this.lines = false,
+    this.trail = '',
+    this.trimEnd = false,
     required this.child,
   });
 
   final String separator;
   final String lead;
   final bool cells;
+  final bool lines;
+  final String trail;
+  final bool trimEnd;
   final Widget child;
 
   @override
@@ -325,16 +501,21 @@ class _ShapeDelegate extends StaticSelectionContainerDelegate {
       for (final selectable in selectables)
         if (selectable.value.hasSelection) selectable,
     ];
-    final parts = <({String text, double top})>[];
+    final parts = <({String text, double top, double bottom})>[];
     _wider = wider || selected.length > 1;
     try {
       for (final selectable in selected) {
         final content = selectable.getSelectedContent();
         if (content == null || content.plainText.isEmpty) continue;
-        final top = shape.cells
+        final rowed = shape.cells || shape.lines;
+        final top = rowed
             ? selectable.getTransformTo(null).getTranslation().y
             : 0.0;
-        parts.add((text: content.plainText, top: top));
+        parts.add((
+          text: content.plainText,
+          top: top,
+          bottom: rowed ? top + selectable.size.height : 0.0,
+        ));
       }
     } finally {
       _wider = wider;
@@ -343,13 +524,17 @@ class _ShapeDelegate extends StaticSelectionContainerDelegate {
     final buffer = StringBuffer();
     for (var i = 0; i < parts.length; i++) {
       if (i > 0) {
-        buffer.write(
-          !shape.cells
-              ? shape.separator
-              : (parts[i].top - parts[i - 1].top).abs() < 1
-              ? '\t'
-              : '\n',
-        );
+        final (a, b) = (parts[i - 1], parts[i]);
+        // Side by side: they share most of a row (a row's parts may be
+        // centred at different heights).
+        final overlap = math.min(a.bottom, b.bottom) - math.max(a.top, b.top);
+        final least = math.min(a.bottom - a.top, b.bottom - b.top);
+        final sameRow = overlap > least / 2;
+        buffer.write(switch (shape) {
+          CopyShape(cells: true) => sameRow ? '\t' : '\n',
+          CopyShape(lines: true) => sameRow ? ' ' : '\n',
+          _ => shape.separator,
+        });
       }
       buffer.write(parts[i].text);
     }
@@ -366,6 +551,14 @@ class _ShapeDelegate extends StaticSelectionContainerDelegate {
         for (final line in lines.skip(1)) line.isEmpty ? '' : '$pad$line',
       ].join('\n');
     }
+    // Run to its end, the selection goes on past it: what follows starts
+    // apart.
+    if (shape.trail.isNotEmpty &&
+        range != null &&
+        math.max(range.startOffset, range.endOffset) >= contentLength) {
+      text += shape.trail;
+    }
+    if (shape.trimEnd) text = text.replaceFirst(RegExp(r'\n+$'), '');
     return SelectedContent(plainText: text);
   }
 }

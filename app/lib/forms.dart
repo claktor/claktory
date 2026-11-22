@@ -13,6 +13,8 @@ import 'mobile/drawer.dart' show largeText;
 import 'mobile/input.dart' show InputKind;
 import 'mobile/platform_policy.dart';
 import 'notification_settings.dart' show notifyModeOptions;
+import 'pipe_reports.dart'
+    show ForwardReportsField, StopReadingReportsField, containedKeeps;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'secrets.dart';
@@ -73,6 +75,9 @@ class FormFrame extends StatelessWidget {
     final palette = Palette.of(context);
     void submit() => onSubmit?.call();
     final phone = isPhoneLayout(context);
+    // Too narrow for three buttons in a row on a phone, and at the largest
+    // text anywhere (an iPad's dialog).
+    final apart = phone || largeText(context);
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.enter, meta: true): submit,
@@ -129,7 +134,7 @@ class FormFrame extends StatelessWidget {
                     ),
                   Row(
                     children: [
-                      if (!phone) ?secondary,
+                      if (!apart) ?secondary,
                       const Spacer(),
                       Button(label: cancelLabel, onPressed: onCancel),
                       const SizedBox(width: Space.s),
@@ -140,9 +145,9 @@ class FormFrame extends StatelessWidget {
                       ),
                     ],
                   ),
-                  // A phone is too narrow for three buttons in a row: the less
-                  // common action goes on a line of its own, under them.
-                  if (phone && secondary != null) ...[
+                  // Where three buttons don't fit in a row, the less common
+                  // action goes on a line of its own, under them.
+                  if (apart && secondary != null) ...[
                     const SizedBox(height: Space.m),
                     Align(alignment: Alignment.centerLeft, child: secondary),
                   ],
@@ -348,9 +353,14 @@ class FormFrame extends StatelessWidget {
                   const SizedBox(height: Space.s),
                 ],
                 if (error != null) ...[
-                  Text(
-                    error,
-                    style: type.secondary.copyWith(color: palette.danger),
+                  // Over the fields: scrolled into sight as it comes, as
+                  // the person may have scrolled down to the end.
+                  _ScrolledTo(
+                    key: ValueKey(error),
+                    child: Text(
+                      error,
+                      style: type.secondary.copyWith(color: palette.danger),
+                    ),
                   ),
                   const SizedBox(height: Space.s),
                 ],
@@ -365,6 +375,36 @@ class FormFrame extends StatelessWidget {
       ],
     );
   }
+}
+
+/// [child], scrolled into sight once it shows (a new one, by its key).
+class _ScrolledTo extends StatefulWidget {
+  const _ScrolledTo({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  State<_ScrolledTo> createState() => _ScrolledToState();
+}
+
+class _ScrolledToState extends State<_ScrolledTo> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      Scrollable.ensureVisible(
+        context,
+        duration: MediaQuery.disableAnimationsOf(context)
+            ? Duration.zero
+            : Motion.base,
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 /// A form's Cancel or its action in a phone's form sheet: words in
@@ -780,6 +820,8 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
               ),
             ),
             _pipesField(backend),
+            // Where its new pipes' reports go, sent as it's chosen.
+            ForwardReportsField(projectId: widget.project.id),
             _archiveField(backend),
           ],
         );
@@ -1971,6 +2013,8 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
             // above them.
             if (_current.quarantined)
               _PipeLimitNote(agent: _current, workspace: workspace),
+            // Reading reports keeps it from the same: why, and the way out.
+            if (_current.readsReports) StopReadingReportsField(agent: _current),
             // Above the extensions, so it's in sight: which secrets it has.
             AgentSecretsField(agent: _current),
             if (workspace.extensions.isNotEmpty)
@@ -1986,9 +2030,9 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
                           workspace: workspace,
                           agentId: agent.id,
                           projectId: _project,
-                          // Ask is all a pipe's limit leaves it.
-                          limited:
-                              _current.quarantined && extension.id != 'ask',
+                          // Ask is all a pipe's limit leaves it; reading
+                          // reports, its database and Reports too.
+                          limited: !containedKeeps(_current, extension.id),
                           enabled: _enabled[extension.id] ?? saved.enabled,
                           value: (option) =>
                               _options[extension.id]?[option] ??

@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# Builds Claktory for iPhone (com.claktory.app) for the App Store and
-# uploads it to App Store Connect, where it shows up in TestFlight.
+# Builds Claktory for iPhone and iPad (com.claktory.app, one universal app)
+# for the App Store and uploads it to App Store Connect, where it shows up
+# in TestFlight and can be submitted for review.
 #
-#   scripts/testflight.sh [--no-upload] [--ipad] [--source COMMIT]
+#   scripts/testflight.sh [--no-upload] [--source COMMIT]
 #
 # --no-upload archives and signs it, and leaves the .ipa in
 # app/build/ios/testflight/, without sending it anywhere.
 #
-# --ipad builds it for iPhone and iPad (device family 1,2) at build time
-# only: the project and app/ios/Runner/Info.plist stay iPhone-only. Xcode
-# makes the iPad icon sizes from the one 1024 icon, and the archived app
-# gets all four iPad orientations, which iPad multitasking requires (App
-# Store Connect refuses it otherwise, error 90474). Xcode warns while
-# archiving that not every orientation is supported: it checks the source
-# Info.plist, not the archived one, so the warning is expected. An iPad
-# build is for internal testers only until we commit to iPad support.
+# Which devices it's for is the project's (TARGETED_DEVICE_FAMILY 1,2 and
+# the iPad orientations in Info.plist since 6e042e1c; --source of an older
+# commit builds that commit's iPhone-only app). An app for iPad must carry
+# all four iPad orientations, which iPad multitasking requires (App Store
+# Connect refuses it otherwise, error 90474): checked before uploading.
+#
+# Before anything is uploaded, scripts/ios-privacy-scan.py refuses an app
+# whose binaries use a required-reason API their privacy manifest doesn't
+# declare (ITMS-91053), or a private or iOS-unavailable symbol (guideline
+# 2.5.1): App Review's automatic refusals, caught here.
 #
 # It signs automatically (Xcode makes or renews the certificate and profile
 # it needs) and uploads with an App Store Connect API key. It needs, from
@@ -47,23 +50,16 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$root/scripts/lib.sh"
 upload=true
-ipad=false
 from=""
-usage() { echo "usage: scripts/testflight.sh [--no-upload] [--ipad] [--source COMMIT]" >&2; exit 2; }
+usage() { echo "usage: scripts/testflight.sh [--no-upload] [--source COMMIT]" >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-upload) upload=false; shift ;;
-    --ipad) ipad=true; shift ;;
+    --ipad) echo "--ipad is gone: every build is for iPhone and iPad, as the project says (6e042e1c)." >&2; exit 2 ;;
     --source) [ $# -ge 2 ] || usage; from="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
-family=()
-devices="iPhone"
-if $ipad; then
-  family=(TARGETED_DEVICE_FAMILY=1,2)
-  devices="iPhone and iPad"
-fi
 
 settings="$HOME/.appstoreconnect/claktory.env"
 if [ -f "$settings" ]; then
@@ -150,7 +146,7 @@ auth=(
   -authenticationKeyIssuerID "$ASC_ISSUER_ID"
 )
 
-echo "Building Claktory $version ($build) for $devices from ${commit:0:10} in $src…"
+echo "Building Claktory $version ($build) from ${commit:0:10} in $src…"
 cd "$src/app"
 # Flutter's half (the Dart code, its assets and the tunnel's Rust library),
 # then Xcode's archive of it. The bundle id, com.claktory.app, comes from
@@ -172,7 +168,7 @@ xcodebuild archive -quiet \
   -destination 'generic/platform=iOS' -archivePath "$archive" \
   -derivedDataPath "$src/app/build/ios/testflight-derived" \
   DEVELOPMENT_TEAM="$CLAKTORY_TEAM_ID" CODE_SIGN_STYLE=Automatic \
-  CODE_SIGNING_ALLOWED=NO ${family[@]+"${family[@]}"}
+  CODE_SIGNING_ALLOWED=NO
 
 app_dir="$archive/Products/Applications/Runner.app"
 # Unsigned, the archive expands $(AppIdentifierPrefix) to nothing in the
@@ -180,22 +176,14 @@ app_dir="$archive/Products/Applications/Runner.app"
 # prefix, the key never saved and the phone never registered for
 # notifications. Fill it in from the sources before anything is signed.
 python3 "$root/scripts/ios-build-vars.py" fill "$app_dir" "$src/app/ios" "$CLAKTORY_TEAM_ID"
-if $ipad; then
-  # The archive is unsigned and the export signs it, so the archived app's
-  # Info.plist can still change here. The iPhone's own orientations
-  # (UISupportedInterfaceOrientations) stay as they are.
-  plist="$app_dir/Info.plist"
-  /usr/libexec/PlistBuddy -c 'Delete :UISupportedInterfaceOrientations~ipad' "$plist" 2>/dev/null || true
-  /usr/libexec/PlistBuddy \
-    -c 'Add :UISupportedInterfaceOrientations~ipad array' \
-    -c 'Add :UISupportedInterfaceOrientations~ipad: string UIInterfaceOrientationPortrait' \
-    -c 'Add :UISupportedInterfaceOrientations~ipad: string UIInterfaceOrientationPortraitUpsideDown' \
-    -c 'Add :UISupportedInterfaceOrientations~ipad: string UIInterfaceOrientationLandscapeLeft' \
-    -c 'Add :UISupportedInterfaceOrientations~ipad: string UIInterfaceOrientationLandscapeRight' \
-    "$plist"
-  /usr/libexec/PlistBuddy -c 'Print :UIDeviceFamily' "$plist" | grep -qE '^[[:space:]]*2$' || { echo "--ipad: no iPad in UIDeviceFamily" >&2; exit 1; }
-  [ "$(/usr/libexec/PlistBuddy -c 'Print :UISupportedInterfaceOrientations~ipad' "$plist" | grep -c UIInterfaceOrientation)" = 4 ] || { echo "--ipad: iPad orientations missing" >&2; exit 1; }
+plist="$app_dir/Info.plist"
+devices="iPhone"
+if /usr/libexec/PlistBuddy -c 'Print :UIDeviceFamily' "$plist" | grep -qE '^[[:space:]]*2$'; then
+  devices="iPhone and iPad"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :UISupportedInterfaceOrientations~ipad' "$plist" 2>/dev/null | grep -c UIInterfaceOrientation)" = 4 ] ||
+    { echo "Not uploading: an app for iPad needs all four iPad orientations (UISupportedInterfaceOrientations~ipad), or App Store Connect refuses it (90474)." >&2; exit 1; }
 fi
+echo "Built for $devices."
 
 # Every binary the app embeds must be loadable by the phone's dyld. A stale
 # build cache can slip an old dylib in: the tunnel's Rust library, linked
@@ -274,6 +262,10 @@ codesign --force --sign - --entitlements "$signing/Runner.entitlements" "$app_di
 # entitled to, with the team prefix.
 python3 "$root/scripts/ios-build-vars.py" check "$app_dir" "$CLAKTORY_TEAM_ID" ||
   { echo "Not uploading: the app's build variables aren't filled in (above)." >&2; exit 1; }
+# No undeclared required-reason API, no private symbol (App Review's
+# automatic refusals).
+python3 "$root/scripts/ios-privacy-scan.py" "$app_dir" ||
+  { echo "Not uploading: App Review would refuse this build (above)." >&2; exit 1; }
 
 destination=export
 $upload && destination=upload
@@ -299,12 +291,6 @@ xcodebuild -exportArchive -quiet \
 
 # Uploading exports straight to App Store Connect and leaves no .ipa here;
 # --no-upload does, and gets the same check on what would be sent.
-if $ipad && ! $upload; then
-  unzip -p "$out"/*.ipa 'Payload/Runner.app/Info.plist' | plutil -p - | grep -q '"UISupportedInterfaceOrientations~ipad"' || {
-    echo "--ipad: the exported .ipa lost its iPad orientations" >&2
-    exit 1
-  }
-fi
 if ! $upload; then
   payload="$signing/payload"
   mkdir "$payload"
@@ -313,10 +299,10 @@ if ! $upload; then
   check_no_traces "$payload/Payload"
   # And as the distribution signature left it.
   python3 "$root/scripts/ios-build-vars.py" check "$payload/Payload/Runner.app" "$CLAKTORY_TEAM_ID"
+  python3 "$root/scripts/ios-privacy-scan.py" "$payload/Payload/Runner.app" >/dev/null
 fi
 if $upload; then
   echo "Uploaded Claktory $version ($build) for $devices. It shows in TestFlight once App Store Connect has processed it, usually within half an hour."
-  if $ipad; then echo "An iPad build: internal testers only. Keep it out of every external group."; fi
 else
   echo "Built $out (Claktory $version, build $build, for $devices); not uploaded."
 fi

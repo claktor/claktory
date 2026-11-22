@@ -1,6 +1,7 @@
-// A blocked checklist item says what it waits on (#255): on you, for how
-// long and whether its agent asked; else the blocker's few words. One
-// blocked on you that nobody asked about stands out in signal.
+// A blocked checklist item says what it waits on (#255): on you, as the
+// agent's state (waiting for it to ask you) until a card asks, then See
+// question; else the blocker's few words. Nothing stands out: only a card
+// is something to do (Matt's ruling).
 import 'package:factory_app/extensions.dart' show blockedFor;
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -53,8 +54,8 @@ void main() {
     expect(blockedFor(const Duration(days: 2, hours: 1)), '2 days');
   });
 
-  testWidgets('blocked on you, never asked: how long, in signal, over its '
-      'note', (tester) async {
+  testWidgets("blocked on you, never asked: the agent's state, muted, over "
+      'its note', (tester) async {
     await _show(
       tester,
       _blocked(
@@ -63,10 +64,11 @@ void main() {
         note: 'Needs the domain picked',
       ),
     );
-    final line = find.text('Blocked on you for 2 days · not asked yet');
+    final line = find.text('Waiting for Builder to ask you');
     expect(line, findsOneWidget);
-    final signal = Palette.of(tester.element(line)).signal;
-    expect(tester.widget<Text>(line).style?.color, signal);
+    final muted = Palette.of(tester.element(line)).textMuted;
+    expect(tester.widget<Text>(line).style?.color, muted);
+    expect(find.text('See question'), findsNothing);
     expect(
       tester.getTopLeft(line).dy,
       lessThan(tester.getTopLeft(find.text('Needs the domain picked')).dy),
@@ -88,10 +90,40 @@ void main() {
       snapshot: snapshot,
     );
     expect(find.text('Blocked on you'), findsOneWidget);
-    expect(find.textContaining('not asked yet'), findsNothing);
+    expect(find.textContaining('to ask you'), findsNothing);
     await tester.tap(find.text('See question'));
     await settle(tester);
     expect(harness.last.selectAgent.agentId, 'a2');
+  });
+
+  testWidgets('See question goes to the card asking about it, wherever it '
+      'is', (tester) async {
+    final snapshot = workspace(openPanel: 'checklist');
+    // Another card waits first in Tester's conversation; the one about
+    // this item is in Builder's.
+    snapshot.agents.firstWhere((a) => a.id == 'a2').waitingSeqs.add(Int64(41));
+    snapshot.agents.firstWhere((a) => a.id == 'a1')
+      ..waitingSeqs.add(Int64(12))
+      ..waitingItems.add(
+        WaitingItem(
+          item: 4,
+          text: 'Publish the site',
+          kind: BlockedKind.BLOCKED_KIND_PERSON_DECISION,
+          hasPendingAsk: true,
+          owner: 'a2',
+          cardAgentId: 'a1',
+          cardSeq: Int64(12),
+        ),
+      );
+    final harness = await _show(
+      tester,
+      _blocked(on: 'person', asked: true, owner: 'a2'),
+      snapshot: snapshot,
+    );
+    await tester.tap(find.text('See question'));
+    await settle(tester);
+    expect(harness.last.selectAgent.agentId, 'a1');
+    expect(harness.backend.reveal.value?.seq, 12);
   });
 
   testWidgets('blocked on something else: its words', (tester) async {

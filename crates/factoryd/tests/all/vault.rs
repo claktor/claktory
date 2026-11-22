@@ -1020,3 +1020,158 @@ async fn approval_needs_an_admin_and_approved_requests_neither_expire_nor_change
     let last = waiting(&view).pop().expect("the request");
     assert_eq!(last.admin_agent_id, "", "no admin agent to pass it to");
 }
+
+/// Builder asks for a mail key, the person approves the need, and Rivet
+/// opens the add-secret card for it: the request, with Rivet's
+/// conversation selected.
+async fn collecting(client: &mut Client, view: &mut View, dir: &Path) -> v1::SecretRequest {
+    apply_request(client, view, create_project("Site", &dir.join("site"))).await;
+    apply_request(client, view, create_agent("site", "Builder", "")).await;
+    let rivet = v1::UpdateAgent {
+        agent_id: "rivet".into(),
+        model: Some(crate::common::MODEL.into()),
+        effort: Some("off".into()),
+        ..Default::default()
+    };
+    apply_request(client, view, Request::UpdateAgent(rivet)).await;
+    let mail = r#"{"name":"Mail key","description":"A Resend key.","variables":[{"name":"RESEND_API_KEY"}],"reason":"Sign-up mail."}"#;
+    call(client, view, "builder", "secrets_request", mail).await;
+    let asked = waiting(view).pop().expect("the request");
+    let approve = v1::DecideSecretRequest { approve_only: true, ..decide("builder", &asked.id, true, Vec::new(), "") };
+    apply_request(client, view, Request::DecideSecretRequest(approve)).await;
+    let opened = call(client, view, "rivet", "secrets_collect", &format!(r#"{{"request":"{}"}}"#, asked.id)).await;
+    assert!(opened.starts_with("Asked the person to add Mail key"), "{opened}");
+    assert!(shown_request(view, &asked.id).collecting);
+    assert_eq!(waiting_seqs(view, "rivet").len(), 1, "the collect card is in Needs you");
+    asked
+}
+
+/// #327: the asker withdraws its request while Rivet's add-secret card is
+/// open. The card shows it withdrawn and leaves Needs you at once; a save
+/// sent from a card that missed it is refused and shows it again as it
+/// ended; secrets_collect cancel on it still works; and after a restart
+/// (the state a card stuck before this fix left on disk) it stays closed.
+#[tokio::test]
+async fn a_request_withdrawn_while_collected_closes_the_admins_card() {
+    let dir = temp_dir();
+    let id;
+    {
+        let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+        let (mut client, workspace, _) = Client::connect(addr).await;
+        let mut view = View { workspace, ..View::default() };
+        let asked = collecting(&mut client, &mut view, &dir).await;
+        id = asked.id.clone();
+        let out = call(&mut client, &mut view, "builder", "secrets_request_cancel", &format!(r#"{{"id":"{id}"}}"#)).await;
+        assert!(out.starts_with("Withdrew"), "{out}");
+        view.follow(&mut client, |view| waiting_seqs(view, "rivet").is_empty()).await;
+        apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+        let card = shown_request(&view, &id);
+        assert!(card.state() == v1::SecretRequestState::Withdrawn && !card.collecting, "Rivet's card follows: {card:?}");
+
+        // The form saved anyway: refused, saying why.
+        let save = v1::DecideSecretRequest {
+            name: "Resend".into(),
+            ..decide("builder", &id, true, vec![entry("RESEND_API_KEY", "re_abcdefghijklmnop")], "")
+        };
+        let late = client.request(Request::DecideSecretRequest(save)).await;
+        assert_eq!(failure(&late.body).1, "The agent withdrew this request.");
+        assert!(vault(&view.workspace).secrets.is_empty(), "nothing made");
+
+        // Rivet closing the card after the request closed isn't an error.
+        let closed = call(&mut client, &mut view, "rivet", "secrets_collect", &format!(r#"{{"request":"{id}","cancel":true}}"#)).await;
+        assert_eq!(closed, format!("{id} is closed already (its agent withdrew it), and so is its card."));
+        assert!(waiting_seqs(&view, "rivet").is_empty());
+        apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    }
+
+    // Read back after a restart, without opening Rivet, then opened.
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    assert!(waiting_seqs(&view, "rivet").is_empty(), "nothing waits with Rivet after a restart");
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    let card = shown_request(&view, &id);
+    assert!(card.state() == v1::SecretRequestState::Withdrawn && !card.collecting, "{card:?}");
+    assert!(waiting_seqs(&view, "rivet").is_empty());
+}
+
+/// A card closed and opened again for the same request: only the new one
+/// waits, live and after a restart.
+#[tokio::test]
+async fn a_collect_card_opened_again_replaces_the_first() {
+    let dir = temp_dir();
+    let id;
+    {
+        let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+        let (mut client, workspace, _) = Client::connect(addr).await;
+        let mut view = View { workspace, ..View::default() };
+        id = collecting(&mut client, &mut view, &dir).await.id;
+        let closed = call(&mut client, &mut view, "rivet", "secrets_collect", &format!(r#"{{"request":"{id}","cancel":true}}"#)).await;
+        assert!(closed.starts_with("Closed the card"), "{closed}");
+        assert!(waiting_seqs(&view, "rivet").is_empty());
+        call(&mut client, &mut view, "rivet", "secrets_collect", &format!(r#"{{"request":"{id}"}}"#)).await;
+        assert_eq!(waiting_seqs(&view, "rivet").len(), 1, "the new card");
+    }
+    let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    view.follow(&mut client, |view| !waiting_seqs(view, "rivet").is_empty()).await;
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    let cards: Vec<(u64, bool)> = view
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            Some(Kind::SecretRequest(request)) if request.id == id => Some((entry.seq, request.collecting)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cards.len(), 2, "{cards:?}");
+    assert!(!cards[0].1 && cards[1].1, "only the newer card is open: {cards:?}");
+    assert_eq!(waiting_seqs(&view, "rivet"), [cards[1].0]);
+}
+
+/// The asker deleted while Rivet's card is open: its requests go with it,
+/// and the card closes, now and when Rivet's conversation is read back
+/// after a restart (as one stuck before this fix does).
+#[tokio::test]
+async fn deleting_the_asker_closes_the_admins_card() {
+    let dir = temp_dir();
+    let id;
+    {
+        let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+        let (mut client, workspace, _) = Client::connect(addr).await;
+        let mut view = View { workspace, ..View::default() };
+        id = collecting(&mut client, &mut view, &dir).await.id;
+        apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+        apply_request(&mut client, &mut view, Request::DeleteAgent(v1::DeleteAgent { agent_id: "builder".into() })).await;
+        view.follow(&mut client, |view| waiting_seqs(view, "rivet").is_empty()).await;
+        let card = shown_request(&view, &id);
+        assert!(card.state() == v1::SecretRequestState::Withdrawn && !card.collecting, "{card:?}");
+        assert_eq!(card.comment, "The agent was deleted.");
+    }
+    let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    assert!(waiting_seqs(&view, "rivet").is_empty());
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    let card = shown_request(&view, &id);
+    assert!(card.state() == v1::SecretRequestState::Withdrawn && !card.collecting, "read back closed: {card:?}");
+    assert!(waiting_seqs(&view, "rivet").is_empty());
+}
+
+/// /clear of the admin agent: its card went with the conversation, so the
+/// requests it held are the person's again, in the asker's conversation.
+#[tokio::test]
+async fn clearing_the_admin_hands_its_requests_back() {
+    let dir = temp_dir();
+    let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let id = collecting(&mut client, &mut view, &dir).await.id;
+    let clear = v1::RunCommand { agent_id: "rivet".into(), name: "clear".into(), args: String::new() };
+    apply_request(&mut client, &mut view, Request::RunCommand(clear)).await;
+    view.follow(&mut client, |view| waiting_seqs(view, "rivet").is_empty() && waiting_seqs(view, "builder").len() == 1).await;
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    let card = shown_request(&view, &id);
+    assert!(card.state() == v1::SecretRequestState::Approved && card.admin_agent_id.is_empty() && !card.collecting, "{card:?}");
+}

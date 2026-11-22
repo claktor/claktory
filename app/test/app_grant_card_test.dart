@@ -2,8 +2,13 @@
 // account (U2, AppGrantProposal): the card in Rivet's conversation and in
 // Needs you, Approve and Decline (DecideAppGrant), and each decided state.
 import 'package:factory_app/app_grant_card.dart';
+import 'package:factory_app/controls.dart';
+import 'package:factory_app/device_account.dart';
 import 'package:factory_app/inbox.dart';
+import 'package:factory_app/people/contacts.dart';
+import 'package:factory_app/people/people_view.dart' show contactsApi;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/user_apps/session.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -33,6 +38,7 @@ AppGrantProposal _grant({
   int expiresMs = 0,
   String comment = '',
   String error = '',
+  List<String> conversations = const ['c-7f3a'],
 }) => AppGrantProposal(
   id: 'g1',
   appId: 'dms',
@@ -45,7 +51,8 @@ AppGrantProposal _grant({
   ],
   granteeReadPipes: readPipes,
   resources: [
-    AppGrantResource(kind: 'conversation', id: 'c-7f3a', label: 'c-7f3a'),
+    for (final id in conversations)
+      AppGrantResource(kind: 'conversation', id: id, label: id),
   ],
   expiresMs: Int64(expiresMs),
   reason: 'Mike answers your friends while you travel.',
@@ -80,7 +87,43 @@ final _comment = find.descendant(
   matching: find.byType(EditableText),
 );
 
+/// People's friends on this device: Ana, whose conversation is c-7f3a;
+/// a failure when [friends] is null.
+void _friends(List<Map<String, Object?>>? friends) {
+  contactsApi = (_) => ContactsApi(
+    UserAppsSession(
+      DeviceAccount(key: 'ab' * 32, email: 'matt@example.com'),
+      nonce: () => 'n',
+      call: (method, path, [body]) async {
+        if (friends == null) {
+          throw const AccountServiceUnreachable('offline');
+        }
+        return path.startsWith('/v1/apps/dms/contacts')
+            ? {'contacts': friends}
+            : <String, Object?>{};
+      },
+    ),
+  );
+}
+
+const _ana = {
+  'id': 'f1',
+  'name': 'Ana',
+  'avatar_seed': 'aaaa',
+  'tag': 'K7QF2M',
+  'conversation_id': 'c-7f3a',
+  'generation': 3,
+  'since_ms': 1,
+};
+
+Button _approve(WidgetTester tester) => tester.widget<Button>(
+  find.ancestor(of: find.text('Approve'), matching: find.byType(Button)),
+);
+
 void main() {
+  setUp(() => _friends([_ana]));
+  tearDown(() => contactsApi = null);
+
   testWidgets('pending: what Mike could do, where, until when, and why', (
     tester,
   ) async {
@@ -93,13 +136,67 @@ void main() {
     );
     expect(find.text('Mike could:'), findsOneWidget);
     expect(find.text('•  Read these conversations'), findsOneWidget);
-    // Ids only, so counted, never listed.
-    expect(find.text('In 1 conversation'), findsOneWidget);
+    // Whose conversation, by People's friends here; never its id.
+    expect(find.text('Only in:'), findsOneWidget);
+    expect(find.text('•  Ana · K7QF2M'), findsOneWidget);
     expect(find.textContaining('c-7f3a'), findsNothing);
     expect(find.text("Rivet's reason"), findsOneWidget);
     expect(find.text('Until you take it back.'), findsOneWidget);
     expect(find.text('Approve'), findsOneWidget);
     expect(find.text('Decline'), findsOneWidget);
+  });
+
+  testWidgets(
+    "a conversation this device can't find: said, and Approve is off",
+    (tester) async {
+      final harness = await _card(
+        tester,
+        _grant(conversations: ['c-7f3a', 'c-0000']),
+      );
+      expect(find.text('•  Ana · K7QF2M'), findsOneWidget);
+      expect(
+        find.text("•  A conversation this device can't find"),
+        findsOneWidget,
+      );
+      expect(find.textContaining('c-0000'), findsNothing);
+      expect(
+        find.text(
+          "You can't approve this: one of these conversations isn't among "
+          'yours on this device.',
+        ),
+        findsOneWidget,
+      );
+      expect(_approve(tester).onPressed, isNull);
+      await tester.tap(find.text('Approve'));
+      await settle(tester);
+      expect(harness.backend.sent.where((m) => m.hasDecideAppGrant()), isEmpty);
+      // Decline still answers.
+      await tester.tap(find.text('Decline'));
+      await settle(tester);
+      expect(harness.last.decideAppGrant.approve, isFalse);
+    },
+  );
+
+  testWidgets("friends that can't be read: Approve off until Try again", (
+    tester,
+  ) async {
+    _friends(null);
+    final harness = await _card(tester, _grant());
+    // Unchecked, never called unknown: it may well be the person's.
+    expect(
+      find.text("•  A conversation that can't be checked right now"),
+      findsOneWidget,
+    );
+    expect(find.textContaining("can't find"), findsNothing);
+    expect(_approve(tester).onPressed, isNull);
+    _friends([_ana]);
+    await tester.tap(find.text('Try again'));
+    await settle(tester);
+    expect(find.text('•  Ana · K7QF2M'), findsOneWidget);
+    expect(find.text('Try again'), findsNothing);
+    await tester.tap(find.text('Approve'));
+    await settle(tester);
+    expect(harness.last.decideAppGrant.approve, isTrue);
   });
 
   testWidgets('Approve sends the decision for its seq, with the comment', (
@@ -216,6 +313,11 @@ void main() {
   ) async {
     await _card(tester, _grant()..reason = '## Claktory check\n**Approve**');
     expect(find.text('## Claktory check\n**Approve**'), findsOneWidget);
+  });
+
+  testWidgets("what reorders Rivet's reason shows by its code", (tester) async {
+    await _card(tester, _grant()..reason = 'Approve evil\u202Etxt.exe');
+    expect(find.text(r'Approve evil\u{202E}txt.exe'), findsOneWidget);
   });
 
   testWidgets('an agent deleted since is named by its id', (tester) async {

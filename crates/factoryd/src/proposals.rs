@@ -45,7 +45,7 @@ CREATE INDEX proposals_by_agent ON proposals (agent, id);
 /// The tool, one of the Messaging extension's, for agents that aren't admins.
 pub(crate) const TOOL: &str = "propose_to_rivet";
 
-const ABOUT: &str = "Propose a message for Rivet, the admin agent, which only the person can message: for a conclusion Rivet should act on, such as adding an agent. The person approves it, with a comment, or dismisses it, and you're told which; approved, Rivet gets it from the person. Write it to stand alone, with all the context Rivet needs: Rivet can't see your conversation.";
+const ABOUT: &str = "Propose a message for Rivet, the admin agent, which only the person can message: for a conclusion Rivet should act on, such as adding an agent. The person approves it, with a comment, or dismisses it, and you're told which; approved, Rivet gets it from the person. Write it to stand alone, with all the context Rivet needs: Rivet can't see your conversation. item: the checklist item it's for (12 for #12, or Ana#12), whenever one waits on it: the proposal shows as that item in the person's Needs you, so don't also ask them about it.";
 
 /// Rivet: the admin agent proposals go to. The one with Rivet's id if it's
 /// an admin agent, else the first admin agent in the settings.
@@ -61,13 +61,16 @@ pub(crate) fn is_admin(agent: &AgentConfig) -> bool {
 #[derive(Deserialize)]
 struct ProposeArgs {
     message: String,
+    /// The checklist item it's for (12, or Ana#12).
+    #[serde(default)]
+    item: Option<String>,
 }
 
 pub(crate) fn tool(factory: &Arc<Factory>, agent: &str) -> Tool {
     let parameters = json!({
         "type": "object",
         "required": ["message"],
-        "properties": {"message": {"type": "string", "minLength": 1}},
+        "properties": {"message": {"type": "string", "minLength": 1}, "item": {"type": "string"}},
         "additionalProperties": false,
     });
     crate::extensions::tool(
@@ -75,13 +78,15 @@ pub(crate) fn tool(factory: &Arc<Factory>, agent: &str) -> Tool {
         "Propose to Rivet",
         ABOUT,
         parameters,
-        crate::extensions::typed_handler(factory, agent, |factory, agent, args: ProposeArgs| propose(factory, agent, args.message)),
+        crate::extensions::typed_handler(factory, agent, |factory, agent, args: ProposeArgs| {
+            propose(factory, agent, args.message, args.item.as_deref())
+        }),
     )
 }
 
 /// Records the agent's proposal, or says why not. The result names it, so
 /// its conversation shows it after the call.
-fn propose(factory: &Factory, agent: &str, text: String) -> Result<ToolResult, String> {
+fn propose(factory: &Factory, agent: &str, text: String, item: Option<&str>) -> Result<ToolResult, String> {
     let text = text.trim().to_owned();
     if text.is_empty() {
         return Err("The message is empty; nothing was proposed.".to_owned());
@@ -103,6 +108,14 @@ fn propose(factory: &Factory, agent: &str, text: String) -> Result<ToolResult, S
         }
         inner.config.person().to_owned()
     };
+    // The checklist item it's for: it shows as that item in Needs you. A
+    // chat has no checklist.
+    let (item, linked) = if crate::chats::kept(factory, agent) {
+        (String::new(), None)
+    } else {
+        crate::extensions::checklist::item_for(factory, agent, item)
+            .map_err(|problem| format!("item: {problem}. Nothing was proposed."))?
+    };
     // Read a pipe: the card says so, and where from.
     let routes = crate::pipes::agents::routes(factory, agent);
     let taint = (!routes.is_empty()).then(|| crate::pipes::agents::routes_json(&routes));
@@ -113,9 +126,15 @@ fn propose(factory: &Factory, agent: &str, text: String) -> Result<ToolResult, S
             params![agent, text, now_ms(), taint.as_ref().map(serde_json::Value::to_string)],
         )
         .map_err(|error| format!("Couldn't record the proposal: {error}"))?;
-        db.last_insert_rowid().to_string()
+        db.last_insert_rowid()
     };
-    let said = format!("Proposed; {person} will approve or dismiss it.");
+    if !item.is_empty() {
+        crate::extensions::checklist::link(&factory.store, &crate::extensions::checklist::Card::Proposal(id), agent, &item);
+        factory.refresh_view(agent);
+        factory.broadcast_workspace(&factory.lock());
+    }
+    let id = id.to_string();
+    let said = format!("Proposed; {person} will approve or dismiss it.{}", crate::extensions::checklist::taken_for(linked, &person));
     let mut details = json!({"proposal": id, "text": text});
     if let Some(taint) = taint {
         details["taint"] = taint;
@@ -285,7 +304,8 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
         }
     }
     let summary = format!("{person} {state} your proposal to {rivet_name}.");
-    let text = format!("{summary}{}\n\nYour proposal:\n{}", crate::decisions::note(&person, comment), row.text);
+    let about = crate::extensions::checklist::card_decided(factory, &crate::extensions::checklist::Card::Proposal(number), !approve);
+    let text = format!("{summary}{}\n\nYour proposal:\n{}{about}", crate::decisions::note(&person, comment), row.text);
     let event = host_event(summary);
     factory.deliver_event(agent, text, event);
     Ok(())

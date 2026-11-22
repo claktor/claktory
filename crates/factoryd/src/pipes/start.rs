@@ -292,7 +292,7 @@ pub(crate) fn dismiss(factory: &Arc<Factory>, request: &v1::DismissPipeStart) ->
         _ => return Err(RequestError::Pipe("This card no longer exists.".to_owned())),
     }
     let Some(row) = end(factory, start, State::Dismissed, "") else { return Ok(()) };
-    let person = factory.lock().config.person_capitalized().to_owned();
+    let person = factory.person_capitalized();
     tell_closed(factory, &row, &format!("{person} closed the card"), &crate::decisions::note(&person, comment));
     Ok(())
 }

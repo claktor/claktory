@@ -10,9 +10,22 @@ use crate::protocol::*;
 
 /// Assertions a device may get an hour.
 const ASSERTIONS_PER_HOUR: u32 = 60;
+/// Other devices a device may remove an hour.
+const REMOVALS_PER_HOUR: u32 = 10;
 
 fn unauthorized() -> ApiError {
     ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "This device isn't signed in. Sign in again.")
+}
+
+/// A key removed from the account (by another of its devices, or at
+/// claktory.com/account): it never signs in to that account again. The app
+/// starts over with a new key, which joins as a new device.
+fn removed() -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        "device_removed",
+        "This device was removed from your account. Sign in again to start over as a new device.",
+    )
 }
 
 /// The account key a device-signed request is from, its time and
@@ -52,6 +65,9 @@ pub(super) async fn sign_in_start(service: &Service, call: &Call) -> Result<Repl
         return Err(ApiError::invalid("A field is missing or out of range."));
     }
     sign_in_limits(service, &email, &call.ip)?;
+    if db::device_removed(&service.db(), &email, &body.account_key)? {
+        return Err(removed());
+    }
     let request = db::Request {
         id: String::new(),
         kind: "device".to_owned(),
@@ -80,7 +96,7 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
     if asked_by.is_some_and(|asked_by| asked_by != account_key) {
         return Err(unauthorized());
     }
-    let request = check_code(service, &body.request_id, &body.code, "device")?;
+    let request = check_code(service, &body.request_id, &body.code, "device", &call.ip)?;
     let account_id = match db::bind_device(&mut service.db(), &request, service.now())? {
         db::Bound::Done { account_id } => account_id,
         db::Bound::TooMany => {
@@ -90,6 +106,7 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
                 &format!("This account has as many devices as it can ({}). Remove one at claktory.com/account.", db::DEVICES_PER_ACCOUNT),
             ));
         }
+        db::Bound::Removed => return Err(removed()),
     };
     tracing::info!("device signed in to account {account_id}");
     Ok(Reply::json(&DeviceAccount { account_id, email: request.email, name: request.name.unwrap_or_default() }))
@@ -106,6 +123,30 @@ pub(super) fn sign_out(service: &Service, call: &Call) -> Result<Reply, ApiError
         tracing::info!("device signed out");
     }
     Ok(Reply::json(&serde_json::json!({})))
+}
+
+/// Signs another of the account's devices out (lost, stolen, given away),
+/// as removing it at claktory.com/account does: its key is unbound, so this
+/// service and the apps behind it answer it 401 from now on, and its
+/// assertions' keys leave the relay allowlist, and the key is remembered,
+/// so it never signs in to the account again (a thief with the device and
+/// the mail can't get its identity back). Only a device of the same
+/// account; never itself (that's sign-out).
+pub(super) fn remove(service: &Service, call: &Call) -> Result<Reply, ApiError> {
+    let device = authenticate(service, call)?;
+    let body: DeviceRemove = call.json()?;
+    if verifying_key(&body.account_key).is_none() {
+        return Err(ApiError::invalid("account_key isn't a device's key."));
+    }
+    if body.account_key == device.account_key {
+        return Err(ApiError::invalid("A device signs itself out with sign-out."));
+    }
+    service.limit(&[(&format!("remove-device:{}", device.account_key), 3600, REMOVALS_PER_HOUR)])?;
+    let removed = db::remove_device(&mut service.db(), &body.account_key, &device.account_id, service.now())?;
+    if removed {
+        tracing::info!("removed: a device of account {}, by another of its devices", device.account_id);
+    }
+    Ok(Reply::json(&DeviceRemoved { removed }))
 }
 
 pub(super) fn claktories(service: &Service, call: &Call) -> Result<Reply, ApiError> {

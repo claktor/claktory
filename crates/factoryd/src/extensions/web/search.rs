@@ -1188,12 +1188,15 @@ mod tests {
     /// tests/fixtures/web/queries.txt run out. Writes each search to
     /// `WEB_RELIABILITY_OUT` (/tmp/web-reliability.csv) and prints the
     /// success rate, which engine answered and how long it took. Starts
-    /// with no health kept, as a new Claktory does.
+    /// with no health kept, as a new Claktory does. `WEB_RELIABILITY_PER_HOUR`
+    /// paces it to about that many searches an hour; unset, it asks as fast as
+    /// a busy agent would (a few every 15 to 40 seconds).
     #[tokio::test]
     #[ignore]
     async fn web_live_reliability() {
         use std::io::Write;
         let minutes: u64 = std::env::var("WEB_RELIABILITY_MINUTES").ok().and_then(|text| text.parse().ok()).unwrap_or(80);
+        let per_hour: Option<u64> = std::env::var("WEB_RELIABILITY_PER_HOUR").ok().and_then(|text| text.parse().ok()).filter(|per_hour| *per_hour > 0);
         let out = std::env::var("WEB_RELIABILITY_OUT").unwrap_or_else(|_| "/tmp/web-reliability.csv".to_owned());
         let health = std::env::temp_dir().join(format!("web-reliability-health-{}.json", now_ms()));
         let searcher = Searcher::new(Some(health.clone()));
@@ -1232,7 +1235,8 @@ mod tests {
         let mut rows: Vec<(String, bool, u128, String, String)> = Vec::new();
         let mut next = queries.into_iter();
         'run: while started.elapsed() < Duration::from_secs(minutes * 60) {
-            for _ in 0..=random(4) {
+            let burst = 1 + random(4);
+            for _ in 0..burst {
                 let Some((query, options)) = next.next() else { break 'run };
                 let began = std::time::Instant::now();
                 let (answers, notices) = searcher.search("measure", std::slice::from_ref(&query), &options).await;
@@ -1255,7 +1259,16 @@ mod tests {
                 );
                 rows.push((query, ok, latency, answer.engine.clone(), why));
             }
-            tokio::time::sleep(Duration::from_secs(15 + random(26))).await;
+            let pause = match per_hour {
+                // Half to one and a half times the even spacing, so the pace
+                // averages out but never ticks like a clock.
+                Some(per_hour) => {
+                    let even = burst * 3600 / per_hour;
+                    even / 2 + random(even + 1)
+                }
+                None => 15 + random(26),
+            };
+            tokio::time::sleep(Duration::from_secs(pause)).await;
         }
         let total = rows.len();
         let ok = rows.iter().filter(|row| row.1).count();

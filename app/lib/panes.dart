@@ -24,8 +24,11 @@ import 'mobile/device.dart' show WindowControls, windowControls;
 import 'mobile/metrics.dart';
 import 'settings_view.dart';
 import 'viewers/registry.dart';
+import 'zoom.dart' show ZoomScope;
 import 'inbox.dart' show InboxView;
 import 'ipad/document_host.dart' show ipadDocumentPane;
+import 'ipad/workbench.dart' show keyboardOverWindow;
+import 'review_answer.dart' show ReviewFrame;
 import 'usage_view.dart';
 
 /// A pane is at least this wide and this tall (docs/IDENTITY.md, "Panes
@@ -229,14 +232,21 @@ ViewNode _besideChat(ViewNode root, ViewNode pane, {double share = 0.5}) {
       );
     }
     final shares = sharesOf(split);
+    // Its room comes from the widest in the row, not the conversation
+    // alone: a page opened beside a wide file takes from the file
+    // (Abbacchio).
+    var widest = at;
+    for (var i = 0; i < shares.length; i++) {
+      if (shares[i] > shares[widest]) widest = i;
+    }
+    final given = shares[widest] * share;
+    final weights = [...shares]..[widest] = shares[widest] - given;
     return ViewNode(
       id: node.id,
       split: ViewSplit(
         axis: split.axis,
         children: [...split.children]..insert(at + 1, pane),
-        weights: [...shares]
-          ..[at] = shares[at] * (1 - share)
-          ..insert(at + 1, shares[at] * share),
+        weights: weights..insert(at + 1, given),
       ),
     );
   }
@@ -452,7 +462,6 @@ class _PaneLayoutState extends State<PaneLayout> {
     if (!node.hasSplit()) return _pane(full, view, node, chat);
     final split = node.split;
     final row = split.axis != ViewAxis.VIEW_AXIS_COLUMN;
-    final shares = sharesOf(split);
     final count = split.children.length;
     final palette = Palette.of(context);
     return LayoutBuilder(
@@ -460,6 +469,12 @@ class _PaneLayoutState extends State<PaneLayout> {
         final total = row ? constraints.maxWidth : constraints.maxHeight;
         // One hairline between each two.
         final room = math.max(0.0, total - (count - 1));
+        // Each at least as big as it can be used (the conversation squeezed
+        // to a word a line beside two pages and a file, Abbacchio): the room
+        // comes from those that have more.
+        final shares = fitShares(sharesOf(split), [
+          for (final child in split.children) minExtent(child, row),
+        ], room);
         final children = <Widget>[];
         final handles = <Widget>[];
         var at = 0.0;
@@ -601,7 +616,12 @@ class _PaneLayoutState extends State<PaneLayout> {
               _ => Builder(
                 builder: (context) =>
                     ipadDocumentPane(context, node) ??
-                    viewerBody(context, leaf),
+                    // While an ask to review it waits, its answer's bar.
+                    ReviewFrame(
+                      agentId: agent.id,
+                      path: leaf.path,
+                      child: viewerBody(context, leaf),
+                    ),
               ),
             },
           );
@@ -670,6 +690,14 @@ class _ExpandedPaneState extends State<ExpandedPane> {
   KeyEventResult _key(FocusNode node, KeyEvent event) {
     if (event is KeyDownEvent &&
         event.logicalKey == LogicalKeyboardKey.escape) {
+      // Typing in a field (an answer, a comment): Escape leaves the field,
+      // its words kept; only the next goes back (Bruno, after Matt's
+      // Space in a video's comment).
+      if (typingInField()) {
+        FocusManager.instance.primaryFocus?.unfocus();
+        _node.requestFocus();
+        return KeyEventResult.handled;
+      }
       widget.onBack();
       return KeyEventResult.handled;
     }
@@ -687,8 +715,11 @@ class _ExpandedPaneState extends State<ExpandedPane> {
     // Where the window's controls sit, at its top left: the Mac's traffic
     // lights; a windowed iPad's dots, which the band goes beside, level
     // with them, as Apple's apps put their toolbars.
+    // The lights don't zoom with the app: their room is fixed in the
+    // window's points (Abbacchio: at 80% the chip slid under them).
+    final zoom = ZoomScope.of(context)?.level ?? 1;
     final lights = defaultTargetPlatform == TargetPlatform.macOS
-        ? 80.0
+        ? 80.0 / zoom
         : Space.m + controls.leading;
     final band = WindowDrag(
       child: Container(
@@ -750,19 +781,25 @@ class _ExpandedPaneState extends State<ExpandedPane> {
           color: palette.canvas,
           child: Padding(
             // Below an iPad's status bar, not its window controls: the
-            // band sits beside them.
+            // band sits beside them. Above the on-screen keyboard, so a
+            // field being written in (a review's answer) stays in sight.
             padding: EdgeInsets.only(
               top: math.max(
                 0,
                 MediaQuery.paddingOf(context).top - controls.top,
               ),
+              bottom: keyboardOverWindow(context),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Unselectable(child: band),
-                Expanded(child: widget.child),
-              ],
+            child: MediaQuery.removeViewInsets(
+              context: context,
+              removeBottom: true,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Unselectable(child: band),
+                  Expanded(child: widget.child),
+                ],
+              ),
             ),
           ),
         ),
@@ -927,6 +964,37 @@ class PageSidewaysState extends State<PageSideways> {
       ),
     );
   }
+}
+
+/// [shares] of [room], each raised to its least ([least]) where it can
+/// be, the difference taken from those above theirs, in proportion to what
+/// they have to spare. When even the least of each won't fit, as they are.
+List<double> fitShares(List<double> shares, List<double> least, double room) {
+  if (room <= 0 || shares.length != least.length) return shares;
+  final need = least.fold<double>(0, (sum, each) => sum + each);
+  if (need > room) return shares;
+  final sizes = [for (final share in shares) share * room];
+  // Raising one can push another under its least: settle in a few rounds.
+  for (var round = 0; round < shares.length; round++) {
+    var short = 0.0;
+    var spare = 0.0;
+    for (var i = 0; i < sizes.length; i++) {
+      if (sizes[i] < least[i]) {
+        short += least[i] - sizes[i];
+        sizes[i] = least[i];
+      } else {
+        spare += sizes[i] - least[i];
+      }
+    }
+    if (short < 0.5 || spare <= 0) break;
+    final keep = math.max(0.0, 1 - short / spare);
+    for (var i = 0; i < sizes.length; i++) {
+      if (sizes[i] > least[i]) {
+        sizes[i] = least[i] + (sizes[i] - least[i]) * keep;
+      }
+    }
+  }
+  return [for (final size in sizes) size / room];
 }
 
 /// The smallest [node] can be along a row ([row]) or a column.
@@ -1313,6 +1381,8 @@ class PaneHeader extends StatelessWidget {
     final touch = touchFirst(context);
     final height = paneHeaderHeightOf(context);
     final titleStyle = TextStyles.label.copyWith(color: palette.text);
+    // Expand's or ×'s width with its gap: a finger's target on touch.
+    final button = (touch ? Metrics.of(context).target : 28) + 2;
     Widget named({required bool withDetails}) => Row(
       children: [
         SizedBox(width: 14, child: Center(child: glyph(palette.textMuted))),
@@ -1384,8 +1454,8 @@ class PaneHeader extends StatelessWidget {
                     maxWidth: math.max(
                       0,
                       constraints.maxWidth -
-                          (onExpand == null ? 0 : 30) -
-                          (onClose == null ? 0 : 30) -
+                          (onExpand == null ? 0 : button) -
+                          (onClose == null ? 0 : button) -
                           14 -
                           2 * Space.s,
                     ),

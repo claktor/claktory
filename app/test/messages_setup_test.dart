@@ -1,8 +1,11 @@
+import 'package:factory_app/controls.dart' show Pressable;
+import 'package:factory_app/device_account.dart';
 import 'package:factory_app/people/dm_keys.dart';
 import 'package:factory_app/people/e2ee.dart';
 import 'package:factory_app/people/messages_setup.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scanner.dart';
+import 'package:factory_app/tunnel/api/dm_transfer.dart';
 import 'package:factory_app/people/secret_clipboard.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -158,10 +161,7 @@ void main() {
     await phone.e2ee.setUpFirst();
     final ipad = FakeEndpoint(worker, 'matt', 'ipad');
     await ipad.e2ee.start();
-    final code = await ipad.e2ee.offerThisDevice(
-      platform: 'iPad',
-      endpointId: [0],
-    );
+    final code = await ipad.e2ee.offerThisDevice(platform: 'iPad');
     await phone.e2ee.addDevice(await phone.e2ee.scanned(code!));
     await ipad.e2ee.takeHandoff();
     await phone.e2ee.sync();
@@ -169,11 +169,253 @@ void main() {
     await _show(tester, phone.e2ee);
     await tester.tap(find.text('Remove…'));
     await _settle(tester);
-    expect(find.text('Remove ipad from your messages?'), findsOneWidget);
+    expect(find.text('Remove ipad?'), findsOneWidget);
+    expect(find.textContaining('signed out of your Claktory'), findsOneWidget);
+    expect(find.textContaining('Settings → Devices'), findsOneWidget);
     await tester.tap(find.text('Remove'));
     await _settle(tester);
     expect(worker.keys['matt']!['version'], 3);
+    // And signed out of the account: the worker answers it no more.
+    expect(worker.signedOut['matt'], {'ipad'});
+    expect(find.text('Remove ipad?'), findsNothing);
     expect(find.text('Remove…'), findsNothing);
+  });
+
+  testWidgets("a sign-out that doesn't go through is said, and tried again", (
+    tester,
+  ) async {
+    final worker = FakeWorker();
+    final phone = await _first(worker);
+    final ipad = FakeEndpoint(worker, 'matt', 'ipad');
+    await ipad.e2ee.start();
+    final code = await ipad.e2ee.offerThisDevice(platform: 'iPad');
+    await phone.e2ee.addDevice(await phone.e2ee.scanned(code!));
+    await ipad.e2ee.takeHandoff();
+    await phone.e2ee.sync();
+
+    worker.refuse = (route) => route == 'POST /v1/devices/remove'
+        ? const AccountServiceUnreachable('offline')
+        : null;
+    await _show(tester, phone.e2ee);
+    await tester.tap(find.text('Remove…'));
+    await _settle(tester);
+    await tester.tap(find.text('Remove'));
+    await _settle(tester);
+    expect(worker.keys['matt']!['version'], 3);
+    expect(
+      find.text(
+        'ipad no longer gets new messages, but it may still be signed in to '
+        'your Claktory account. Try again.',
+      ),
+      findsOneWidget,
+    );
+    expect(worker.signedOut['matt'], isNull);
+    // Kept as under way: Your devices says so too (R5b).
+    expect(find.text("ipad isn't fully removed yet."), findsOneWidget);
+
+    // A refusal is said as one.
+    worker.refuse = (route) => route == 'POST /v1/devices/remove'
+        ? const AccountServiceError(429, 'rate_limited', 'Too many.')
+        : null;
+    // The dialog's (over Your devices').
+    await tester.tap(find.text('Try again').last);
+    await _settle(tester);
+    expect(
+      find.text(
+        "ipad no longer gets new messages, but it couldn't be signed out of "
+        'your Claktory account. Try again.',
+      ),
+      findsOneWidget,
+    );
+
+    worker.refuse = null;
+    await tester.tap(find.text('Try again').last);
+    await _settle(tester);
+    expect(worker.signedOut['matt'], {'ipad'});
+    // The list was changed once.
+    expect(worker.keys['matt']!['version'], 3);
+    expect(find.text('Remove ipad?'), findsNothing);
+    expect(find.text("ipad isn't fully removed yet."), findsNothing);
+    expect(find.text('Try again'), findsNothing);
+  });
+
+  testWidgets('a removal closed part-way is finished from Your devices: '
+      'Try again on what was under way, Finish removing on a device left '
+      'in a group', (tester) async {
+    final worker = FakeWorker();
+    final mac = await _first(worker);
+    for (final leaf in ['ipad', 'laptop']) {
+      final other = FakeEndpoint(worker, 'matt', leaf);
+      await other.e2ee.start();
+      final code = await other.e2ee.offerThisDevice(platform: 'Mac');
+      await mac.e2ee.addDevice(await mac.e2ee.scanned(code!));
+      await other.e2ee.takeHandoff();
+      await other.e2ee.sync();
+    }
+    await mac.e2ee.sync();
+
+    worker.refuse = (route) => route == 'POST /v1/devices/remove'
+        ? const AccountServiceUnreachable('offline')
+        : null;
+    await _show(tester, mac.e2ee);
+    await tester.tap(find.text('Remove…').first);
+    await _settle(tester);
+    await tester.tap(find.text('Remove'));
+    await _settle(tester);
+    await tester.tap(find.text('Cancel'));
+    await _settle(tester);
+    expect(find.text("ipad isn't fully removed yet."), findsOneWidget);
+    worker.refuse = null;
+    await tester.tap(find.text('Try again'));
+    await _settle(tester);
+    expect(worker.signedOut['matt'], {'ipad'});
+    expect(find.text("ipad isn't fully removed yet."), findsNothing);
+
+    // The laptop, off the list by a build before the fix and nothing kept:
+    // still in the self group, so not fully removed.
+    final listed = mac.device.deviceList(account: 'matt')!.leaves;
+    await mac.device.signDeviceList(
+      version: BigInt.from(9),
+      createdMs: BigInt.one,
+      leaves: [
+        for (final each in listed)
+          if (each.leafId != 'laptop') each,
+      ],
+    );
+    mac.e2ee.dismissNewKey();
+    await _settle(tester);
+    expect(find.text('Finish removing'), findsOneWidget);
+    expect(find.textContaining('laptop'), findsOneWidget);
+    expect(find.textContaining('Not fully removed'), findsOneWidget);
+    await tester.tap(find.text('Finish removing'));
+    await _settle(tester);
+    expect(find.text('Finish removing'), findsNothing);
+    expect(worker.signedOut['matt'], {'ipad', 'laptop'});
+  });
+
+  group('lost or stolen: a new security key (R4)', () {
+    Future<(FakeWorker, FakeEndpoint, FakeEndpoint, FakeEndpoint)>
+    three() async {
+      final worker = FakeWorker();
+      final mac = await _first(worker);
+      Future<FakeEndpoint> add(String leaf) async {
+        final other = FakeEndpoint(worker, 'matt', leaf);
+        await other.e2ee.start();
+        final code = await other.e2ee.offerThisDevice(platform: leaf);
+        await mac.e2ee.addDevice(await mac.e2ee.scanned(code!));
+        await other.e2ee.takeHandoff();
+        return other;
+      }
+
+      final ipad = await add('ipad');
+      final phone = await add('phone');
+      for (final each in [mac, ipad, phone]) {
+        await each.e2ee.sync();
+      }
+      return (worker, mac, ipad, phone);
+    }
+
+    testWidgets('confirms the devices kept, signs the lost one out first, '
+        'and the others are told where the new key came from', (tester) async {
+      final (worker, mac, ipad, phone) = await three();
+      final old = mac.device.identity;
+      await _show(tester, mac.e2ee);
+      await tester.tap(find.text('Lost or stolen…').first);
+      await _settle(tester);
+      expect(find.text('Lock out ipad?'), findsOneWidget);
+      expect(
+        find.textContaining('ipad is removed and signed out'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining("change your email's password"),
+        findsOneWidget,
+      );
+      expect(find.text('Devices to keep'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(Pressable),
+          matching: find.text('phone'),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Lock out'));
+      await _settle(tester);
+      expect(find.text('Lock out ipad?'), findsNothing);
+      // Fugo: signed out before the new key went to the worker.
+      expect(
+        worker.log.indexOf('POST /v1/devices/remove'),
+        lessThan(worker.log.indexOf('POST me/keys/rotate')),
+      );
+      expect(worker.signedOut['matt'], {'ipad'});
+      expect(mac.device.identity, isNot(old));
+      expect(mac.device.lists['matt']!.leaves.map((each) => each.leafId), [
+        'mac',
+        'phone',
+      ]);
+
+      // The phone takes it, and says from where, once.
+      await phone.e2ee.sync();
+      await tester.pumpWidget(const SizedBox());
+      await _show(tester, phone.e2ee);
+      expect(find.text('Your security key changed'), findsOneWidget);
+      expect(
+        find.textContaining('made for your account on mac'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('OK'));
+      await _settle(tester);
+      expect(find.text('Your security key changed'), findsNothing);
+    });
+
+    testWidgets("one unticked goes too; a sign-out that doesn't go through "
+        'makes no key until tried again', (tester) async {
+      final (worker, mac, _, _) = await three();
+      final old = mac.device.identity;
+      await _show(tester, mac.e2ee);
+      await tester.tap(find.text('Lost or stolen…').first);
+      await _settle(tester);
+      await tester.tap(
+        find.descendant(
+          of: find.byType(Pressable),
+          matching: find.text('phone'),
+        ),
+      );
+      await _settle(tester);
+      worker.refuse = (route) => route == 'POST /v1/devices/remove'
+          ? const AccountServiceUnreachable('offline')
+          : null;
+      await tester.tap(find.text('Lock out'));
+      await _settle(tester);
+      expect(
+        find.text(
+          "ipad no longer gets new messages, but it couldn't be signed out "
+          "of your Claktory account, so your security key hasn't changed "
+          'yet. Try again.',
+        ),
+        findsOneWidget,
+      );
+      expect(worker.log, isNot(contains('POST me/keys/rotate')));
+      expect(mac.device.identity, old);
+
+      // Kept as under way: Your devices says so too (R5b).
+      expect(
+        find.text("ipad and phone aren't fully locked out yet."),
+        findsOneWidget,
+      );
+
+      worker.refuse = null;
+      // The dialog's (over Your devices').
+      await tester.tap(find.text('Try again').last);
+      await _settle(tester);
+      expect(find.text('Lock out ipad?'), findsNothing);
+      expect(find.textContaining('fully locked out'), findsNothing);
+      expect(worker.signedOut['matt'], {'ipad', 'phone'});
+      expect(mac.device.identity, isNot(old));
+      expect(mac.device.lists['matt']!.leaves.map((each) => each.leafId), [
+        'mac',
+      ]);
+    });
   });
 
   testWidgets("a key this device can't read offers to start over", (
@@ -311,6 +553,62 @@ void main() {
         ),
         findsOneWidget,
       );
+    });
+  });
+
+  group('the history coming over', () {
+    // The iPad, added from the phone, today.
+    Future<FakeEndpoint> added() async {
+      final worker = FakeWorker();
+      final phone = await _first(worker);
+      final ipad = FakeEndpoint(worker, 'matt', 'ipad');
+      ipad.now = DateTime.now().millisecondsSinceEpoch;
+      await ipad.e2ee.start();
+      final code = await ipad.e2ee.offerThisDevice(platform: 'iPad');
+      await phone.e2ee.addDevice(await phone.e2ee.scanned(code!));
+      await ipad.e2ee.takeHandoff();
+      return ipad;
+    }
+
+    DmTransferProgress at(int done, int total, [DmTransferEnd? end]) =>
+        DmTransferProgress(chatsDone: done, chatsTotal: total, end: end);
+
+    testWidgets('shows how far it is, and Skip leaves it', (tester) async {
+      final ipad = await added();
+      await _show(tester, ipad.e2ee);
+      expect(find.text('Bringing your messages over…'), findsOneWidget);
+      ipad.transfers.single.progress.add(at(3, 12));
+      await _settle(tester);
+      expect(find.text('3 of 12 chats'), findsOneWidget);
+
+      await tester.tap(find.text('Skip'));
+      await _settle(tester);
+      expect(ipad.transfers.single.closed, isTrue);
+      expect(find.text('Bringing your messages over…'), findsNothing);
+      expect(
+        find.text('Messages from before today are on your other devices.'),
+        findsOneWidget,
+      );
+      expect(find.text('Try again'), findsNothing);
+      await tester.tap(find.text('OK'));
+      await _settle(tester);
+      expect(find.textContaining('Messages from before'), findsNothing);
+    });
+
+    testWidgets('cut short, it can be tried again', (tester) async {
+      final ipad = await added();
+      await _show(tester, ipad.e2ee);
+      ipad.transfers.single.progress.add(at(5, 12, DmTransferEnd.cutShort));
+      await _settle(tester);
+      expect(find.text("Some messages didn't come over."), findsOneWidget);
+      await tester.tap(find.text('Try again'));
+      await _settle(tester);
+      expect(ipad.transfers.single.receiving, 2);
+      expect(find.text('Bringing your messages over…'), findsOneWidget);
+      ipad.transfers.single.progress.add(at(12, 12, DmTransferEnd.complete));
+      await _settle(tester);
+      expect(find.text('Bringing your messages over…'), findsNothing);
+      expect(find.text("Some messages didn't come over."), findsNothing);
     });
   });
 }

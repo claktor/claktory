@@ -593,6 +593,29 @@ void main() {
     matching: find.byType(EditableText),
   );
 
+  testWidgets("what reorders a request's words shows by its code", (
+    tester,
+  ) async {
+    final harness = Harness(_workspace());
+    final request = resend()
+      ..newSecret.name = 'Re\u202Esend'
+      ..newSecret.description = 'Mail \u2066x\u2069'
+      ..reason = 'For evil\u202Etxt.exe';
+    await _show(tester, harness, SecretRequestCard(request));
+    expect(
+      find.text(r'June asks for a secret: Re\u{202E}send'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining(r'For evil\u{202E}txt.exe', findRichText: true),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining(r'Mail \u{2066}x\u{2069}', findRichText: true),
+      findsOneWidget,
+    );
+  });
+
   testWidgets("a request like none of the person's secrets: New secret, filled "
       'in from it', (tester) async {
     final harness = Harness(_workspace());
@@ -1246,6 +1269,112 @@ void main() {
     expect(decided.hasAskEachTime(), isTrue);
   });
 
+  SecretRequest password({
+    String allowed = '',
+    int maxLength = 0,
+    int longest = 64,
+  }) => SecretRequest(
+    id: 'r3',
+    agentId: 'june',
+    generate: 'password',
+    newSecret: NewSecret(
+      name: 'smtp-password',
+      variables: [SecretVariable(name: 'PASSWORD')],
+    ),
+    password: PasswordSpec(
+      length: 32,
+      lowercase: true,
+      uppercase: true,
+      digits: true,
+      symbols: allowed.isEmpty,
+      allowed: allowed,
+      requireEach: true,
+      maxLength: maxLength,
+      alphabetSize: 90,
+      bits: 207.7,
+      shortest: 16,
+      longest: longest,
+      bitsPerCharacter: 6.49,
+    ),
+    reason: 'To send mail.',
+    state: SecretRequestState.SECRET_REQUEST_STATE_PENDING,
+  );
+
+  test('strength in a word', () {
+    expect(passwordStrength(72), 'fair');
+    expect(passwordStrength(96), 'strong');
+    expect(passwordStrength(128), 'very strong');
+    expect(passwordStrength(60), 'weak');
+  });
+
+  testWidgets('a password to generate says what it is and how strong, and '
+      'its length moves between the bounds', (tester) async {
+    final harness = Harness(_workspace());
+    await _show(tester, harness, SecretRequestCard(password(longest: 33)));
+    expect(find.text('June asks for a new password'), findsOneWidget);
+    expect(
+      find.text('A 32-character password: letters, digits and symbols'),
+      findsOneWidget,
+    );
+    expect(find.text('Strength: very strong'), findsOneWidget);
+    expect(find.text("Also the key's comment"), findsNothing);
+    expect(find.text('No one ever sees it, June included.'), findsOneWidget);
+
+    await tester.tap(find.bySemanticsLabel('Longer'));
+    await tester.pump();
+    expect(
+      find.text('A 33-character password: letters, digits and symbols'),
+      findsOneWidget,
+    );
+    expect(find.text('Strength: very strong'), findsOneWidget);
+    // Not past the longest.
+    await tester.tap(find.bySemanticsLabel('Longer'));
+    await tester.pump();
+    expect(find.textContaining('33-character'), findsOneWidget);
+    for (var i = 0; i < 20; i++) {
+      await tester.tap(find.bySemanticsLabel('Shorter'));
+      await tester.pump();
+    }
+    // Nor below the shortest.
+    expect(find.textContaining('16-character'), findsOneWidget);
+    expect(find.text('Strength: strong'), findsOneWidget);
+
+    await tester.tap(find.text('Generate'));
+    await pumpFrames(tester);
+    final decided = _sent(
+      harness,
+      (m) => m.hasDecideSecretRequest(),
+    ).single.decideSecretRequest;
+    expect(decided.approve, isTrue);
+    expect(decided.name, 'smtp-password');
+    expect(decided.passwordLength, 16);
+    expect(decided.entries, isEmpty);
+  });
+
+  testWidgets('a password left as asked sends no length, and says what the '
+      'service limits', (tester) async {
+    final harness = Harness(_workspace());
+    await _show(
+      tester,
+      harness,
+      SecretRequestCard(
+        password(allowed: 'abcXYZ123', maxLength: 40, longest: 40),
+      ),
+    );
+    expect(find.text('Only these characters: abcXYZ123'), findsOneWidget);
+    expect(
+      find.text('The service accepts at most 40 characters.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Generate'));
+    await pumpFrames(tester);
+    final decided = _sent(
+      harness,
+      (m) => m.hasDecideSecretRequest(),
+    ).single.decideSecretRequest;
+    expect(decided.passwordLength, 0);
+  });
+
   testWidgets('a generated key shows to whom it went and its public key, '
       'with Copy', (tester) async {
     final copied = <String>[];
@@ -1313,6 +1442,208 @@ void main() {
       secretRequestSummary(sshKey(), _workspace()),
       'Asks for a new SSH key',
     );
+  });
+
+  group('files to import (vault import)', () {
+    SecretRequest importing({
+      bool tainted = false,
+      String path = '/Users/me/keys/release.p12',
+      String sensitive = '',
+      String problem = '',
+      SecretRequestState state =
+          SecretRequestState.SECRET_REQUEST_STATE_PENDING,
+    }) => SecretRequest(
+      id: 'r3',
+      agentId: 'june',
+      adminAgentId: 'mike',
+      newSecret: NewSecret(
+        name: 'android-release',
+        variables: [
+          SecretVariable(name: 'KEYSTORE', file: true),
+          SecretVariable(name: 'KEY_PROPERTIES', file: true),
+        ],
+      ),
+      reason: 'To sign the Android release.',
+      state: state,
+      askerReadPipes: tainted,
+      imports: [
+        SecretImport(
+          variable: 'KEYSTORE',
+          path: path,
+          size: Int64(4096),
+          modifiedMs: Int64(DateTime(2026, 11, 20, 9).millisecondsSinceEpoch),
+          fingerprint: '3f9a 21c0 7d44',
+          sensitive: sensitive,
+          problem: problem,
+        ),
+        SecretImport(
+          variable: 'KEY_PROPERTIES',
+          path: '/Users/me/keys/key.properties',
+          size: Int64(120),
+          modifiedMs: Int64(DateTime(2026, 11, 20, 9).millisecondsSinceEpoch),
+          fingerprint: '88b2 0c1d e4f7',
+        ),
+      ],
+    );
+
+    Toggle toggle(WidgetTester tester, String label) => tester.widget<Toggle>(
+      find.byWidgetPredicate((w) => w is Toggle && w.label == label),
+    );
+
+    testWidgets('each file in full, to no one and nothing deleted unless '
+        'turned on, then Import', (tester) async {
+      final harness = Harness(_workspace());
+      await _show(tester, harness, SecretRequestCard(importing()));
+      expect(find.text('June asks to import 2 files'), findsOneWidget);
+      expect(find.text('/Users/me/keys/release.p12'), findsOneWidget);
+      expect(find.text('/Users/me/keys/key.properties'), findsOneWidget);
+      expect(find.text('KEYSTORE (file)'), findsOneWidget);
+      expect(find.textContaining('4.1 KB'), findsOneWidget);
+      expect(find.textContaining('fingerprint 3f9a 21c0 7d44'), findsOneWidget);
+      expect(
+        find.text('Files are stored exactly as they are, binary files too.'),
+        findsOneWidget,
+      );
+      // Never a values form, a choice of secrets or the admin agent.
+      for (final gone in [
+        'Your secrets',
+        'New secret',
+        'Paste the file’s contents',
+        'Approve',
+        'Choose a secret…',
+      ]) {
+        expect(find.text(gone), findsNothing, reason: gone);
+      }
+      expect(toggle(tester, 'Give it to June').value, isFalse);
+      expect(
+        toggle(tester, 'Delete the originals after they’re imported').value,
+        isFalse,
+      );
+      expect(toggle(tester, askEachTimeLabel).value, isFalse);
+      await tester.tap(find.text('Import'));
+      await pumpFrames(tester);
+      final decided = _sent(
+        harness,
+        (m) => m.hasDecideSecretRequest(),
+      ).single.decideSecretRequest;
+      expect(decided.approve, isTrue);
+      expect(decided.name, 'android-release');
+      expect(decided.grantToAsker, isFalse);
+      expect(decided.deleteOriginals, isFalse);
+      expect(decided.entries, isEmpty);
+      expect(decided.approveOnly, isFalse);
+    });
+
+    testWidgets('given to June and the originals deleted when turned on', (
+      tester,
+    ) async {
+      final harness = Harness(_workspace());
+      await _show(tester, harness, SecretRequestCard(importing()));
+      await tester.tap(_labeled('Give it to June'));
+      await tester.tap(
+        _labeled('Delete the originals after they’re imported'),
+      );
+      await tester.pump();
+      expect(
+        find.text(
+          'No one sees the contents here. June can use them in '
+          'commands.',
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Import'));
+      await pumpFrames(tester);
+      final decided = _sent(
+        harness,
+        (m) => m.hasDecideSecretRequest(),
+      ).single.decideSecretRequest;
+      expect(decided.grantToAsker, isTrue);
+      expect(decided.deleteOriginals, isTrue);
+    });
+
+    testWidgets('a path with hidden characters shows them as codes; where '
+        'keys are kept, and an asker that read others, are said', (
+      tester,
+    ) async {
+      final harness = Harness(_workspace());
+      await _show(
+        tester,
+        harness,
+        SecretRequestCard(
+          importing(
+            tainted: true,
+            path: '/Users/me/.ssh/id_\u202Eyek.pub',
+            sensitive: 'ssh',
+          ),
+        ),
+      );
+      expect(find.text('/Users/me/.ssh/id_\\u{202E}yek.pub'), findsOneWidget);
+      expect(find.text('This is in your SSH keys folder.'), findsOneWidget);
+      expect(
+        find.textContaining('June had read messages from another Claktory'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets("a file that can't be imported says why, and Import is off", (
+      tester,
+    ) async {
+      final harness = Harness(_workspace());
+      await _show(
+        tester,
+        harness,
+        SecretRequestCard(importing(problem: 'It changed since June asked.')),
+      );
+      expect(find.text('It changed since June asked.'), findsOneWidget);
+      expect(find.text("It can't be imported as it is."), findsOneWidget);
+      await tester.tap(find.text('Import'));
+      await pumpFrames(tester);
+      expect(_sent(harness, (m) => m.hasDecideSecretRequest()), isEmpty);
+    });
+
+    testWidgets('imported: to whom, and the files', (tester) async {
+      final harness = Harness(_workspace());
+      await _show(
+        tester,
+        harness,
+        SecretRequestCard(
+          importing(state: SecretRequestState.SECRET_REQUEST_STATE_GENERATED),
+        ),
+      );
+      expect(find.text('Imported, given to no one'), findsOneWidget);
+      expect(
+        find.text(
+          '/Users/me/keys/release.p12 · 4.1 KB · fingerprint 3f9a 21c0 7d44',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Import'), findsNothing);
+    });
+
+    testWidgets('a file changed since: the refusal shows, and it can be '
+        'imported again', (tester) async {
+      final harness = Harness(_workspace());
+      await _show(tester, harness, SecretRequestCard(importing()));
+      harness.backend.refuse =
+          '/Users/me/keys/release.p12 changed since it was asked for, so it '
+          "wasn't imported. Ask for it again.";
+      await tester.tap(find.text('Import'));
+      await pumpFrames(tester);
+      expect(find.textContaining("so it wasn't imported"), findsOneWidget);
+      harness.backend.refuse = null;
+      await tester.tap(find.text('Import'));
+      await pumpFrames(tester);
+      expect(_sent(harness, (m) => m.hasDecideSecretRequest()), hasLength(2));
+    });
+
+    test('the summary in Needs you', () {
+      expect(
+        secretRequestSummary(importing(), _workspace()),
+        'Asks to import 2 files',
+      );
+      expect(importPath('/a/\u200Bb\u0007'), '/a/\\u{200B}b\\u{0007}');
+      expect(importPath('a\u2028b\u3164'), 'a\\u{2028}b\\u{3164}');
+    });
   });
 
   testWidgets('Dismiss tells the agent why, and the card shows it', (

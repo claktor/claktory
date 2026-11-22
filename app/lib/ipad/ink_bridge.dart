@@ -1148,12 +1148,20 @@ class InkSurfaceController {
       false;
 
   /// PDF only, with [region] (0..1 of the page) scrolled into view when
-  /// given: a search match, an item's anchor. Returns the page shown.
-  Future<int> goToPage(int page1based, {Rect? region}) async =>
+  /// given: a search match, an item's anchor. [match]: the region is the
+  /// find's current match, marked apart from the others and brought into
+  /// the upper part of the view, clear of a find bar and keyboard below.
+  /// Returns the page shown.
+  Future<int> goToPage(
+    int page1based, {
+    Rect? region,
+    bool match = false,
+  }) async =>
       _int(
         (await _call('goToPage', {
           'page_1based': page1based,
           if (region != null) 'region': inkRegionJson(region),
+          if (match && region != null) 'match': true,
         }))['page_1based'],
       ) ??
       page1based;

@@ -5,6 +5,7 @@
 
 import 'api/account.dart';
 import 'api/dm.dart';
+import 'api/dm_transfer.dart';
 import 'api/tunnel.dart';
 
 import 'dart:async';
@@ -32,6 +33,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoffPtr;
 
   CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_DmTransferEndpointPtr => wire
+      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpointPtr;
+
+  CrossPlatformFinalizerArg
   get rust_arc_decrement_strong_count_ForwardHandlePtr => wire
       ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandlePtr;
 
@@ -51,6 +56,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   DmHandoff
   dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    dynamic raw,
+  );
+
+  @protected
+  DmTransferEndpoint
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint(
     dynamic raw,
   );
 
@@ -79,6 +90,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  DmTransferEndpoint
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint(
+    dynamic raw,
+  );
+
+  @protected
   ForwardHandle
   dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     dynamic raw,
@@ -103,6 +120,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  DmTransferEndpoint
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint(
+    dynamic raw,
+  );
+
+  @protected
   ForwardHandle
   dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     dynamic raw,
@@ -113,6 +136,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTunnelHandle(
     dynamic raw,
   );
+
+  @protected
+  RustStreamSink<DmTransferProgress>
+  dco_decode_StreamSink_dm_transfer_progress_Sse(dynamic raw);
 
   @protected
   String dco_decode_String(dynamic raw);
@@ -145,7 +172,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DmMessage dco_decode_box_autoadd_dm_message(dynamic raw);
 
   @protected
+  DmPendingRotation dco_decode_box_autoadd_dm_pending_rotation(dynamic raw);
+
+  @protected
   DmPin dco_decode_box_autoadd_dm_pin(dynamic raw);
+
+  @protected
+  DmRemoval dco_decode_box_autoadd_dm_removal(dynamic raw);
+
+  @protected
+  DmRotation dco_decode_box_autoadd_dm_rotation(dynamic raw);
+
+  @protected
+  DmTransferEnd dco_decode_box_autoadd_dm_transfer_end(dynamic raw);
 
   @protected
   PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
@@ -196,10 +235,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DmOutcome dco_decode_dm_outcome(dynamic raw);
 
   @protected
+  DmPendingRotation dco_decode_dm_pending_rotation(dynamic raw);
+
+  @protected
   DmPin dco_decode_dm_pin(dynamic raw);
 
   @protected
   DmProcessed dco_decode_dm_processed(dynamic raw);
+
+  @protected
+  DmRemoval dco_decode_dm_removal(dynamic raw);
+
+  @protected
+  DmRotation dco_decode_dm_rotation(dynamic raw);
 
   @protected
   DmSafety dco_decode_dm_safety(dynamic raw);
@@ -209,6 +257,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DmStatus dco_decode_dm_status(dynamic raw);
+
+  @protected
+  DmTransferEnd dco_decode_dm_transfer_end(dynamic raw);
+
+  @protected
+  DmTransferProgress dco_decode_dm_transfer_progress(dynamic raw);
 
   @protected
   DmUnsent dco_decode_dm_unsent(dynamic raw);
@@ -277,7 +331,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DmMessage? dco_decode_opt_box_autoadd_dm_message(dynamic raw);
 
   @protected
+  DmPendingRotation? dco_decode_opt_box_autoadd_dm_pending_rotation(
+    dynamic raw,
+  );
+
+  @protected
   DmPin? dco_decode_opt_box_autoadd_dm_pin(dynamic raw);
+
+  @protected
+  DmRemoval? dco_decode_opt_box_autoadd_dm_removal(dynamic raw);
+
+  @protected
+  DmRotation? dco_decode_opt_box_autoadd_dm_rotation(dynamic raw);
+
+  @protected
+  DmTransferEnd? dco_decode_opt_box_autoadd_dm_transfer_end(dynamic raw);
 
   @protected
   PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
@@ -334,6 +402,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  DmTransferEndpoint
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ForwardHandle
   sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     SseDeserializer deserializer,
@@ -354,6 +428,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   DmHandoff
   sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmTransferEndpoint
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint(
     SseDeserializer deserializer,
   );
 
@@ -382,6 +462,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  DmTransferEndpoint
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ForwardHandle
   sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     SseDeserializer deserializer,
@@ -392,6 +478,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTunnelHandle(
     SseDeserializer deserializer,
   );
+
+  @protected
+  RustStreamSink<DmTransferProgress>
+  sse_decode_StreamSink_dm_transfer_progress_Sse(SseDeserializer deserializer);
 
   @protected
   String sse_decode_String(SseDeserializer deserializer);
@@ -428,7 +518,23 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DmMessage sse_decode_box_autoadd_dm_message(SseDeserializer deserializer);
 
   @protected
+  DmPendingRotation sse_decode_box_autoadd_dm_pending_rotation(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DmPin sse_decode_box_autoadd_dm_pin(SseDeserializer deserializer);
+
+  @protected
+  DmRemoval sse_decode_box_autoadd_dm_removal(SseDeserializer deserializer);
+
+  @protected
+  DmRotation sse_decode_box_autoadd_dm_rotation(SseDeserializer deserializer);
+
+  @protected
+  DmTransferEnd sse_decode_box_autoadd_dm_transfer_end(
+    SseDeserializer deserializer,
+  );
 
   @protected
   PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
@@ -479,10 +585,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DmOutcome sse_decode_dm_outcome(SseDeserializer deserializer);
 
   @protected
+  DmPendingRotation sse_decode_dm_pending_rotation(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DmPin sse_decode_dm_pin(SseDeserializer deserializer);
 
   @protected
   DmProcessed sse_decode_dm_processed(SseDeserializer deserializer);
+
+  @protected
+  DmRemoval sse_decode_dm_removal(SseDeserializer deserializer);
+
+  @protected
+  DmRotation sse_decode_dm_rotation(SseDeserializer deserializer);
 
   @protected
   DmSafety sse_decode_dm_safety(SseDeserializer deserializer);
@@ -492,6 +609,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DmStatus sse_decode_dm_status(SseDeserializer deserializer);
+
+  @protected
+  DmTransferEnd sse_decode_dm_transfer_end(SseDeserializer deserializer);
+
+  @protected
+  DmTransferProgress sse_decode_dm_transfer_progress(
+    SseDeserializer deserializer,
+  );
 
   @protected
   DmUnsent sse_decode_dm_unsent(SseDeserializer deserializer);
@@ -568,7 +693,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  DmPendingRotation? sse_decode_opt_box_autoadd_dm_pending_rotation(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DmPin? sse_decode_opt_box_autoadd_dm_pin(SseDeserializer deserializer);
+
+  @protected
+  DmRemoval? sse_decode_opt_box_autoadd_dm_removal(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmRotation? sse_decode_opt_box_autoadd_dm_rotation(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmTransferEnd? sse_decode_opt_box_autoadd_dm_transfer_end(
+    SseDeserializer deserializer,
+  );
 
   @protected
   PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
@@ -631,6 +776,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint(
+    DmTransferEndpoint self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
   sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     ForwardHandle self,
     SseSerializer serializer,
@@ -654,6 +806,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void
   sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff(
     DmHandoff self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint(
+    DmTransferEndpoint self,
     SseSerializer serializer,
   );
 
@@ -687,6 +846,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint(
+    DmTransferEndpoint self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
   sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerForwardHandle(
     ForwardHandle self,
     SseSerializer serializer,
@@ -696,6 +862,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void
   sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerTunnelHandle(
     TunnelHandle self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_dm_transfer_progress_Sse(
+    RustStreamSink<DmTransferProgress> self,
     SseSerializer serializer,
   );
 
@@ -749,7 +921,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_dm_pending_rotation(
+    DmPendingRotation self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_dm_pin(DmPin self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_dm_removal(
+    DmRemoval self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_dm_rotation(
+    DmRotation self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_dm_transfer_end(
+    DmTransferEnd self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_i_64(
@@ -806,10 +1002,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_dm_outcome(DmOutcome self, SseSerializer serializer);
 
   @protected
+  void sse_encode_dm_pending_rotation(
+    DmPendingRotation self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_dm_pin(DmPin self, SseSerializer serializer);
 
   @protected
   void sse_encode_dm_processed(DmProcessed self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_removal(DmRemoval self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_rotation(DmRotation self, SseSerializer serializer);
 
   @protected
   void sse_encode_dm_safety(DmSafety self, SseSerializer serializer);
@@ -819,6 +1027,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_dm_status(DmStatus self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_transfer_end(DmTransferEnd self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_transfer_progress(
+    DmTransferProgress self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_dm_unsent(DmUnsent self, SseSerializer serializer);
@@ -909,7 +1126,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_dm_pending_rotation(
+    DmPendingRotation? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_dm_pin(DmPin? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_removal(
+    DmRemoval? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_rotation(
+    DmRotation? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_transfer_end(
+    DmTransferEnd? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_i_64(
@@ -1037,6 +1278,40 @@ class RustLibWire implements BaseWire {
       );
   late final _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoff =
       _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmHandoffPtr
+          .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
+
+  void
+  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint(
+    ffi.Pointer<ffi.Void> ptr,
+  ) {
+    return _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint(
+      ptr,
+    );
+  }
+
+  late final _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpointPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>(
+        'frbgen_factory_app_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint',
+      );
+  late final _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint =
+      _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpointPtr
+          .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
+
+  void
+  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint(
+    ffi.Pointer<ffi.Void> ptr,
+  ) {
+    return _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint(
+      ptr,
+    );
+  }
+
+  late final _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpointPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>(
+        'frbgen_factory_app_rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint',
+      );
+  late final _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpoint =
+      _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmTransferEndpointPtr
           .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
 
   void

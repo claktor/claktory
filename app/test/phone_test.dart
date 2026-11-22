@@ -218,6 +218,37 @@ void main() {
     expect(find.byType(PairScreen), findsNothing);
   });
 
+  testWidgets('a claktory:// code, pasted or scanned, asks and connects as '
+      'a factory:// one does', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final code = 'claktory://?t=${'a' * 64}&name=mac-mini&e=${'c' * 64}';
+    final harness = Harness(Workspace(), localBackend: false);
+    harness.camera.state = CameraAccess.granted;
+    await harness.show(tester, size: phone);
+    await pumpFrames(tester);
+    expect(find.byKey(const ValueKey('camera')), findsOneWidget);
+    harness.camera.scan(code);
+    await pumpFrames(tester);
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    await tester.tap(find.text('Cancel').last);
+    await pumpFrames(tester);
+    expect(harness.connections.current, isNull);
+    // Pasted instead.
+    await tester.tap(find.text('Paste code instead'));
+    await pumpFrames(tester);
+    await tester.enterText(find.byType(EditableText), code);
+    await tester.pump();
+    await tester.tap(find.text('Connect'));
+    await pumpFrames(tester);
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    expect(harness.connections.current, isNull);
+    await tester.tap(find.text('Connect').last);
+    await pumpFrames(tester);
+    expect(harness.connections.current?.code, code);
+    expect(harness.backend.target?.endpointId, 'c' * 64);
+  });
+
   testWidgets('pasting stays behind a small link, and back', (tester) async {
     final harness = Harness(Workspace(), localBackend: false);
     harness.camera.state = CameraAccess.granted;

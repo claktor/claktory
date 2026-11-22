@@ -482,11 +482,13 @@ class DeviceAccount extends ChangeNotifier {
     if (_key.isEmpty) _key = _makeKey();
     if (!signedIn) _service = service == defaultAccountService ? '' : service;
     _kept();
-    final started = await _api.start(
-      email: email.trim(),
-      name: name,
-      platform: platform,
-      version: version,
+    final started = await _unlessRemoved(
+      () => _api.start(
+        email: email.trim(),
+        name: name,
+        platform: platform,
+        version: version,
+      ),
     );
     _awaiting = DeviceCodeWait(
       email: email.trim(),
@@ -504,9 +506,8 @@ class DeviceAccount extends ChangeNotifier {
     if (awaiting == null) {
       throw const AccountServiceError(410, 'code_expired', '');
     }
-    final signedIn = await _api.verify(
-      requestId: awaiting.requestId,
-      code: code.trim(),
+    final signedIn = await _unlessRemoved(
+      () => _api.verify(requestId: awaiting.requestId, code: code.trim()),
     );
     _awaiting = null;
     _email = signedIn.email.isNotEmpty ? signedIn.email : awaiting.email;
@@ -598,6 +599,28 @@ class DeviceAccount extends ChangeNotifier {
       return await call();
     } on AccountServiceError catch (error) {
       if (error.status == 401 && error.code == 'unauthorized') _signedOut();
+      rethrow;
+    }
+  }
+
+  /// The account key this device signs in with (hex): a new one once
+  /// another device removed this one, so it starts over as a new device.
+  String get key => _key;
+
+  /// [call] to sign in; when another of the person's devices removed this
+  /// one (403 device_removed), its key can never sign in to that account
+  /// again (Fugo): a new key, so the next sign-in starts over as a new
+  /// device, and its messages with it (e2eeOf starts them over when [key]
+  /// changes). The refusal goes on to say so.
+  Future<T> _unlessRemoved<T>(Future<T> Function() call) async {
+    try {
+      return await call();
+    } on AccountServiceError catch (error) {
+      if (error.status == 403 && error.code == 'device_removed') {
+        _key = _makeKey();
+        _client = null;
+        _signedOut();
+      }
       rethrow;
     }
   }

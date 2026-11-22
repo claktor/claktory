@@ -41,8 +41,10 @@ impl Quarantine {
     }
 }
 
-/// The extensions a quarantined agent keeps (when they're on for it).
-pub(crate) const KEPT_EXTENSIONS: &[&str] = &[crate::extensions::ask::ID];
+/// The extensions a quarantined agent keeps (when they're on for it): Ask,
+/// and the Hand-off's, which gives a liaison of a pipe with a forward its
+/// tools to hand reports off.
+pub(crate) const KEPT_EXTENSIONS: &[&str] = &[crate::extensions::ask::ID, super::curator::HANDOFF];
 
 /// The pipe tools a quarantined agent keeps.
 const KEPT_PIPE_TOOLS: &[&str] = &["pipe_send", "pipe_read", "pipe_status"];
@@ -79,21 +81,28 @@ pub(crate) fn quarantine(factory: &Factory, config: &Config, agent: &str) -> Opt
 /// quarantine's), with writes refused through a symbolic link, and the pipe
 /// tools.
 pub(crate) fn tools(factory: &Arc<Factory>, agent: &str, places: &Places) -> Vec<Tool> {
+    let mut tools = contained_tools(factory, places);
+    tools.extend(pipe_tools(factory, agent));
+    tools
+}
+
+/// A contained agent's own tools (a liaison's or a curator's): the file
+/// tools in its places, with no bash, and writes refused through a symbolic
+/// link.
+pub(crate) fn contained_tools(factory: &Arc<Factory>, places: &Places) -> Vec<Tool> {
     let mut tools = factory_agent::coding_tools(&places.folder, &places.extra_dirs, None);
     factory_agent::tools::read_only(&mut tools, &places.read_only);
     factory_agent::tools::denied(&mut tools, &crate::ink::private(&factory.home));
     tools.retain(|tool| tool.kind != ToolKind::Bash);
     let roots: Vec<PathBuf> = std::iter::once(places.folder.clone()).chain(places.extra_dirs.iter().cloned()).collect();
-    let mut tools: Vec<Tool> = tools
+    tools
         .into_iter()
         .map(
             |tool| {
                 if matches!(tool.kind, ToolKind::WriteFile | ToolKind::EditFile) { no_links(tool, &places.folder, &roots) } else { tool }
             },
         )
-        .collect();
-    tools.extend(pipe_tools(factory, agent));
-    tools
+        .collect()
 }
 
 /// The pipe tools a quarantined agent keeps.
@@ -157,7 +166,7 @@ pub(crate) fn prompt_line(record: &Record) -> String {
 
 /// Tells `agent` it's quarantined for `record` now, or released from it.
 fn tell(factory: &Arc<Factory>, agent: &str, record: &Record, quarantined: bool) {
-    let person = factory.lock().config.person_capitalized().to_owned();
+    let person = factory.person_capitalized();
     let name = &record.name;
     let (summary, text) = if quarantined {
         (

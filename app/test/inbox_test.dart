@@ -1,5 +1,7 @@
 import 'package:factory_app/ask_card.dart';
 import 'package:factory_app/inbox.dart';
+import 'package:factory_app/needs_you_history.dart' show NeedsYouHistoryList;
+import 'package:factory_app/selection.dart' show CopyMenu;
 import 'package:factory_app/pipes.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
@@ -10,6 +12,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+import 'selection_test.dart' show copyItem, rightClick, watchClipboard;
 
 Agent _agent(String id, String name, {List<int> waiting = const []}) => Agent(
   id: id,
@@ -187,6 +190,85 @@ void main() {
     expect(decided.approve, isFalse);
   });
 
+  testWidgets("Needs you's words select and copy; its buttons still work", (
+    tester,
+  ) async {
+    final copied = watchClipboard(tester);
+    final harness = await show(tester, _workspace(omar: [2]));
+    harness.backend.entriesById['omar/2'] = _proposal(2);
+    await tester.tap(find.text('Needs you'));
+    await settle(tester);
+    await settle(tester);
+    // Folded, its line; open, the card's own words. (Nested shapes join
+    // the selection a frame or two later.)
+    await pumpFrames(tester);
+    await rightClick(
+      tester,
+      find.text('Proposes to Rivet: Add a designer agent'),
+    );
+    expect(find.byType(CopyMenu), findsOneWidget);
+    await tester.tap(copyItem);
+    await tester.pump();
+    expect(copied, hasLength(1));
+    expect('Proposes to Rivet: Add a designer agent', contains(copied.single));
+    await tester.tap(find.text('Proposes to Rivet: Add a designer agent'));
+    await settle(tester);
+    expect(
+      find.ancestor(
+        of: find.text('Dismiss'),
+        matching: find.byType(SelectableRegion),
+      ),
+      findsOneWidget,
+    );
+    await tester.ensureVisible(find.text('Dismiss'));
+    await settle(tester);
+    await tester.tap(find.text('Dismiss'));
+    await settle(tester);
+    expect(harness.last.decideProposal.proposalId, 'prop2');
+
+    // History's too.
+    await tester.tap(find.text('History'));
+    await settle(tester);
+    expect(
+      find.ancestor(
+        of: find.byType(NeedsYouHistoryList),
+        matching: find.byType(SelectableRegion),
+      ),
+      findsOneWidget,
+    );
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+  testWidgets('Select All copies each item on its own lines', (tester) async {
+    final copied = watchClipboard(tester);
+    final harness = await show(tester, _workspace(june: [1], omar: [2]));
+    harness.backend.entriesById['june/1'] = _ask(1);
+    harness.backend.entriesById['omar/2'] = _proposal(2);
+    await tester.tap(find.text('Needs you'));
+    await settle(tester);
+    await settle(tester);
+    // Nested shapes join the selection a frame or two later.
+    await pumpFrames(tester);
+    final region = tester.state<SelectableRegionState>(
+      find.byType(SelectableRegion),
+    );
+    region.selectAll(SelectionChangedCause.keyboard);
+    await tester.pump();
+    // As ⌘C does.
+    Actions.invoke(
+      tester.element(find.textContaining('Proposes to Rivet')),
+      CopySelectionTextIntent.copy,
+    );
+    await tester.pump();
+    final text = copied.single;
+    final items = text.split('\n\n');
+    expect(items, hasLength(2), reason: text);
+    for (final item in items) {
+      expect(item.split('\n').length, greaterThan(1), reason: item);
+    }
+    expect(text, contains('Add a designer agent'));
+    expect(text, contains('Which region should the bucket live in?'));
+  });
+
   testWidgets("a pipe's approval opens to the approval itself", (tester) async {
     final harness = await show(
       tester,
@@ -217,6 +299,58 @@ void main() {
     await tester.tap(find.text('Approve'));
     await settle(tester);
     expect(harness.last.approvePipe.pipeId, 'pipe1');
+  });
+
+  testWidgets("a message no agent answers waits in Needs you, saying to "
+      'choose a lead; the pipe counts it', (tester) async {
+    final harness = Harness(
+      _workspace(
+        pipes: [
+          Pipe(
+            id: 'pipe1',
+            name: 'Acme',
+            projectId: 'p1',
+            state: PipeState.PIPE_STATE_OPEN,
+            online: true,
+            peer: PipePeer(ownerName: 'Ana', claktoryName: "Ana's Claktory"),
+            memberIds: ['june'],
+            unansweredSeqs: [Int64(7)],
+          ),
+        ],
+      ),
+    );
+    harness.backend.pipeMessagesById['pipe1/7'] = PipeMessage(
+      seq: Int64(7),
+      timestampMs: Int64(5000),
+      author: PipeAuthor(
+        kind: PipeAuthorKind.PIPE_AUTHOR_KIND_THEIR_AGENT,
+        name: 'Bo',
+      ),
+      text: 'Is the launch still Friday?',
+      state: PipeMessageState.PIPE_MESSAGE_STATE_RECEIVED,
+    );
+    await harness.show(tester);
+    await settle(tester);
+    expect(find.text(pipeUnanswered), findsOneWidget, reason: 'its row');
+    expect(
+      _labeled('Acme has something waiting for your answer'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Needs you'));
+    await settle(tester);
+    await settle(tester);
+    expect(
+      find.text('$pipeUnanswered\nIs the launch still Friday?'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('$pipeUnanswered\nIs the launch still Friday?'));
+    await settle(tester);
+    await settle(tester);
+    expect(find.text(pipeChooseLead), findsOneWidget);
+    await tester.ensureVisible(find.text('Pipe settings…'));
+    await tester.tap(find.text('Pipe settings…'));
+    await settle(tester);
+    expect(find.text('Pipe settings'), findsOneWidget);
   });
 
   testWidgets("a chat's proposal to Rivet waits in Needs you under the "

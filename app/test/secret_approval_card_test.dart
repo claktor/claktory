@@ -87,6 +87,13 @@ void main() {
     expect(tester.getTopLeft(read).dy, inExclusiveRange(header, command));
   });
 
+  testWidgets('the command shows every hidden character by its code', (
+    tester,
+  ) async {
+    await _card(tester, _approval()..command = 'aws s3 rm \u202Es3://x\u200B');
+    expect(find.text(r'aws s3 rm \u{202E}s3://x\u{200B}'), findsOneWidget);
+  });
+
   testWidgets('with no taint, no such line', (tester) async {
     await _card(tester, _approval());
     expect(find.text('June wants to use AWS'), findsOneWidget);

@@ -38,6 +38,8 @@
 		C0EC71002B3C4D5E6F700041 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700042 /* Recorder.swift */; };
 		C0EC71002B3C4D5E6F700043 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */; };
 		C0EC71002B3C4D5E6F700053 /* NetworkPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */; };
+		C0EC71002B3C4D5E6F700091 /* SecretClipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700092 /* SecretClipboard.swift */; };
+		C0EC71002B3C4D5E6F700093 /* DmKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700094 /* DmKeys.swift */; };
 		C0EC71002B3C4D5E6F700061 /* SetupLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700062 /* SetupLink.swift */; };
 		C0EC71002B3C4D5E6F700071 /* Notifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700072 /* Notifications.swift */; };
 		B4A0B4A02B3C4D5E6F700001 /* BrowserBroker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4A0B4A02B3C4D5E6F700002 /* BrowserBroker.swift */; };
@@ -99,6 +101,8 @@
 		C0EC71002B3C4D5E6F700042 /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recorder.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlayer.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkPath.swift; sourceTree = "<group>"; };
+		C0EC71002B3C4D5E6F700092 /* SecretClipboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretClipboard.swift; sourceTree = "<group>"; };
+		C0EC71002B3C4D5E6F700094 /* DmKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DmKeys.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700062 /* SetupLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupLink.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700072 /* Notifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notifications.swift; sourceTree = "<group>"; };
 		B4A0B4A02B3C4D5E6F700002 /* BrowserBroker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserBroker.swift; sourceTree = "<group>"; };
@@ -213,6 +217,8 @@
 				C0EC71002B3C4D5E6F700042 /* Recorder.swift */,
 				C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */,
 				C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */,
+				C0EC71002B3C4D5E6F700092 /* SecretClipboard.swift */,
+				C0EC71002B3C4D5E6F700094 /* DmKeys.swift */,
 				C0EC71002B3C4D5E6F700062 /* SetupLink.swift */,
 				C0EC71002B3C4D5E6F700072 /* Notifications.swift */,
 				B4A0B4A02B3C4D5E6F700002 /* BrowserBroker.swift */,
@@ -417,6 +423,8 @@
 				C0EC71002B3C4D5E6F700041 /* Recorder.swift in Sources */,
 				C0EC71002B3C4D5E6F700043 /* AudioPlayer.swift in Sources */,
 				C0EC71002B3C4D5E6F700053 /* NetworkPath.swift in Sources */,
+				C0EC71002B3C4D5E6F700091 /* SecretClipboard.swift in Sources */,
+				C0EC71002B3C4D5E6F700093 /* DmKeys.swift in Sources */,
 				C0EC71002B3C4D5E6F700061 /* SetupLink.swift in Sources */,
 				C0EC71002B3C4D5E6F700071 /* Notifications.swift in Sources */,
 				B4A0B4A02B3C4D5E6F700001 /* BrowserBroker.swift in Sources */,

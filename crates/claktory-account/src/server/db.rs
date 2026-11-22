@@ -144,6 +144,15 @@ CREATE TABLE IF NOT EXISTS device_keys (
     PRIMARY KEY (device_key, account_key)
 );
 CREATE INDEX IF NOT EXISTS device_keys_account_key ON device_keys (account_key);
+-- Device keys removed from the account (lost, stolen, given away), by
+-- another of its devices or on the account page: never signed in to that
+-- account again.
+CREATE TABLE IF NOT EXISTS removed_devices (
+    account_id TEXT NOT NULL,
+    account_key TEXT NOT NULL,
+    removed INTEGER NOT NULL,
+    PRIMARY KEY (account_id, account_key)
+);
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value INTEGER NOT NULL
@@ -177,6 +186,19 @@ CREATE TABLE IF NOT EXISTS health (
 );
 -- Deleted accounts the user-apps worker hasn't yet said it forgot: asked
 -- again, with a growing wait, until it does.
+-- Replies people reported (POST /v1/reports/ai), for Claktory's team to
+-- read here; kept AI_REPORT_KEEP_DAYS. Nothing of who sent them, and
+-- `received` only to the hour.
+CREATE TABLE IF NOT EXISTS ai_reports (
+    id INTEGER PRIMARY KEY,
+    received INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    model TEXT NOT NULL,
+    version TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    note TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ai_reports_received ON ai_reports (received);
 CREATE TABLE IF NOT EXISTS apps_purges (
     account_id TEXT PRIMARY KEY,
     queued INTEGER NOT NULL,
@@ -280,6 +302,17 @@ pub fn hash(text: &str) -> String {
 /// A code's hash, salted with its request's id.
 pub fn code_hash(code: &str, request_id: &str) -> String {
     hash(&format!("{code}\0{request_id}"))
+}
+
+/// Keeps a reported reply (`server::reports`), received at the hour it
+/// arrived in: no finer, so it can't be lined up with an address the
+/// limits held then.
+pub fn add_ai_report(conn: &Connection, report: &crate::protocol::AiReport, now: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO ai_reports (received, text, model, version, platform, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![now - now.rem_euclid(3600), report.text, report.model, report.version, report.platform, report.note],
+    )?;
+    Ok(())
 }
 
 /// A limit's key for an email address, without the address in it.
@@ -518,9 +551,17 @@ pub fn moved(
     Ok(true)
 }
 
+/// Collects an already prepared query, returning the first row error.
+fn query<T>(
+    mut statement: rusqlite::Statement<'_>,
+    parameters: impl rusqlite::Params,
+    read: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+) -> rusqlite::Result<Vec<T>> {
+    statement.query_map(parameters, read)?.collect()
+}
+
 pub fn claktories(conn: &Connection, account_id: &str) -> rusqlite::Result<Vec<Claktory>> {
-    let mut statement = conn.prepare(&format!("{CLAKTORY} WHERE account_id = ?1 ORDER BY created"))?;
-    statement.query_map(params![account_id], claktory_row)?.collect()
+    query(conn.prepare(&format!("{CLAKTORY} WHERE account_id = ?1 ORDER BY created"))?, params![account_id], claktory_row)
 }
 
 /// What a code that was right signs in to.
@@ -824,12 +865,15 @@ fn anonymize(conn: &Connection, id: &str) -> rusqlite::Result<()> {
 /// A Claktory's usage since a day, per model: (the model's name as the app
 /// shows it, or its id; requests; all tokens).
 pub fn usage_since(conn: &Connection, id: &str, since: &str) -> rusqlite::Result<Vec<(String, i64, i64)>> {
-    let mut statement = conn.prepare(
-        "SELECT coalesce(models.name, usage.model), sum(requests), sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens)
+    query(
+        conn.prepare(
+            "SELECT coalesce(models.name, usage.model), sum(requests), sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens)
          FROM usage LEFT JOIN models ON models.provider = usage.provider AND models.model = usage.model
          WHERE claktory_id = ?1 AND day >= ?2 GROUP BY usage.provider, usage.model ORDER BY 3 DESC",
-    )?;
-    statement.query_map(params![id, since], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect()
+        )?,
+        params![id, since],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
 }
 
 /// Minutes a Claktory's agents worked since an hour.
@@ -875,8 +919,11 @@ pub fn record_release(conn: &Connection, id: &str, now: i64, ip: &str, epoch: u6
 
 /// A Claktory's kept releases, newest first: (time, IP).
 pub fn releases(conn: &Connection, id: &str, most: u32) -> rusqlite::Result<Vec<(i64, String)>> {
-    let mut statement = conn.prepare("SELECT time, ip FROM share_releases WHERE claktory_id = ?1 ORDER BY time DESC LIMIT ?2")?;
-    statement.query_map(params![id, most], |row| Ok((row.get(0)?, row.get(1)?)))?.collect()
+    query(
+        conn.prepare("SELECT time, ip FROM share_releases WHERE claktory_id = ?1 ORDER BY time DESC LIMIT ?2")?,
+        params![id, most],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
 }
 
 /// Replaces a Claktory's endpoints; whether they changed.
@@ -888,10 +935,10 @@ pub fn set_endpoints(conn: &mut Connection, id: &str, backend: &str, devices: &[
             wanted.push((device.clone(), "device"));
         }
     }
-    let mut had: Vec<(String, String)> = {
-        let mut statement = tx.prepare("SELECT endpoint, kind FROM endpoints WHERE claktory_id = ?1")?;
-        statement.query_map(params![id], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<_>>()?
-    };
+    let mut had: Vec<(String, String)> =
+        query(tx.prepare("SELECT endpoint, kind FROM endpoints WHERE claktory_id = ?1")?, params![id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
     let mut new: Vec<(String, String)> = wanted.iter().map(|(endpoint, kind)| (endpoint.clone(), (*kind).to_owned())).collect();
     had.sort();
     new.sort();
@@ -947,14 +994,17 @@ fn bump_allowlist(conn: &Connection) -> rusqlite::Result<()> {
 /// the device keys assertions were made for in the last day (`purge` drops
 /// older ones), of devices still signed in.
 pub fn allowlist(conn: &Connection) -> rusqlite::Result<Vec<String>> {
-    let mut statement = conn.prepare(
-        "SELECT endpoint FROM endpoints JOIN claktories ON claktories.id = endpoints.claktory_id
+    query(
+        conn.prepare(
+            "SELECT endpoint FROM endpoints JOIN claktories ON claktories.id = endpoints.claktory_id
          WHERE claktories.revoked_at IS NULL
          UNION
          SELECT device_key FROM device_keys JOIN devices ON devices.account_key = device_keys.account_key
          ORDER BY 1",
-    )?;
-    statement.query_map([], |row| row.get(0))?.collect()
+        )?,
+        [],
+        |row| row.get(0),
+    )
 }
 
 /// Removes a Claktory from its account; false when it isn't the account's,
@@ -990,6 +1040,7 @@ pub fn delete_account(conn: &mut Connection, account: &Account, apps: bool, now:
         params![account.id],
     )?;
     tx.execute("DELETE FROM devices WHERE account_id = ?1", params![account.id])?;
+    tx.execute("DELETE FROM removed_devices WHERE account_id = ?1", params![account.id])?;
     tx.execute("DELETE FROM requests WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM sessions WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM accounts WHERE id = ?1", params![account.id])?;
@@ -1006,8 +1057,11 @@ pub fn delete_account(conn: &mut Connection, account: &Account, apps: bool, now:
 /// Deleted accounts due to be purged from the user-apps worker at `now`
 /// (at most `limit`), with how often it was asked already.
 pub fn apps_purges_due(conn: &Connection, now: i64, limit: u32) -> rusqlite::Result<Vec<(String, i64)>> {
-    let mut statement = conn.prepare("SELECT account_id, tries FROM apps_purges WHERE next_try <= ?1 ORDER BY next_try LIMIT ?2")?;
-    statement.query_map(params![now, limit], |row| Ok((row.get(0)?, row.get(1)?)))?.collect()
+    query(
+        conn.prepare("SELECT account_id, tries FROM apps_purges WHERE next_try <= ?1 ORDER BY next_try LIMIT ?2")?,
+        params![now, limit],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
 }
 
 /// The worker purged it: done.
@@ -1026,67 +1080,57 @@ pub fn apps_purge_failed(conn: &Connection, account_id: &str, next_try: i64) -> 
 pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Value> {
     let mut claktories_out = Vec::new();
     for claktory in claktories(conn, &account.id)? {
-        let endpoints: Vec<Value> = {
-            let mut statement =
-                conn.prepare("SELECT endpoint, kind, added FROM endpoints WHERE claktory_id = ?1 ORDER BY added, endpoint")?;
-            statement
-                .query_map(params![claktory.id], |row| {
-                    Ok(json!({"endpoint": row.get::<_, String>(0)?, "kind": row.get::<_, String>(1)?, "added": row.get::<_, i64>(2)?}))
-                })?
-                .collect::<rusqlite::Result<_>>()?
-        };
+        let endpoints: Vec<Value> = query(
+            conn.prepare("SELECT endpoint, kind, added FROM endpoints WHERE claktory_id = ?1 ORDER BY added, endpoint")?,
+            params![claktory.id],
+            |row| Ok(json!({"endpoint": row.get::<_, String>(0)?, "kind": row.get::<_, String>(1)?, "added": row.get::<_, i64>(2)?})),
+        )?;
         let unlocks: Vec<Value> =
             releases(conn, &claktory.id, u32::MAX)?.into_iter().map(|(time, ip)| json!({"time": time, "ip": ip})).collect();
-        let usage: Vec<Value> = {
-            let mut statement = conn.prepare(
+        let usage: Vec<Value> = query(
+            conn.prepare(
                 "SELECT day, provider, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
                  FROM usage WHERE claktory_id = ?1 ORDER BY day, provider, model",
-            )?;
-            statement
-                .query_map(params![claktory.id], |row| {
-                    Ok(json!({
-                        "day": row.get::<_, String>(0)?,
-                        "provider": row.get::<_, String>(1)?,
-                        "model": row.get::<_, String>(2)?,
-                        "requests": row.get::<_, i64>(3)?,
-                        "input_tokens": row.get::<_, i64>(4)?,
-                        "output_tokens": row.get::<_, i64>(5)?,
-                        "cache_read_tokens": row.get::<_, i64>(6)?,
-                        "cache_write_tokens": row.get::<_, i64>(7)?,
-                    }))
-                })?
-                .collect::<rusqlite::Result<_>>()?
-        };
-        let activity: Vec<Value> = {
-            let mut statement =
-                conn.prepare("SELECT hour, agent_minutes, agents_working, runs FROM activity WHERE claktory_id = ?1 ORDER BY hour")?;
-            statement
-                .query_map(params![claktory.id], |row| {
-                    Ok(json!({
-                        "hour": row.get::<_, i64>(0)?,
-                        "agent_minutes": row.get::<_, i64>(1)?,
-                        "agents_working": row.get::<_, i64>(2)?,
-                        "runs": row.get::<_, i64>(3)?,
-                    }))
-                })?
-                .collect::<rusqlite::Result<_>>()?
-        };
+            )?,
+            params![claktory.id],
+            |row| {
+                Ok(json!({
+                    "day": row.get::<_, String>(0)?,
+                    "provider": row.get::<_, String>(1)?,
+                    "model": row.get::<_, String>(2)?,
+                    "requests": row.get::<_, i64>(3)?,
+                    "input_tokens": row.get::<_, i64>(4)?,
+                    "output_tokens": row.get::<_, i64>(5)?,
+                    "cache_read_tokens": row.get::<_, i64>(6)?,
+                    "cache_write_tokens": row.get::<_, i64>(7)?,
+                }))
+            },
+        )?;
+        let activity: Vec<Value> = query(
+            conn.prepare("SELECT hour, agent_minutes, agents_working, runs FROM activity WHERE claktory_id = ?1 ORDER BY hour")?,
+            params![claktory.id],
+            |row| {
+                Ok(json!({
+                    "hour": row.get::<_, i64>(0)?,
+                    "agent_minutes": row.get::<_, i64>(1)?,
+                    "agents_working": row.get::<_, i64>(2)?,
+                    "runs": row.get::<_, i64>(3)?,
+                }))
+            },
+        )?;
         let table = |sql: &str, names: &[&str]| -> rusqlite::Result<Vec<Value>> {
-            let mut statement = conn.prepare(sql)?;
-            statement
-                .query_map(params![claktory.id], |row| {
-                    let mut object = serde_json::Map::new();
-                    for (at, name) in names.iter().enumerate() {
-                        let value = match row.get::<_, rusqlite::types::Value>(at)? {
-                            rusqlite::types::Value::Integer(number) => json!(number),
-                            rusqlite::types::Value::Text(text) => json!(text),
-                            _ => Value::Null,
-                        };
-                        object.insert((*name).to_owned(), value);
-                    }
-                    Ok(Value::Object(object))
-                })?
-                .collect()
+            query(conn.prepare(sql)?, params![claktory.id], |row| {
+                let mut object = serde_json::Map::new();
+                for (at, name) in names.iter().enumerate() {
+                    let value = match row.get::<_, rusqlite::types::Value>(at)? {
+                        rusqlite::types::Value::Integer(number) => json!(number),
+                        rusqlite::types::Value::Text(text) => json!(text),
+                        _ => Value::Null,
+                    };
+                    object.insert((*name).to_owned(), value);
+                }
+                Ok(Value::Object(object))
+            })
         };
         let devices_now = table(
             "SELECT platform, kind, app_version, count FROM claktory_devices WHERE claktory_id = ?1 ORDER BY platform, kind, app_version",
@@ -1101,10 +1145,8 @@ pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Va
             conn.query_row("SELECT model_connected, first_run FROM claktories WHERE id = ?1", params![claktory.id], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })?;
-        let days: Vec<String> = {
-            let mut statement = conn.prepare("SELECT day FROM seen_days WHERE claktory_id = ?1 ORDER BY day")?;
-            statement.query_map(params![claktory.id], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?
-        };
+        let days: Vec<String> =
+            query(conn.prepare("SELECT day FROM seen_days WHERE claktory_id = ?1 ORDER BY day")?, params![claktory.id], |row| row.get(0))?;
         claktories_out.push(json!({
             "id": claktory.id,
             "name": claktory.name,
@@ -1132,14 +1174,11 @@ pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Va
     }
     let mut devices_out = Vec::new();
     for device in devices(conn, &account.id)? {
-        let keys: Vec<Value> = {
-            let mut statement = conn.prepare("SELECT device_key, issued FROM device_keys WHERE account_key = ?1 ORDER BY issued")?;
-            statement
-                .query_map(params![device.account_key], |row| {
-                    Ok(json!({"device_key": row.get::<_, String>(0)?, "issued": row.get::<_, i64>(1)?}))
-                })?
-                .collect::<rusqlite::Result<_>>()?
-        };
+        let keys: Vec<Value> = query(
+            conn.prepare("SELECT device_key, issued FROM device_keys WHERE account_key = ?1 ORDER BY issued")?,
+            params![device.account_key],
+            |row| Ok(json!({"device_key": row.get::<_, String>(0)?, "issued": row.get::<_, i64>(1)?})),
+        )?;
         devices_out.push(json!({
             "account_key": device.account_key,
             "name": device.name,
@@ -1150,10 +1189,16 @@ pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Va
             "assertions": keys,
         }));
     }
+    let removed_out: Vec<Value> = query(
+        conn.prepare("SELECT account_key, removed FROM removed_devices WHERE account_id = ?1 ORDER BY removed, account_key")?,
+        params![account.id],
+        |row| Ok(json!({"account_key": row.get::<_, String>(0)?, "removed": row.get::<_, i64>(1)?})),
+    )?;
     Ok(json!({
         "account": {"id": account.id, "email": account.email, "created": account.created, "last_sign_in": account.last_sign_in},
         "claktories": claktories_out,
         "devices": devices_out,
+        "removed_devices": removed_out,
     }))
 }
 
@@ -1190,6 +1235,7 @@ pub fn purge(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM limits WHERE window < ?1", params![now - 2 * 86_400])?;
     conn.execute("DELETE FROM share_releases WHERE time < ?1", params![now - RELEASES_KEPT])?;
     conn.execute("DELETE FROM periods WHERE received < ?1", params![now - PERIODS_KEPT])?;
+    conn.execute("DELETE FROM ai_reports WHERE received < ?1", params![now - crate::protocol::AI_REPORT_KEEP_DAYS * 86_400])?;
     Ok(())
 }
 
@@ -1234,8 +1280,7 @@ pub fn device(conn: &Connection, account_key: &str) -> rusqlite::Result<Option<D
 
 /// An account's devices, the one in touch last first.
 pub fn devices(conn: &Connection, account_id: &str) -> rusqlite::Result<Vec<Device>> {
-    let mut statement = conn.prepare(&format!("{DEVICE} WHERE account_id = ?1 ORDER BY last_seen DESC, created DESC"))?;
-    statement.query_map(params![account_id], device_row)?.collect()
+    query(conn.prepare(&format!("{DEVICE} WHERE account_id = ?1 ORDER BY last_seen DESC, created DESC"))?, params![account_id], device_row)
 }
 
 /// A device was in touch.
@@ -1251,6 +1296,8 @@ pub enum Bound {
     },
     /// The account has as many devices as it may.
     TooMany,
+    /// This key was removed from the account.
+    Removed,
 }
 
 /// Signs a device in from a request whose code was right: makes the
@@ -1263,6 +1310,11 @@ pub fn bind_device(conn: &mut Connection, request: &Request, now: i64) -> rusqli
         return Err(rusqlite::Error::InvalidQuery);
     };
     let tx = conn.transaction()?;
+    if device_removed(&tx, &request.email, account_key)? {
+        tx.execute("DELETE FROM requests WHERE id = ?1", params![request.id])?;
+        tx.commit()?;
+        return Ok(Bound::Removed);
+    }
     let account_id = account_for(&tx, &request.email, now)?;
     let others: u32 = tx.query_row(
         "SELECT count(*) FROM devices WHERE account_id = ?1 AND account_key != ?2",
@@ -1300,6 +1352,37 @@ pub fn bind_device(conn: &mut Connection, request: &Request, now: i64) -> rusqli
 /// (given `account_id`) isn't that account's.
 pub fn unbind_device(conn: &mut Connection, account_key: &str, account_id: Option<&str>) -> rusqlite::Result<bool> {
     let tx = conn.transaction()?;
+    let removed = unbind(&tx, account_key, account_id)?;
+    tx.commit()?;
+    Ok(removed)
+}
+
+/// Removes a device from an account for good (another of its devices, or
+/// the account page, asks): the key is unbound (if it's the account's) and
+/// remembered, so it never signs in to that account again. Remembered also when it isn't
+/// bound now (signed out already, say). False when it wasn't the account's.
+pub fn remove_device(conn: &mut Connection, account_key: &str, account_id: &str, now: i64) -> rusqlite::Result<bool> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO removed_devices (account_id, account_key, removed) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
+        params![account_id, account_key, now],
+    )?;
+    let removed = unbind(&tx, account_key, Some(account_id))?;
+    tx.commit()?;
+    Ok(removed)
+}
+
+/// Whether this key was removed from the account with this email.
+pub fn device_removed(conn: &Connection, email: &str, account_key: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM removed_devices JOIN accounts ON accounts.id = removed_devices.account_id
+         WHERE accounts.email = ?1 AND removed_devices.account_key = ?2)",
+        params![email, account_key],
+        |row| row.get(0),
+    )
+}
+
+fn unbind(tx: &Connection, account_key: &str, account_id: Option<&str>) -> rusqlite::Result<bool> {
     let removed = match account_id {
         Some(account_id) => {
             tx.execute("DELETE FROM devices WHERE account_key = ?1 AND account_id = ?2", params![account_key, account_id])?
@@ -1307,9 +1390,8 @@ pub fn unbind_device(conn: &mut Connection, account_key: &str, account_id: Optio
         None => tx.execute("DELETE FROM devices WHERE account_key = ?1", params![account_key])?,
     };
     if removed > 0 && tx.execute("DELETE FROM device_keys WHERE account_key = ?1", params![account_key])? > 0 {
-        bump_allowlist(&tx)?;
+        bump_allowlist(tx)?;
     }
-    tx.commit()?;
     Ok(removed > 0)
 }
 

@@ -3,4 +3,5 @@
 
 pub mod account;
 pub mod dm;
+pub mod dm_transfer;
 pub mod tunnel;

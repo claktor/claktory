@@ -8,6 +8,7 @@ import 'package:flutter/widgets.dart';
 import '../annotations.dart';
 import '../backend.dart';
 import '../controls.dart';
+import '../find.dart';
 import '../identity.dart';
 import '../markdown.dart';
 import '../pane_chrome.dart';
@@ -37,6 +38,29 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
   String _text = '';
   bool _binary = false;
 
+  /// Find in the file (⌘F): what's shown, formatted or plain, searched
+  /// here; the view shown answers for it ([_FindHook]).
+  final _hook = _FindHook();
+  late final _find = LocalFind(
+    placeholder: 'Search this file',
+    items: () => _hook.items?.call() ?? const [],
+    go: (key, nth) => _hook.go?.call(key, nth),
+  );
+
+  @override
+  void dispose() {
+    _find.dispose();
+    super.dispose();
+  }
+
+  /// What's shown changed (read again, or formatted or plain): found again
+  /// once it's built.
+  void _shownChanged() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _find.refresh();
+    });
+  }
+
   bool get _markdown {
     final mime = file?.mime ?? '';
     return mime == 'text/markdown' ||
@@ -56,6 +80,7 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
             mime == 'application/xml' ||
             mime == 'application/javascript');
     _text = _binary ? '' : _decode(file.data);
+    _shownChanged();
   }
 
   static String _decode(List<int> bytes) {
@@ -91,7 +116,10 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
         _Toggle(
           options: const ['Formatted', 'Plain'],
           selected: _raw ? 1 : 0,
-          onChanged: (index) => setState(() => _raw = index == 1),
+          onChanged: (index) {
+            setState(() => _raw = index == 1);
+            _shownChanged();
+          },
         ),
       reloadButton(),
     ];
@@ -133,12 +161,16 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
                 version: file.sha256,
                 note: note,
                 comments: commenting,
+                find: _find,
+                hook: _hook,
               )
             : _NumberedText(
                 text: _text,
                 version: file.sha256,
                 note: note,
                 comments: commenting,
+                find: _find,
+                hook: _hook,
               ),
       );
       body = commenting == null
@@ -151,14 +183,16 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
       comments: commentable ? CommentsButton(controller: comments) : null,
       actions: [
         if (_markdown && !_binary && problem == null)
-          PaneAction(
-            'Plain text',
-            () => setState(() => _raw = !_raw),
-            active: _raw,
-          ),
+          PaneAction('Plain text', () {
+            setState(() => _raw = !_raw);
+            _shownChanged();
+          }, active: _raw),
         PaneAction('Reload', reload),
       ],
-      body: ColoredBox(color: palette.canvas, child: body),
+      body: FindScope(
+        target: _find,
+        child: ColoredBox(color: palette.canvas, child: body),
+      ),
     );
   }
 }
@@ -175,6 +209,33 @@ void _commentFrom(
   comments.comment(suggest: suggest);
   region.hideToolbar();
   region.clearSelection();
+}
+
+/// How the view shown answers the viewer's find: its items (blocks or
+/// lines) and bringing an occurrence into sight.
+class _FindHook {
+  Iterable<(Object, String)> Function()? items;
+  void Function(Object key, int nth)? go;
+
+  void attach(
+    Iterable<(Object, String)> Function() items,
+    void Function(Object key, int nth) go,
+  ) {
+    this.items = items;
+    this.go = go;
+  }
+}
+
+/// Where the [nth] occurrence of [query] starts in [text], matched as
+/// find matches; 0 when it isn't there.
+int _occurrence(String text, String query, int nth) {
+  final lower = text.toLowerCase();
+  final needle = query.toLowerCase();
+  var at = lower.indexOf(needle);
+  for (var i = 0; i < nth && at >= 0; i++) {
+    at = lower.indexOf(needle, at + needle.length);
+  }
+  return at < 0 ? 0 : at;
 }
 
 class _CutNote extends StatelessWidget {
@@ -474,12 +535,16 @@ class _FormattedText extends StatefulWidget {
     required this.version,
     required this.note,
     required this.comments,
+    required this.find,
+    required this.hook,
   });
 
   final String text;
   final String version;
   final String? note;
   final CommentsController? comments;
+  final LocalFind find;
+  final _FindHook hook;
 
   @override
   State<_FormattedText> createState() => _FormattedTextState();
@@ -508,12 +573,40 @@ class _FormattedTextState extends State<_FormattedText>
     super.initState();
     _scroll.addListener(_moved);
     _attach();
+    widget.hook.attach(_findItems, _findGo);
   }
 
   @override
   void didUpdateWidget(_FormattedText old) {
     super.didUpdateWidget(old);
     if (old.comments != widget.comments) _attach();
+    widget.hook.attach(_findItems, _findGo);
+  }
+
+  /// The rendered blocks, as the last build laid them out.
+  var _shown = const <String>[];
+
+  Iterable<(Object, String)> _findItems() => [
+    for (final (index, text) in _shown.indexed) (index, text),
+  ];
+
+  /// Brings block [key]'s [nth] occurrence into sight: a quarter of the
+  /// way down, unless it's in sight already.
+  void _findGo(Object key, int nth) {
+    if (key is! int || key >= _shown.length || key >= blocks.length) return;
+    final block = blocks[key];
+    final at = _occurrence(_shown[key], widget.find.marks.value.query, nth);
+    final box = boxAt(block.base + at);
+    final view = _scroll.hasClients
+        ? _scroll.position.context.notificationContext?.findRenderObject()
+        : null;
+    if (box == null || view is! RenderBox || !view.attached) return;
+    final top = view.localToGlobal(Offset.zero).dy;
+    final height = view.size.height;
+    if (box.top >= top + Space.xxl && box.bottom <= top + height - Space.l) {
+      return;
+    }
+    _scrollBy(box.top - (top + height * 0.25));
   }
 
   void _attach() {
@@ -562,6 +655,7 @@ class _FormattedTextState extends State<_FormattedText>
   }
 
   Widget _block(int index, TextSpan span, Widget Function(TextSpan) build) {
+    final found = widget.find.marks.value;
     if (index == 0) {
       _building.clear();
       _offset = 0;
@@ -585,7 +679,14 @@ class _FormattedTextState extends State<_FormattedText>
       selectionNotifier: block.selection,
       child: KeyedSubtree(
         key: block.key,
-        child: build(markSpan(span, marks, base: block.base)),
+        child: build(
+          markFound(
+            markSpan(span, marks, base: block.base),
+            found.query,
+            current: found.at == index,
+            nth: found.nth,
+          ),
+        ),
       ),
     );
   }
@@ -595,6 +696,7 @@ class _FormattedTextState extends State<_FormattedText>
   void _built() {
     if (!mounted) return;
     shownText = _building.join('\n');
+    _shown = List.of(_building);
     widget.comments?.show(kind: kind, text: shownText, version: widget.version);
     widget.comments?.relayout();
   }
@@ -612,12 +714,20 @@ class _FormattedTextState extends State<_FormattedText>
     Widget content() => SingleChildScrollView(
       controller: _scroll,
       padding: EdgeInsets.fromLTRB(Space.l, Space.l, Space.l + inset, Space.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Markdown(widget.text, textBlock: comments == null ? null : _block),
-          if (note != null) _CutNote(note),
-        ],
+      // Selected where the pointer is at any zoom (Matt).
+      child: ScrolledSelection(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Its blocks are found in and marked, commented on or not.
+            ValueListenableBuilder(
+              valueListenable: widget.find.marks,
+              builder: (context, _, _) =>
+                  Markdown(widget.text, textBlock: _block),
+            ),
+            if (note != null) _CutNote(note),
+          ],
+        ),
       ),
     );
     if (comments == null) return content();
@@ -650,12 +760,16 @@ class _NumberedText extends StatefulWidget {
     required this.version,
     this.note,
     this.comments,
+    required this.find,
+    required this.hook,
   });
 
   final String text;
   final String version;
   final String? note;
   final CommentsController? comments;
+  final LocalFind find;
+  final _FindHook hook;
 
   @override
   State<_NumberedText> createState() => _NumberedTextState();
@@ -702,6 +816,45 @@ class _NumberedTextState extends State<_NumberedText>
     _down.addListener(_moved);
     _attach();
     _show();
+    widget.hook.attach(_findItems, _findGo);
+    widget.find.marks.addListener(_marked);
+  }
+
+  /// A find's marks moved: the lines show them.
+  void _marked() {
+    if (mounted) setState(() {});
+  }
+
+  Iterable<(Object, String)> _findItems() => [
+    for (final (index, line) in _lines.indexed) (index, line),
+  ];
+
+  /// Brings line [key]'s [nth] occurrence into sight: down to it, and
+  /// across when it's past the edge.
+  void _findGo(Object key, int nth) {
+    if (key is! int || key >= _lines.length || !_down.hasClients) return;
+    final down = _down.position;
+    final y = key * _lineHeight;
+    if (y < down.pixels + Space.xxl ||
+        y + _lineHeight > down.pixels + down.viewportDimension) {
+      _down.jumpTo(
+        (y - 3 * _lineHeight).clamp(down.minScrollExtent, down.maxScrollExtent),
+      );
+    }
+    if (!_across.hasClients) return;
+    final across = _across.position;
+    final query = widget.find.marks.value.query;
+    final x = _gutter + Space.m + _occurrence(_lines[key], query, nth) * 7.3;
+    final width = query.length * 7.3;
+    if (x < across.pixels + _gutter + Space.m ||
+        x + width > across.pixels + across.viewportDimension - Space.l) {
+      _across.jumpTo(
+        (x - _gutter - Space.m - Space.xl).clamp(
+          across.minScrollExtent,
+          across.maxScrollExtent,
+        ),
+      );
+    }
   }
 
   @override
@@ -712,6 +865,7 @@ class _NumberedTextState extends State<_NumberedText>
       _starts = _startsOf(_lines);
     }
     if (old.comments != widget.comments) _attach();
+    widget.hook.attach(_findItems, _findGo);
     if (old.text != widget.text ||
         old.version != widget.version ||
         old.comments != widget.comments) {
@@ -771,6 +925,7 @@ class _NumberedTextState extends State<_NumberedText>
     if (comments?.yOf == _yOf) comments?.yOf = null;
     if (comments?.rectOfRange == _rectOf) comments?.rectOfRange = null;
     if (comments?.scrollBy == _scrollBy) comments?.scrollBy = null;
+    widget.find.marks.removeListener(_marked);
     _across.dispose();
     _down.dispose();
     super.dispose();
@@ -834,13 +989,26 @@ class _NumberedTextState extends State<_NumberedText>
       if (line.length > widest) widest = line.length;
     }
     final width = widest * 7.3 + Space.xl;
+    final found = widget.find.marks.value;
+    // A line's matches marked, the one gone to in full.
+    TextSpan marked(TextSpan span, int index) => markFound(
+      span,
+      found.query,
+      current: found.at == index,
+      nth: found.nth,
+    );
     Widget lineText(int index) {
-      final text = Text(
-        _lines[index],
+      final text = Text.rich(
+        marked(
+          TextSpan(
+            text: _lines[index],
+            style: style.copyWith(color: palette.text),
+          ),
+          index,
+        ),
         maxLines: 1,
         softWrap: false,
         overflow: TextOverflow.clip,
-        style: style.copyWith(color: palette.text),
       );
       if (comments == null) return text;
       final block = blockAt(index)
@@ -858,13 +1026,16 @@ class _NumberedTextState extends State<_NumberedText>
         child: KeyedSubtree(
           key: block.key,
           child: Text.rich(
-            markSpan(
-              TextSpan(
-                text: _lines[index],
-                style: style.copyWith(color: palette.text),
+            marked(
+              markSpan(
+                TextSpan(
+                  text: _lines[index],
+                  style: style.copyWith(color: palette.text),
+                ),
+                marks,
+                base: block.base,
               ),
-              marks,
-              base: block.base,
+              index,
             ),
             maxLines: 1,
             softWrap: false,
@@ -885,41 +1056,56 @@ class _NumberedTextState extends State<_NumberedText>
             scrollDirection: Axis.horizontal,
             child: SizedBox(
               width: gutter + Space.m + textWidth,
-              child: ListView.builder(
-                controller: _down,
-                padding: const EdgeInsets.symmetric(vertical: _padding),
-                itemExtent: _lineHeight,
-                itemCount: _lines.length + (note == null ? 0 : 1),
-                itemBuilder: (context, index) {
-                  if (index == _lines.length) {
-                    return Padding(
-                      padding: EdgeInsets.only(left: gutter + Space.m),
-                      child: Text(
-                        note!,
-                        style: TextStyles.caption.copyWith(
-                          color: palette.textFaint,
-                        ),
-                      ),
-                    );
-                  }
-                  return Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      SizedBox(
-                        width: gutter,
-                        child: Unselectable(
-                          child: Text(
-                            '${index + 1}',
-                            textAlign: TextAlign.right,
-                            style: style.copyWith(color: palette.textFaint),
+              // Selected where the pointer is at any zoom (Matt), sideways
+              // here and down each line.
+              child: ScrolledSelection(
+                child: ListView.builder(
+                  controller: _down,
+                  padding: const EdgeInsets.symmetric(vertical: _padding),
+                  itemExtent: _lineHeight,
+                  itemCount: _lines.length + (note == null ? 0 : 1),
+                  itemBuilder: (context, index) {
+                    if (index == _lines.length) {
+                      return Padding(
+                        padding: EdgeInsets.only(left: gutter + Space.m),
+                        child: Text(
+                          note!,
+                          style: TextStyles.caption.copyWith(
+                            color: palette.textFaint,
                           ),
                         ),
+                      );
+                    }
+                    // Copied, each line ends its own, and the blank
+                    // lines after it come along (they hold nothing to
+                    // select).
+                    var blanks = 0;
+                    while (index + blanks + 1 < _lines.length &&
+                        _lines[index + blanks + 1].isEmpty) {
+                      blanks++;
+                    }
+                    return ScrolledSelection(
+                      trail: '\n' * (blanks + 1),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SizedBox(
+                            width: gutter,
+                            child: Unselectable(
+                              child: Text(
+                                '${index + 1}',
+                                textAlign: TextAlign.right,
+                                style: style.copyWith(color: palette.textFaint),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: Space.m),
+                          Expanded(child: lineText(index)),
+                        ],
                       ),
-                      const SizedBox(width: Space.m),
-                      Expanded(child: lineText(index)),
-                    ],
-                  );
-                },
+                    );
+                  },
+                ),
               ),
             ),
           ),

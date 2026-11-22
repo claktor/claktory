@@ -717,7 +717,7 @@ mod tests {
 
         // Taken back: refused at once.
         let id: String = world.db.query_row("SELECT id FROM grants", [], |row| row.get(0)).expect("the grant");
-        grants::revoke(&mut world.db, &backend(), &id).expect("revoked");
+        grants::revoke(&mut world.db, &backend(), &id, world.now).expect("revoked");
         assert_eq!(call(&mut world, &june, "GET", &format!("agent/conversations/{c1}/messages"), Value::Null).0, 403);
     }
 
@@ -843,7 +843,7 @@ mod tests {
         let cursor = got["next_cursor"].as_str().expect("a cursor").to_owned();
         assert_eq!(call(&mut world, &june, "PUT", &format!("agent/subscriptions/{c1}"), json!({})).0, 204);
         let id: String = world.db.query_row("SELECT id FROM grants", [], |row| row.get(0)).expect("the grant");
-        grants::revoke(&mut world.db, &backend(), &id).expect("revoked");
+        grants::revoke(&mut world.db, &backend(), &id, world.now).expect("revoked");
         post(&mut world, "bo", &c1, generation, "Still?");
         assert_eq!(events(&mut world, &cursor).1["events"], json!([]));
         assert_eq!(events(&mut world, "c1.garbage").0, 410, "a cursor never handed out");

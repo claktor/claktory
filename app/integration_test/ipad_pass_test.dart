@@ -97,6 +97,15 @@ void main() {
       await tester.enterText(find.byType(EditableText).first, _code);
       await settle(300);
       await tester.tap(find.text('Connect').last);
+      // Then the check that this is the Claktory meant (confirmPairing).
+      for (var i = 0; i < 50; i++) {
+        if (find.text('Connect to this Claktory?').evaluate().isNotEmpty) {
+          await settle(300);
+          await tester.tap(find.text('Connect').last);
+          break;
+        }
+        await settle(200);
+      }
     }
     final shell = find.byWidgetPredicate(
       (widget) =>

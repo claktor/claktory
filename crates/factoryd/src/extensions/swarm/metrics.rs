@@ -60,6 +60,15 @@ pub(crate) fn open(home: &Home) -> Result<Connection, String> {
     Ok(db)
 }
 
+/// Collects an already prepared cached query, stopping at the first row error.
+fn query<T, C: FromIterator<T>>(
+    mut statement: rusqlite::CachedStatement<'_>,
+    parameters: impl rusqlite::Params,
+    read: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+) -> rusqlite::Result<C> {
+    statement.query_map(parameters, read)?.collect()
+}
+
 /// A window of time: from `t0` to `t1`, in ms since 1970.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) struct Window {
@@ -108,11 +117,9 @@ SELECT agent, SUM(MAX(0, MIN(e, t1) - MAX(s, t0))) * 1.0 / (t1 - t0) AS busy_sha
 FROM r, w GROUP BY agent HAVING busy_share > 0 ORDER BY busy_share DESC";
 
 pub(crate) fn load(db: &Connection, team: &Team, window: Window) -> rusqlite::Result<Vec<Load>> {
-    let mut statement = db.prepare_cached(Q1)?;
-    let rows = statement.query_map(params![window.t0, window.t1, team.ids(), SHORT_MS], |row| {
+    query(db.prepare_cached(Q1)?, params![window.t0, window.t1, team.ids(), SHORT_MS], |row| {
         Ok(Load { agent: row.get(0)?, busy_share: row.get(1)?, runs: row.get(2)?, short_runs: row.get(3)? })
-    })?;
-    rows.collect()
+    })
 }
 
 // ---- Q2: how long an agent takes to answer another ----
@@ -137,11 +144,9 @@ SELECT responder, n AS replies, MIN(CASE WHEN i >= 0.5*n THEN wait END) / 60000.
 FROM k GROUP BY responder ORDER BY p90_min DESC";
 
 pub(crate) fn answers(db: &Connection, team: &Team, window: Window) -> rusqlite::Result<Vec<Answers>> {
-    let mut statement = db.prepare_cached(Q2)?;
-    let rows = statement.query_map(params![window.t0, window.t1, team.ids()], |row| {
+    query(db.prepare_cached(Q2)?, params![window.t0, window.t1, team.ids()], |row| {
         Ok(Answers { agent: row.get(0)?, replies: row.get(1)?, p50_min: row.get(2)?, p90_min: row.get(3)? })
-    })?;
-    rows.collect()
+    })
 }
 
 // ---- Q3: who's in the middle of the traffic ----
@@ -194,7 +199,7 @@ SELECT COUNT(*) FROM quiet_copies WHERE created >= ?1 AND created < ?2
 fn provenance(db: &Connection, team: &Team, window: Window) -> Option<Provenance> {
     let ids = team.ids();
     let (recorded, sends, answers, handoffs) = db
-        .query_row(PROVENANCE, params![window.t0, window.t1, ids], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .query_row(PROVENANCE, params![window.t0, window.t1, ids], crate::store::row4)
         .ok()?;
     let quiet_copies = db.query_row(QUIET_COPIES, params![window.t0, window.t1, ids], |row| row.get(0)).ok()?;
     Some(Provenance { recorded, sends, answers, handoffs, quiet_copies })
@@ -217,7 +222,7 @@ GROUP BY sender_id, agent";
 pub(crate) fn traffic(db: &Connection, team: &Team, window: Window) -> rusqlite::Result<Traffic> {
     let mut statement = db.prepare_cached(Q3)?;
     let pairs: Vec<(String, String, i64)> =
-        statement.query_map(params![window.t0, window.t1, team.ids()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect::<Result<_, _>>()?;
+        statement.query_map(params![window.t0, window.t1, team.ids()], crate::store::row3)?.collect::<Result<_, _>>()?;
     let messages: i64 = pairs.iter().map(|(_, _, count)| count).sum();
     if messages == 0 {
         return Ok(Traffic { provenance: provenance(db, team, window), ..Traffic::default() });
@@ -300,8 +305,7 @@ FROM d GROUP BY day ORDER BY day";
 
 /// The 7 days up to `end`.
 pub(crate) fn days(db: &Connection, team: &Team, end: i64) -> rusqlite::Result<Vec<Day>> {
-    let mut statement = db.prepare_cached(Q4)?;
-    let rows = statement.query_map(params![end - 7 * 24 * HOUR_MS, end, team.ids(), SHORT_MS], |row| {
+    query(db.prepare_cached(Q4)?, params![end - 7 * 24 * HOUR_MS, end, team.ids(), SHORT_MS], |row| {
         Ok(Day {
             day: row.get(0)?,
             agent_messages: row.get(1)?,
@@ -312,8 +316,7 @@ pub(crate) fn days(db: &Connection, team: &Team, end: i64) -> rusqlite::Result<V
             items_done: row.get(6)?,
             cards: row.get(7)?,
         })
-    })?;
-    rows.collect()
+    })
 }
 
 // ---- Q5: flow ----
@@ -343,7 +346,7 @@ FROM c";
 
 pub(crate) fn flow(db: &Connection, team: &Team, window: Window) -> rusqlite::Result<Flow> {
     let (finished, p50, p90, open_now): (i64, Option<f64>, Option<f64>, i64) =
-        db.prepare_cached(Q5)?.query_row(params![window.t0, window.t1, team.ids()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
+        db.prepare_cached(Q5)?.query_row(params![window.t0, window.t1, team.ids()], crate::store::row4)?;
     let per_hour = finished as f64 / window.hours();
     Ok(Flow {
         finished,
@@ -383,9 +386,7 @@ FROM checklist_items i WHERE i.status = 'blocked' AND i.agent IN (SELECT value F
 
 /// What's blocked now (`now`: when that is).
 pub(crate) fn blocked(db: &Connection, team: &Team, now: i64, names: &HashMap<String, String>) -> rusqlite::Result<Vec<Blocked>> {
-    let mut statement = db.prepare_cached(Q6)?;
-    let rows = statement.query_map(params![now, team.ids()], |row| blocked_row(row, names))?;
-    rows.collect()
+    query(db.prepare_cached(Q6)?, params![now, team.ids()], |row| blocked_row(row, names))
 }
 
 /// What was blocked at `t`, rebuilt from the checklists' history: items
@@ -406,9 +407,7 @@ FROM o ORDER BY blocked_h DESC";
 
 /// What was blocked at `t`, in the past (`Q6_AT`).
 pub(crate) fn blocked_at(db: &Connection, team: &Team, t: i64, names: &HashMap<String, String>) -> rusqlite::Result<Vec<Blocked>> {
-    let mut statement = db.prepare_cached(Q6_AT)?;
-    let rows = statement.query_map(params![t, team.ids()], |row| blocked_row(row, names))?;
-    rows.collect()
+    query(db.prepare_cached(Q6_AT)?, params![t, team.ids()], |row| blocked_row(row, names))
 }
 
 fn blocked_row(row: &rusqlite::Row<'_>, names: &HashMap<String, String>) -> rusqlite::Result<Blocked> {
@@ -544,8 +543,7 @@ FROM r WHERE started >= ?1 AND started < ?2 AND prev_end IS NOT NULL GROUP BY ag
 ORDER BY from_5_to_60_min + over_60_min DESC, agent";
 
 pub(crate) fn wakes(db: &Connection, team: &Team, window: Window) -> rusqlite::Result<Vec<Wakes>> {
-    let mut statement = db.prepare_cached(Q8)?;
-    let rows = statement.query_map(params![window.t0, window.t1, team.ids(), SHORT_MS], |row| {
+    query(db.prepare_cached(Q8)?, params![window.t0, window.t1, team.ids(), SHORT_MS], |row| {
         let agent: String = row.get(0)?;
         Ok(Wakes {
             cache_min: team.ttl_ms.get(&agent).copied().unwrap_or(5 * 60_000) / 60_000,
@@ -555,8 +553,7 @@ pub(crate) fn wakes(db: &Connection, team: &Team, window: Window) -> rusqlite::R
             over_60_min: row.get(3)?,
             late_and_short: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
         })
-    })?;
-    rows.collect()
+    })
 }
 
 // ---- Q9: tokens and context size ----
@@ -589,8 +586,7 @@ FROM agent_usage WHERE hour >= ?1 / 1000 AND hour < ?2 / 1000 AND agent IN (SELE
 GROUP BY agent, provider, model ORDER BY SUM(cache_read) + SUM(cache_write) DESC, agent";
 
 pub(crate) fn usage(db: &Connection, team: &Team, window: Window) -> rusqlite::Result<Vec<Usage>> {
-    let mut statement = db.prepare_cached(Q9)?;
-    let rows = statement.query_map(params![window.t0, window.t1, team.ids()], |row| {
+    query(db.prepare_cached(Q9)?, params![window.t0, window.t1, team.ids()], |row| {
         Ok(Usage {
             agent: row.get(0)?,
             provider: row.get(1)?,
@@ -601,8 +597,7 @@ pub(crate) fn usage(db: &Connection, team: &Team, window: Window) -> rusqlite::R
             cache_read: row.get(6)?,
             output: row.get(7)?,
         })
-    })?;
-    rows.collect()
+    })
 }
 
 // ---- Q10: monitors that wake agents ----
@@ -625,8 +620,7 @@ FROM monitors m WHERE m.state = 'active' AND m.agent IN (SELECT value FROM json_
 ORDER BY fires_in_window DESC, m.fires DESC LIMIT 10";
 
 pub(crate) fn wakers(db: &Connection, team: &Team, window: Window) -> rusqlite::Result<Vec<Waker>> {
-    let mut statement = db.prepare_cached(Q10)?;
-    let rows = statement.query_map(params![window.t0, window.t1, team.ids()], |row| {
+    query(db.prepare_cached(Q10)?, params![window.t0, window.t1, team.ids()], |row| {
         Ok(Waker {
             agent: row.get(0)?,
             monitor: format!("m{}", row.get::<_, i64>(1)?),
@@ -635,8 +629,7 @@ pub(crate) fn wakers(db: &Connection, team: &Team, window: Window) -> rusqlite::
             fires_ever: row.get(4)?,
             fires_in_window: row.get(5)?,
         })
-    })?;
-    rows.collect()
+    })
 }
 
 // ---- What the signs need besides ----
@@ -644,23 +637,26 @@ pub(crate) fn wakers(db: &Connection, team: &Team, window: Window) -> rusqlite::
 /// Items each agent could take up now: open or in progress, by owner (the
 /// list's agent when there's none).
 pub(crate) fn ready(db: &Connection, team: &Team) -> rusqlite::Result<HashMap<String, i64>> {
-    let mut statement = db.prepare_cached(
-        "SELECT CASE WHEN owner = '' THEN agent ELSE owner END AS who, COUNT(*) FROM checklist_items
+    query(
+        db.prepare_cached(
+            "SELECT CASE WHEN owner = '' THEN agent ELSE owner END AS who, COUNT(*) FROM checklist_items
          WHERE status IN ('open', 'in_progress') AND agent IN (SELECT value FROM json_each(?1)) GROUP BY who",
-    )?;
-    let rows = statement.query_map(params![team.ids()], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    rows.collect()
+        )?,
+        params![team.ids()],
+        crate::store::row2,
+    )
 }
 
 /// Messages and events each agent was sent in the window, but the
 /// person's: what wakes it without them (agents copying it in, monitors,
 /// tasks).
 pub(crate) fn received(db: &Connection, team: &Team, window: Window) -> rusqlite::Result<HashMap<String, i64>> {
-    let mut statement = db.prepare_cached(
-        "SELECT agent, COUNT(*) FROM messages WHERE created >= ?1 AND created < ?2 AND source != 'person' AND agent IN (SELECT value FROM json_each(?3)) GROUP BY agent",
-    )?;
-    let rows = statement.query_map(params![window.t0, window.t1, team.ids()], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    rows.collect()
+    query(
+        db.prepare_cached(
+            "SELECT agent, COUNT(*) FROM messages WHERE created >= ?1 AND created < ?2 AND source != 'person' AND agent IN (SELECT value FROM json_each(?3)) GROUP BY agent",
+        )?,
+        params![window.t0, window.t1, team.ids()], crate::store::row2,
+    )
 }
 
 #[cfg(test)]

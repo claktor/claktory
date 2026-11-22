@@ -622,6 +622,7 @@ impl Broker {
                 value,
                 file: false,
                 public: false,
+                binary: false,
             })
             .collect()
     }
@@ -1190,7 +1191,7 @@ impl Factory {
             return Err(RequestError::Connect(format!("{} didn't allow anything a secret could be made from.", recipe.spec().name)));
         };
         let values: Vec<Value> =
-            values.into_iter().map(|variable| Value { variable: variable.name, value: variable.value, file: false }).collect();
+            values.into_iter().map(|variable| Value { variable: variable.name, value: variable.value, file: false, binary: false }).collect();
         let name = if ask.name.is_empty() { format!("{} access", recipe.spec().name) } else { ask.name.clone() };
         // Unless said otherwise, it says what it grants, as checked.
         let description = match request.description.trim() {
@@ -1232,7 +1233,7 @@ impl Factory {
                     .await
                     .map_err(|problem| self.recipe_failed(&opened, problem))?;
                 let values: Option<Vec<Value>> = derived.values.map(|values| {
-                    values.into_iter().map(|variable| Value { variable: variable.name, value: variable.value, file: false }).collect()
+                    values.into_iter().map(|variable| Value { variable: variable.name, value: variable.value, file: false, binary: false }).collect()
                 });
                 if values.is_some() {
                     let before = self.vault.values(&current.id)?;
@@ -1246,6 +1247,7 @@ impl Factory {
                                 value: value.value,
                                 file: value.file,
                                 public: false,
+                                binary: value.binary,
                             })
                             .collect(),
                     );

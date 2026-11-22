@@ -295,7 +295,7 @@ impl Injected<'_> {
             let name = if safe { variable.variable.clone() } else { format!("secret-{index}") };
             let path = dir.join(name);
             let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
-            file.write_all(variable.value.as_bytes())?;
+            file.write_all(&variable.bytes())?;
             environment.push((variable.variable.clone(), Zeroizing::new(path.display().to_string())));
         }
         Ok(environment)

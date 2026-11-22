@@ -112,7 +112,7 @@ fn message(kind: &str, surface: &str, body: Value) -> Value {
 }
 
 impl App {
-    /// The first time, the default dashboard.
+    /// The first time, the default dashboard; later, its fixes.
     pub fn start(&mut self, host: &mut impl Host) {
         if let Err(why) = model::first_start(host) {
             host.log(Level::Error, &format!("Couldn't keep the dashboard: {why}"));

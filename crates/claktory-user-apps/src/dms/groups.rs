@@ -96,6 +96,12 @@ pub const EPOCHS_BEHIND: u64 = 5;
 /// application messages a minute per leaf (self and channel groups).
 const COMMITS_PER_LEAF: i64 = 120;
 const COMMITS_PER_ACCOUNT: i64 = 600;
+/// A budget of their own for the commits a new security key or a removed
+/// device takes (dms-e2ee §2.1): each leaf's move to the new key, and the
+/// Removes of the account's own leaves its key no longer vouches for, one
+/// per group each, so a person with many chats isn't held up.
+const ROTATION_COMMITS_PER_LEAF: i64 = 1000;
+const ROTATION_COMMITS_PER_ACCOUNT: i64 = 5000;
 const PROPOSALS_PER_LEAF: i64 = 120;
 const MESSAGES_PER_LEAF: i64 = 60;
 /// A page of a mailbox: messages by default and at most, and bytes.
@@ -268,6 +274,21 @@ fn is_leaf(certificate: &LeafCertificate, leaf: &Leaf) -> bool {
 fn current(db: &Connection, certificate: &LeafCertificate) -> Result<bool, Refusal> {
     let Some(keys) = keys_of(db, &certificate.leaf.account_id)? else { return Ok(false) };
     Ok(certificate.identity == keys.identity && keys.list.names(certificate))
+}
+
+/// Whether the account's current identity made `certificate`, listed or
+/// not. A leaf under any other (one its account replaced) is inert: it
+/// moves itself to the new key, and does nothing else (dms-e2ee §2.1).
+fn under_current(db: &Connection, certificate: &LeafCertificate) -> Result<bool, Refusal> {
+    Ok(keys_of(db, &certificate.leaf.account_id)?.is_some_and(|keys| keys.identity == certificate.identity))
+}
+
+fn replaced() -> Refusal {
+    Refusal(
+        403,
+        "replaced_key",
+        "This leaf's certificate is from a security key its account replaced: it only moves itself to the new one.".to_owned(),
+    )
 }
 
 /// The people whose devices a group reaches: a conversation's two, or the
@@ -605,8 +626,6 @@ fn commit(
     if epoch != group.epoch {
         return Ok(epoch_answer(group.epoch));
     }
-    take(transaction, &format!("commit:{}", leaf.leaf_id), 3600, COMMITS_PER_LEAF, now_ms)?;
-    take(transaction, &format!("commits:{}", leaf.account), 3600, COMMITS_PER_ACCOUNT, now_ms)?;
     let message = parsed.into_protocol_message().map_err(|error| invalid(&format!("That commit isn't one: {error}.")))?;
     let key = seal_key(keys, transaction, &group.id, now_ms)?;
     let provider = Provider::public(crypto(), transaction, &key).map_err(|error| broken(&error.to_string()))?;
@@ -620,12 +639,43 @@ fn commit(
         return Err(invalid("commit isn't a commit."));
     };
 
-    // Who: the caller's own leaf, as a member or rejoining.
+    // Who: the caller's own leaf, as a member or rejoining. A member's new
+    // leaf, when it has one, is its own under the account's current key and
+    // list; under a key its account replaced, a member only moves itself to
+    // the new one, keeping its signature key, with nothing else in the
+    // commit (R1's rule, with Fugo's three tightenings).
+    let mut rotation = false;
+    let committer = match sender {
+        Sender::Member(index) => Some(index),
+        _ => None,
+    };
     let external = match sender {
         Sender::Member(index) => {
             let mine = public.leaf(index).and_then(|node| certified(node.credential(), node.signature_key().as_slice()));
-            if !mine.is_some_and(|certificate| is_leaf(&certificate, &leaf)) {
+            let Some(old) = mine.filter(|certificate| is_leaf(certificate, &leaf)) else {
                 return Err(invalid("A leaf commits only as itself."));
+            };
+            let path = staged.update_path_leaf_node().map(|node| certified(node.credential(), node.signature_key().as_slice()));
+            if let Some(new) = &path {
+                let fine = match new {
+                    Some(new) => is_leaf(new, &leaf) && current(transaction, new)?,
+                    None => false,
+                };
+                if !fine {
+                    return Err(Refusal(
+                        403,
+                        "not_current",
+                        "A leaf's new certificate is its own, from its account's current security key and on its device list.".to_owned(),
+                    ));
+                }
+            }
+            if !under_current(transaction, &old)? {
+                let moved = staged.queued_proposals().next().is_none()
+                    && path.flatten().is_some_and(|new| new.leaf.signature_key == old.leaf.signature_key);
+                if !moved {
+                    return Err(replaced());
+                }
+                rotation = true;
             }
             false
         }
@@ -649,10 +699,35 @@ fn commit(
     // rejoin only removes its own old leaf.
     let people = people(transaction, &group)?;
     let mut added = Vec::new();
+    // Only Removes of the account's own leaves its current key and list no
+    // longer vouch for: a removed device's, or one a new key left behind.
+    let mut cleanup = staged.queued_proposals().next().is_some();
     for queued in staged.queued_proposals() {
         if matches!(leaf.kind, LeafKind::Claktory) && !external {
             return Err(Refusal(403, "claktory_update_only", "A Claktory commits only its own update.".to_owned()));
         }
+        // A proposal another member made, taken in by reference: never
+        // one from a leaf under a replaced key.
+        if let Sender::Member(by) = queued.sender()
+            && Some(*by) != committer
+        {
+            let proposer = public.leaf(*by).and_then(|node| certified(node.credential(), node.signature_key().as_slice()));
+            match proposer {
+                Some(proposer) if under_current(transaction, &proposer)? => {}
+                _ => return Err(replaced()),
+            }
+        }
+        let leaving = match queued.proposal() {
+            Proposal::Remove(remove) if !external => {
+                public.leaf(remove.removed()).and_then(|node| certified(node.credential(), node.signature_key().as_slice()))
+            }
+            _ => None,
+        };
+        cleanup = cleanup
+            && match leaving {
+                Some(gone) => gone.leaf.account_id == leaf.account && !current(transaction, &gone)?,
+                None => false,
+            };
         match queued.proposal() {
             Proposal::Add(add) => {
                 if external {
@@ -690,6 +765,16 @@ fn commit(
             _ => return Err(invalid("Commits here add, remove and update, nothing else.")),
         }
     }
+
+    // A new key's moves and the Removes it leaves behind have their own
+    // budget; everything else the usual one.
+    let (budget, per_leaf, per_account) = if rotation || cleanup {
+        ("rotation-commit", ROTATION_COMMITS_PER_LEAF, ROTATION_COMMITS_PER_ACCOUNT)
+    } else {
+        ("commit", COMMITS_PER_LEAF, COMMITS_PER_ACCOUNT)
+    };
+    take(transaction, &format!("{budget}:{}", leaf.leaf_id), 3600, per_leaf, now_ms)?;
+    take(transaction, &format!("{budget}s:{}", leaf.account), 3600, per_account, now_ms)?;
 
     // Whom it adds: KeyPackages the worker handed out, of leaves that
     // belong here, and the Welcome to exactly them.
@@ -791,7 +876,21 @@ fn propose(
     now_ms: i64,
 ) -> Result<(u16, Value), Refusal> {
     let leaf = leaf_of(caller)?;
-    let (mut group, _) = reached(transaction, caller, id, now_ms)?;
+    let mut group = match reached(transaction, caller, id, now_ms) {
+        Ok((group, _)) => group,
+        // A Claktory whose grant on a conversation ended asks to leave it
+        // (Fugo L6): no grant is needed for that, only its leaf still in
+        // the tree, which processing the proposal below checks, and it
+        // being its own Remove, the only proposal taken.
+        Err(refused) => match (caller, load(transaction, &group_id_of(id)?)?) {
+            (Caller::Backend { agent: None, .. }, Some(group))
+                if group.kind == GroupKind::Conversation && people(transaction, &group)?.contains(&leaf.account) =>
+            {
+                group
+            }
+            _ => return Err(refused),
+        },
+    };
     let (envelope, parsed) = envelope_of(&propose.proposal, MlsKind::Proposal, "proposal")?;
     let (group_id, epoch) = parsed.group.clone().ok_or_else(|| invalid("proposal isn't a proposal."))?;
     if group_id.as_slice() != group.id.as_slice() {
@@ -811,8 +910,11 @@ fn propose(
         public.process_message(provider.crypto(), message).map_err(|error| invalid(&format!("That proposal doesn't apply: {error}.")))?;
     let Sender::Member(index) = *processed.sender() else { return Err(invalid("Proposals here come from members.")) };
     let mine = public.leaf(index).and_then(|node| certified(node.credential(), node.signature_key().as_slice()));
-    if !mine.is_some_and(|certificate| is_leaf(&certificate, &leaf)) {
+    let Some(mine) = mine.filter(|certificate| is_leaf(certificate, &leaf)) else {
         return Err(invalid("A leaf proposes only as itself."));
+    };
+    if !under_current(transaction, &mine)? {
+        return Err(replaced());
     }
     let ProcessedMessageContent::ProposalMessage(queued) = processed.into_content() else {
         return Err(invalid("proposal isn't a proposal."));
@@ -1587,7 +1689,7 @@ mod tests {
             .iter()
             .map(|event| (event["kind"].as_str().expect("kind").to_owned(), event["group_id"].clone()))
             .collect();
-        let next = followed["next_cursor"].as_str().expect("a cursor");
+        let next = followed["next_cursor"].as_str().expect("a cursor").to_owned();
         assert_eq!(call(&mut world, &machine, "GET", &format!("claktory/events?since={next}"), Value::Null).1["events"], json!([]));
         let channel_b64 = json!(b64(&channel_id));
         let chat_b64 = json!(b64(&chat_id));
@@ -1604,14 +1706,27 @@ mod tests {
                 ("groups".to_owned(), Value::Null),
                 ("group_message".to_owned(), channel_b64),
                 ("groups".to_owned(), Value::Null),
-                // Added to the conversation once granted.
+                // The grant, then added to the conversation.
+                ("groups".to_owned(), Value::Null),
                 ("group_message".to_owned(), chat_b64),
                 ("welcome".to_owned(), Value::Null),
             ]
         );
 
-        // It asks to leave the conversation by proposal: its own Remove only.
+        // The grant ends: its feed says so at once, and the conversation
+        // leaves its list.
         let (_, welcomes) = call(&mut world, &machine, "GET", "welcomes", Value::Null);
+        let grant: String = world.db.query_row("SELECT id FROM grants", [], |row| row.get(0)).expect("the grant");
+        world.now += 1_000;
+        crate::grants::revoke(&mut world.db, &phone, &grant, world.now).expect("revoked");
+        let (_, followed) = call(&mut world, &machine, "GET", &format!("claktory/events?since={next}"), Value::Null);
+        assert_eq!(followed["events"], json!([{"kind": "groups"}]));
+        let (_, listed) = call(&mut world, &machine, "GET", "groups", Value::Null);
+        assert_eq!(listed["groups"].as_array().map(Vec::len), Some(1), "the channel only: {listed}");
+        assert_eq!(mailbox(&mut world, &machine, &chat_id, 0).0, 404);
+
+        // It still asks to leave by proposal, with no grant (Fugo L6): its
+        // own Remove only, and only the Claktory itself.
         let welcome = welcomes["welcomes"]
             .as_array()
             .expect("welcomes")

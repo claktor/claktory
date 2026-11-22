@@ -46,7 +46,7 @@ static CONNECTING: Manifest = Manifest {
 
 const ASK: &str = "## Asking for secrets
 
-You can use only the secrets listed in your Secrets section, if any. The person may keep others in the vault that could help with your work; you can't see them. When you need a key, token or password you weren't given, ask with `secrets_request`, never in a message: describe the kind of secret (a short name; which service, what the secret must be able to do and roughly how much, such as \"an Anthropic API key that can run Claude models a few times\"; and the environment variables you expect, never values) and say why. The person approves the need or dismisses it; approved, you're given one that fits, theirs or a new one, and you're told what you got. `secrets_requests` lists your requests; while one waits, change it with `secrets_request_update` rather than asking again, and withdraw it with `secrets_request_cancel` once you no longer need it. For a new ssh key, have the vault generate it (`generate`): no one, you included, ever sees its private half, and you're told its public one.
+You can use only the secrets listed in your Secrets section, if any. The person may keep others in the vault that could help with your work; you can't see them. When you need a key, token or password you weren't given, ask with `secrets_request`, never in a message: describe the kind of secret (a short name; which service, what the secret must be able to do and roughly how much, such as \"an Anthropic API key that can run Claude models a few times\"; and the environment variables you expect, never values) and say why. The person approves the need or dismisses it; approved, you're given one that fits, theirs or a new one, and you're told what you got. `secrets_requests` lists your requests; while one waits, change it with `secrets_request_update` rather than asking again, and withdraw it with `secrets_request_cancel` once you no longer need it. For a new ssh key or password, have the vault generate it (`generate`): no one, you included, ever sees its private half or the password, and you're told a key's public half. For a file already on this computer (a keystore, a credentials file), ask to import it (`import`); never ask the person to copy a file's contents into the vault by hand.
 ";
 
 const CONNECT: &str = "## Connecting services
@@ -68,7 +68,7 @@ const CONNECTED: &str = "## Connected services
 A connected service (Cloudflare, AWS) is given to no one. When the person connects one for an agent's suggestion, compare what it asked for with what the connection reaches (`secrets_inspect`), see what a secret can be made of (`secrets_choices`), make one with only the access that work needs (`secrets_derive`), give that to the agent with `secrets_grant`, and tell it what it got.
 ";
 
-const REQUEST: &str = "Ask the person for a secret you need: name, a short name for it (\"Cloudflare token\"); description, which service, what the secret must be able to do and roughly how much (\"an Anthropic API key that can run Claude models a few times\"); variables, the environment variables you expect ([{name, file}], file: true for a key file given to commands as its path; never values); reason, why you need it. You're told what you got when it's decided. For a new key no one has ever seen (an ssh deploy key), pass generate: \"ssh-ed25519\": the vault makes it when the person approves, its private half in one file variable (SSH_KEY unless you name one), name also the key's comment, and you're told only its public half. grant: \"nobody\" gives it to no one, you included (for a key the person gives elsewhere); \"me\", the default, gives it to you.";
+const REQUEST: &str = "Ask the person for a secret you need: name, a short name for it (\"Cloudflare token\"); description, which service, what the secret must be able to do and roughly how much (\"an Anthropic API key that can run Claude models a few times\"); variables, the environment variables you expect ([{name, file}], file: true for a key file given to commands as its path; never values); reason, why you need it. You're told what you got when it's decided. For a new key no one has ever seen (an ssh deploy key), pass generate: \"ssh-ed25519\": the vault makes it when the person approves, its private half in one file variable (SSH_KEY unless you name one), name also the key's comment, and you're told only its public half. For a new password, pass generate: \"password\" and password: {length (at least 16, 256 at most; the shortest strong one if left out), lowercase, uppercase, digits, symbols (true for each kind wanted; all four if none), or allowed (the exact characters a fussy service accepts), avoid_similar (no 0 O o 1 l I |), require_each (at least one of each kind), max_length (the most the service takes, if under 16)}: the vault makes it when the person approves, in one variable (PASSWORD unless you name one), and refuses anything weaker than 80 bits (72 when the service caps the length). grant: \"nobody\" gives it to no one, you included (for a key or password the person gives elsewhere); \"me\", the default, gives it to you. For a file already on this computer (a keystore, a credentials file), pass import: [{variable, path}] (each file's full path, and the variable that gives it to commands as a file) with name and reason: the person sees exactly which files, never their contents, and when they approve, Claktory reads them into the vault itself, binary files too; they choose whether you get it. Never ask the person to copy a file's contents into the vault by hand; ask to import it. item: the checklist item it's for (12 for #12, or Ana#12), whenever it unblocks one: the request shows as that item in their Needs you, so don't also ask them about it.";
 const REQUESTS: &str = "Your requests for secrets: the ones waiting for the person, and your latest decided ones, each with its id, name, state, variables and reason.";
 const UPDATE: &str = "Change a request of yours that's still waiting, rather than asking again: id from secrets_requests; give only what changes: description, variables ([{name, file}], all of them) or reason. The person sees it changed.";
 const CANCEL: &str = "Withdraw a request of yours that's still waiting, once you no longer need it: id from secrets_requests; reason, optional, why. The person sees it withdrawn.";
@@ -118,8 +118,30 @@ impl Extension for Secrets {
                     "additionalProperties": false,
                 }},
                 "reason": {"type": "string"},
+                "item": {"type": "string"},
                 "generate": {"type": "string", "enum": crate::vault::generate::KINDS},
                 "grant": {"type": "string", "enum": ["me", "nobody"]},
+                "import": {"type": "array", "items": {
+                    "type": "object",
+                    "required": ["variable", "path"],
+                    "properties": {"variable": {"type": "string"}, "path": {"type": "string"}},
+                    "additionalProperties": false,
+                }},
+                "password": {
+                    "type": "object",
+                    "properties": {
+                        "length": {"type": "integer"},
+                        "lowercase": {"type": "boolean"},
+                        "uppercase": {"type": "boolean"},
+                        "digits": {"type": "boolean"},
+                        "symbols": {"type": "boolean"},
+                        "allowed": {"type": "string"},
+                        "avoid_similar": {"type": "boolean"},
+                        "require_each": {"type": "boolean"},
+                        "max_length": {"type": "integer"},
+                    },
+                    "additionalProperties": false,
+                },
             },
         });
         let ask = super::tool(crate::vault::asks::TOOL, "Ask for a secret", REQUEST, request, super::typed_handler(factory, agent, ask));
@@ -293,6 +315,15 @@ struct AskArgs {
     /// Who a generated key goes to: "me" (the default) or "nobody".
     #[serde(default)]
     grant: String,
+    /// What a generated password is made of.
+    #[serde(default)]
+    password: Option<crate::vault::generate::Password>,
+    /// Files on this computer to import, each into a file variable.
+    #[serde(default)]
+    import: Vec<crate::vault::import::Wanted>,
+    /// The checklist item it's for (12, or Ana#12).
+    #[serde(default)]
+    item: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -337,8 +368,17 @@ fn admin(factory: &Factory, asker: &str) -> Result<(), String> {
 }
 
 fn ask(factory: &Arc<Factory>, asker: &str, args: AskArgs) -> Result<ToolResult, String> {
+    // Read and checked now, by Claktory: never what an agent says it read.
+    let imports = if args.import.is_empty() {
+        Vec::new()
+    } else if !args.generate.is_empty() || args.password.is_some() {
+        return Err("Ask to import files or to generate a secret, not both.".to_owned());
+    } else {
+        let homes = crate::vault::import::homes(factory.home.root());
+        factory.vault.asked_imports(&args.import, &homes).map_err(|error| error.to_string())?
+    };
     let wanted = match args.new {
-        Some(wanted) if args.name.trim().is_empty() => wanted,
+        Some(wanted) if args.name.trim().is_empty() => crate::vault::asks::Wanted { imports: Vec::new(), read_pipes: false, ..wanted },
         _ => crate::vault::asks::Wanted {
             name: if args.name.trim().is_empty() { args.secret.unwrap_or_default() } else { args.name },
             description: args.description,
@@ -350,23 +390,48 @@ fn ask(factory: &Arc<Factory>, asker: &str, args: AskArgs) -> Result<ToolResult,
                 other => return Err(format!("grant is \"me\" or \"nobody\", not \"{other}\".")),
             },
             public_key: String::new(),
+            password: args.password,
+            imports,
+            read_pipes: false,
         },
     };
+    let wanted = crate::vault::asks::Wanted { read_pipes: !factory.pipes.tainted(asker).is_empty(), ..wanted };
+    // The checklist item it's for: it shows as that item in Needs you.
+    let (item, linked) = super::checklist::item_for(factory, asker, args.item.as_deref())
+        .map_err(|problem| format!("item: {problem}. Nothing was asked."))?;
     // The admin agent an approval would pass it to, picked now so the card
     // knows; empty when there's none, and the person does the vault work.
     let admin = crate::vault::requests::secrets_admin(&factory.lock().config, asker).unwrap_or_default();
     let request = factory.vault.ask(asker, wanted, &args.reason, &admin).map_err(|error| error.to_string())?;
+    if !item.is_empty() {
+        super::checklist::link(&factory.store, &super::checklist::Card::Secret(request.id.clone()), asker, &item);
+        factory.refresh_view(asker);
+    }
     factory.vault_changed();
     let person = factory.lock().config.person().to_owned();
-    let said = if request.generate.is_empty() {
+    let kind = crate::vault::generate::called(&request.generate, request.password.as_ref());
+    let said = if !request.imports.is_empty() {
+        let files: Vec<String> =
+            request.imports.iter().map(|file| format!("{} ({}, {} bytes)", file.variable, file.path, file.size)).collect();
+        format!(
+            "Asked to import {} into the vault as {}; {person} will approve or dismiss it, choosing whether you get it, and you'll be told. You never see the contents.",
+            files.join(", "),
+            request.secret_name
+        )
+    } else if request.generate.is_empty() {
         format!("Asked for {}; {person} will give it to you or dismiss the request, and you'll be told.", request.secret_name)
+    } else if request.generate == crate::vault::generate::PASSWORD {
+        format!(
+            "Asked the vault to generate {}, {kind}; {person} will approve or dismiss it (they may make it longer), and you'll be told how it went, never the password.",
+            request.secret_name
+        )
     } else {
         format!(
-            "Asked the vault to generate {}, {}; {person} will approve or dismiss it, and you'll be told its public key, never the private one.",
-            request.secret_name,
-            crate::vault::generate::called(&request.generate)
+            "Asked the vault to generate {}, {kind}; {person} will approve or dismiss it, and you'll be told its public key, never the private one.",
+            request.secret_name
         )
     };
+    let said = format!("{said}{}", super::checklist::taken_for(linked, &person));
     Ok(ToolResult::text(said, crate::vault::asks::details(&request)))
 }
 
@@ -417,7 +482,12 @@ fn request_line(request: &factory_protocol::v1::SecretRequest) -> String {
     if !request.public_key.is_empty() {
         line.push_str(&format!(" Public key: {}", request.public_key));
     } else if !request.generate.is_empty() {
-        line.push_str(&format!(" (a key for the vault to generate, {})", if request.grant_to_nobody { "for no one" } else { "for you" }));
+        let what = if request.generate == crate::vault::generate::PASSWORD {
+            crate::vault::generate::called(&request.generate, request.password.as_ref())
+        } else {
+            "a key".to_owned()
+        };
+        line.push_str(&format!(" ({what} for the vault to generate, {})", if request.grant_to_nobody { "for no one" } else { "for you" }));
     }
     line
 }
@@ -445,7 +515,8 @@ fn cancel_request(factory: &Arc<Factory>, asker: &str, args: CancelArgs) -> Resu
     let request = factory.vault.withdraw_request(asker, &args.id, &args.reason).map_err(|error| error.to_string())?;
     factory.vault_changed();
     let said = format!("Withdrew your request {} for {}.", request.id, request.secret_name);
-    crate::vault::requests::show(factory, request.clone());
+    // An admin agent's add-secret card for it closes too.
+    crate::vault::requests::show_everywhere(factory, request.clone());
     Ok(ToolResult::text(said, json!({"request_id": request.id})))
 }
 
@@ -579,21 +650,12 @@ fn grant(factory: &Arc<Factory>, asker: &str, args: GrantArgs) -> Result<ToolRes
 /// the values go straight into the vault.
 fn collect(factory: &Arc<Factory>, asker: &str, args: CollectArgs) -> Result<ToolResult, String> {
     admin(factory, asker)?;
+    if args.cancel {
+        return close_collect(factory, asker, &args.request);
+    }
     let asked = factory.vault.approved_request(&args.request).map_err(|error| error.to_string())?;
     if asked.agent_id == asker {
         return Err("You can't collect a secret for your own request; the person decides it.".to_owned());
-    }
-    if args.cancel {
-        if !(asked.collecting && asked.admin_agent_id == asker) {
-            return Err(format!("You have no card open for {}.", asked.id));
-        }
-        let request = factory.vault.set_collecting(&asked.agent_id, &asked.id, asker, false).map_err(|error| error.to_string())?;
-        factory.vault_changed();
-        crate::vault::requests::show_everywhere(factory, request.clone());
-        return Ok(ToolResult::text(
-            format!("Closed the card for {}; the request stays approved, so you can still grant a secret or open a new card.", request.id),
-            crate::vault::asks::collect_details(&request),
-        ));
     }
     if asked.collecting && asked.admin_agent_id == asker {
         return Err(format!("The card for {} is open in your conversation already.", asked.id));
@@ -609,6 +671,44 @@ fn collect(factory: &Arc<Factory>, asker: &str, args: CollectArgs) -> Result<Too
         request.secret_name
     );
     Ok(ToolResult::text(said, crate::vault::asks::collect_details(&request)))
+}
+
+/// secrets_collect with cancel: closes the admin agent's add-secret card
+/// for `id`. A request that closed meanwhile (withdrawn, decided, expired)
+/// closed its card already: it's shown again as it ended, in case the card
+/// missed it, and that's no error.
+fn close_collect(factory: &Arc<Factory>, asker: &str, id: &str) -> Result<ToolResult, String> {
+    use factory_protocol::v1::SecretRequestState;
+    let found = factory.vault.find_request(id).map_err(|error| error.to_string())?;
+    let Some(asked) = found else { return Err(format!("There's no request {}.", id.trim())) };
+    if asked.agent_id == asker || asked.admin_agent_id != asker {
+        return Err(format!("You have no card open for {}.", asked.id));
+    }
+    let ended = match asked.state() {
+        SecretRequestState::Pending => return Err(format!("You have no card open for {}.", asked.id)),
+        SecretRequestState::Approved => None,
+        SecretRequestState::Withdrawn => Some("its agent withdrew it"),
+        SecretRequestState::Expired => Some("it expired"),
+        SecretRequestState::Dismissed => Some("it was dismissed"),
+        _ => Some("it was answered"),
+    };
+    if let Some(ended) = ended {
+        crate::vault::requests::show_everywhere(factory, asked.clone());
+        return Ok(ToolResult::text(
+            format!("{} is closed already ({ended}), and so is its card.", asked.id),
+            crate::vault::asks::collect_details(&asked),
+        ));
+    }
+    if !asked.collecting {
+        return Err(format!("You have no card open for {}.", asked.id));
+    }
+    let request = factory.vault.set_collecting(&asked.agent_id, &asked.id, asker, false).map_err(|error| error.to_string())?;
+    factory.vault_changed();
+    crate::vault::requests::show_everywhere(factory, request.clone());
+    Ok(ToolResult::text(
+        format!("Closed the card for {}; the request stays approved, so you can still grant a secret or open a new card.", request.id),
+        crate::vault::asks::collect_details(&request),
+    ))
 }
 
 fn revoke_tool(factory: &Arc<Factory>, asker: &str, args: GrantArgs) -> Result<ToolResult, String> {

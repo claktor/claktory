@@ -45,6 +45,8 @@ prost = "0.14.6"
 pulldown-cmark = { version = "0.13.6", default-features = false }
 # `factoryd pair` shows the code as a QR code in the terminal; no image formats.
 qrcode = { version = "0.15", default-features = false, features = ["std"] }
+# Passwords the vault generates (`vault/generate.rs`): the system's random numbers, unbiased uniform choice.
+rand = { version = "0.10", default-features = false, features = ["std", "sys_rng"] }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.43.0", features = ["bundled", "hooks"] }
@@ -65,6 +67,8 @@ tokio-tungstenite = "0.30.0"
 tar = "0.4"
 # The person's initials (person.rs), by grapheme; already linked through iroh.
 unicode-segmentation = "1"
+# Reports' text, normalised before it's kept (pipes/handoff/schema.rs).
+unicode-normalization = "0.1"
 # Browser sessions' sites, spelled as Chrome does (`browser/origin.rs`); already linked through reqwest.
 url = "2"
 tokio-util = "0.7.20"

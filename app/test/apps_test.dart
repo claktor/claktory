@@ -574,4 +574,114 @@ void main() {
       expect(find.textContaining('can also read'), findsNothing);
     });
   });
+
+  testWidgets("Claktory's own apps show with Install, reviewed and installed "
+      'as a file is; an older one installed offers its update', (tester) async {
+    final harness = Harness(
+      _workspace(apps: [])
+        ..bundledApps.add(
+          BundledApp(
+            id: 'charts',
+            name: 'Charts',
+            description: 'Live charts of what your agents do.',
+            icon: 'chart-column',
+            version: '0.2.1',
+            publisher: 'claktory',
+          ),
+        ),
+    );
+    harness.backend.appPermissions = AppPermissions(
+      sha256: 'abc',
+      id: 'charts',
+      name: 'Charts',
+      version: '0.2.1',
+      publisher: 'claktory',
+      tier: AppTier.APP_TIER_CLAKTORY,
+    );
+    await _show(tester, harness, const AppsSettings());
+
+    expect(find.text('No apps yet.'), findsNothing);
+    expect(find.text('Charts'), findsOneWidget);
+    expect(find.text('Live charts of what your agents do.'), findsOneWidget);
+    expect(find.text('Made by Claktory · Version 0.2.1'), findsOneWidget);
+    await tester.tap(find.text('Install'));
+    await tester.pumpAndSettle();
+    final review = _sent(harness, (m) => m.hasInstallLocalApp()).single;
+    expect(review.installLocalApp.bundled, 'charts');
+    expect(review.installLocalApp.approve, isFalse);
+    expect(review.installLocalApp.content, isEmpty);
+    expect(find.text('Install Charts?'), findsOneWidget);
+    // Claktory's own says so once, not "By claktory" too.
+    expect(find.textContaining('By claktory'), findsNothing);
+    expect(find.textContaining('Made by Claktory'), findsWidgets);
+
+    await tester.tap(find.text('Install').last);
+    await tester.pumpAndSettle();
+    final install = _sent(harness, (m) => m.hasInstallLocalApp()).last;
+    expect(install.installLocalApp.bundled, 'charts');
+    expect(install.installLocalApp.approve, isTrue);
+    expect(install.installLocalApp.sha256, 'abc');
+
+    // An older version installed: its update.
+    harness.backend.workspace.apply(
+      _workspace()
+        ..bundledApps.add(
+          BundledApp(
+            id: 'charts',
+            name: 'Charts',
+            version: '0.2.1',
+            installedVersion: '0.2.0',
+          ),
+        ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Update to v0.2.1'), findsOneWidget);
+    expect(
+      find.text('Made by Claktory · Version 0.2.0 installed'),
+      findsOneWidget,
+    );
+    // Installed and listed: one row, the installed app's, with its update.
+    harness.backend.workspace.apply(
+      _workspace(
+          apps: [
+            _telegram(),
+            AppInfo(
+              id: 'charts',
+              name: 'Charts',
+              version: '0.2.0',
+              tier: AppTier.APP_TIER_CLAKTORY,
+              state: AppState.APP_STATE_RUNNING,
+            ),
+          ],
+        )
+        ..bundledApps.add(
+          BundledApp(
+            id: 'charts',
+            name: 'Charts',
+            version: '0.2.1',
+            installedVersion: '0.2.0',
+          ),
+        ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Charts'), findsOneWidget);
+    expect(
+      find.text('Made by Claktory · Version 0.2.0 installed'),
+      findsNothing,
+    );
+    expect(find.text('v0.2.0 installed'), findsOneWidget);
+    harness.backend.appPermissions = AppPermissions(
+      sha256: 'abd',
+      id: 'charts',
+      name: 'Charts',
+      version: '0.2.1',
+      installedVersion: '0.2.0',
+      publisher: 'claktory',
+      tier: AppTier.APP_TIER_CLAKTORY,
+    );
+    await tester.tap(find.text('Update to v0.2.1'));
+    await tester.pumpAndSettle();
+    // The same version form as the button's.
+    expect(find.text('Update Charts to v0.2.1?'), findsOneWidget);
+  });
 }

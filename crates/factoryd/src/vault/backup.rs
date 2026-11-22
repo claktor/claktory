@@ -543,7 +543,8 @@ mod tests {
         let vault = Vault::open(home.join("vault"));
         vault.set_passphrase_params("argon2id m=1024 t=1 p=1");
         let recovery = vault.create(locked.then_some("a long passphrase"), locked).expect("vault");
-        let value = Value { variable: "TOKEN".to_owned(), value: Zeroizing::new("s3cr3t-value-0123".to_owned()), file: false };
+        let value =
+            Value { variable: "TOKEN".to_owned(), value: Zeroizing::new("s3cr3t-value-0123".to_owned()), file: false, binary: false };
         vault.create_secret("Cloudflare", "", &[value], "").expect("secret");
         (home, recovery)
     }

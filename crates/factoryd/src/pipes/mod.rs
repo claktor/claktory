@@ -16,7 +16,13 @@
 
 pub(crate) mod agents;
 pub(crate) mod bound;
+pub(crate) mod curator;
+pub(crate) mod files;
+pub mod handoff;
+pub mod identity;
+pub(crate) mod lead;
 pub(crate) mod quarantine;
+pub(crate) mod spend;
 pub(crate) mod start;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -196,9 +202,10 @@ impl PeerRecord {
             claktory_name: self.claktory.clone(),
             owner_name: self.owner_name.clone(),
             owner_email: self.owner_email.clone(),
-            verified: false,
             project_name: self.project.clone(),
             purpose: self.purpose.clone(),
+            // Who vouches for it: `identity::peer`.
+            ..v1::PipePeer::default()
         }
     }
 
@@ -249,6 +256,8 @@ pub(crate) struct Record {
     /// Incoming messages let in after the lead was told of later ones: it's
     /// told of them at its next wake all the same.
     pub untold: Vec<u64>,
+    /// The pipe said no agent answers it (`lead`), since it last had a lead.
+    pub no_lead_said: bool,
     /// Agents' messages in a row with no person writing on either side.
     pub quiet: u32,
     /// Hashes of the latest agents' messages, to tell repeats.
@@ -321,6 +330,8 @@ struct Data {
     tainted: BTreeMap<String, Taint>,
     /// Pipes whose lead has a wake coming.
     waking: BTreeSet<String>,
+    /// Curators (`curator`), by id.
+    curators: BTreeSet<String>,
     loaded: bool,
 }
 
@@ -329,11 +340,20 @@ pub(crate) struct Pipes {
     data: Mutex<Data>,
     /// How long the lead's wakes are apart, at least (a minute); tests make it shorter.
     wake_every_ms: AtomicU64,
+    /// How the other sides' statements are checked (`identity`).
+    pub(crate) identity: identity::Identity,
+    /// Report readers' wakes (`handoff::wake`).
+    pub(crate) handoff: handoff::wake::Wakes,
 }
 
 impl Default for Pipes {
     fn default() -> Pipes {
-        Pipes { data: Mutex::default(), wake_every_ms: AtomicU64::new(60_000) }
+        Pipes {
+            data: Mutex::default(),
+            wake_every_ms: AtomicU64::new(60_000),
+            identity: identity::Identity::default(),
+            handoff: handoff::wake::Wakes::default(),
+        }
     }
 }
 
@@ -359,6 +379,32 @@ impl Pipes {
     /// Whether `agent` is quarantined for a pipe (`quarantine`).
     pub(crate) fn quarantined(&self, agent: &str) -> bool {
         self.data().pipes.values().any(|record| record.quarantined.iter().any(|id| id == agent))
+    }
+
+    /// Whether `agent` is a curator (`curator`).
+    pub(crate) fn curator(&self, agent: &str) -> bool {
+        self.data().curators.contains(agent)
+    }
+
+    /// Whether `agent` is contained: a pipe's liaison or a curator. Either
+    /// has no commands, secrets, web, messaging or apps.
+    pub(crate) fn contained(&self, agent: &str) -> bool {
+        let data = self.data();
+        data.curators.contains(agent) || data.pipes.values().any(|record| record.quarantined.iter().any(|id| id == agent))
+    }
+
+    /// The curators, by id.
+    pub(crate) fn curators(&self) -> Vec<String> {
+        self.data().curators.iter().cloned().collect()
+    }
+
+    pub(crate) fn set_curator(&self, agent: &str, curator: bool) {
+        let mut data = self.data();
+        if curator {
+            data.curators.insert(agent.to_owned());
+        } else {
+            data.curators.remove(agent);
+        }
     }
 
     /// The same, with the agents each came through.
@@ -400,6 +446,10 @@ pub(crate) fn start(factory: &Arc<Factory>) {
         }
         Err(error) => tracing::error!(%error, "could not read the pipes"),
     }
+    match curator::load(factory) {
+        Ok(curators) => data.curators = curators,
+        Err(error) => tracing::error!(%error, "could not read the curators"),
+    }
     data.loaded = true;
     // Invites don't outlive a restart's ten minutes for long; those expired meanwhile close.
     let now = now_ms();
@@ -415,6 +465,9 @@ pub(crate) fn start(factory: &Arc<Factory>) {
     }
     quarantine::upgrade(factory);
     bound::upgrade(factory);
+    // A pipe with agents and no lead (from before every pipe had one) gets one.
+    lead::settle_all(factory);
+    handoff::start(factory);
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
         runtime.spawn(start::expire(Arc::downgrade(factory)));
     }
@@ -722,6 +775,9 @@ pub(crate) fn add(factory: &Factory, pipe: &str, mut message: Message) -> Option
     Some(message)
 }
 
+/// What a message held by Review incoming says.
+pub(crate) const REVIEW_NOTE: &str = "Waiting for you: let it in, or discard it.";
+
 /// A line from Claktory in the pipe's chat.
 pub(crate) fn line(factory: &Factory, pipe: &str, text: impl Into<String>) {
     add(factory, pipe, Message { text: text.into(), ..Message::default() });
@@ -792,6 +848,25 @@ pub(crate) fn messages(factory: &Factory, pipe: &str, before: u64, limit: u32) -
     (found, earlier)
 }
 
+/// Every message of the pipe from seq `from` up to `before` (0: to the
+/// end), oldest first; and whether there are earlier ones.
+fn messages_from(factory: &Factory, pipe: &str, from: u64, before: u64) -> (Vec<Message>, bool) {
+    let from = i64::try_from(from).unwrap_or(i64::MAX);
+    let before = if before == 0 { i64::MAX } else { i64::try_from(before).unwrap_or(i64::MAX) };
+    let db = factory.store.db();
+    let read = || -> rusqlite::Result<(Vec<Message>, bool)> {
+        let mut statement =
+            db.prepare(&format!("SELECT {COLUMNS} FROM pipe_messages WHERE pipe = ?1 AND seq >= ?2 AND seq < ?3 ORDER BY seq"))?;
+        let found = statement.query_map(params![pipe, from, before], read_message)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let earlier = db.query_row("SELECT EXISTS (SELECT 1 FROM pipe_messages WHERE pipe = ?1 AND seq < ?2)", params![pipe, from], |row| row.get(0))?;
+        Ok((found, earlier))
+    };
+    read().unwrap_or_else(|error| {
+        tracing::error!(%pipe, %error, "could not read a pipe's messages");
+        (Vec::new(), false)
+    })
+}
+
 /// How many of the other side's messages wait for the person to let them in.
 pub(crate) fn waiting_incoming(factory: &Factory, pipe: &str) -> u32 {
     counted(factory, pipe, &[Author::TheirAgent, Author::TheirPerson], &[MessageState::HeldIncoming], i64::MAX / 2)
@@ -822,6 +897,7 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Pipe>, String) 
         let data = factory.pipes.data();
         (data.pipes.values().cloned().collect::<Vec<_>>(), data.selected.clone().unwrap_or_default())
     };
+    let can_check = identity::checks(factory, &inner.config.account);
     let mut pipes: Vec<v1::Pipe> = records
         .iter()
         .filter(|record| inner.config.project(&record.project).is_some())
@@ -830,6 +906,7 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Pipe>, String) 
             let (sent, mb) = used(factory, &record.id);
             let members: Vec<String> = record.members.iter().filter(|id| inner.config.agent(id).is_some()).cloned().collect();
             let lead = if members.contains(&record.lead) { record.lead.clone() } else { String::new() };
+            let (forward, reports) = handoff::pipe_view(factory, record);
             v1::Pipe {
                 id: record.id.clone(),
                 name: record.name.clone(),
@@ -837,7 +914,7 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Pipe>, String) 
                 state: state_proto(record.state).into(),
                 paused: pause_proto(record.paused).into(),
                 created_ms: record.created,
-                peer: record.peer.as_ref().map(PeerRecord::to_proto),
+                peer: record.peer.as_ref().map(|peer| identity::peer(factory, &record.id, can_check, peer.to_proto())),
                 purpose: record.purpose.clone(),
                 prompt: record.prompt.clone(),
                 lead_id: lead,
@@ -851,6 +928,8 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Pipe>, String) 
                 review_outgoing: record.review,
                 review_incoming: record.review_incoming,
                 folder: record.folder.clone(),
+                forward,
+                reports,
                 suggested_liaison_name: if record.state == State::Closed { String::new() } else { bound::suggest(&inner.config, record) },
                 digits: if record.state == State::Approval { record.digits.clone() } else { String::new() },
                 invite_expires_ms: if record.state == State::Invited { record.invite_expires } else { 0 },
@@ -861,6 +940,7 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Pipe>, String) 
                 offline_reason: if record.state == State::Joining { record.offline_reason.clone() } else { link.reason.clone() },
                 offline_since_ms: if record.state == State::Joining { record.offline_since } else { link.offline_since_ms },
                 waiting_seqs: waiting(factory, &record.id),
+                unanswered_seqs: lead::unanswered(factory, &inner.config, record),
                 quarantined_ids: record.quarantined.iter().filter(|id| members.contains(id)).cloned().collect(),
                 can_run_commands_ids: members.iter().filter(|id| !record.quarantined.contains(id)).cloned().collect(),
                 member_ids: members,
@@ -1057,6 +1137,7 @@ fn new_record(factory: &Factory, project: &str, name: &str, purpose: &str, state
 
 fn insert(factory: &Factory, record: Record) {
     save(factory, &record);
+    handoff::adopt_default(factory, &record);
     factory.pipes.data().pipes.insert(record.id.clone(), record);
     factory.broadcast_workspace(&factory.lock());
 }
@@ -1124,9 +1205,7 @@ fn offered_name(theirs: &str, now: i64) -> String {
     if plain && !folded.contains("claktory") {
         return theirs.to_owned();
     }
-    let day = jiff::Timestamp::from_millisecond(now)
-        .map(|at| at.to_zoned_datetime(jiff::tz::TimeZone::system()).strftime("%-d %b").to_string())
-        .unwrap_or_default();
+    let day = crate::transcript::local_time(now, "%-d %b");
     format!("Pipe joined {day}").trim().to_owned()
 }
 
@@ -1318,7 +1397,7 @@ fn called(record: &Record) -> String {
 
 /// Tells `agent` what the person decided, with their comment as theirs.
 fn noted(factory: &Arc<Factory>, agent: &str, what: &str, comment: &str) {
-    let person = factory.lock().config.person_capitalized().to_owned();
+    let person = factory.person_capitalized();
     let summary = format!("{person} {what}");
     let text = format!("{summary}.{}", crate::decisions::note(&person, comment));
     factory.deliver_event(agent, text, crate::factory::host_event(summary));
@@ -1332,6 +1411,10 @@ fn checked_members(factory: &Factory, record: &Record, ids: &[String]) -> Result
         let Some(agent) = inner.config.agent(id) else { return Err(RequestError::UnknownAgent(id.clone())) };
         if agent.project.as_deref() != Some(record.project.as_str()) {
             return Err(RequestError::Pipe(format!("{} isn't in this pipe's project.", agent.name)));
+        }
+        // A curator never reaches a pipe (pipes-automation.md §3).
+        if factory.pipes.curator(id) {
+            return Err(RequestError::Pipe(format!("{} reads reports, so it can't be in a pipe.", agent.name)));
         }
         if !members.contains(id) {
             members.push(id.clone());
@@ -1410,6 +1493,7 @@ pub(crate) async fn add_liaison(factory: &Arc<Factory>, request: &v1::AddPipeLia
         name => name.to_owned(),
     };
     let id = make_liaison(factory, &record, &name).await?;
+    let lead_before = lead::effective(&factory.lock().config, &record).unwrap_or_default();
     // Quarantined from the moment it's made: it's never told of it, as it
     // never had more.
     change(factory, &record.id, |record| {
@@ -1423,6 +1507,7 @@ pub(crate) async fn add_liaison(factory: &Arc<Factory>, request: &v1::AddPipeLia
         record.bound = id.clone();
     });
     make_folders(factory, &record);
+    lead::settle(factory, &record.id, &lead_before);
     Ok(())
 }
 
@@ -1460,6 +1545,7 @@ pub(crate) fn update(factory: &Arc<Factory>, request: &v1::UpdatePipe) -> Result
     }
     let review_off = request.review_outgoing == Some(false) && record.review;
     let incoming = request.review_incoming.filter(|review| *review != record.review_incoming);
+    let lead_before = lead::effective(&factory.lock().config, &record).unwrap_or_default();
     change(factory, &record.id, |record| {
         if let Some(name) = &request.name
             && name.trim() != record.name
@@ -1513,6 +1599,9 @@ pub(crate) fn update(factory: &Arc<Factory>, request: &v1::UpdatePipe) -> Result
     let now = factory.pipes.get(&record.id).map(|record| record.quarantined).unwrap_or_default();
     quarantine::set(factory, &record.id, quarantined.unwrap_or(now));
     bound::unbind_if_gone(factory, &record);
+    // A pipe with agents always has a lead: "No lead", or a lead unticked,
+    // gives it its liaison, or another of its agents (`lead`).
+    lead::settle(factory, &record.id, &lead_before);
     if request.review_outgoing.is_none() {
         review_with_commands(factory, &record.id, &record.can_run_commands());
     }
@@ -1579,6 +1668,8 @@ pub(crate) fn set_pipe_state(factory: &Arc<Factory>, request: &v1::SetPipeState)
                 record.recent.clear();
             });
             line(factory, &id, "You resumed it.");
+            // What its lead wasn't told of meanwhile (a new lead's catch-up).
+            agents::wake(factory, &id);
         }
         v1::PipeAction::Close => {
             if record.state == State::Closed {
@@ -1694,7 +1785,10 @@ fn send_transcript(factory: &Factory, id: &str) {
 /// LoadPipeMessages.
 pub(crate) fn load_messages(factory: &Factory, request: &v1::LoadPipeMessages) -> Result<v1::PipeMessagePage, RequestError> {
     known(factory, &request.pipe_id)?;
-    let (messages, has_earlier) = messages(factory, &request.pipe_id, request.before_seq, request.limit);
+    let (messages, has_earlier) = match request.from_seq {
+        Some(from) => messages_from(factory, &request.pipe_id, from, request.before_seq),
+        None => messages(factory, &request.pipe_id, request.before_seq, request.limit),
+    };
     Ok(v1::PipeMessagePage { pipe_id: request.pipe_id.clone(), messages: messages.iter().map(Message::to_proto).collect(), has_earlier })
 }
 
@@ -1711,7 +1805,7 @@ pub(crate) fn send_person(factory: &Arc<Factory>, request: &v1::SendPipeMessage)
     if text.len() > pipe_link::MAX_TEXT {
         return Err(RequestError::Pipe("That's more than a pipe message can hold (16 KB).".to_owned()));
     }
-    let name = factory.lock().config.person_capitalized().to_owned();
+    let name = factory.person_capitalized();
     if let Some(secrets) = agents::secrets_in(factory, &text, &[]) {
         return Err(RequestError::Pipe(format!("It contains your secret {secrets}, so it wasn't sent.")));
     }
@@ -1778,7 +1872,7 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
     let Some(message) = message(factory, &record.id, request.seq) else {
         return Err(RequestError::Pipe("No such message in this pipe.".to_owned()));
     };
-    let person = factory.lock().config.person_capitalized().to_owned();
+    let person = factory.person_capitalized();
     let note = crate::decisions::note(&person, comment);
     // Only with a comment: the lead hears nothing else of it.
     let tell_lead = |what: &str| {
@@ -1996,9 +2090,11 @@ impl pipe_link::Store for Link {
         if incoming_bytes(factory, pipe) + arriving > u64::from(record.limits.file_mb) * 1_048_576 {
             return Err(format!("Over this side's limit of {} MB of files a day.", record.limits.file_mb));
         }
-        // Over the limits, or Review incoming: held whoever they say wrote it.
+        // Over the limits, another account than the person accepted, or
+        // Review incoming: held whoever they say wrote it.
         let held = over_incoming(factory, &record)
-            .or_else(|| record.review_incoming.then(|| "Waiting for you: let it in, or discard it.".to_owned()));
+            .or_else(|| identity::held_note(factory, &record))
+            .or_else(|| record.review_incoming.then(|| REVIEW_NOTE.to_owned()));
         if held.is_some() && waiting_incoming(factory, pipe) >= MAX_HELD_INCOMING {
             return Err("Too many messages already wait for this side's person.".to_owned());
         }
@@ -2091,12 +2187,25 @@ impl pipe_link::Store for Link {
         if resumed == Some(true) {
             let who = factory.pipes.get(pipe).map(|record| record.peer_who()).unwrap_or_default();
             line(factory, pipe, format!("{who} resumed it."));
+            agents::wake(factory, pipe);
         }
     }
 
     fn peer_closed(&self, factory: &Arc<Factory>, pipe: &str) {
         let who = factory.pipes.get(pipe).map(|record| record.peer_who()).unwrap_or_default();
         close_with(factory, pipe, &format!("{who} closed it."));
+    }
+
+    fn identity(&self, factory: &Arc<Factory>, pipe: &str, endpoint: &str, identity: &str) {
+        identity::heard(factory, pipe, endpoint, identity);
+    }
+
+    fn own_identity(&self, factory: &Arc<Factory>) -> Option<String> {
+        identity::own(factory)
+    }
+
+    fn holds_agents(&self, factory: &Arc<Factory>, pipe: &str) -> bool {
+        identity::changed_account(factory, pipe)
     }
 
     fn link_changed(&self, factory: &Arc<Factory>, _pipe: &str, _status: LinkStatus) {
@@ -2190,6 +2299,7 @@ pub fn upgrade_for_test(factory: &Arc<Factory>, pipe: &str) {
 pub fn start_for_test(factory: &Arc<Factory>) {
     quarantine::upgrade(factory);
     bound::upgrade(factory);
+    lead::settle_all(factory);
 }
 
 /// Tests: the pipe as if kept from before binding, and Claktory starting
@@ -2207,6 +2317,18 @@ pub fn unbound_for_test(factory: &Arc<Factory>, pipe: &str) {
 #[doc(hidden)]
 pub fn expire_starts_for_test(factory: &Arc<Factory>, later_ms: i64) {
     start::expire_before(factory, crate::transcript::now_ms() + later_ms - start::WAITS_MS);
+}
+
+/// Tests: makes `agent` a curator, as the person does (`curator::make`).
+#[doc(hidden)]
+pub async fn make_curator_for_test(factory: &Arc<Factory>, agent: &str, clear: bool) -> Result<(), String> {
+    curator::make(factory, agent, "", clear).await
+}
+
+/// Tests: the person lifts `agent`'s curator limits (`curator::release`).
+#[doc(hidden)]
+pub async fn release_curator_for_test(factory: &Arc<Factory>, agent: &str) -> Result<(), String> {
+    curator::release(factory, agent, false).await
 }
 
 /// Tests: whether `agent` is quarantined for a pipe.

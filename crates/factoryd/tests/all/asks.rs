@@ -295,7 +295,7 @@ async fn a_pdf_review_is_answered_with_drawings_of_its_pages_which_the_agent_is_
     std::fs::write(dir.join("stray.png"), b"\x89PNG\r\n\x1a\n").expect("stray");
     let stray = v1::Attachment { path: dir.join("stray.png").display().to_string(), name: "stray.png".into(), ..Default::default() };
     let drawn = |attachments: Vec<v1::Attachment>, dismiss: bool| {
-        client_message::Body::AnswerAsk(v1::AnswerAsk { agent_id: "builder".into(), seq, dismiss, text: String::new(), attachments })
+        client_message::Body::AnswerAsk(v1::AnswerAsk { agent_id: "builder".into(), seq, dismiss, text: String::new(), attachments, step: None })
     };
     let refused = apply_request(&mut client, &mut view, drawn(vec![third.clone(), stray], false)).await;
     let Body::Error(error) = refused else { panic!("{refused:?}") };
@@ -327,9 +327,113 @@ async fn a_pdf_review_is_answered_with_drawings_of_its_pages_which_the_agent_is_
         dismiss: true,
         text: String::new(),
         attachments: vec![third.clone()],
+        step: None,
     });
     assert!(matches!(apply_request(&mut client, &mut view, one).await, Body::Ack(_)));
     let text = told(&mut client, &mut view, 2).await;
     assert!(text.starts_with("The person dismissed your question \"Mark up the paper\""), "{text}");
     assert!(text.contains(&format!("The person drew on 1 page (page 3); look at it with read_image: {}", third.path)), "{text}");
+}
+
+fn step(seq: u64, step: u32, cant: bool, text: &str) -> client_message::Body {
+    client_message::Body::AnswerAsk(v1::AnswerAsk {
+        agent_id: "builder".into(),
+        seq,
+        dismiss: cant,
+        text: text.into(),
+        step: Some(step),
+        ..Default::default()
+    })
+}
+
+fn states(ask: &v1::AskPerson) -> Vec<v1::AskStepState> {
+    ask.steps.iter().map(|step| step.state()).collect()
+}
+
+async fn refused(client: &mut Client, view: &mut View, body: client_message::Body) -> String {
+    match apply_request(client, view, body).await {
+        Body::Error(error) => error.message,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_procedure_goes_one_step_at_a_time_and_counts_once() {
+    let dir = temp_dir();
+    let (factory, mut client, mut view) = setup(&dir).await;
+    let steps = ["Open Settings → Signing.", "Click **Add key**.", "Paste the key from 1Password."];
+    let args = |steps: &[&str]| serde_json::json!({"title": "Set up signing", "body": "So releases are signed.", "steps": steps});
+
+    // What steps can't be.
+    let (said, shown) = ask_with(&mut client, &mut view, args(&steps[..1])).await;
+    assert!(shown.is_none() && said.contains("steps: must not have fewer than 2 items"), "{said}");
+    let mut with_text = args(&steps);
+    with_text["wants_text"] = true.into();
+    let (said, shown) = ask_with(&mut client, &mut view, with_text).await;
+    assert!(shown.is_none() && said.contains("steps go without wants_text and review"), "{said}");
+
+    let (said, shown) = ask_with(&mut client, &mut view, args(&steps)).await;
+    assert!(said.starts_with("Asked the person to go through 3 steps"), "{said}");
+    let (seq, shown) = shown.expect("a card");
+    assert_eq!(shown.steps.iter().map(|step| step.text.as_str()).collect::<Vec<_>>(), steps);
+    assert_eq!(states(&shown), [v1::AskStepState::Pending; 3]);
+    assert_eq!(view.agent("builder").waiting_seqs, [seq], "one card, however many steps");
+
+    // Only the current step can be answered; a step needs saying which.
+    assert_eq!(refused(&mut client, &mut view, step(seq, 1, false, "")).await, "You haven't reached that step yet.");
+    assert_eq!(refused(&mut client, &mut view, answer(seq, false, "")).await, "Answer the step the card shows.");
+
+    // Done: the agent is told, and the next step is current.
+    assert!(matches!(apply_request(&mut client, &mut view, step(seq, 0, false, "It's under General.")).await, Body::Ack(_)));
+    let said = told(&mut client, &mut view, 1).await;
+    assert!(
+        said.starts_with(
+            "The person did step 1 of 3 of \"Set up signing\": Open Settings → Signing.\n\nTheir comment:\n\nIt's under General.\n\nThey see step 2 next: Click **Add key**."
+        ),
+        "{said}"
+    );
+    let now = card(&view, seq);
+    assert_eq!(states(&now), [v1::AskStepState::Done, v1::AskStepState::Pending, v1::AskStepState::Pending]);
+    assert_eq!((now.state(), now.steps[0].comment.as_str()), (AskPersonState::Pending, "It's under General."));
+    assert!(now.steps[0].decided_ms > 0);
+    assert_eq!(view.agent("builder").waiting_seqs, [seq]);
+    // A second tap on the same step does nothing.
+    assert_eq!(refused(&mut client, &mut view, step(seq, 0, false, "")).await, "That step was already answered.");
+    assert!(matches!(apply_request(&mut client, &mut view, step(seq, 1, false, "")).await, Body::Ack(_)));
+    told(&mut client, &mut view, 2).await;
+    drop(client);
+    drop(factory);
+
+    // Across a restart it's where it was, and the last step finishes it.
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, select("builder")).await;
+    assert_eq!(states(&card(&view, seq)), [v1::AskStepState::Done, v1::AskStepState::Done, v1::AskStepState::Pending]);
+    assert!(matches!(apply_request(&mut client, &mut view, step(seq, 2, false, "")).await, Body::Ack(_)));
+    let said = told(&mut client, &mut view, 3).await;
+    assert!(said.starts_with("The person did the last step, 3 of 3, of \"Set up signing\": Paste the key from 1Password.\n\nAll 3 steps are done."), "{said}");
+    assert_eq!(card(&view, seq).state(), AskPersonState::Answered);
+    assert!(view.agent("builder").waiting_seqs.is_empty());
+
+    // Can't do this stops it: the steps after it are never shown.
+    let (_, shown) = ask_with(&mut client, &mut view, args(&steps)).await;
+    let (seq, _) = shown.expect("a card");
+    assert!(matches!(apply_request(&mut client, &mut view, step(seq, 0, true, "There's no Signing.")).await, Body::Ack(_)));
+    let said = told(&mut client, &mut view, 4).await;
+    assert!(
+        said.starts_with(
+            "The person couldn't do step 1 of 3 of \"Set up signing\": Open Settings → Signing.\n\nTheir comment:\n\nThere's no Signing.\n\nThat stops it there. Steps 2 to 3 weren't shown to them."
+        ),
+        "{said}"
+    );
+    let stopped = card(&view, seq);
+    assert_eq!((stopped.state(), states(&stopped)[0]), (AskPersonState::Dismissed, v1::AskStepState::Cant));
+    assert_eq!(states(&stopped)[1..], [v1::AskStepState::Pending; 2]);
+    assert_eq!(refused(&mut client, &mut view, step(seq, 1, false, "")).await, "This question was already dismissed.");
+
+    // An ordinary question has no steps to answer.
+    let (_, shown) = ask(&mut client, &mut view, "Ship it?", false).await;
+    let (seq, _) = shown.expect("a card");
+    assert_eq!(refused(&mut client, &mut view, step(seq, 0, false, "")).await, "This question has no steps.");
 }

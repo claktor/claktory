@@ -1236,9 +1236,7 @@ fn tell(home: &Home, manifest: &Manifest, map: &PathMap, state: &State) -> Resul
             .iter()
             .filter(|task| task.agent == agent.id)
             .map(|task| {
-                let started = jiff::Timestamp::from_millisecond(task.started_ms)
-                    .map(|at| at.to_zoned_datetime(jiff::tz::TimeZone::system()).strftime("%H:%M").to_string())
-                    .unwrap_or_default();
+                let started = crate::transcript::local_time(task.started_ms, "%H:%M");
                 format!("{} ({}), started {started}", task.task, short(&task.command))
             })
             .collect();

@@ -17,12 +17,14 @@ import '../mobile/navigation.dart';
 import '../mobile/presentation.dart' show SheetAction, showActions;
 import '../transcript.dart' show Bubble;
 import '../user_apps/session.dart';
+import '../visible_codes.dart' show proseCodes;
 import '../tunnel/api/dm.dart' as dm;
 import 'chat.dart';
 import 'e2ee.dart';
 import 'my_identity.dart';
 import 'problems.dart';
 import 'review_view.dart';
+import 'verify.dart';
 
 // D3c: the chat screen: a friend's name and tag over the history, newest
 // at the bottom, the person's messages on the right and theirs on the
@@ -38,7 +40,8 @@ import 'review_view.dart';
 /// place: the chat's top, Add a friend and People's Friends say it.
 const dmDisclosure =
     'End-to-end encrypted: only you and your friends can read these '
-    'messages, on your devices and any Claktory you give a chat to. '
+    'messages, on your devices and any Claktory either of you gives a chat '
+    'to. '
     "Claktory's servers see who you talk to and when, but not what you say.";
 
 /// Stands in for the account service in tests.
@@ -98,13 +101,13 @@ String outgoingLine(OutgoingMessage message, {String friend = ''}) =>
           "Not sent: you're out of space for messages. Delete some "
               'conversations to make room.',
         'unencryptable' =>
-          "Not sent: ${_named(friend)}'s security key changed. Read the note "
+          'Not sent: ${_whose(friend)} security key changed. Read the note '
               'above, then send it again.',
         _ => 'Not sent.',
       },
     };
 
-String _named(String name) => name.isEmpty ? 'Their' : name;
+String _whose(String name) => name.isEmpty ? 'their' : "$name's";
 
 /// What a change in who can read a chat says, one line per leaf (Trish's
 /// words): [me] is the person's account, [friend] the friend's name.
@@ -118,14 +121,19 @@ List<String> memberLines(
     final mine = member.account == me;
     if (member.kind == dm.DmLeafKind.claktory) {
       final whose = mine ? 'Your' : "$who's";
-      return '$whose Claktory ${member.name} can '
+      return '$whose Claktory ${proseCodes(member.name)} can '
           '${added ? 'now' : 'no longer'} read this chat';
     }
     return '${mine ? 'You' : who} ${added ? 'added' : 'removed'} a device: '
-        '${member.name}';
+        '${proseCodes(member.name)}';
   }
 
   return [
+    // Before anything they said under it (Fugo): only the friend's, in a
+    // chat of two.
+    for (final account in members.keyChanged)
+      if (account != me)
+        "${friend.isEmpty ? 'Their' : "$friend's"} security key changed",
     for (final member in members.added) line(member, true),
     for (final member in members.removed) line(member, false),
   ];
@@ -274,10 +282,16 @@ class _ChatViewState extends State<ChatView> {
                   draft: draft,
                   thread: _thread,
                 ),
+              if (_thread.held)
+                _Held(onRejoin: _thread.heldLong ? _thread.rejoin : null),
               if (_thread.keyChanged)
                 _KeyChanged(
                   name: _thread.conversation.person.name,
                   onSeen: _thread.keySeen,
+                  onVerify: _verify,
+                  wasVerified: _thread.e2ee.wasVerified.contains(
+                    _thread.friend,
+                  ),
                 ),
               for (final message in _thread.outgoing.reversed)
                 _Outgoing(
@@ -378,6 +392,21 @@ class _ChatViewState extends State<ChatView> {
 
   /// "Ana · K7QF2M": the tag always, so two of a name never pass for each
   /// other.
+  /// Verify, for the friend: their security code, to compare or scan.
+  Future<void> _verify() async {
+    await showVerify(
+      context,
+      _thread.e2ee,
+      account: _thread.friend,
+      name: _thread.conversation.person.name,
+    );
+    if (mounted) setState(() {});
+  }
+
+  /// Whether Verify can open: the friend's key is pinned here.
+  bool get _canVerify =>
+      _thread.friend.isNotEmpty && _thread.e2ee.pin(_thread.friend) != null;
+
   Widget _name(TypeScale type, Palette palette) {
     final person = _thread.conversation.person;
     return Text.rich(
@@ -391,6 +420,11 @@ class _ChatViewState extends State<ChatView> {
             TextSpan(
               text: ' · ${person.tag}',
               style: TextStyle(color: palette.textFaint),
+            ),
+          if (_thread.verified)
+            TextSpan(
+              text: ' · Verified',
+              style: TextStyle(color: palette.signal),
             ),
         ],
       ),
@@ -416,6 +450,10 @@ class _ChatViewState extends State<ChatView> {
           _avatar(28),
           const SizedBox(width: Space.m),
           Expanded(child: _name(type, palette)),
+          if (_canVerify && !_thread.verified) ...[
+            Button(label: 'Verify…', onPressed: _verify),
+            const SizedBox(width: Space.s),
+          ],
           if (_thread.messages.isNotEmpty) ...[
             Button(label: 'Delete…', onPressed: _delete),
             const SizedBox(width: Space.s),
@@ -444,9 +482,12 @@ class _ChatViewState extends State<ChatView> {
                   person.name.isEmpty ? 'No name' : person.name,
                   style: type.emphasis.copyWith(color: palette.text),
                 ),
-                if (person.tag.isNotEmpty)
+                if (person.tag.isNotEmpty || _thread.verified)
                   Text(
-                    person.tag,
+                    [
+                      if (person.tag.isNotEmpty) person.tag,
+                      if (_thread.verified) 'Verified',
+                    ].join(' · '),
                     style: type.caption.copyWith(color: palette.textFaint),
                   ),
               ],
@@ -455,21 +496,24 @@ class _ChatViewState extends State<ChatView> {
         ],
       ),
       trailing: [
-        if (_thread.messages.isNotEmpty)
+        if (_thread.messages.isNotEmpty || _canVerify)
           HeaderButton.more(
             onTap: () async {
               final chosen = await showActions<String>(
                 context,
                 title: person.label,
-                actions: const [
-                  SheetAction(
-                    'Delete conversation…',
-                    'delete',
-                    destructive: true,
-                  ),
+                actions: [
+                  if (_canVerify) const SheetAction('Verify…', 'verify'),
+                  if (_thread.messages.isNotEmpty)
+                    const SheetAction(
+                      'Delete conversation…',
+                      'delete',
+                      destructive: true,
+                    ),
                 ],
               );
               if (chosen == 'delete') await _delete();
+              if (chosen == 'verify') await _verify();
             },
           ),
       ],
@@ -585,8 +629,12 @@ class _Message extends StatelessWidget {
             outgoing: mine,
             sentMs: message.acceptedMs,
             timeColor: mine ? const Color(0xB3FFFFFF) : null,
+            // Theirs, or an agent's: what reorders text shows by its code
+            // (proseCodes, Fugo). The person's own, as they wrote it.
             child: Text(
-              message.text,
+              mine && !message.byAgent
+                  ? message.text
+                  : proseCodes(message.text),
               style: type.body.copyWith(
                 color: mine ? const Color(0xFFFFFFFF) : palette.text,
               ),
@@ -717,11 +765,71 @@ class _QuietLine extends StatelessWidget {
 
 /// The friend's security key changed: what that means, and OK, which
 /// lets sending go on (until then nothing is encrypted to them).
+/// The feed waits at a change made under a security key this device
+/// doesn't have yet (Ghiaccio, Fugo: held, never dropped); after a day,
+/// Join again.
+class _Held extends StatelessWidget {
+  const _Held({this.onRejoin});
+
+  final Future<void> Function()? onRejoin;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: Space.s),
+      child: Container(
+        padding: const EdgeInsets.all(Space.m),
+        decoration: BoxDecoration(
+          border: Border.all(color: palette.hairline),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Waiting for the new security key to reach this device.',
+              style: type.body.copyWith(color: palette.text),
+            ),
+            if (onRejoin case final rejoin?) ...[
+              const SizedBox(height: Space.xs),
+              Text(
+                'Still waiting after a day. Join again to carry on; messages '
+                'sent meanwhile may not show here.',
+                style: type.caption.copyWith(color: palette.textMuted),
+              ),
+              const SizedBox(height: Space.s),
+              Align(
+                alignment: AlignmentDirectional.centerEnd,
+                child: Button(
+                  label: 'Join again',
+                  primary: true,
+                  onPressed: () => unawaited(rejoin()),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _KeyChanged extends StatelessWidget {
-  const _KeyChanged({required this.name, required this.onSeen});
+  const _KeyChanged({
+    required this.name,
+    required this.onSeen,
+    required this.onVerify,
+    this.wasVerified = false,
+  });
 
   final String name;
   final VoidCallback onSeen;
+  final VoidCallback onVerify;
+
+  /// They were verified before: they no longer are.
+  final bool wasVerified;
 
   @override
   Widget build(BuildContext context) {
@@ -741,15 +849,30 @@ class _KeyChanged extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              '$who security key changed. This happens when $them sets up '
-              'messages again or replaces a device. Verify '
+              '$who security key changed. This happens when $them '
+              '${name.isEmpty ? 'set up' : 'sets up'} messages again or '
+              '${name.isEmpty ? 'replace' : 'replaces'} a device. Verify '
               '${name.isEmpty ? 'them' : name} to be sure it\'s still them.',
               style: type.body.copyWith(color: palette.text),
             ),
+            if (wasVerified) ...[
+              const SizedBox(height: Space.xs),
+              Text(
+                '$who security key changed, so ${name.isEmpty ? 'they are' : '$name is'} '
+                'no longer verified.',
+                style: type.caption.copyWith(color: palette.textMuted),
+              ),
+            ],
             const SizedBox(height: Space.s),
             Align(
               alignment: AlignmentDirectional.centerEnd,
-              child: Button(label: 'OK', primary: true, onPressed: onSeen),
+              child: Wrap(
+                spacing: Space.s,
+                children: [
+                  Button(label: 'Verify…', onPressed: onVerify),
+                  Button(label: 'OK', primary: true, onPressed: onSeen),
+                ],
+              ),
             ),
           ],
         ),

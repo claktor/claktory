@@ -19,12 +19,14 @@ import 'browser/browser_view.dart'
     show BrowserScope, BrowserSessionCard, browserAssists;
 import 'browser/session.dart' show browserHost;
 import 'characters/character.dart';
+import 'checklist_reply.dart' show showChecklistItem;
 import 'chats.dart' show ChatGlyph, chatTitle, openChat;
 import 'connectors.dart' show ConnectProposalCard, serviceName;
 import 'controls.dart';
-import 'extensions.dart' show WaitingWords, waitingWords;
+import 'find.dart';
 import 'forms.dart' show archivedProjectOf, rivetIn;
 import 'identity.dart';
+import 'mobile/drawer.dart' show largeText;
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
 import 'move.dart' show BackendMove, MoveConfirmCard, MoveStatus, moveStatusOf;
@@ -38,11 +40,13 @@ import 'pipes.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'recovery_key.dart' show SaveRecoveryKeyForm;
 import 'scope.dart';
+import 'selection.dart' show CopyShape, SelectableArea, SelectionPane;
 import 'secrets.dart'
     show SecretRequestCard, UnlockSecretsForm, secretRequestSummary;
 import 'state.dart' show TranscriptStore;
 import 'transcript.dart' show ProposalCard;
 import 'usage.dart' show formatAge;
+import 'visible_codes.dart' show proseCodes;
 import 'waiting.dart' show NeedsYouMark;
 
 /// What a thing that waits for the person is.
@@ -63,6 +67,11 @@ enum NeedsYouKind {
   /// A pipe's message held for the person (Pipe.waiting_seqs).
   pipeHeld,
 
+  /// A message from a pipe's other side that no agent was told of, as the
+  /// pipe has no lead (Pipe.unanswered_seqs): the person's to read, until
+  /// an agent leads the pipe.
+  pipeUnanswered,
+
   /// A provider refused to renew an account's sign-in
   /// (Account.sign_in_again): the person signs in to it again.
   signIn,
@@ -80,10 +89,6 @@ enum NeedsYouKind {
   /// (VaultState.recovery_key_unconfirmed): the person shows it, saves it
   /// and types back one group of it.
   recoveryKey,
-
-  /// A checklist item waiting on the person's decision or action with no
-  /// card asking (Agent.waiting_items).
-  waitingItem,
 
   /// An agent's browser session waiting for the person to choose a tab on
   /// their Mac, or decline (Workspace.browser_sessions, pending).
@@ -118,15 +123,6 @@ class NeedsYouItem {
   const NeedsYouItem.pipe(this.kind, this.pipeId, {this.seq = 0})
     : agentId = '',
       chatId = '',
-      providerId = '',
-      accountId = '',
-      sessionId = '',
-      conversationId = '';
-
-  const NeedsYouItem.waitingItem(this.agentId, this.seq)
-    : kind = NeedsYouKind.waitingItem,
-      chatId = '',
-      pipeId = '',
       providerId = '',
       accountId = '',
       sessionId = '',
@@ -219,13 +215,13 @@ class NeedsYouItem {
     NeedsYouKind.entry => 'agent:$agentId/$seq',
     NeedsYouKind.chat => 'chat:$chatId/$seq',
     NeedsYouKind.pipeHeld => 'pipe:$pipeId/$seq',
+    NeedsYouKind.pipeUnanswered => 'pipe:$pipeId/unanswered/$seq',
     NeedsYouKind.pipeApproval => 'pipe:$pipeId/approval',
     NeedsYouKind.pipeLoop => 'pipe:$pipeId/loop',
     NeedsYouKind.signIn => 'signin:$providerId/$accountId',
     NeedsYouKind.vault => 'vault',
     NeedsYouKind.move => 'move',
     NeedsYouKind.recoveryKey => 'recoveryKey',
-    NeedsYouKind.waitingItem => 'item:$agentId/$seq',
     NeedsYouKind.browser => 'browser:$sessionId',
     NeedsYouKind.dmSend => 'dm:$agentId/$conversationId',
   };
@@ -250,13 +246,10 @@ List<NeedsYouItem> needsYouItems(Workspace workspace) {
   return [
     for (final agent in workspace.agents)
       if (archivedProjectOf(workspace, agent) == null) ...[
+        // A checklist item waiting on the person shows only as the card
+        // asking about it, never on its own (Matt's ruling).
         for (final seq in agent.waitingSeqs)
           NeedsYouItem.entry(agent.id, seq.toInt()),
-        // Waiting on the person with no card asking: the card stands
-        // for it while there is one.
-        for (final waiting in agent.waitingItems)
-          if (!waiting.hasPendingAsk)
-            NeedsYouItem.waitingItem(agent.id, waiting.item),
       ],
     for (final chat in workspace.chats)
       for (final seq in chat.waitingSeqs)
@@ -270,6 +263,12 @@ List<NeedsYouItem> needsYouItems(Workspace workspace) {
           NeedsYouItem.pipe(NeedsYouKind.pipeLoop, pipe.id),
         for (final seq in pipe.waitingSeqs)
           NeedsYouItem.pipe(NeedsYouKind.pipeHeld, pipe.id, seq: seq.toInt()),
+        for (final seq in pipe.unansweredSeqs)
+          NeedsYouItem.pipe(
+            NeedsYouKind.pipeUnanswered,
+            pipe.id,
+            seq: seq.toInt(),
+          ),
       ],
     for (final provider in workspace.providers)
       for (final account in provider.accounts)
@@ -342,16 +341,42 @@ String dmSendSummary(Workspace workspace, NeedsYouItem item) {
       '$friend?';
 }
 
-/// The checklist item [item] stands for, while it still waits on the
-/// person.
-WaitingItem? waitingItemOf(Workspace workspace, NeedsYouItem item) {
-  for (final agent in workspace.agents) {
-    if (agent.id != item.agentId) continue;
-    for (final waiting in agent.waitingItems) {
-      if (waiting.item == item.seq) return waiting;
-    }
-  }
-  return null;
+/// The checklist items the card at [seq] in [agentId]'s conversation asks
+/// about (WaitingItem.card_agent_id and card_seq), each with the agent
+/// whose checklist holds it.
+List<({String checklistAgentId, WaitingItem item})> cardItemsOf(
+  Workspace workspace,
+  String agentId,
+  int seq,
+) => [
+  for (final agent in workspace.agents)
+    for (final waiting in agent.waitingItems)
+      if (waiting.cardSeq != 0 &&
+          waiting.cardSeq.toInt() == seq &&
+          (waiting.cardAgentId.isEmpty ? agent.id : waiting.cardAgentId) ==
+              agentId)
+        (checklistAgentId: agent.id, item: waiting),
+];
+
+/// The context above a card about a checklist item: "On its checklist:
+/// Pick the icon", or "On Bruno's checklist: …" when the item is on
+/// another agent's checklist than the conversation the card is in.
+String cardItemWords(
+  Workspace workspace, {
+  required String checklistAgentId,
+  required String cardAgentId,
+  required WaitingItem item,
+}) {
+  // The agent's words, so what reorders them shows by its code (Fugo).
+  final text = proseCodes(item.text);
+  if (checklistAgentId == cardAgentId) return 'On its checklist: $text';
+  final name =
+      workspace.agents
+          .where((agent) => agent.id == checklistAgentId)
+          .firstOrNull
+          ?.name ??
+      checklistAgentId;
+  return "On $name's checklist: $text";
 }
 
 /// The browser session [item] waits on, while the backend lists it.
@@ -361,32 +386,6 @@ BrowserSession? browserSessionOf(Workspace workspace, NeedsYouItem item) {
   }
   return null;
 }
-
-/// What a waiting item waits for, leading its line in Needs you.
-String waitingItemLead(BlockedKind kind) => switch (kind) {
-  BlockedKind.BLOCKED_KIND_PERSON_ACTION => 'Waiting for you to act',
-  _ => 'Waiting for your decision',
-};
-
-/// The words under a waiting item in Needs you, as its checklist says them.
-WaitingWords waitingItemWords(
-  Workspace workspace,
-  String agentId,
-  WaitingItem waiting,
-) => waitingWords(
-  kind: waiting.kind,
-  blockedOn: 'person',
-  ref: '',
-  sinceMs: waiting.sinceMs.toInt(),
-  retryAtMs: 0,
-  reaskAtMs: waiting.reaskAtMs.toInt(),
-  dismissedMs: waiting.dismissedMs.toInt(),
-  hasPendingAsk: waiting.hasPendingAsk,
-  agentId: waiting.owner.isEmpty ? agentId : waiting.owner,
-  checklistAgentId: agentId,
-  workspace: workspace,
-  now: DateTime.now(),
-);
 
 /// The provider and account [item] asks to sign in to again, while it
 /// still does.
@@ -456,70 +455,82 @@ class _InboxViewState extends State<InboxView> {
       bindings: {const SingleActivator(LogicalKeyboardKey.escape): close},
       child: FocusScope(
         autofocus: !inPane,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (!inPane)
-              isPhoneLayout(context)
-                  ? PhoneHeader(
-                      leading: HeaderButton.back(onTap: close),
-                      title: Text(
-                        'Needs you',
-                        style: PhoneType.emphasis.copyWith(color: palette.text),
-                      ),
-                    )
-                  : WindowDrag(
-                      child: Container(
-                        height: titleBarHeight,
-                        padding: const EdgeInsets.only(
-                          left: Space.xl,
-                          right: Space.m,
-                        ),
-                        decoration: BoxDecoration(
-                          border: Border(
-                            bottom: BorderSide(color: palette.hairline),
+        // A click on its header or tabs makes its list the one ⌘A selects.
+        child: SelectionPane(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (!inPane)
+                isPhoneLayout(context)
+                    ? PhoneHeader(
+                        leading: HeaderButton.back(onTap: close),
+                        title: Text(
+                          'Needs you',
+                          style: PhoneType.emphasis.copyWith(
+                            color: palette.text,
                           ),
                         ),
-                        child: Row(
-                          children: [
-                            Text(
-                              'Needs you',
-                              style: TypeScale.of(context).label.copyWith(
-                                color: palette.text,
-                                fontWeight: FontWeight.w600,
-                              ),
+                      )
+                    : WindowDrag(
+                        child: Container(
+                          height: titleBarHeight,
+                          padding: const EdgeInsets.only(
+                            left: Space.xl,
+                            right: Space.m,
+                          ),
+                          decoration: BoxDecoration(
+                            border: Border(
+                              bottom: BorderSide(color: palette.hairline),
                             ),
-                            const Spacer(),
-                            Button(label: 'Done', onPressed: close),
-                          ],
+                          ),
+                          child: Row(
+                            children: [
+                              // At the largest text in a narrow window it
+                              // ends in "…" rather than pushing Done off.
+                              Expanded(
+                                child: Text(
+                                  'Needs you',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TypeScale.of(context).label.copyWith(
+                                    color: palette.text,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                              Button(label: 'Done', onPressed: close),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-            // What waits, or what was already decided.
-            Padding(
-              padding: isPhoneLayout(context)
-                  ? const EdgeInsets.fromLTRB(Space.l, Space.s, Space.l, 0)
-                  : const EdgeInsets.fromLTRB(Space.xl, Space.m, Space.xl, 0),
-              child: Align(
-                alignment: Alignment.topCenter,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 640),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: NeedsYouTabs(
-                      history: _history,
-                      choose: (history) => setState(() => _history = history),
+              // What waits, or what was already decided.
+              Padding(
+                padding: isPhoneLayout(context)
+                    ? const EdgeInsets.fromLTRB(Space.l, Space.s, Space.l, 0)
+                    : const EdgeInsets.fromLTRB(Space.xl, Space.m, Space.xl, 0),
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 640),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: NeedsYouTabs(
+                        history: _history,
+                        choose: (history) => setState(() => _history = history),
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-            Expanded(
-              child: _history
-                  ? const NeedsYouHistoryList()
-                  : const NeedsYouList(),
-            ),
-          ],
+              Expanded(
+                child: _history
+                    // Its words select and copy, as what waits does; each
+                    // row is copied apart from the next.
+                    ? const SelectableArea(child: NeedsYouHistoryList())
+                    : const NeedsYouList(),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -561,6 +572,38 @@ class _NeedsYouListState extends State<NeedsYouList> {
   /// What waited the last time the list was built.
   var _waiting = <String>{};
 
+  /// Find in the list (⌘F): who asks and what, as the bubbles say them.
+  late final _find = LocalFind(
+    placeholder: 'Search Needs you',
+    items: () => [
+      for (final bubble in _shown)
+        (
+          bubble.item.key,
+          () {
+            final (:who, :what) = bubble.words(_backend);
+            return '$who\n$what';
+          }(),
+        ),
+    ],
+    go: (key, _) {
+      final context = _places[key]?.currentContext;
+      if (context == null) return;
+      Scrollable.ensureVisible(
+        context,
+        alignment: 0.2,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+      );
+      Scrollable.ensureVisible(
+        context,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtStart,
+      );
+    },
+  );
+
+  /// The bubbles as the last build showed them, and each one's place.
+  var _shown = const <_Bubble>[];
+  final _places = <String, GlobalKey>{};
+
   @override
   void initState() {
     super.initState();
@@ -576,6 +619,7 @@ class _NeedsYouListState extends State<NeedsYouList> {
 
   @override
   void dispose() {
+    _find.dispose();
     _backend.workspace.removeListener(_changed);
     _backend.transcript.removeListener(_rebuild);
     _backend.chatTranscript.removeListener(_rebuild);
@@ -605,7 +649,8 @@ class _NeedsYouListState extends State<NeedsYouList> {
 
   bool _has(NeedsYouItem item) => switch (item.kind) {
     NeedsYouKind.entry || NeedsYouKind.chat => _entries.containsKey(item.key),
-    NeedsYouKind.pipeHeld => _messages.containsKey(item.key),
+    NeedsYouKind.pipeHeld ||
+    NeedsYouKind.pipeUnanswered => _messages.containsKey(item.key),
     _ => true,
   };
 
@@ -680,9 +725,8 @@ class _NeedsYouListState extends State<NeedsYouList> {
   int _timeOf(NeedsYouItem item, Workspace workspace) => switch (item.kind) {
     NeedsYouKind.entry ||
     NeedsYouKind.chat => _entryOf(item)?.timestampMs.toInt() ?? 0,
-    NeedsYouKind.pipeHeld => _messageOf(item)?.timestampMs.toInt() ?? 0,
-    NeedsYouKind.waitingItem =>
-      waitingItemOf(workspace, item)?.sinceMs.toInt() ?? 0,
+    NeedsYouKind.pipeHeld ||
+    NeedsYouKind.pipeUnanswered => _messageOf(item)?.timestampMs.toInt() ?? 0,
     NeedsYouKind.browser =>
       browserSessionOf(workspace, item)?.createdMs.toInt() ?? 0,
     NeedsYouKind.dmSend =>
@@ -751,56 +795,102 @@ class _NeedsYouListState extends State<NeedsYouList> {
     final padding =
         widget.padding ??
         EdgeInsets.all(isPhoneLayout(context) ? Space.l : Space.xl);
+    _shown = [
+      for (final item in items)
+        _Bubble(
+          item: item,
+          waiting: keys.contains(item.key),
+          open: _open.contains(item.key),
+          onToggle: () => item.isAction ? _act(item) : _toggle(item),
+          entry: item.isEntry ? _entryOf(item) : null,
+          message:
+              item.kind == NeedsYouKind.pipeHeld ||
+                  item.kind == NeedsYouKind.pipeUnanswered
+              ? _messageOf(item)
+              : null,
+          failed: _failed[item.key],
+          workspace: workspace,
+        ),
+    ];
+    // What's found follows what waits.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _find.refresh();
+    });
+    _places.removeWhere((key, _) => !keys.contains(key));
     if (items.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: padding,
-          child: Text(
-            'Nothing is waiting for your answer.',
-            textAlign: TextAlign.center,
-            style: TextStyles.body.copyWith(color: palette.textMuted),
+      return FindScope(
+        target: _find,
+        child: Center(
+          child: Padding(
+            padding: padding,
+            child: Text(
+              'Nothing is waiting for your answer.',
+              textAlign: TextAlign.center,
+              style: TextStyles.body.copyWith(color: palette.textMuted),
+            ),
           ),
         ),
       );
     }
-    return ListView(
-      shrinkWrap: widget.shrinkWrap,
-      padding: padding,
-      children: [
-        // Keyed here, on the list's own children: matched by place instead,
-        // a question coming in above would take this one's card, and with
-        // it what the person was typing and their focus.
-        for (final item in items)
-          Align(
-            key: ValueKey(item.key),
-            alignment: Alignment.topCenter,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 640),
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: Space.s),
-                child: _Bubble(
-                  item: item,
-                  waiting: keys.contains(item.key),
-                  open: _open.contains(item.key),
-                  onToggle: () => item.isAction ? _act(item) : _toggle(item),
-                  entry: item.isEntry ? _entryOf(item) : null,
-                  message: item.kind == NeedsYouKind.pipeHeld
-                      ? _messageOf(item)
-                      : null,
-                  failed: _failed[item.key],
-                  workspace: workspace,
+    // Every word in it selects and copies (drag, ⌘C, a right click's Copy;
+    // a long press on a phone), as in a conversation; its buttons and
+    // controls don't.
+    // Copied, each item's lines on their own and a blank line between
+    // items, as they read: the items in one Column inside the list, whose
+    // own selection would run them together.
+    return FindScope(
+      target: _find,
+      child: SelectableArea(
+        child: ListView(
+          shrinkWrap: widget.shrinkWrap,
+          padding: padding,
+          children: [
+            // Selected where the pointer is at any zoom, however far it's
+            // scrolled.
+            ScrolledSelection(
+              child: CopyShape(
+                separator: '\n\n',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Keyed here, on the column's own children: matched by place
+                    // instead, a question coming in above would take this one's
+                    // card, and with it what the person was typing and their
+                    // focus.
+                    for (final bubble in _shown)
+                      Align(
+                        key: ValueKey(bubble.item.key),
+                        alignment: Alignment.topCenter,
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 640),
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: Space.s),
+                            child: CopyShape(
+                              lines: true,
+                              child: LocalFindMarks(
+                                key: _places[bubble.item.key] ??= GlobalKey(),
+                                find: _find,
+                                itemKey: bubble.item.key,
+                                child: bubble,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
             ),
-          ),
-      ],
+          ],
+        ),
+      ),
     );
   }
 
   /// Whether what [item] was about still exists: its agent, chat or pipe.
   static bool _stillThere(NeedsYouItem item, Workspace workspace) =>
       switch (item.kind) {
-        NeedsYouKind.entry || NeedsYouKind.waitingItem => workspace.agents.any(
+        NeedsYouKind.entry => workspace.agents.any(
           (agent) => agent.id == item.agentId,
         ),
         NeedsYouKind.chat => workspace.chats.any(
@@ -864,20 +954,29 @@ class _Bubble extends StatelessWidget {
       if (pipe.id == item.pipeId) pipe,
   ].firstOrNull;
 
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    final backend = AppScope.of(context);
+  /// The checklist items an agent's card asks about ([cardItemsOf]).
+  List<({String checklistAgentId, WaitingItem item})> get _cardItems =>
+      item.kind == NeedsYouKind.entry
+      ? cardItemsOf(workspace, item.agentId, item.seq)
+      : const [];
+
+  /// A pipe's liaison asks as the pipe's ("Kai · Acme launch").
+  Pipe? get _liaisonOf {
     final agent = _agent;
-    final chat = _chat;
-    final pipe = _pipe;
-    // A pipe's liaison asks as the pipe's ("Kai · Acme launch").
-    final liaisonOf = agent == null || agent.pipeId.isEmpty
+    return agent == null || agent.pipeId.isEmpty
         ? null
         : [
             for (final pipe in workspace.pipes)
               if (pipe.id == agent.pipeId) pipe,
           ].firstOrNull;
+  }
+
+  /// Who asks, and what, as its header says them (and find searches).
+  ({String who, String what}) words(Backend backend) {
+    final agent = _agent;
+    final chat = _chat;
+    final pipe = _pipe;
+    final liaisonOf = _liaisonOf;
     final signIn = signInOf(workspace, item);
     final who = item.kind == NeedsYouKind.signIn
         ? 'Sign in to ${signIn?.provider.name ?? 'your provider'} again'
@@ -891,13 +990,26 @@ class _Bubble extends StatelessWidget {
               (chat == null ? null : chatTitle(chat)) ??
               pipe?.name ??
               '';
-    final what = _summary(backend);
+    return (who: who, what: _summary(backend));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final backend = AppScope.of(context);
+    final agent = _agent;
+    final liaisonOf = _liaisonOf;
+    final (:who, :what) = words(backend);
+    final large = largeText(context);
+    final answered = Text(
+      'Answered',
+      style: TextStyles.caption.copyWith(color: palette.textFaint),
+    );
     final time = switch (item.kind) {
       NeedsYouKind.entry ||
       NeedsYouKind.chat => entry?.timestampMs.toInt() ?? 0,
-      NeedsYouKind.pipeHeld => message?.timestampMs.toInt() ?? 0,
-      NeedsYouKind.waitingItem =>
-        waitingItemOf(workspace, item)?.sinceMs.toInt() ?? 0,
+      NeedsYouKind.pipeHeld ||
+      NeedsYouKind.pipeUnanswered => message?.timestampMs.toInt() ?? 0,
       NeedsYouKind.browser =>
         browserSessionOf(workspace, item)?.createdMs.toInt() ?? 0,
       NeedsYouKind.dmSend =>
@@ -956,37 +1068,53 @@ class _Bubble extends StatelessWidget {
                     Ticking(
                       active: time > 0,
                       builder: (context, now) => Text.rich(
-                        TextSpan(
-                          text: who,
-                          children: [
-                            if (time > 0)
-                              TextSpan(
-                                text: ' · ${formatAge(time, now)}',
-                                style: TextStyles.caption.copyWith(
-                                  color: waiting && waitedADay(time, now)
-                                      ? palette.signal
-                                      : palette.textFaint,
-                                  fontWeight: FontWeight.w400,
+                        // Its name's matches marked when found (⌘F).
+                        FindHighlight.mark(
+                          context,
+                          TextSpan(
+                            children: [
+                              TextSpan(text: who),
+                              if (time > 0)
+                                TextSpan(
+                                  text: ' · ${formatAge(time, now)}',
+                                  style: TextStyles.caption.copyWith(
+                                    color: waiting && waitedADay(time, now)
+                                        ? palette.signal
+                                        : palette.textFaint,
+                                    fontWeight: FontWeight.w400,
+                                  ),
                                 ),
-                              ),
-                          ],
+                            ],
+                          ),
                         ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                        // At large text it wraps rather than cutting the
+                        // name ("Ri…" beside Answered).
+                        maxLines: large ? null : 1,
+                        overflow: large ? null : TextOverflow.ellipsis,
                         style: TextStyles.label.copyWith(
                           color: waiting ? palette.text : palette.textMuted,
                           fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
-                    Text(
-                      what,
-                      maxLines: open ? 3 : 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyles.body.copyWith(
-                        color: waiting ? palette.textMuted : palette.textFaint,
+                    Text.rich(
+                      FindHighlight.markText(
+                        context,
+                        what,
+                        TextStyles.body.copyWith(
+                          color: waiting
+                              ? palette.textMuted
+                              : palette.textFaint,
+                        ),
                       ),
+                      // At large text, all of it: a procedure's step
+                      // isn't cut to "· S…".
+                      maxLines: large ? null : (open ? 3 : 2),
+                      overflow: large ? null : TextOverflow.ellipsis,
                     ),
+                    // At large text, under what it asked: beside it
+                    // there's no room.
+                    if (large && !waiting) answered,
                   ],
                 ),
               ),
@@ -1007,17 +1135,12 @@ class _Bubble extends StatelessWidget {
                     ),
                   ),
                 )
-              else if (waiting)
+              else if (waiting || large)
                 const SizedBox.shrink()
               else
                 Padding(
                   padding: const EdgeInsets.only(right: Space.s),
-                  child: Text(
-                    'Answered',
-                    style: TextStyles.caption.copyWith(
-                      color: palette.textFaint,
-                    ),
-                  ),
+                  child: answered,
                 ),
               AnimatedRotation(
                 turns: open ? 0.25 : 0,
@@ -1060,24 +1183,43 @@ class _Bubble extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     _card(context, palette),
-                    // A move's card is all there is to it.
-                    if (item.kind != NeedsYouKind.move) ...[
+                    // A move's card is all there is to it, and a message
+                    // to a friend's has Open chat on it.
+                    if (item.kind != NeedsYouKind.move &&
+                        item.kind != NeedsYouKind.dmSend) ...[
                       const SizedBox(height: Space.s),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: _OpenLink(
-                          label: switch (item.kind) {
-                            NeedsYouKind.entry when liaisonOf != null =>
-                              'Open pipe',
-                            NeedsYouKind.entry ||
-                            NeedsYouKind.browser => 'Open conversation',
-                            NeedsYouKind.dmSend => 'Open chat',
-                            NeedsYouKind.waitingItem => 'Show in checklist',
-                            NeedsYouKind.chat => 'Open chat',
-                            _ => 'Open pipe',
-                          },
-                          onTap: () => _openWhere(context),
-                        ),
+                      Wrap(
+                        spacing: Space.l,
+                        children: [
+                          _OpenLink(
+                            label: switch (item.kind) {
+                              NeedsYouKind.entry when liaisonOf != null =>
+                                'Open pipe',
+                              NeedsYouKind.entry ||
+                              NeedsYouKind.browser => 'Open conversation',
+                              NeedsYouKind.chat => 'Open chat',
+                              _ => 'Open pipe',
+                            },
+                            onTap: () => _openWhere(context),
+                          ),
+                          // The checklist item the card asks about, glowing
+                          // in its checklist beside the conversation.
+                          if (_cardItems.firstOrNull case final about?)
+                            _OpenLink(
+                              label: 'Show in checklist',
+                              onTap: () {
+                                final backend = AppScope.of(context);
+                                AppScope.closePage(context);
+                                fireAndLog(
+                                  showChecklistItem(
+                                    backend,
+                                    about.checklistAgentId,
+                                    about.item.item,
+                                  ),
+                                );
+                              },
+                            ),
+                        ],
                       ),
                     ],
                   ],
@@ -1123,6 +1265,35 @@ class _Bubble extends StatelessWidget {
           );
         }
         return PipeMessageView(pipe: pipe, message: message);
+      case NeedsYouKind.pipeUnanswered:
+        final message = this.message;
+        if (pipe == null) return line('This pipe was deleted.');
+        if (message == null) {
+          return line(
+            failed ?? 'Loading…',
+            color: failed == null ? null : palette.danger,
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            PipeMessageView(pipe: pipe, message: message),
+            // Answered by no agent until one leads the pipe.
+            if (pipe.leadId.isEmpty &&
+                pipe.state != PipeState.PIPE_STATE_CLOSED) ...[
+              const SizedBox(height: Space.s),
+              line(pipeChooseLead),
+              const SizedBox(height: Space.xs),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Button(
+                  label: 'Pipe settings…',
+                  onPressed: () => showPipeSettings(context, pipe),
+                ),
+              ),
+            ],
+          ],
+        );
       case NeedsYouKind.signIn ||
           NeedsYouKind.vault ||
           NeedsYouKind.recoveryKey:
@@ -1145,12 +1316,25 @@ class _Bubble extends StatelessWidget {
       case NeedsYouKind.dmSend:
         final sends = dmSendsOf(workspace, item);
         if (sends.isEmpty) return line('No longer needs you.');
-        // Never its text here: it's read and sent only in the chat.
-        return line(
-          sends.length > 1
-              ? 'Read them in the chat, then send them there.'
-              : 'Read it in the chat, then send it there.',
-          color: palette.textMuted,
+        // Never its text here: it's read and sent only in the chat, where
+        // Send and Don't send sit above the box. Open chat goes there in
+        // one tap: opening it is the action.
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            line(
+              sends.length > 1
+                  ? 'Read them in the chat, then send them there.'
+                  : 'Read it in the chat, then send it there.',
+              color: palette.textMuted,
+            ),
+            const SizedBox(height: Space.s),
+            Button(
+              label: 'Open chat',
+              primary: true,
+              onPressed: () => _openWhere(context),
+            ),
+          ],
         );
       case NeedsYouKind.browser:
         final session = browserSessionOf(workspace, item);
@@ -1158,24 +1342,6 @@ class _Bubble extends StatelessWidget {
         return BrowserSessionCard(
           session: session,
           local: BrowserScope.localOf(context),
-        );
-      case NeedsYouKind.waitingItem:
-        final waiting = waitingItemOf(workspace, item);
-        if (waiting == null) return line('No longer needs you.');
-        final words = waitingItemWords(workspace, item.agentId, waiting);
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              waiting.text,
-              style: TextStyles.body.copyWith(color: palette.text),
-            ),
-            const SizedBox(height: Space.xs),
-            line(
-              words.text,
-              color: words.standsOut ? palette.signal : palette.textMuted,
-            ),
-          ],
         );
       case NeedsYouKind.entry || NeedsYouKind.chat:
         final entry = this.entry;
@@ -1188,12 +1354,40 @@ class _Bubble extends StatelessWidget {
             color: failed == null ? null : palette.danger,
           );
         }
-        return waitingCard(entry, agentId: item.agentId, chatId: item.chatId) ??
+        final card =
+            waitingCard(entry, agentId: item.agentId, chatId: item.chatId) ??
             line(
               item.kind == NeedsYouKind.chat
                   ? 'Open the chat to answer this.'
                   : 'Open the conversation to answer this.',
             );
+        final about = _cardItems;
+        if (about.isEmpty) return card;
+        // What on the checklist the card is about, above it.
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (final (:checklistAgentId, item: waiting) in about)
+              Padding(
+                padding: const EdgeInsets.only(bottom: Space.s),
+                child: Text.rich(
+                  FindHighlight.mark(
+                    context,
+                    TextSpan(
+                      text: cardItemWords(
+                        workspace,
+                        checklistAgentId: checklistAgentId,
+                        cardAgentId: item.agentId,
+                        item: waiting,
+                      ),
+                    ),
+                  ),
+                  style: TextStyles.caption.copyWith(color: palette.textMuted),
+                ),
+              ),
+            card,
+          ],
+        );
     }
   }
 
@@ -1217,6 +1411,10 @@ class _Bubble extends StatelessWidget {
                   '${pipe == null ? 'the other side' : pipePeerClaktory(pipe)}?'
                   '\n${message.text}'
             : 'Waiting for you to send it: ${message.text}';
+      case NeedsYouKind.pipeUnanswered:
+        final message = this.message;
+        if (message == null) return pipeUnanswered;
+        return '$pipeUnanswered\n${message.text}';
       case NeedsYouKind.signIn:
         final signIn = signInOf(workspace, item);
         return signIn == null
@@ -1239,10 +1437,6 @@ class _Bubble extends StatelessWidget {
         return browserAssists(session)
             ? 'Allow reading and using $host in Chrome?'
             : 'Allow reading $host in Chrome?';
-      case NeedsYouKind.waitingItem:
-        final waiting = waitingItemOf(workspace, item);
-        if (waiting == null) return 'No longer needs you';
-        return '${waitingItemLead(waiting.kind)}: ${waiting.text}';
       case NeedsYouKind.entry || NeedsYouKind.chat:
         final entry = this.entry;
         if (entry == null) return 'Waiting for your answer';
@@ -1276,16 +1470,6 @@ class _Bubble extends StatelessWidget {
         }
         backend.reveal.reachSeq(item.agentId, item.seq);
       }());
-    } else if (item.kind == NeedsYouKind.waitingItem) {
-      // Its checklist beside the conversation, the item glowing.
-      fireAndLog(() async {
-        await backend.selectAgent(item.agentId);
-        await backend.openPanel(item.agentId, 'checklist');
-        final key = 'checklist_item:${item.agentId}#${item.seq}';
-        // Pointed at, so the checklist scrolls to it, glow or not.
-        backend.highlights.pointedAt.value = (keys: [key], at: DateTime.now());
-        backend.highlights.glow(key, [agentColor(agent?.color ?? 'slate')]);
-      }());
     } else if (item.kind == NeedsYouKind.chat) {
       if (chat != null) openChat(context, chat);
     } else {
@@ -1295,7 +1479,8 @@ class _Bubble extends StatelessWidget {
       fireAndLog(() async {
         await backend.selectPipe(item.pipeId);
         // Among its liaison's conversation, at the message's card.
-        if (item.kind == NeedsYouKind.pipeHeld) {
+        if (item.kind == NeedsYouKind.pipeHeld ||
+            item.kind == NeedsYouKind.pipeUnanswered) {
           backend.reveal.reachExtra(
             liaison?.id ?? pipeChatRevealId(item.pipeId),
             pipeItemKey(item.seq),
@@ -1338,8 +1523,12 @@ class _OpenLink extends StatelessWidget {
 }
 
 /// What a waiting card in [entry] asks, in a line; [agentId] is whose
-/// conversation shows it.
+/// conversation shows it. It names a decision in an agent's or a device's
+/// words, so what reorders them shows by its code (proseCodes, Fugo).
 String waitingSummary(Entry entry, Backend backend, {String? agentId}) =>
+    proseCodes(_waitingLine(entry, backend, agentId: agentId));
+
+String _waitingLine(Entry entry, Backend backend, {String? agentId}) =>
     switch (entry.whichKind()) {
       Entry_Kind.secretRequest => secretRequestSummary(
         entry.secretRequest,
@@ -1355,7 +1544,7 @@ String waitingSummary(Entry entry, Backend backend, {String? agentId}) =>
             '${entry.proposal.text.trim().split('\n').first}',
       Entry_Kind.secretApproval =>
         'Wants to use ${entry.secretApproval.secretNames.join(', ')}',
-      Entry_Kind.askPerson => entry.askPerson.title,
+      Entry_Kind.askPerson => askSummary(entry.askPerson),
       Entry_Kind.pipeStart => pipeStartSummary(entry.pipeStart),
       Entry_Kind.appGrant => appGrantSummary(
         entry.appGrant,

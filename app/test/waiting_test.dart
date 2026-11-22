@@ -1,6 +1,7 @@
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/state.dart';
 import 'package:factory_app/transcript.dart';
+import 'package:factory_app/selection.dart' show SelectableArea;
 import 'package:factory_app/waiting.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
@@ -78,6 +79,7 @@ bool _onScreen(WidgetTester tester, String text, {double height = _height}) {
 }
 
 void main() {
+  _needsYouMarkGrows();
   test('a count reads 9+ past nine', () {
     expect(waitingCount(1), '1');
     expect(waitingCount(9), '9');
@@ -470,5 +472,47 @@ void main() {
       expect(_onScreen(tester, 'message 199'), isTrue);
       expect(reveal.value, isNotNull);
     });
+  });
+}
+
+void _needsYouMarkGrows() {
+  for (final (scale, least) in [(1.0, 16.0), (3.1, 30.0)]) {
+    testWidgets('the Needs you count is whole at ${scale}x, a pill', (
+      tester,
+    ) async {
+      tester.platformDispatcher.textScaleFactorTestValue = scale;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      await Harness(Workspace()).show(
+        tester,
+        size: const Size(393, 852),
+        home: const Center(child: NeedsYouMark(count: 12, label: '')),
+      );
+      final pill = tester.getSize(find.byType(NeedsYouMark));
+      final text = tester.getSize(find.text(waitingCount(12)));
+      expect(pill.height, greaterThanOrEqualTo(least));
+      expect(pill.height, greaterThanOrEqualTo(text.height));
+      expect(pill.width, greaterThanOrEqualTo(text.width));
+      if (scale == 1) expect(pill.height, 16, reason: 'unchanged at 1x');
+    });
+  }
+
+  testWidgets('the count is no part of a selection around it', (tester) async {
+    await Harness(Workspace()).show(
+      tester,
+      size: const Size(393, 852),
+      home: const SelectableArea(
+        child: Center(child: NeedsYouMark(count: 3, label: '3 waiting')),
+      ),
+    );
+    expect(
+      find.ancestor(
+        of: find.text('3'),
+        matching: find.byWidgetPredicate(
+          (w) => w is SelectionContainer && w.registrar == null,
+        ),
+      ),
+      findsWidgets,
+    );
+    expect(find.bySemanticsLabel('3 waiting'), findsOneWidget);
   });
 }

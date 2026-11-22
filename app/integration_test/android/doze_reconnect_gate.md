@@ -2,9 +2,12 @@
 
 Owner: Doppio. **D5 direct and forced-local-relay 5-minute cases PASS** on
 one paired debug APK. Both main-build hour rows also pass (direct with a
-timing note). #214 remains **open**: the direct simulated-next-day row
-recovered on main c414bba7 but is **NOT PASS** because it opened three tunnels
-after resume; relay is not run. Physical/OEM/actual-overnight acceptance is owed.
+timing note). The direct simulated-next-day row is **PASS on main db16e149**
+under the PM's real-network-change ruling below; the earlier c414bba7 finding
+remains NOT PASS. The forced-local-relay simulated-next-day row is also
+**PASS on the same APK**. Zucchero's independent record-consistency review
+also returned **PASS**, with no fresh device rerun or raw-log re-derivation. #214 remains
+open for its acceptance decision; physical/OEM/actual-overnight evidence is owed.
 Earlier candidate failures remain recorded below, not relabeled as passes.
 The signed friend APK gate is separate (`friend_apk_gate.md`).
 
@@ -32,7 +35,7 @@ credentials or an early foreground visit must be retried, not shortened.
 |---|---|---|
 | At least 5 minutes | PASS e85dc6e9, 329.659 s idle, connected in 2.920 s | PASS same APK, 323.527 s idle, connected in 1.722 s |
 | At least 1 hour | PASS with note on main f765aae5; onShow → connected 3.820 s, wake → connected 5.146 s | PASS on the same APK; onShow → connected 1.146 s, wake → connected 1.650 s |
-| Simulated next day (90 min deep idle + clock/network/standby changes) | NOT PASS on main c414bba7: recovered, but 3 post-resume opens / 2 native binds | NOT RUN; main build |
+| Simulated next day (90 min forced Doze including maintenance + clock/network/standby changes) | PASS on main db16e149 under the PM's real-network-change ruling: 2 opens for the observed transitions; onShow → connected 1.120 s | PASS same APK: 2 opens for observed transitions; onShow → connected 1.575 s; no relay duplicates |
 
 Each cell needs its own sleeping/waking record and an actual post-resume
 message/reply. Cases may share a paired device, but not an interval disturbed
@@ -86,14 +89,21 @@ on a QA sandbox. Physical public-network/VPS relay is a separate owed row.
 4. Scope logs to this device's public endpoint and this resume window. Record
    the actual sandbox `tunnel connection opened` and `device connected` lines,
    with only synthetic public ids; redact private client ids/addresses. The
-   number of new tunnel-open lines is **exactly one**. Record the preceding
-   old-connection drop when emitted; do not assume it must arrive after wake.
+   number of new tunnel-open lines is **exactly one for an unchanged-network
+   resume**. PM ruling after the db16e149 row: one open per real default-network
+   change, none induced by unchanged-handle/interface-only events. When the
+   network moves after resume, correlate every open with the resume or a
+   distinct native default-network handle transition; unexplained opens fail.
+   Record the preceding old-connection drop when emitted; do not assume it
+   must arrive after wake.
 5. Record both device-wake → backend `device connected` and app onShow →
    connected, plus the reached connected UI upper bound. Latest lead ruling:
    the **5-second** target starts at onShow (the app learning the person came
    back), not the earlier Android wake command; retain the wake clock beside
-   it. Exactly one tunnel opens, with no bind after the first post-resume
-   endpoint. Confirm connected UI separately; do not infer it from
+   it. On an unchanged-network resume exactly one tunnel opens, with no bind
+   after the first post-resume endpoint. For a real network move apply the
+   event-correlated rule above, not a blanket one-open limit. Confirm connected
+   UI separately; do not infer it from
    a stale transcript. UI polling gives an upper bound; label it
    as such, not precise transport latency. A stale transcript alone is not a
    connected surface. Open connection details and assert its real connection
@@ -107,8 +117,10 @@ on a QA sandbox. Physical public-network/VPS relay is a separate owed row.
    lifecycle mirror (ignored in release mode), and enable Risotto's debug
    native logging before launching. Positively observe `to the background`
    and `back after Ns`. Between them require **zero binds and zero tunnel
-   opens**; after resume require exactly one open/bind. Correlate close and
-   fallback categories. Save selected sanitized fragments, not raw logcat/UI
+   opens**; after an unchanged-network resume require exactly one open/bind.
+   In a network-changing row, retain every native handle event and correlate
+   additional opens/binds with real transitions. Correlate close and fallback
+   categories. Save selected sanitized fragments, not raw logcat/UI
    XML. A disconnected VM observer or absent logging cannot prove zero events.
 8. Relay client registrations are matched by the endpoint's first 5 bytes
    (10 lower-hex digits), using the whole word `registering`, not
@@ -460,8 +472,9 @@ slow-close warning or fallback. The attached observer retained two lifecycle
 resume log events only 2 ms apart; it did not erase either or infer native
 subscription count from them. Native path/listen event logging was not
 available in this build. Dart and native network owners have the timeline;
-the cause and any required fix/retest are pending. Recovery and a correct
-reply do **not** override the extra-open criterion.
+the later stable-handle fix and a fresh full rerun are described below.
+Recovery and a correct reply do **not** retroactively pass this row: it lacks
+native evidence tying the extra opens to real default-network changes.
 
 The owned device clock, automatic time, Wi-Fi, standby bucket, debug property,
 battery/idle state and non-root adb were restored and checked. Forward/reverse
@@ -472,6 +485,170 @@ read back: `evidence/doze214-20261122/main-direct-sim90-finding.json`. Private
 checksums, endpoint identifiers, pairing material and raw UI are not published.
 This remains a **SIMULATED next day / clock-skew** test, not true overnight or
 backend-token passage. Relay and independent QA remain owed.
+
+## Direct simulated-next-day rerun on the network fix — PASS, 2026-11-22
+
+**PM acceptance ruling:** the db16e149 run is a real-network-change case,
+not an unchanged-default-network resume. Its two opens are correct: the
+pre-Doze Wi-Fi changed to cellular just after onShow, then to a newly connected
+Wi-Fi handle 3.9 seconds later. One open followed each real transition;
+repeated events for the same handle produced no extra opens. Bruno accepted
+this row and directed **no hidden settling period**. No app-side delay or
+coalescing change is requested. This does not retroactively pass c414bba7.
+
+The app and guarded QA were rebuilt from main **db16e149**, including Pesci's
+handle-aware network-move rule and Risotto's stable native handles/event logs.
+Installed APK bytes matched the recorded dev/debug arm64 build with safe
+stdout logging. Fresh actual paste, fingerprint/warning, matching number,
+normal approval, named agent and pre-sleep linked reply all passed. There was
+one initial tunnel and one approved DIRECT device, with no pending approval.
+The production Android package was not changed.
+
+A first attempt on the same source was **aborted by the host disk emergency**
+after setup, not counted as a timed result. Its emulator/observer and QA were
+stopped; rebuildable output was deleted. After Pericolo's explicit all-clear,
+the app and QA were rebuilt sequentially and this full interval restarted in
+a fresh emulator process. Small abort/baseline evidence was preserved.
+
+- Actual forced deep idle started **11:36:16.211625 UTC**; host elapsed before
+  wake was **5524.757 s**. Rare (40) then restricted (45) bucket readbacks passed.
+  A real `deviceidle step` from asserted IDLE reached IDLE_MAINTENANCE. Its
+  immediate post-step/canary assertion did not settle; a subsequent read
+  positively verified maintenance and background canaries without repeating
+  the step or waking. A read-only
+  follow-up at 353.892 s verified natural return to IDLE. This is elapsed
+  forced Doze **including maintenance**, not 90 uninterrupted minutes in IDLE.
+- Before unlock, the actual device clock advanced **72003 s**, and actual
+  Wi-Fi settings changed off/on. The host clock remained unchanged. Immediate
+  connectivity captures still listed the old default and both Wi-Fi/Ethernet
+  transports; commands completing did not mean Wi-Fi had reassociated. Native
+  callbacks across resume supplied the decisive real-default-network evidence.
+- **Zero hidden native binds and zero hidden backend opens.** The passive
+  PID observer stayed attached with positive initial bind/path, background and
+  resume canaries. Process, approved device and DIRECT path were preserved.
+- Wake clock: **13:08:21.000102 UTC**. First onShow host receipt:
+  **13:08:21.501906 UTC**. Two backend opens occurred at **13:08:22.582679**
+  and **13:08:25.950676 UTC**. Native path events reported cellular handle A
+  at onShow +0.476 s, then Wi-Fi handle B at +3.866 s, each followed by one
+  network-moved event. Handle A/B differ from the pre-Doze Wi-Fi; actual
+  ephemeral handles remain in private evidence. Repeated same-handle events
+  did not cause further opens. There was one post-resume native bind, with no
+  slow-close warning or fresh-open fallback. Both lifecycle mirrors are kept.
+- First connected: **1.622 s from wake**, **1.120 s from onShow host receipt**.
+  Connected-drawer observation upper bound: **5.547 s**, with one bounded UI
+  observation error retained. The actual named composer then sent
+  `main-direct-fixed-sim90-after`; exactly one backend user entry and exact
+  visible assistant reply linked by `replied_to` passed. The same approved
+  DIRECT device and no pending device were rechecked. A settled tail still
+  contained only the two event-correlated opens.
+
+Direct reconnects, split by their actual native path event:
+
+| Default-network transition | Path event → backend connected | Tunnel open → backend connected |
+|---|---:|---:|
+| Pre-Doze Wi-Fi → cellular | 0.645 s | 0.040 s |
+| Cellular → reconnected Wi-Fi | 0.602 s | 0.019 s |
+
+Clock/automatic time, Wi-Fi, bucket, debug property, battery/idle and nonroot
+adb were restored and verified; forward/reverse lists were unchanged. Dev
+fixture data was cleared, QA stopped, and observer/emulator stopped before
+Risotto's reserved short native-test slot. Small evidence was archived outside
+build output and read back:
+`evidence/doze214-20261122/main-direct-fixed-sim90-pass.json`.
+The separate disk-abort receipt ends in `main-direct-fixed-sim90-disk-abort.json`.
+No private checksum, pairing material, endpoint id or raw UI is published.
+
+This remains **SIMULATED next day / device clock skew**, not true overnight,
+backend token expiry, physical/OEM acceptance or a global Android pass.
+The forced-local-relay result follows; independent QA is still owed.
+
+## Forced-local-relay simulated-next-day row — PASS, 2026-11-22
+
+The **same recorded db16e149 APK and matching guarded QA** passed the relay
+row in a fresh emulator process, after Risotto returned his reserved native
+test slot stopped. This uses an owned local **iroh-relay 1.5.0** built from the
+locked published crate, not the production push service or a public relay.
+Its private artifact checksum was verified before use. The actual pairing code
+had no `a=` hints and only the owned localhost relay. Exact **dev-package UID**
+IPv4 and IPv6 OUTPUT UDP DROP rules plus one TCP3340 adb reverse forced the
+transport; all were checked before the interval and before wake. No rules or
+data belonging to the production Android package were changed.
+
+Fresh real fingerprint/warning, matching-number approval, named conversation,
+pre-sleep linked nonce, approved `DEVICE_PATH_RELAYED` and no pending device
+passed. There was exactly one initial backend tunnel and one app relay client
+registration, with no duplicate/replaced client. Native bind/path logging was
+positively observed before sleeping; the passive observer stayed attached.
+
+- Deep idle began **13:18:39.765654 UTC**. Before wake, actual host elapsed was
+  **5503.562 s**, with stable host wall/monotonic clocks and the same app
+  process/boot. Rare/restricted readbacks and real IDLE→IDLE_MAINTENANCE were
+  exercised. The immediate post-step/canary check did not settle; a subsequent
+  read verified maintenance, screen off and positive background events without
+  another step or wake. A read-only check at 355.849 s verified natural return
+  to IDLE. This is forced Doze **including maintenance**, not continuous IDLE.
+- Still hidden and before unlock, the device clock actually advanced
+  **72003 s** and Wi-Fi was turned off/on. The host clock was not changed.
+  No hidden settling delay was introduced. Two real default-network changes
+  were observed **across resume**: pre-Doze Wi-Fi→cellular A, then cellular
+  A→new Wi-Fi B. These are native handle transitions, not toggle command
+  counts; no claim is made that native callbacks ran during hidden Doze.
+- There were **zero hidden native binds, backend opens, app relay
+  registrations or duplicate clients**. After resume there were **two backend
+  opens and one native bind**, each open explained by the two real transitions.
+  Repeated identical-handle callbacks caused no further opens. This applies
+  Bruno's event-correlated rule, not the superseded unconditional one-open cap.
+- Wake: **14:50:23.360347 UTC**. First onShow host receipt:
+  **14:50:24.731903 UTC**. Cellular was reported at onShow +0.890 s; Wi-Fi at
+  +3.343 s. Backend opens were **14:50:26.055167** and **14:50:28.714047 UTC**;
+  connected events were **14:50:26.306433** and **14:50:28.863768 UTC**.
+- First connected: **1.575 s from onShow**, **2.946 s from wake**, both within
+  the five-second target. Actual connected-drawer observation upper bound:
+  **8.533 s**, with two bounded UI errors retained. The actual named composer
+  then sent `main-relay-fixed-sim90-after`; exactly one backend user entry and
+  the exact visible assistant reply with correct `replied_to` passed. The
+  same approved RELAYED device and no pending device were rechecked.
+- The settled window retained two opens, **one new app relay registration**,
+  and **zero duplicate/replaced clients**. Across setup and resume there were
+  two app registrations total. There was no slow-close warning, completion
+  exception, dead-port fallback or fresh-open fallback during the case.
+  Two later relay “Stream terminated” warnings occurred only during deliberate
+  app/QA teardown, not the measured recovery, and are retained as cleanup events.
+
+| Default-network transition | Path event → backend connected | Tunnel open → backend connected |
+|---|---:|---:|
+| Pre-Doze Wi-Fi → cellular | 0.684 s | 0.251 s |
+| Cellular → reconnected Wi-Fi | 0.789 s | 0.150 s |
+
+All owned clock/automatic-time, Wi-Fi, bucket, debug, idle/battery changes were
+restored and read back. Both exact UID UDP rules and only the owned TCP3340
+reverse were removed and verified absent **before unrooting**. Dev fixture
+data was cleared, nonroot adb restored, QA down, and the observer, local relay
+and emulator stopped. Small sanitized evidence was archived outside build
+output and read back:
+`evidence/doze214-20261122/main-relay-fixed-sim90-pass.json`.
+
+Both simulated-next-day emulator rows are now recorded. **A fresh independent
+rerun, physical/OEM, real Wi-Fi/cellular/public-network relay and true overnight
+acceptance remain owed.** The independent record review below does not close
+#214 by itself, certify native hardware or claim backend token expiry. The
+broader Android parity audit is separate from this reconnect work.
+
+## Independent review — PASS on the records, 2026-11-22
+
+Zucchero independently read the landed report and both sanitized evidence JSON
+records (QA row 55). He recomputed the idle/wake/onShow timings, each of the two
+handle-correlated opens, per-path reconnect latency, one post-resume bind,
+hidden-event sequence, device clock gap of host elapsed plus 72003 s, relay
+registration/duplicate counts, and the nonce/reply link on the same approved
+device/path. All reported figures matched his calculation within 0.04 s.
+
+**Scope: record-consistency review, not a fresh 90-minute device run.** He did
+not re-run the cases, and raw backend/relay logs had already been removed with
+the completed build output, so he could not re-derive the records from raw
+logs. This remains emulator device-clock skew, not true overnight or backend
+token expiry. Physical-phone evidence is still owed. The PM owns #214's
+acceptance/closure decision; this report does not close it.
 
 ## Measurement helper
 
@@ -526,5 +703,7 @@ notification keys, capability URLs, whole UI hierarchies or raw private logs.
 Physical-phone availability was requested from Matt by card. Until answered,
 it is **unknown**, not evidence that no phone exists. If one is available,
 supply a short phone-only check; an emulator PASS cannot close that row.
-Report each matrix cell separately to Prosciutto, including elapsed interval,
-transport evidence, reconnect timings, one-tunnel log and anything still owed.
+Hand finished Android UI acceptance evidence directly to Zucchero for
+independent verification, including elapsed interval, transport evidence,
+reconnect timings, event-correlated tunnel logs and anything still owed.
+Blockers and protocol changes go to Bruno and the relevant owners.

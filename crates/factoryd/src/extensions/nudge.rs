@@ -175,17 +175,18 @@ const ASK_WITHIN_MINUTES: i64 = 60;
 
 /// The daily reminder: items with `blocked_on` "person", blocked an hour,
 /// whose owning agent (the owner, or the checklist's agent) has no pending
-/// ask about them get that agent told to file one, at most once a day. Not
-/// for something only the person can do (#282: its Needs you entry is
-/// enough), nor once they dismissed a question about it (it's asked again
-/// on its own terms, see `checklist::check_waits`).
+/// ask about them get that agent told to file one, at most once a day: a
+/// decision or something only the person can do alike, since neither shows
+/// in Needs you until a question names it. Not once they dismissed a
+/// question about it (it's asked again on its own terms, see
+/// `checklist::check_waits`).
 fn check_person_blocked(factory: &Arc<Factory>) -> rusqlite::Result<()> {
     sweep_once(factory)?;
     let rows: Vec<Blocked> = {
         let db = factory.store.db();
         let mut statement = db.prepare(
             "SELECT agent, owner, id, text FROM checklist_items WHERE status = 'blocked' AND blocked_on = 'person'
-             AND blocked_kind != 'person_action' AND dismissed_at IS NULL AND blocked_since <= ?1 ORDER BY agent, id",
+             AND dismissed_at IS NULL AND blocked_since <= ?1 ORDER BY agent, id",
         )?;
         let since = now_ms() - ASK_WITHIN_MINUTES.saturating_mul(factory.nudge_minute());
         let rows = statement.query_map([since], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
@@ -225,7 +226,7 @@ fn remind_owner(factory: &Arc<Factory>, owning: &str, items: &[Blocked], person:
     }
     let items: Vec<&Blocked> = items
         .iter()
-        .filter(|(agent, _, id, _)| !super::ask::pending_about(&factory.store, owning, &checklist::item_key(agent, *id)))
+        .filter(|(agent, _, id, _)| !checklist::asked_about(factory, owning, &checklist::item_key(agent, *id)))
         .collect();
     if items.is_empty() {
         return Ok(());
@@ -240,7 +241,7 @@ fn remind_owner(factory: &Arc<Factory>, owning: &str, items: &[Blocked], person:
         .iter()
         .take(NAMED)
         .map(|(agent, _, id, text)| {
-            let whose = if agent == owning { String::new() } else { format!(" on {agent}'s checklist") };
+            let whose = if agent == owning { String::new() } else { format!(" on {}'s checklist", checklist::name_of(factory, agent)) };
             format!("#{id}{whose} {}", clip(text, 60))
         })
         .collect();
@@ -255,8 +256,9 @@ fn remind_owner(factory: &Arc<Factory>, owning: &str, items: &[Blocked], person:
         let _ = write!(text, ", +{} more", items.len() - NAMED);
     }
     text.push_str(
-        ". A decision that gates work is asked the day it blocks: file ask_person now, one card per real decision \
-         (only pure preferences batch into one question) — or note on the item why you can't ask yet.",
+        ". None of it shows in their Needs you until you ask: file ask_person now with item naming it, one card per \
+         decision or action (secrets_request or propose_to_rivet with item, if one waits on a secret or on Rivet) — or note \
+         on the item why you can't ask yet.",
     );
     let summary = format!("Reminder: {} blocked item{} with nothing asked", items.len(), if items.len() == 1 { "" } else { "s" });
     tracing::info!(agent = %owning, items = items.len(), "reminding an agent of person-blocked items with no ask");

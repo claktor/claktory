@@ -1,6 +1,7 @@
 package com.claktory.app
 
 import android.content.Intent
+import android.view.View
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 
@@ -34,7 +35,21 @@ class MainActivity : FlutterActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) keepKeysComing()
         adapters?.onFocus(hasFocus)
+    }
+
+    /**
+     * The app's view holds focus whenever its window does. Opened by touch,
+     * Android gives no view focus (targetSdk 28+), and a tap doesn't give
+     * it either (Flutter takes touches itself), so a keyboard's shortcuts
+     * (Ctrl+F, which isn't typing and doesn't leave touch mode) reached no
+     * view until a letter was typed. FlutterView is focusable in touch
+     * mode; focusing it opens no keyboard.
+     */
+    private fun keepKeysComing() {
+        if (currentFocus != null) return
+        window.decorView.findViewById<View>(FLUTTER_VIEW_ID)?.requestFocus()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {

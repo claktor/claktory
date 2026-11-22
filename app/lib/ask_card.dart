@@ -6,6 +6,7 @@ import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
 import 'decision.dart';
+import 'dictation.dart';
 import 'explorer.dart' show shortPath;
 import 'extensions.dart' show logTime;
 import 'identity.dart';
@@ -16,9 +17,11 @@ import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
 import 'mobile/navigation.dart' show PhoneRoutes;
 import 'protocol/factory/v1/factory.pb.dart';
+import 'review_answer.dart' show rememberReviewReturn;
 import 'scope.dart';
 import 'selection.dart' show SelectableArea;
 import 'taint_label.dart';
+import 'visible_codes.dart' show proseCodes, visibleCodes;
 
 /// An agent's question for the person, one it can't go on without: what it
 /// needs (its title) and why (the body, Markdown), and the person's answer
@@ -48,18 +51,53 @@ class AskPersonCard extends StatefulWidget {
 
 class _AskPersonCardState extends State<AskPersonCard> {
   final _text = TextEditingController();
+
+  /// The written answer's focus, or a step's what's in the way: never
+  /// both on the card at once.
+  final _focus = FocusNode(debugLabel: 'Ask answer');
   var _busy = false;
   String? _error;
+
+  /// A procedure's Can't do this… was chosen: its comment field and the
+  /// button that sends it show instead of Done.
+  var _cant = false;
+
+  /// Can't do this…: its field opens with the keys, so what's typed lands
+  /// in it at once, as Add a comment's does (Abbacchio).
+  void _openCant() {
+    setState(() => _cant = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _cant) _focus.requestFocus();
+    });
+  }
+
+  /// A procedure's finished steps are listed, not only counted.
+  var _showSteps = false;
+
+  @override
+  void didUpdateWidget(AskPersonCard old) {
+    super.didUpdateWidget(old);
+    // The next step: a clean card for it.
+    if (currentStep(old.ask) != currentStep(widget.ask)) {
+      _text.clear();
+      _cant = false;
+      _error = null;
+    }
+  }
 
   @override
   void dispose() {
     _text.dispose();
+    _focus.dispose();
     super.dispose();
   }
 
-  Future<void> _answer({required bool dismiss}) async {
+  Future<void> _answer({required bool dismiss, int? step}) async {
     final text = _text.text.trim();
-    if (_busy || (!dismiss && widget.ask.wantsText && text.isEmpty)) return;
+    if (_busy ||
+        (step == null && !dismiss && widget.ask.wantsText && text.isEmpty)) {
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
@@ -71,6 +109,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
         // Dismissed, what's typed goes too, as the person's comment.
         text: text,
         dismiss: dismiss,
+        step: step,
       );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
@@ -112,7 +151,9 @@ class _AskPersonCardState extends State<AskPersonCard> {
               ],
               Flexible(
                 child: Text(
-                  '$name needs your answer',
+                  ask.steps.isEmpty
+                      ? '$name needs your answer'
+                      : '$name needs you to do something',
                   style: type.caption.copyWith(
                     color: color,
                     fontWeight: FontWeight.w600,
@@ -124,8 +165,10 @@ class _AskPersonCardState extends State<AskPersonCard> {
           // Where the question may come from, when its agent read a pipe.
           TaintLabel(taint: ask.taint, agent: name),
           const SizedBox(height: Space.s),
+          // What the agent wrote, to decide on: what reorders text shows by
+          // its code (proseCodes, Fugo).
           Text(
-            ask.title,
+            proseCodes(ask.title),
             style: type.emphasis.copyWith(
               color: dismissed ? palette.textMuted : palette.text,
             ),
@@ -136,7 +179,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
               if (i > 0) const SizedBox(height: Space.s),
               part.command
                   ? _Command(part.text)
-                  : Markdown(part.text, color: palette.textMuted),
+                  : Markdown(proseCodes(part.text), color: palette.textMuted),
             ],
           ],
           // A document it asks the person to review, with Review.
@@ -149,7 +192,9 @@ class _AskPersonCardState extends State<AskPersonCard> {
             ),
           ],
           const SizedBox(height: Space.m),
-          if (pending)
+          if (ask.steps.isNotEmpty)
+            ..._procedure(palette, type, color, name, pending, decided)
+          else if (pending)
             ..._pending(palette, type, name)
           else
             ..._decided(palette, type, color, name, dismissed, decided),
@@ -172,16 +217,23 @@ class _AskPersonCardState extends State<AskPersonCard> {
       // A written answer has its box; an approval, a comment under its
       // buttons for either.
       if (wantsText) ...[
-        CallbackShortcuts(
-          bindings: {
-            const SingleActivator(LogicalKeyboardKey.enter): () =>
-                _answer(dismiss: false),
-          },
-          child: TextField(
-            controller: _text,
-            placeholder: 'Your answer',
-            minLines: 1,
-            maxLines: 8,
+        // Or said: the mic puts what's said in, to check before sending.
+        Dictation(
+          controller: _text,
+          focusNode: _focus,
+          enabled: !_busy,
+          child: CallbackShortcuts(
+            bindings: {
+              const SingleActivator(LogicalKeyboardKey.enter): () =>
+                  _answer(dismiss: false),
+            },
+            child: TextField(
+              controller: _text,
+              focusNode: _focus,
+              placeholder: 'Your answer',
+              minLines: 1,
+              maxLines: 8,
+            ),
           ),
         ),
         const SizedBox(height: Space.s),
@@ -225,6 +277,193 @@ class _AskPersonCardState extends State<AskPersonCard> {
           enabled: !_busy,
           onSubmitted: () => _answer(dismiss: false),
         ),
+    ];
+  }
+
+  /// A procedure (ask_person's steps): one step at a time, "Step 2 of 6",
+  /// with Done and Can't do this…, the steps finished counted above it
+  /// and listed on request; decided, how it ended, with every step.
+  List<Widget> _procedure(
+    Palette palette,
+    TypeScale type,
+    Color color,
+    String name,
+    bool pending,
+    int decided,
+  ) {
+    final ask = widget.ask;
+    final steps = ask.steps;
+    final at = currentStep(ask);
+    final finished = [
+      for (final (i, step) in steps.indexed)
+        if (!_open(step)) i,
+    ];
+    if (pending && at != null) {
+      final step = steps[at];
+      return [
+        if (finished.isNotEmpty) ...[
+          _StepsToggle(
+            label: finished.length == 1
+                ? '1 step done'
+                : '${finished.length} steps done',
+            open: _showSteps,
+            onTap: () => setState(() => _showSteps = !_showSteps),
+          ),
+          if (_showSteps)
+            for (final i in finished) _StepLine(index: i, step: steps[i]),
+          const SizedBox(height: Space.s),
+        ],
+        Text(
+          'Step ${at + 1} of ${steps.length}',
+          style: type.caption.copyWith(
+            color: color,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: Space.xs),
+        for (final (i, part) in askBodyParts(step.text).indexed) ...[
+          if (i > 0) const SizedBox(height: Space.s),
+          part.command
+              ? _Command(part.text)
+              : Markdown(proseCodes(part.text), color: palette.text),
+        ],
+        const SizedBox(height: Space.m),
+        if (_cant) ...[
+          // What's in the way, for the agent to decide what's next; typed
+          // or said.
+          Dictation(
+            controller: _text,
+            focusNode: _focus,
+            enabled: !_busy,
+            child: TextField(
+              controller: _text,
+              focusNode: _focus,
+              placeholder: "What's in the way? (optional)",
+              minLines: 1,
+              maxLines: 6,
+            ),
+          ),
+          const SizedBox(height: Space.s),
+          ActionLine(
+            lead: Text(
+              _error ?? '$name hears why and decides what to do next.',
+              style: type.caption.copyWith(
+                color: _error == null ? palette.textFaint : palette.danger,
+              ),
+            ),
+            action: ControlsLine(
+              children: [
+                Button(
+                  label: 'Back',
+                  onPressed: _busy ? null : () => setState(() => _cant = false),
+                ),
+                Button(
+                  label: "Can't do this",
+                  primary: true,
+                  onPressed: _busy
+                      ? null
+                      : () => _answer(dismiss: true, step: at),
+                ),
+              ],
+            ),
+          ),
+        ] else ...[
+          ActionLine(
+            lead: Text(
+              _error ??
+                  (at + 1 < steps.length
+                      ? 'The next step shows once this one is done.'
+                      : '$name carries on once this is done.'),
+              style: type.caption.copyWith(
+                color: _error == null ? palette.textFaint : palette.danger,
+              ),
+            ),
+            action: ControlsLine(
+              children: [
+                Button(
+                  label: "Can't do this…",
+                  onPressed: _busy ? null : _openCant,
+                ),
+                Button(
+                  label: 'Done',
+                  primary: true,
+                  onPressed: _busy
+                      ? null
+                      : () => _answer(dismiss: false, step: at),
+                ),
+              ],
+            ),
+          ),
+          DecisionComment(
+            controller: _text,
+            agent: name,
+            enabled: !_busy,
+            onSubmitted: () => _answer(dismiss: false, step: at),
+          ),
+        ],
+      ];
+    }
+    // Decided: every step done, stopped at one, or left to the agent.
+    final stopped = steps.indexed
+        .where((each) => each.$2.state == AskStepState.ASK_STEP_STATE_CANT)
+        .firstOrNull;
+    final allDone =
+        ask.state == AskPersonState.ASK_PERSON_STATE_ANSWERED &&
+        stopped == null;
+    final outcome = allDone
+        ? steps.length == 2
+              ? 'Both steps done'
+              : 'All ${steps.length} steps done'
+        : stopped != null
+        ? "Couldn't do step ${stopped.$1 + 1} of ${steps.length}"
+        : 'Left to $name';
+    return [
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const PersonAvatar(size: 16),
+          const SizedBox(width: Space.xs + 2),
+          Flexible(
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: outcome,
+                    style: TextStyle(
+                      color: allDone ? color : palette.textMuted,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  if (decided > 0)
+                    TextSpan(
+                      text:
+                          ' · ${logTime(DateTime.fromMillisecondsSinceEpoch(decided))}',
+                      style: TextStyle(color: palette.textFaint),
+                    ),
+                ],
+              ),
+              style: type.caption,
+            ),
+          ),
+        ],
+      ),
+      // What was in the way.
+      if (stopped != null && stopped.$2.comment.isNotEmpty) ...[
+        const SizedBox(height: Space.xs),
+        Text(
+          stopped.$2.comment,
+          style: type.body.copyWith(color: palette.textMuted),
+        ),
+      ],
+      const SizedBox(height: Space.xs),
+      _StepsToggle(
+        label: 'Steps',
+        open: _showSteps,
+        onTap: () => setState(() => _showSteps = !_showSteps),
+      ),
+      if (_showSteps)
+        for (final (i, step) in steps.indexed)
+          _StepLine(index: i, step: step, reached: !_open(step)),
     ];
   }
 
@@ -285,6 +524,31 @@ class _AskPersonCardState extends State<AskPersonCard> {
   }
 }
 
+/// A procedure's step not answered yet.
+bool _open(AskStep step) =>
+    step.state == AskStepState.ASK_STEP_STATE_PENDING ||
+    step.state == AskStepState.ASK_STEP_STATE_UNSPECIFIED;
+
+/// The step [ask] shows now, 0-based: its first not answered while it
+/// waits; null when it has no steps or isn't waiting.
+int? currentStep(AskPerson ask) {
+  if (ask.state != AskPersonState.ASK_PERSON_STATE_PENDING &&
+      ask.state != AskPersonState.ASK_PERSON_STATE_UNSPECIFIED) {
+    return null;
+  }
+  for (final (i, step) in ask.steps.indexed) {
+    if (_open(step)) return i;
+  }
+  return null;
+}
+
+/// What a waiting ask says in a line (Needs you, the agent's list): its
+/// title, and for a procedure the step it's at.
+String askSummary(AskPerson ask) => switch (currentStep(ask)) {
+  final at? => '${ask.title} · Step ${at + 1} of ${ask.steps.length}',
+  null => ask.title,
+};
+
 /// A part of an ask's body: Markdown, or a command (a fenced code block's
 /// contents) to show with Copy.
 typedef AskBodyPart = ({String text, bool command});
@@ -326,7 +590,9 @@ class _CommandState extends State<_Command> {
 
   @override
   Widget build(BuildContext context) => ActionLine(
-    lead: CodeBlock(widget.command),
+    // Code an agent wrote, shown as tool calls show it: every hidden
+    // character by its code (Fugo). Copy copies it as it is.
+    lead: CodeBlock(visibleCodes(widget.command)),
     action: Button(
       label: _copied ? 'Copied' : 'Copy',
       onPressed: () {
@@ -345,6 +611,8 @@ void openReview(BuildContext context, String agentId, String path) {
   // On a phone, a page over what shows (Needs you stays under it, for
   // Back), with the review's bar at its foot.
   if (PhoneRoutes.of(context)?.showFile(agentId, path) ?? false) return;
+  // Answered there, back here.
+  rememberReviewReturn(context, agentId, path);
   final scope = AppScope.scope(context);
   final backend = scope.backend;
   if (backend.workspace.agent(agentId) == null) return;
@@ -417,6 +685,127 @@ class _ReviewFile extends StatelessWidget {
           ],
         ),
         action: Button(label: 'Review', onPressed: onReview),
+      ),
+    );
+  }
+}
+
+/// Shows or hides a procedure's steps: [label], and whether they show.
+class _StepsToggle extends StatelessWidget {
+  const _StepsToggle({
+    required this.label,
+    required this.open,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool open;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    return Align(
+      alignment: AlignmentDirectional.centerStart,
+      child: Semantics(
+        button: true,
+        expanded: open,
+        child: Pressable(
+          onTap: onTap,
+          builder: (context, hovered) => Container(
+            // A finger's height on a phone or iPad, the words centred in
+            // it (Prosciutto: not a gap under them).
+            constraints: BoxConstraints(
+              minHeight: touchFirst(context) ? Metrics.of(context).target : 0,
+            ),
+            alignment: AlignmentDirectional.centerStart,
+            // One text, so it wraps at the largest sizes.
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: label,
+                    style: TextStyle(
+                      color: hovered ? palette.text : palette.textMuted,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  TextSpan(
+                    text: open ? '  Hide' : '  Show',
+                    style: TextStyle(color: palette.textFaint),
+                  ),
+                ],
+              ),
+              style: type.caption,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One of a procedure's steps, small: its number and words, how it went
+/// (done, couldn't do, not reached), and the person's comment on it.
+class _StepLine extends StatelessWidget {
+  const _StepLine({required this.index, required this.step, this.reached});
+
+  final int index;
+  final AskStep step;
+
+  /// Whether it was answered; null where only answered ones are listed.
+  final bool? reached;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final outcome = switch (step.state) {
+      AskStepState.ASK_STEP_STATE_DONE => 'Done',
+      AskStepState.ASK_STEP_STATE_CANT => "Couldn't do",
+      _ => reached == false ? 'Not reached' : '',
+    };
+    // The whole step on one line, its command too ("Open Terminal and run:
+    // ykman info"), without a code block's fences.
+    final first = proseCodes(
+      [
+        for (final line in step.text.split('\n'))
+          if (line.trim().isNotEmpty && !line.trim().startsWith('```'))
+            line.trim(),
+      ].join(' '),
+    );
+    return Padding(
+      padding: const EdgeInsets.only(top: Space.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(text: '${index + 1}. $first'),
+                if (outcome.isNotEmpty)
+                  TextSpan(
+                    text: ' · $outcome',
+                    style: TextStyle(
+                      color: step.state == AskStepState.ASK_STEP_STATE_CANT
+                          ? palette.danger
+                          : palette.textFaint,
+                    ),
+                  ),
+              ],
+            ),
+            style: type.caption.copyWith(color: palette.textMuted),
+          ),
+          if (step.comment.isNotEmpty)
+            Padding(
+              padding: const EdgeInsetsDirectional.only(start: Space.m),
+              child: Text(
+                step.comment,
+                style: type.caption.copyWith(color: palette.textFaint),
+              ),
+            ),
+        ],
       ),
     );
   }

@@ -461,6 +461,32 @@ Proofs:
 
 A real phone's TEE is owed.
 
+### Copy code's secret on the clipboard (E5)
+
+`factory/secret-clipboard` (`SecretClipboard.kt`, Dart:
+`app/lib/people/secret_clipboard.dart`):
+
+- **`copy {text, seconds}`** puts the text under the label
+  `Claktory code`, marked sensitive (`android.content.extra.IS_SENSITIVE`
+  in the description's extras). Android 13 then hides it in its preview,
+  and keyboards keep it out of their history. It answers a token.
+- **`clear {token}`** clears the clipboard only while it still holds
+  that write. From Android 8, that means the label and the time the
+  system took the clip are unchanged. Before Android 8, it means the
+  label and the text's SHA-256, and the text is read only under this
+  app's label. Anything else, including another app's clip, Flutter's
+  own copies or a later Copy code, is left alone. From Android 10 a
+  backgrounded app can't see what's there, so `clear` does nothing then
+  and keeps the token for a later `clear`.
+- **Expiry:** Android has no expiry of its own, so `seconds` is the
+  app's to keep, by calling `clear`.
+
+Proofs:
+
+- `SecretClipboardCoreTest` (JVM, with timestamps and without).
+- `SecretClipboardTest` (instrumentation, the real clipboard from the
+  running app).
+
 ### Proof owed in A.2
 
 Instrumentation tests on an emulator and a real phone: round trip of the
@@ -583,6 +609,25 @@ hung at "Connecting…" and never reached the sandbox, even after a force
 stop. A second clean install connected at once. The tunnel's later
 reconnect fixes (#214) likely cover it; current builds never showed it.
 Still owed: the same on a real phone.
+
+### Keyboard shortcuts and focus
+
+Opened by touch, Android gives no view focus (targetSdk 28 and later), and
+a tap doesn't give FlutterView focus either, since Flutter takes touches
+itself. A key that isn't typing, such as Ctrl+F, doesn't leave touch mode,
+so it reached no view until a letter was typed. MainActivity gives
+FlutterView focus whenever the window gains it and nothing else holds it.
+That opens no keyboard. `KeyFocusTest` checks it in touch mode, and after
+a tap.
+
+`adb shell input keycombination` can't stand in for a keyboard here: the
+Ctrl down it injects carries no Ctrl meta state, so Flutter releases Ctrl
+again at once, and F then arrives without it. A real keyboard's Ctrl down
+carries its own meta state. Keyboard-shaped events (UiAutomation, Ctrl's
+meta on every event, source KEYBOARD) open Find on the API 36 emulator
+after a tap (2026-11-22). The AVD has no keyboard device, so the
+emulator's EV_KEY events reach nothing. A real Bluetooth keyboard on a
+phone is still owed.
 
 ### Links and the clipboard
 
@@ -716,6 +761,21 @@ release key included), for its versions, and for being signed with the
 APK's certificate. Two runs of 05f9de729e with a throwaway key gave the
 same bundle and the same APK, byte for byte. Neither the bundle nor its
 debug symbols hold a home-folder path or the user's name.
+
+For Play's crash reports, the bundle carries R8's mapping and the native
+libraries' symbol tables (`debugSymbolLevel = "SYMBOL_TABLE"`), and the
+script checks that both are in it. It also puts
+`claktory-<version>-<code>-mapping.txt` and
+`-native-debug-symbols.zip` beside the `.aab` for the Console. The
+APK's libraries stay stripped: 101701's and 101702's tunnel library are
+the same bytes.
+
+With Play App Signing, Play signs what it installs with the app key (our
+release key, M11), and we sign the bundle with a separate upload key:
+`--upload-key FILE`, checked against that keystore's certificate and
+refused if it's the app key. The APK for the link stays signed with the
+app key. Two runs of 6f2b7e9c with a throwaway upload key gave the same
+APK, bundle, mapping and symbols, byte for byte.
 
 ## 7. The boot proof, step by step
 
@@ -908,7 +968,7 @@ It's the native side only: what the backend, the account service
 `INTERNET` and `ACCESS_NETWORK_STATE` (the private connection, and
 watching the network to reconnect); `RECORD_AUDIO` and `CAMERA`, each asked
 for when first used (recording a voice message; scanning a pairing code),
-never at launch; the camera is an optional feature. AndroidX adds its own
+never at launch; the camera and the microphone are optional features, so Play offers the app to devices without them (pairing by paste works there). AndroidX adds its own
 `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`, which only guards the app's own
 receivers. No storage, contacts, location, phone, notification or
 account permissions.
@@ -936,7 +996,7 @@ against its checksum at build time (§1).
 | Attachments | only the photos, videos and files the person picks (system pickers, no storage permission), or the image they paste | Copied into the app's cache, uploaded to their Claktory. |
 | Voice messages | a recording made while the person holds record | A file in the app's cache, sent to their Claktory, which transcribes it on its own machine. |
 | Camera | frames while the pairing screen's scanner shows | In memory only, read for a QR code on the phone; never stored, logged or sent. Only the code's text goes to the app. |
-| Clipboard | read only when the person taps Paste or Paste image | As above. |
+| Clipboard | read only when the person taps Paste or Paste image; written when they tap Copy (Copy code's secret marked sensitive, cleared later if it's still there) | As above. |
 | Share sheet | the text the person chose to share | To the app they pick. |
 | Web sign-in for a service | the service's page, in a Custom Tab (the browser's) | The redirect's code goes to the person's Claktory, which finishes the sign-in. |
 | Logs | codes and counts only (§5, §10): never codes, keys, addresses, messages or what a QR code says | logcat on the phone; never sent anywhere. |

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -83,6 +84,231 @@ class TitleSpace extends StatelessWidget {
       // A phone has no window to drag, and its status bar is room enough.
       ? const SizedBox(height: Space.s)
       : const WindowDrag(child: SizedBox(height: titleBarHeight));
+}
+
+/// What a scroll view holds, for selecting in it under the app's zoom.
+/// Flutter's scroll view, inside a selectable area, adds its offset to a
+/// drag's position in its own units and takes it off in the window's, so
+/// at any zoom but 100% a selection lands (zoom − 1) × the offset away
+/// from the pointer: lines away down a long file (Matt). This takes that
+/// back off before what it holds sees the drag. Put it right inside each
+/// scroll view (its child, or each of a list's items) whose text can be
+/// selected; it does nothing where nothing is selectable or nothing
+/// zooms. [trail] follows what it copies when the selection runs past its
+/// end: a line's break, in a list of lines.
+class ScrolledSelection extends StatefulWidget {
+  const ScrolledSelection({super.key, this.trail = '', required this.child});
+
+  final String trail;
+  final Widget child;
+
+  @override
+  State<ScrolledSelection> createState() => _ScrolledSelectionState();
+}
+
+class _ScrolledSelectionState extends State<ScrolledSelection> {
+  late final _delegate = _ScrolledSelectionDelegate(
+    () => mounted ? Scrollable.maybeOf(context) : null,
+  )..trail = widget.trail;
+
+  @override
+  void didUpdateWidget(ScrolledSelection old) {
+    super.didUpdateWidget(old);
+    _delegate.trail = widget.trail;
+  }
+
+  @override
+  void dispose() {
+    _delegate.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scrollable = Scrollable.maybeOf(context);
+    // A scroll view outside any selectable area takes no part in it.
+    if (scrollable == null ||
+        SelectionContainer.maybeOf(scrollable.context) == null) {
+      return widget.child;
+    }
+    return SelectionContainer(delegate: _delegate, child: widget.child);
+  }
+}
+
+class _ScrolledSelectionDelegate extends StaticSelectionContainerDelegate {
+  _ScrolledSelectionDelegate(this.scrollable);
+
+  final ScrollableState? Function() scrollable;
+  String trail = '';
+
+  @override
+  SelectedContent? getSelectedContent() {
+    final content = super.getSelectedContent();
+    if (trail.isEmpty || content == null) return content;
+    final range = getSelection();
+    if (range == null ||
+        math.max(range.startOffset, range.endOffset) < contentLength) {
+      return content;
+    }
+    return SelectedContent(plainText: content.plainText + trail);
+  }
+
+  /// What the scroll view added to a position the window gave it: its
+  /// offset, scaled by the zoom less one.
+  Offset _skew() {
+    final state = scrollable();
+    final box = state?.context.findRenderObject();
+    if (state == null || box is! RenderBox || !box.attached) {
+      return Offset.zero;
+    }
+    // How big a unit along it is in the window.
+    final vertical = axisDirectionToAxis(state.axisDirection) == Axis.vertical;
+    final unit = vertical ? const Offset(0, 1) : const Offset(1, 0);
+    final zoom =
+        (box.localToGlobal(unit) - box.localToGlobal(Offset.zero)).distance;
+    final extra = (zoom - 1) * state.position.pixels;
+    if (extra.abs() < 0.01) return Offset.zero;
+    return switch (state.axisDirection) {
+      AxisDirection.down => Offset(0, extra),
+      AxisDirection.up => Offset(0, -extra),
+      AxisDirection.right => Offset(extra, 0),
+      AxisDirection.left => Offset(-extra, 0),
+    };
+  }
+
+  @override
+  SelectionResult handleSelectionEdgeUpdate(SelectionEdgeUpdateEvent event) {
+    final skew = _skew();
+    final at = event.globalPosition;
+    if (skew == Offset.zero || !at.isFinite) {
+      return super.handleSelectionEdgeUpdate(event);
+    }
+    return super.handleSelectionEdgeUpdate(
+      event.type == SelectionEventType.endEdgeUpdate
+          ? SelectionEdgeUpdateEvent.forEnd(
+              globalPosition: at - skew,
+              granularity: event.granularity,
+            )
+          : SelectionEdgeUpdateEvent.forStart(
+              globalPosition: at - skew,
+              granularity: event.granularity,
+            ),
+    );
+  }
+}
+
+/// [parent], the app's way of scrolling, with one change while the app is
+/// zoomed ([zoomed]): a drag that selects never scrolls the view by
+/// itself. Flutter's view scrolls while a drag's edge is past its end, but
+/// under the zoom it takes the pointer to be (zoom − 1) × its offset away,
+/// so a drag held still well inside it ran off scrolling, screens at a
+/// time (Abbacchio, at 125%). A wheel or trackpad still scrolls it
+/// meanwhile, and [ScrolledSelection] keeps the selection under the
+/// pointer. [AppZoom] puts it round the whole app.
+class ZoomedSelectionScrollBehavior extends ScrollBehavior {
+  const ZoomedSelectionScrollBehavior(this.parent, {required this.zoomed});
+
+  final ScrollBehavior parent;
+  final bool zoomed;
+
+  @override
+  ScrollPhysics getScrollPhysics(BuildContext context) {
+    final physics = parent.getScrollPhysics(context);
+    return zoomed ? _NoSelectionEdgeScroll(parent: physics) : physics;
+  }
+
+  @override
+  Widget buildOverscrollIndicator(
+    BuildContext context,
+    Widget child,
+    ScrollableDetails details,
+  ) => parent.buildOverscrollIndicator(context, child, details);
+
+  @override
+  Widget buildScrollbar(
+    BuildContext context,
+    Widget child,
+    ScrollableDetails details,
+  ) => parent.buildScrollbar(context, child, details);
+
+  @override
+  TargetPlatform getPlatform(BuildContext context) =>
+      parent.getPlatform(context);
+
+  @override
+  Set<PointerDeviceKind> get dragDevices => parent.dragDevices;
+
+  @override
+  MultitouchDragStrategy getMultitouchDragStrategy(BuildContext context) =>
+      parent.getMultitouchDragStrategy(context);
+
+  @override
+  Set<LogicalKeyboardKey> get pointerAxisModifiers =>
+      parent.pointerAxisModifiers;
+
+  @override
+  GestureVelocityTrackerBuilder velocityTrackerBuilder(BuildContext context) =>
+      parent.velocityTrackerBuilder(context);
+
+  @override
+  ScrollViewKeyboardDismissBehavior getKeyboardDismissBehavior(
+    BuildContext context,
+  ) => parent.getKeyboardDismissBehavior(context);
+
+  @override
+  bool shouldNotify(ZoomedSelectionScrollBehavior oldDelegate) =>
+      zoomed != oldDelegate.zoomed ||
+      parent.runtimeType != oldDelegate.parent.runtimeType ||
+      parent.shouldNotify(oldDelegate.parent);
+}
+
+/// [parent]'s scrolling, without a selecting drag's own.
+class _NoSelectionEdgeScroll extends ScrollPhysics {
+  const _NoSelectionEdgeScroll({super.parent});
+
+  @override
+  _NoSelectionEdgeScroll applyTo(ScrollPhysics? ancestor) =>
+      _NoSelectionEdgeScroll(parent: buildParent(ancestor));
+
+  @override
+  bool get allowSelectionEdgeScrolling => false;
+}
+
+/// Whether a text field has the keyboard now (a comment, a review's
+/// answer, a find bar, a message box): its keys are its own.
+bool typingInField() =>
+    FocusManager.instance.primaryFocus?.context
+        ?.findAncestorStateOfType<EditableTextState>() !=
+    null;
+
+/// Key shortcuts for what's under them, as [CallbackShortcuts] binds them,
+/// that never take a key while a text field has focus: Space types a space
+/// in a video's comment instead of playing it (Matt), Escape stays the
+/// field's. For a viewer's own keys.
+class ViewerKeys extends StatelessWidget {
+  const ViewerKeys({super.key, required this.bindings, required this.child});
+
+  final Map<ShortcutActivator, VoidCallback> bindings;
+  final Widget child;
+
+  KeyEventResult _key(FocusNode node, KeyEvent event) {
+    if (typingInField()) return KeyEventResult.ignored;
+    for (final MapEntry(key: activator, value: callback) in bindings.entries) {
+      if (activator.accepts(event, HardwareKeyboard.instance)) {
+        callback();
+        return KeyEventResult.handled;
+      }
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  Widget build(BuildContext context) => Focus(
+    canRequestFocus: false,
+    skipTraversal: true,
+    onKeyEvent: _key,
+    child: child,
+  );
 }
 
 /// A clickable region that tells its builder whether the pointer is over
@@ -312,6 +538,7 @@ class TextField extends StatefulWidget {
     this.minLines,
     this.autofocus = false,
     this.onSubmitted,
+    this.onEditingComplete,
     this.bordered = true,
     this.obscureText = false,
     this.kind,
@@ -335,6 +562,9 @@ class TextField extends StatefulWidget {
   final int? minLines;
   final bool autofocus;
   final ValueChanged<String>? onSubmitted;
+
+  /// Return/Search/Go without leaving the field, when set.
+  final VoidCallback? onEditingComplete;
   final bool bordered;
 
   /// Hides what's typed, for secrets.
@@ -481,6 +711,7 @@ class _TextFieldState extends State<TextField>
       contextMenuBuilder: native.contextMenuBuilder,
       magnifierConfiguration: native.magnifier,
       onSubmitted: widget.onSubmitted,
+      onEditingComplete: widget.onEditingComplete,
       rendererIgnoresPointer: true,
     );
     // Several lines of placeholder take turns, one at a time.
@@ -1053,14 +1284,41 @@ Future<void> showModal(
   return done.future;
 }
 
-class _Modal extends StatelessWidget {
+class _Modal extends StatefulWidget {
   const _Modal({required this.close, required this.child});
 
   final VoidCallback close;
   final Widget child;
 
   @override
+  State<_Modal> createState() => _ModalState();
+}
+
+class _ModalState extends State<_Modal> {
+  final _scope = FocusScopeNode(debugLabel: 'modal');
+
+  @override
+  void initState() {
+    super.initState();
+    // It takes the keys as it opens, even from what had them under it (the
+    // iPad's paired and full tiers): a scope's autofocus waits for nothing
+    // else to be focused, and Esc must reach its binding (Sorbet). A field
+    // inside that took them on its own keeps them.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_scope.hasFocus) _scope.requestFocus();
+    });
+  }
+
+  @override
+  void dispose() {
+    _scope.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final close = widget.close;
+    final child = widget.child;
     final palette = Palette.of(context);
     return TweenAnimationBuilder<double>(
       tween: Tween(begin: 0, end: 1),
@@ -1075,24 +1333,35 @@ class _Modal extends StatelessWidget {
               child: const ColoredBox(color: Color(0x66000000)),
             ),
           ),
-          Center(
-            child: FocusScope(
-              autofocus: true,
+          // Centred in what the on-screen keyboard leaves (an iPad with
+          // none attached), so a field and its buttons stay in sight; a
+          // form's fields scroll when even that is too short (Sorbet).
+          Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.viewInsetsOf(context).bottom,
+            ),
+            child: Center(
+              // Esc above the scope: the scope itself has the keys when
+              // nothing in it took them.
               child: CallbackShortcuts(
                 bindings: {
                   const SingleActivator(LogicalKeyboardKey.escape): close,
                 },
-                child: Container(
-                  width: 480,
-                  margin: const EdgeInsets.all(Space.xl),
-                  padding: const EdgeInsets.all(Space.xl),
-                  decoration: BoxDecoration(
-                    color: palette.canvas,
-                    borderRadius: BorderRadius.circular(Radii.floating),
-                    border: Border.all(color: palette.hairline),
-                    boxShadow: floatingShadow,
+                child: FocusScope(
+                  node: _scope,
+                  autofocus: true,
+                  child: Container(
+                    width: 480,
+                    margin: const EdgeInsets.all(Space.xl),
+                    padding: const EdgeInsets.all(Space.xl),
+                    decoration: BoxDecoration(
+                      color: palette.canvas,
+                      borderRadius: BorderRadius.circular(Radii.floating),
+                      border: Border.all(color: palette.hairline),
+                      boxShadow: floatingShadow,
+                    ),
+                    child: SelectableArea(child: child),
                   ),
-                  child: SelectableArea(child: child),
                 ),
               ),
             ),
@@ -2251,6 +2520,7 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'network': _drawNetwork,
   'paperclip': _drawPaperclip,
   'message-square': _drawMessageSquare,
+  'message-square-text': _drawMessageSquareText,
   'play': _drawPlay,
   'pause': _drawPause,
   'film': _drawFilm,
@@ -2382,6 +2652,14 @@ final _drawMonitor = _paths(const [
 final _drawMessageSquare = _paths(const [
   'M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202'
       'A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z',
+]);
+
+final _drawMessageSquareText = _paths(const [
+  'M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202'
+      'A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z',
+  'M7 11h10',
+  'M7 15h6',
+  'M7 7h8',
 ]);
 
 final _drawChartColumn = _paths(const [

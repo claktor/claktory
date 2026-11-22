@@ -48,6 +48,14 @@ pub enum Error {
     /// Refused by the shared validation (`validation`), and why.
     #[error("refused: {0}")]
     Refused(String),
+    /// A leaf certified by a key that isn't the one pinned for its account,
+    /// nor one it had before: the account may have made a new one (dms-e2ee
+    /// §2.1). A friend's device fetches that account's keys, applies
+    /// `Pins::key_changed` (the notice) and processes the same commit again;
+    /// for the person's own account a new key comes only from their own
+    /// devices (M3), never from what the service says.
+    #[error("refused: {account}'s certificate isn't from their security key")]
+    UnknownIdentity { account: String },
     /// OpenMLS failed.
     #[error("mls: {0}")]
     Mls(String),

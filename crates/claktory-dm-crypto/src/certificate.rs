@@ -7,7 +7,7 @@
 //! key (`validation`) and the service can't make one.
 
 use openmls::prelude::{BasicCredential, Credential, CredentialType};
-use tls_codec::{DeserializeBytes, Serialize as _, TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
+use tls_codec::{Deserialize as _, Serialize as _, TlsDeserialize, TlsSerialize, TlsSize, VLBytes};
 
 use crate::Error;
 use crate::identity::{IdentityKey, IdentityPublic, Purpose};
@@ -70,7 +70,7 @@ pub fn claktory_of(leaf_id: &str) -> Option<&str> {
     (!claktory.is_empty() && !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit())).then_some(claktory)
 }
 
-#[derive(Debug, Clone, PartialEq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+#[derive(Debug, Clone, PartialEq, TlsSerialize, TlsDeserialize, TlsSize)]
 struct Body {
     version: u8,
     kind: u8,
@@ -82,7 +82,7 @@ struct Body {
     identity: [u8; 32],
 }
 
-#[derive(Debug, Clone, PartialEq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+#[derive(Debug, Clone, PartialEq, TlsSerialize, TlsDeserialize, TlsSize)]
 struct Wire {
     body: Body,
     signature: [u8; 64],
@@ -144,8 +144,9 @@ fn check_name(name: &str) -> Result<(), Error> {
 }
 
 /// Whether `text` is one line of 1 to `most` bytes with nothing hidden in it:
-/// a variation selector only right after a visible character.
-pub(crate) fn one_line(text: &str, most: usize) -> bool {
+/// a variation selector only right after a visible character. Also what a
+/// device checks of names it shows that came from elsewhere (E8's history).
+pub fn one_line(text: &str, most: usize) -> bool {
     if text.trim().is_empty() || text.len() > most {
         return false;
     }
@@ -218,7 +219,7 @@ impl LeafCertificate {
     /// Reads a certificate, all of `bytes` and nothing after, checking its
     /// form and its signature.
     pub fn from_bytes(bytes: &[u8]) -> Result<LeafCertificate, Error> {
-        let wire = Wire::tls_deserialize_exact_bytes(bytes).map_err(|_| Error::Format("not a leaf certificate".to_owned()))?;
+        let wire = Wire::tls_deserialize_exact(bytes).map_err(|_| Error::Format("not a leaf certificate".to_owned()))?;
         let body = wire.body;
         if body.version != VERSION {
             return Err(Error::Format(format!("leaf certificate version {}", body.version)));

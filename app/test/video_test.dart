@@ -348,6 +348,112 @@ void main() {
     expect(back.end, closeTo(30, 0.5));
   });
 
+  testWidgets('typing "a b" in a comment types a space; Space plays only '
+      'outside it (Matt)', (tester) async {
+    await _showVideo(tester);
+    final player = FakePlayback.made.last;
+    await tester.tap(
+      find.descendant(
+        of: find.byType(CommentPick),
+        matching: find.text('Comment'),
+      ),
+    );
+    await settle(tester);
+    await tester.tap(find.text('Comment').last);
+    await settle(tester);
+    final field = find.descendant(
+      of: find.byType(Commented),
+      matching: find.byType(EditableText),
+    );
+    await tester.tap(field);
+    await tester.pump();
+    // The keys as the Mac sends them: each goes to the field, none taken.
+    for (final key in [
+      LogicalKeyboardKey.keyA,
+      LogicalKeyboardKey.space,
+      LogicalKeyboardKey.keyB,
+    ]) {
+      expect(await tester.sendKeyEvent(key), isFalse, reason: '$key');
+    }
+    await tester.enterText(field, 'a b');
+    await tester.pump();
+    expect(player.state.value.playing, isFalse);
+    expect(tester.widget<EditableText>(field).controller.text, 'a b');
+
+    // Outside the field, Space plays and pauses as before.
+    FocusManager.instance.primaryFocus?.unfocus();
+    await tester.pump();
+    await _spacePlays(tester, player);
+  });
+
+  // The click that opens the comment's editor gave the player the keys;
+  // the editor's field takes them all the same (Abbacchio, in the VM).
+  testWidgets("a comment's field opened from the player takes the keys at "
+      'once: Space types, the video stays paused', (tester) async {
+    await _showVideo(tester);
+    final player = FakePlayback.made.last;
+    await tester.tap(
+      find.descendant(
+        of: find.byType(CommentPick),
+        matching: find.text('Comment'),
+      ),
+    );
+    await settle(tester);
+    await tester.tap(find.text('Comment').last);
+    await settle(tester);
+    final field = find.descendant(
+      of: find.byType(Commented),
+      matching: find.byType(EditableText),
+    );
+    expect(tester.widget<EditableText>(field).focusNode.hasFocus, isTrue);
+    for (final key in [
+      LogicalKeyboardKey.keyA,
+      LogicalKeyboardKey.space,
+      LogicalKeyboardKey.keyB,
+    ]) {
+      expect(await tester.sendKeyEvent(key), isFalse, reason: '$key');
+    }
+    await tester.pump();
+    expect(player.state.value.playing, isFalse);
+  });
+
+  // A click on the player takes its keys, as a person clicks it: nothing
+  // focused by hand (Abbacchio, in the VM).
+  testWidgets('after a click on the frame, Space pauses and plays', (
+    tester,
+  ) async {
+    await _showVideo(tester);
+    final player = FakePlayback.made.last;
+    // The frame: a click plays it.
+    await tester.tap(
+      find.descendant(
+        of: find.byType(Commented),
+        matching: find.byWidgetPredicate(
+          (w) => w is ColoredBox && w.color == const Color(0xFF000000),
+        ),
+      ),
+    );
+    await settle(tester);
+    expect(player.state.value.playing, isTrue);
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    expect(player.state.value.playing, isFalse);
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    expect(player.state.value.playing, isTrue);
+  });
+
+  testWidgets('after a click on Play, Space pauses', (tester) async {
+    await _showVideo(tester);
+    final player = FakePlayback.made.last;
+    await tester.tap(find.bySemanticsLabel('Play').first);
+    await settle(tester);
+    expect(player.state.value.playing, isTrue);
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    expect(player.state.value.playing, isFalse);
+  });
+
   testWidgets('a comment made on an earlier version says so', (tester) async {
     await _showVideo(
       tester,
@@ -361,4 +467,18 @@ void main() {
     );
     expect(find.text('0:10–0:20'), findsOneWidget);
   });
+}
+
+/// A click on the player's frame (no field focused) and Space toggles it.
+Future<void> _spacePlays(WidgetTester tester, FakePlayback player) async {
+  final was = player.state.value.playing;
+  await tester.tap(find.bySemanticsLabel(was ? 'Pause' : 'Play').first);
+  await tester.pump();
+  expect(player.state.value.playing, !was);
+  await tester.sendKeyEvent(LogicalKeyboardKey.space);
+  await tester.pump();
+  expect(player.state.value.playing, was);
+  await tester.sendKeyEvent(LogicalKeyboardKey.space);
+  await tester.pump();
+  expect(player.state.value.playing, !was);
 }

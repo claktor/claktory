@@ -1,17 +1,20 @@
 // Typed blocks: a blocked item says what kind of thing it waits on (the
 // person's decision or action, another item or agent, something outside
 // with when it's tried again); ongoing work set aside is Parked, apart from
-// Blocked, with when it resumes; and an item waiting on the person with no card asking is in
-// Needs you on its own.
+// Blocked, with when it resumes. An item waiting on the person shows in
+// Needs you only as a card asking about it, with the item above the card;
+// with no card it's the agent's state, in its checklist alone (Matt's
+// ruling).
 import 'package:factory_app/extensions.dart' show statusLabel, waitingWords;
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/inbox.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
+import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'extensions_test.dart' show at, checklistView, now, showWith, workspace;
+import 'extensions_test.dart' show at, checklistView, now, workspace;
 import 'harness.dart';
 
 final _ws = workspace();
@@ -53,25 +56,30 @@ final _tonight = DateTime(now.year, now.month, now.day, 23, 59);
 void main() {
   test('what each kind of wait says', () {
     const decision = BlockedKind.BLOCKED_KIND_PERSON_DECISION;
+    // No card asks: the agent's state, not a task for the person.
     expect(
       _words(decision, since: const Duration(days: 2, hours: 1)),
-      'Waiting 2 days for your decision · not asked yet',
+      'Waiting for Builder to ask you',
     );
     expect(
       _words(BlockedKind.BLOCKED_KIND_PERSON_ACTION),
-      'Waiting for you to act · not asked yet',
+      'Waiting for Builder to ask you',
     );
+    // A card asks: what it waits for, and See question.
     expect(_words(decision, asked: true), 'Waiting for your decision');
+    expect(
+      _words(BlockedKind.BLOCKED_KIND_PERSON_ACTION, asked: true),
+      'Waiting for you to act',
+    );
     final later = DateTime(now.year, now.month, now.day, 23, 59);
     expect(
       _words(decision, dismissed: true, reask: later),
-      'Waiting for your decision · you left it to Builder · asks again at '
-      '${_clock(later)}',
+      'You left it to Builder · it may ask again at ${_clock(later)}',
     );
     expect(
       _words(decision, dismissed: true),
       // No cap on re-asking; with no time set, it's left to the agent.
-      'Waiting for your decision · you left it to Builder',
+      'You left it to Builder',
     );
     expect(
       _words(
@@ -104,7 +112,7 @@ void main() {
     );
     expect(
       _words(BlockedKind.BLOCKED_KIND_UNSPECIFIED, on: 'person'),
-      'Blocked on you · not asked yet',
+      'Waiting for Builder to ask you',
     );
   });
 
@@ -152,13 +160,12 @@ void main() {
     harness.backend.extensionView.apply(view);
     await settle(tester);
 
-    final decision = find.text(
-      'Waiting 2 days for your decision · not asked yet',
-    );
+    // Muted, like every other wait: nothing for the person to do here.
+    final decision = find.text('Waiting for Builder to ask you');
     expect(decision, findsOneWidget);
     expect(
       tester.widget<Text>(decision).style?.color,
-      Palette.of(tester.element(decision)).signal,
+      Palette.of(tester.element(decision)).textMuted,
     );
     expect(find.text('Waiting for Tester: Usage circles'), findsOneWidget);
     // Parked: last of what's outstanding, with its note, counted apart.
@@ -175,56 +182,80 @@ void main() {
   });
 
   group('Needs you', () {
-    Workspace waiting({bool asked = false, DateTime? reask}) {
+    /// Item #7 on Tester's checklist, waiting on the person; with
+    /// [cards], the cards asking about it, as (conversation, seq).
+    Workspace waiting({
+      List<(String, int)> cards = const [],
+      bool dismissed = false,
+    }) {
       final snapshot = workspace();
-      snapshot.agents
-          .firstWhere((agent) => agent.id == 'a2')
-          .waitingItems
-          .add(
-            WaitingItem(
-              item: 7,
-              text: 'Pick the bucket region',
-              kind: BlockedKind.BLOCKED_KIND_PERSON_DECISION,
-              sinceMs: at(now.subtract(const Duration(days: 2))),
-              hasPendingAsk: asked,
-              reaskAtMs: reask == null ? null : at(reask),
-              dismissedMs: reask == null
-                  ? null
-                  : at(now.subtract(const Duration(hours: 1))),
-            ),
+      final tester = snapshot.agents.firstWhere((agent) => agent.id == 'a2');
+      WaitingItem item({String cardAgentId = '', int cardSeq = 0}) =>
+          WaitingItem(
+            item: 7,
+            text: 'Pick the bucket region',
+            kind: BlockedKind.BLOCKED_KIND_PERSON_DECISION,
+            sinceMs: at(now.subtract(const Duration(days: 2))),
+            hasPendingAsk: cardSeq != 0,
+            dismissedMs: dismissed
+                ? at(now.subtract(const Duration(hours: 1)))
+                : null,
+            cardAgentId: cardAgentId == 'a2' ? '' : cardAgentId,
+            cardSeq: Int64(cardSeq),
           );
+      if (cards.isEmpty) tester.waitingItems.add(item());
+      for (final (agentId, seq) in cards) {
+        tester.waitingItems.add(item(cardAgentId: agentId, cardSeq: seq));
+        snapshot.agents
+            .firstWhere((agent) => agent.id == agentId)
+            .waitingSeqs
+            .add(Int64(seq));
+      }
       return snapshot;
     }
 
-    test('an item with a card asking counts once, as its card', () {
-      expect(needsYouCount(waiting()), 1);
-      expect(needsYouCount(waiting(asked: true)), 0);
+    Entry ask(int seq, String title) => Entry(
+      seq: Int64(seq),
+      timestampMs: at(now.subtract(const Duration(hours: 1))),
+      askPerson: AskPerson(id: 'ask$seq', title: title, wantsText: true),
+    );
+
+    test('an item with no card asking is not in it, nor in its count', () {
+      expect(needsYouItems(waiting()), isEmpty);
+      expect(needsYouCount(waiting()), 0);
+      expect(needsYouCount(waiting(dismissed: true)), 0);
     });
 
-    testWidgets('an item waiting on you with no card: its words, how long, '
-        'and its checklist', (tester) async {
-      final reask = now.add(const Duration(hours: 5));
-      final harness = await showWith(tester, waiting(reask: reask));
+    test('an item counts as its cards, each one on its own', () {
+      expect(needsYouCount(waiting(cards: [('a2', 41)])), 1);
+      final two = waiting(cards: [('a2', 41), ('a2', 43)]);
+      expect(needsYouCount(two), 2);
+      expect(needsYouItems(two).map((item) => item.key), [
+        'agent:a2/41',
+        'agent:a2/43',
+      ]);
+    });
+
+    testWidgets('the card, with its item above it and Show in checklist', (
+      tester,
+    ) async {
+      final harness = Harness(waiting(cards: [('a2', 41)]));
+      harness.backend.entriesById['a2/41'] = ask(41, 'Which region?');
+      await harness.show(tester);
+      await settle(tester);
       harness.page.value = AppPage.inbox;
       await settle(tester);
       await settle(tester);
 
-      expect(
-        find.text('Waiting for your decision: Pick the bucket region'),
-        findsOneWidget,
-      );
-      expect(
-        find.textContaining('Tester · 2 days ago', findRichText: true),
-        findsOneWidget,
-      );
-      await tester.tap(
-        find.text('Waiting for your decision: Pick the bucket region'),
-      );
+      await tester.tap(find.text('Which region?').first);
       await pumpFrames(tester);
-      expect(
-        find.textContaining('you left it to Tester · asks again'),
-        findsOneWidget,
+      final about = find.text(
+        'On its checklist: Pick the bucket region',
+        findRichText: true,
       );
+      expect(about, findsOneWidget);
+      // No row of its own for the item.
+      expect(find.textContaining('Waiting for your decision'), findsNothing);
 
       await tester.tap(find.text('Show in checklist'));
       await settle(tester);
@@ -235,6 +266,26 @@ void main() {
       final open = harness.last.openPanel;
       expect(open.agentId, 'a2');
       expect(open.extensionId, 'checklist');
+    });
+
+    testWidgets("a card in another agent's conversation names whose "
+        'checklist', (tester) async {
+      final harness = Harness(waiting(cards: [('a1', 9)]));
+      harness.backend.entriesById['a1/9'] = ask(9, 'Which region?');
+      await harness.show(tester);
+      await settle(tester);
+      harness.page.value = AppPage.inbox;
+      await settle(tester);
+      await settle(tester);
+      await tester.tap(find.text('Which region?').first);
+      await pumpFrames(tester);
+      expect(
+        find.text(
+          "On Tester's checklist: Pick the bucket region",
+          findRichText: true,
+        ),
+        findsOneWidget,
+      );
     });
   });
 

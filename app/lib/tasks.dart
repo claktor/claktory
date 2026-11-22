@@ -5,6 +5,7 @@ import 'backend.dart';
 import 'controls.dart';
 import 'explorer.dart';
 import 'extensions.dart';
+import 'find.dart' show RenderedFindScope;
 import 'identity.dart';
 import 'mobile/presentation.dart';
 import 'mobile/metrics.dart';
@@ -28,8 +29,12 @@ class TasksView extends StatelessWidget {
   /// tasks", or as an admin) say whose they are.
   final String agentId;
 
+  /// Searchable with ⌘F, by the words it shows (find.dart).
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      RenderedFindScope(placeholder: 'Search tasks', child: _view(context));
+
+  Widget _view(BuildContext context) {
     final store = AppScope.of(context).workspace;
     final running = [
       for (final task in tasks.tasks)
@@ -48,18 +53,27 @@ class TasksView extends StatelessWidget {
     return ListenableBuilder(
       listenable: store,
       builder: (context, _) => ListView(
+        // All of it laid out, for find.
+        scrollCacheExtent: RenderedFindScope.everything,
         padding: const EdgeInsets.fromLTRB(Space.s, Space.s, Space.s, Space.l),
         children: [
-          if (tasks.tasks.isEmpty)
-            const _Empty('No background tasks in the last day.'),
-          if (running.isNotEmpty) ...[
-            const _Heading('Running'),
-            for (final task in running) item(task),
-          ],
-          if (finished.isNotEmpty) ...[
-            const _Heading('Finished'),
-            for (final task in finished) item(task),
-          ],
+          // Each selectable where the pointer is at any zoom.
+          for (final child in <Widget>[
+            if (tasks.tasks.isEmpty)
+              const _Empty('No background tasks in the last day.'),
+            if (running.isNotEmpty) ...[
+              const _Heading('Running'),
+              for (final task in running) item(task),
+            ],
+            if (finished.isNotEmpty) ...[
+              const _Heading('Finished'),
+              for (final task in finished) item(task),
+            ],
+          ])
+            ScrolledSelection(
+              key: child.key == null ? null : ValueKey(child.key),
+              child: child,
+            ),
         ],
       ),
     );

@@ -115,7 +115,7 @@ pub fn member(kind: &GroupKind, trust: &impl Trust, credential: &Credential, sig
         return Err(refused(format!("no security key is known for {account} here yet")));
     };
     if identity != certificate.identity {
-        return Err(refused(format!("{account}'s certificate isn't from their security key")));
+        return Err(Error::UnknownIdentity { account: account.to_owned() });
     }
     if !list.is_some_and(|list| list.names(&certificate)) {
         return Err(refused(format!("{account}'s device list doesn't name this leaf")));
@@ -153,7 +153,12 @@ pub fn commit(
     let (committer, committer_index) = match sender {
         Sender::Member(index) => {
             let (old_credential, old_key) = leaf(*index).ok_or_else(|| refused("a commit from no member"))?;
-            let before = member(kind, trust, &old_credential, &old_key)?;
+            let before = match member(kind, trust, &old_credential, &old_key) {
+                Ok(before) => before,
+                // Under a key its account replaced, a leaf does one thing:
+                // move itself to the new key (dms-e2ee §2.1).
+                Err(error) => return rotated(kind, trust, credential, staged, (&old_credential, &old_key)).map_err(|why| why.unwrap_or(error)),
+            };
             if *credential != old_credential {
                 return Err(refused("the commit's credential isn't its sender's"));
             }
@@ -240,6 +245,47 @@ pub fn commit(
             Proposal::ExternalInit(_) if committer_index.is_none() => {}
             _ => return Err(refused("a kind of proposal Claktory doesn't use")),
         }
+    }
+    Ok(())
+}
+
+/// A commit from a member whose certificate is under an identity its
+/// account replaced (dms-e2ee §2.1, R1, with Fugo's three tightenings): it
+/// counts only as that leaf's own new certificate, the same leaf (account,
+/// leaf id, kind and signature key) under the identity pinned for its
+/// account now, on that identity's list; with nothing else in it, no
+/// proposal of its own or anyone's. Such a member is otherwise inert: its
+/// messages, proposals and other commits fail `member` as before.
+///
+/// `Err(None)`: the sender's key wasn't replaced, so the ordinary refusal
+/// stands.
+fn rotated(
+    kind: &GroupKind,
+    trust: &impl Trust,
+    credential: &Credential,
+    staged: &StagedCommit,
+    (old_credential, old_key): (&Credential, &[u8]),
+) -> Result<(), Option<Error>> {
+    let old = LeafCertificate::from_credential(old_credential).map_err(|_| None)?;
+    if old.leaf.signature_key.as_slice() != old_key || !trust.retired(&old.leaf.account_id, &old.identity) {
+        return Err(None);
+    }
+    let refuse = |why: &str| Some(refused(why));
+    if credential != old_credential {
+        return Err(refuse("the commit's credential isn't its sender's"));
+    }
+    if staged.queued_proposals().next().is_some() {
+        return Err(refuse("a leaf under a replaced key commits only its own move to the new one"));
+    }
+    let path = staged.update_path_leaf_node().ok_or_else(|| refuse("a leaf under a replaced key commits only its own move to the new one"))?;
+    // The new certificate: the account's identity as pinned here now (never
+    // one the commit brings, nor another replaced one), and listed.
+    let new = member(kind, trust, path.credential(), path.signature_key().as_slice()).map_err(Some)?;
+    if new.account() != old.leaf.account_id || new.leaf_id() != old.leaf.leaf_id || new.kind() != old.leaf.kind {
+        return Err(refuse("a leaf can't become another leaf"));
+    }
+    if path.signature_key().as_slice() != old_key {
+        return Err(refuse("a leaf moving to the new key keeps its own signature key"));
     }
     Ok(())
 }

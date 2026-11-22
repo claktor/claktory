@@ -11,6 +11,7 @@ import '../message_time.dart' show dayLine;
 import '../mobile/metrics.dart';
 import '../mobile/navigation.dart' show PhoneRoutes;
 import '../mobile/presentation.dart';
+import '../protocol/factory/v1/factory.pb.dart' show Workspace;
 import '../user_apps/session.dart';
 import '../your_claktories.dart' show DeviceSignInDialog;
 import 'chat.dart';
@@ -28,7 +29,14 @@ import 'review.dart';
 // reached the person (Accept, Decline, Block), their friends (Remove,
 // Block), the requests they sent (Cancel), whom they blocked (Unblock),
 // and Add a friend with a friend ID. Everyone shows with their tag, so
-// two of the same name can't pass for each other. Nothing opens it yet.
+// two of the same name can't pass for each other. It opens from the
+// sidebar (the drawer on a phone) only where [peopleAvailable].
+
+/// Whether People shows: only where the backend offers direct messages
+/// (its preview, FACTORY_DMS_PREVIEW, until People ships), which it says
+/// by listing their extension.
+bool peopleAvailable(Workspace workspace) =>
+    workspace.extensions.any((extension) => extension.id == 'dm');
 
 /// Opens People.
 Future<void> showPeople(BuildContext context) => showModal(
@@ -252,7 +260,11 @@ class _PeopleViewState extends State<PeopleView> {
       case 'remove':
         await _remove(friend);
       case 'report':
-        await _report(friend.person, contact: friend.id);
+        await _report(
+          friend.person,
+          contact: friend.id,
+          conversation: friend.conversationId,
+        );
       case 'block':
         await _block(friend.person, contact: friend.id);
     }
@@ -265,6 +277,7 @@ class _PeopleViewState extends State<PeopleView> {
     String? request,
     String? contact,
     String? block,
+    String conversation = '',
   }) async {
     await showModal(
       context,
@@ -274,6 +287,7 @@ class _PeopleViewState extends State<PeopleView> {
         requestId: request,
         contactId: contact,
         blockId: block,
+        conversationId: conversation,
         close: close,
       ),
     );

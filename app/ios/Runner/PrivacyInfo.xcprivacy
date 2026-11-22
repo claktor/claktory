@@ -49,14 +49,28 @@
 				<string>CA92.1</string>
 			</array>
 		</dict>
-		<!-- The tunnel (claktory_tunnel.framework) reads its own files in
-		     the app's container, which looks up their size with fstat. -->
+		<!-- Files in the app's own container: the tunnel
+		     (claktory_tunnel.framework) looks up its files' sizes with
+		     fstat, its SQLite store (direct messages) stats its database
+		     files, and the iPad's ink cache (Ink/InkCache.swift) reads its
+		     files' modification dates to drop the oldest. -->
 		<dict>
 			<key>NSPrivacyAccessedAPIType</key>
 			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
 			<key>NSPrivacyAccessedAPITypeReasons</key>
 			<array>
 				<string>C617.1</string>
+			</array>
+		</dict>
+		<!-- The tunnel's SQLite (bundled, for the direct-message store)
+		     calls statfs and fstatfs on its database's volume before it
+		     writes, to choose how it locks and syncs the file. -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>E174.1</string>
 			</array>
 		</dict>
 	</array>

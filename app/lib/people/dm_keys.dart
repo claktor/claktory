@@ -41,6 +41,10 @@ import 'package:flutter/services.dart';
 /// the local store's seal key (32 bytes each, made in Rust).
 enum DmKeyName {
   identity('identity'),
+
+  /// A new identity while it's being changed (Lost or stolen, dms-e2ee
+  /// §2.1): kept first, so a crash carries on with the same one.
+  identityNext('identity_next'),
   leaf('leaf'),
   store('store');
 

@@ -13,13 +13,17 @@ import 'app_grant_card.dart';
 import 'attachments.dart';
 import 'backend.dart' show RequestFailure;
 import 'characters/character.dart';
+import 'checklist_reply.dart' show ChecklistRef;
 import 'avatar.dart';
 import 'chats.dart' show ChatScope, chatTitle;
+import 'report_reply.dart' show ReportedReply, reportReply;
 import 'connectors.dart' show ConnectProposalCard;
 import 'controls.dart';
+import 'conversation_find.dart';
 import 'decision.dart';
 import 'conversation_scrollbar.dart';
 import 'explorer.dart' show openFile;
+import 'find.dart';
 import 'extensions.dart' show logTime;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
@@ -44,6 +48,7 @@ import 'state.dart';
 import 'tell_rivet.dart';
 import 'selection.dart';
 import 'tool_views.dart';
+import 'visible_codes.dart';
 import 'voice.dart';
 import 'waiting.dart' show EntryReveal, EntryTarget;
 
@@ -77,6 +82,15 @@ class TimelineItem {
   final int timestampMs;
   final WidgetBuilder build;
 }
+
+/// A pipe's messages among its liaison's conversation, to find in: the
+/// pipe, each message's key among [TranscriptView.extras], and a load of
+/// its messages from a seq up to the first held, to go to an older one.
+typedef PipeFind = ({
+  String pipeId,
+  Object Function(int seq) keyOf,
+  Future<void> Function(int seq) loadFrom,
+});
 
 /// Where [TranscriptView.extras] go: [before] the first entry held, and
 /// [after] each entry by its index.
@@ -113,7 +127,11 @@ class TranscriptView extends StatefulWidget {
     this.loadFrom,
     this.extras,
     this.hidden,
+    this.pipeFind,
   });
+
+  /// In a pipe's timeline: its messages are found in too (⌘F).
+  final PipeFind? pipeFind;
 
   /// More of the timeline than the transcript's entries, by time (a pipe's
   /// messages among its liaison's conversation), sorted by
@@ -375,6 +393,208 @@ class _TranscriptViewState extends State<TranscriptView>
 
   /// The message the pointer is over, for the right click's Reply.
   final _pointed = ValueNotifier<_Pointed?>(null);
+
+  /// Find in this conversation (⌘F): Claktory searches all of it.
+  late final _find = ConversationFind(
+    search: _searchLog,
+    pipe: widget.pipeFind != null,
+    go: _findGo,
+  );
+
+  /// Each entry's place in the tree, by seq, to tell whether a match is in
+  /// sight.
+  final _entryKeys = <int, GlobalKey>{};
+
+  /// The occurrence gone to, where it's laid out in the match's entry:
+  /// only it in full there. Null while it doesn't show (then the entry's
+  /// every occurrence is).
+  final _exact = ValueNotifier<_Exact?>(null);
+
+  Future<ConversationMatches> _searchLog(
+    String query, {
+    required bool pipe,
+    int? beforeSeq,
+  }) {
+    final backend = AppScope.of(context);
+    final pipeFind = widget.pipeFind;
+    if (pipe && pipeFind != null) {
+      return backend.searchConversation(
+        pipeId: pipeFind.pipeId,
+        query: query,
+        beforeSeq: beforeSeq,
+      );
+    }
+    final chatId = ChatScope.chatIdOf(context) ?? '';
+    return backend.searchConversation(
+      agentId: chatId.isEmpty ? widget.transcript.agentId : '',
+      chatId: chatId,
+      query: query,
+      beforeSeq: beforeSeq,
+    );
+  }
+
+  /// Brings a match into sight: where it is, if it's built; else goes to
+  /// it, loading back to it first when it's older than what's held.
+  void _findGo(FoundAt at, int nth, int hits) {
+    final pipeFind = widget.pipeFind;
+    if (at.pipe) {
+      if (pipeFind == null) return;
+      final key = pipeFind.keyOf(at.seq);
+      if (_bringIntoSight(_extraKeys[key], nth, hits)) return;
+      _exact.value = null;
+      unawaited(() async {
+        try {
+          await pipeFind.loadFrom(at.seq);
+        } on RequestFailure {
+          return;
+        }
+        if (!mounted) return;
+        // Placed among the entries (paging them back to it), then put in
+        // sight.
+        widget.reveal?.reachExtra(widget.transcript.agentId, key);
+      }());
+      return;
+    }
+    final transcript = widget.transcript;
+    // A tool call shows its command twice (its line and its input) and its
+    // output, which Claktory doesn't search: no one occurrence to single
+    // out, so all of its are marked.
+    for (var i = 0; i < transcript.length; i++) {
+      if (transcript[i].seq == at.seq && transcript[i].entry.hasToolCall()) {
+        hits = -1;
+      }
+    }
+    if (_bringIntoSight(_entryKeys[at.seq], nth, hits)) return;
+    _exact.value = null;
+    EntryTarget target() => (agentId: transcript.agentId, seq: at.seq);
+    void goTo(int index) {
+      _goToFound(index, () => _bringIntoSight(_entryKeys[at.seq], nth, hits));
+    }
+
+    final index = _indexFor(target());
+    if (index != null) return goTo(index);
+    final load = widget.loadFrom;
+    if (load == null ||
+        transcript.length == 0 ||
+        !transcript.hasEarlier ||
+        at.seq >= transcript[0].seq) {
+      return;
+    }
+    unawaited(() async {
+      try {
+        await load(at.seq);
+      } on RequestFailure {
+        return;
+      }
+      if (!mounted) return;
+      final index = _indexFor(target());
+      if (index != null) goTo(index);
+    }());
+  }
+
+  /// Whether what [key] holds is built: then the [nth] place from its end
+  /// the words found show in it (else its top) is brought into sight, a
+  /// fifth of the way down, unless it's in sight already: clear of the
+  /// find bar, and of the foot, where a phone's Latest sits; and marked,
+  /// the one occurrence, where it shows the [hits] found. Again a frame
+  /// later, laid out anew (a tool call the find opened).
+  bool _bringIntoSight(GlobalKey? key, int nth, int hits) {
+    if (!_placeFound(key, nth, hits)) return false;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_placeFound(key, nth, hits)) return;
+      // Marked as laid out? Where its words came out other than as the
+      // paragraph reads (a tool call's), the entry's every occurrence is.
+      final box = key?.currentContext?.findRenderObject();
+      if (_exact.value != null && box != null && !showsCurrent(box)) {
+        _exact.value = null;
+      }
+    });
+    return true;
+  }
+
+  bool _placeFound(GlobalKey? key, int nth, int hits) {
+    final context = key?.currentContext;
+    final box = context?.findRenderObject();
+    if (context == null || box is! RenderBox || !box.attached) return false;
+    final scrollable = Scrollable.maybeOf(context);
+    final view = scrollable?.context.findRenderObject();
+    if (scrollable == null || view is! RenderBox) return false;
+    RenderObject target = box;
+    var rect = Offset.zero & Size(box.size.width, 0);
+    final marks = _find.marks.value;
+    final shown = shownMatches(box, marks.query);
+    // Counted from the entry's end, as the find counts. Where it shows
+    // other than what was found (a tool call's output, which isn't
+    // searched), the entry's every occurrence is marked.
+    final index = shown.length - 1 - nth;
+    final single = index >= 0 && shown.length == hits;
+    _Exact? exact;
+    if (shown.isNotEmpty) {
+      // Marked all through, it's gone to at its first (a tool call's line,
+      // over its input and output).
+      final (paragraph, start, end) = shown[single ? index : 0];
+      if (foundRect(paragraph, start, end) case final found?) {
+        target = paragraph;
+        rect = found;
+        if (single) {
+          exact = (
+            marks: marks,
+            exact: (
+              text: paragraph.text.toPlainText(includeSemanticsLabels: false),
+              start: start,
+            ),
+          );
+        }
+      }
+    }
+    _exact.value = exact;
+    final transform = target.getTransformTo(view);
+    final top = MatrixUtils.transformPoint(transform, rect.topLeft).dy;
+    final bottom = MatrixUtils.transformPoint(transform, rect.bottomLeft).dy;
+    // Clear of what floats over the top (the find bar; a phone's "1 needs
+    // you") and of the foot.
+    final clear = math.max(Space.xxl, view.size.height * 0.15);
+    if (top >= clear && bottom <= view.size.height * 0.7) return true;
+    _stopFollowing();
+    final position = scrollable.position;
+    final reveal = RenderAbstractViewport.of(box)
+        .getOffsetToReveal(target, 0.2, rect: rect);
+    position.jumpTo(
+      reveal.offset.clamp(position.minScrollExtent, position.maxScrollExtent),
+    );
+    // Not moved, at the end (the match there, lower than a fifth down):
+    // following on, so Latest doesn't show over it.
+    if (identical(position, _controller.position)) {
+      _controller.pinned = _atEnd();
+    }
+    return true;
+  }
+
+  void _stopFollowing() {
+    _glide.stop();
+    _controller
+      ..gliding = false
+      ..pinned = false;
+  }
+
+  /// Goes to the entry at [index], not built: a fifth of the way down;
+  /// then, laid out there, [then].
+  void _goToFound(int index, void Function() then) {
+    _goTo(index);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_controller.hasClients) return;
+      final position = _controller.position;
+      _controller.jumpTo(
+        (-position.viewportDimension * 0.2).clamp(
+          position.minScrollExtent,
+          position.maxScrollExtent,
+        ),
+      );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) then();
+      });
+    });
+  }
 
   /// Quotes [message] into this conversation's message box: an agent's,
   /// or a chat's.
@@ -767,6 +987,8 @@ class _TranscriptViewState extends State<TranscriptView>
   void dispose() {
     _selecting.dispose();
     _pointed.dispose();
+    _find.dispose();
+    _exact.dispose();
     widget.follow.removeListener(_followAgain);
     widget.transcript.removeListener(_entriesChanged);
     widget.queued?.removeListener(_queueChanged);
@@ -987,8 +1209,16 @@ class _TranscriptViewState extends State<TranscriptView>
     }
   }
 
-  Widget _measured(int index) =>
-      MeasuredItem(id: _idOf(index), heights: _heights, child: _item(index));
+  Widget _measured(int index) => MeasuredItem(
+    id: _idOf(index),
+    heights: _heights,
+    // Copied, each item's rows on lines of their own and a blank line
+    // after it, so items read apart rather than run together. Selected
+    // where the pointer is at any zoom, however far it's scrolled.
+    child: ScrolledSelection(
+      child: CopyShape(lines: true, trail: '\n\n', child: _item(index)),
+    ),
+  );
 
   Widget _item(int index) {
     final transcript = widget.transcript;
@@ -1039,7 +1269,13 @@ class _TranscriptViewState extends State<TranscriptView>
                   _glideDuration,
           child: KeyedSubtree(
             key: _extraKey(item.key),
-            child: Builder(builder: item.build),
+            child: _Marked(
+              marks: _find.marks,
+              exact: _exact,
+              isAt: (at) =>
+                  at.pipe && widget.pipeFind?.keyOf(at.seq) == item.key,
+              child: Builder(builder: item.build),
+            ),
           ),
         ),
       ),
@@ -1087,38 +1323,44 @@ class _TranscriptViewState extends State<TranscriptView>
                 !_reducedMotion &&
                 DateTime.now().difference(_arrivals[model.seq] ?? DateTime(0)) <
                     _glideDuration,
-            child: Builder(
-              builder: (context) {
-                final run = thinkingRunAt(
-                  transcript,
-                  index,
-                  hidden: widget.hidden,
-                  working: widget.working,
-                  // An extra after a thought shows there: the run ends.
-                  ends: (index) => _placed.after[index]?.isNotEmpty ?? false,
-                );
-                return EntryView(
-                  model: model,
-                  block: model.entry.hasToolCall()
-                      ? toolBlockAt(transcript, index, hidden: widget.hidden)
-                      : const ToolBlock(first: true, last: true),
-                  live: widget.working && index == transcript.length - 1,
-                  expanded: _expanded.contains(model.seq),
-                  onToggle: (open) => _toggled(model.seq, open),
-                  run: run,
-                  runExpanded:
-                      run != null && _expandedRuns.contains(run.firstSeq),
-                  onRunToggle: run == null
-                      ? null
-                      : (open) => setState(() {
-                          if (open) {
-                            _expandedRuns.add(run.firstSeq);
-                          } else {
-                            _expandedRuns.remove(run.firstSeq);
-                          }
-                        }),
-                );
-              },
+            child: _Marked(
+              key: _entryKeys[model.seq] ??= GlobalKey(),
+              marks: _find.marks,
+              exact: _exact,
+              isAt: (at) => !at.pipe && at.seq == model.seq,
+              child: Builder(
+                builder: (context) {
+                  final run = thinkingRunAt(
+                    transcript,
+                    index,
+                    hidden: widget.hidden,
+                    working: widget.working,
+                    // An extra after a thought shows there: the run ends.
+                    ends: (index) => _placed.after[index]?.isNotEmpty ?? false,
+                  );
+                  return EntryView(
+                    model: model,
+                    block: model.entry.hasToolCall()
+                        ? toolBlockAt(transcript, index, hidden: widget.hidden)
+                        : const ToolBlock(first: true, last: true),
+                    live: widget.working && index == transcript.length - 1,
+                    expanded: _expanded.contains(model.seq),
+                    onToggle: (open) => _toggled(model.seq, open),
+                    run: run,
+                    runExpanded:
+                        run != null && _expandedRuns.contains(run.firstSeq),
+                    onRunToggle: run == null
+                        ? null
+                        : (open) => setState(() {
+                            if (open) {
+                              _expandedRuns.add(run.firstSeq);
+                            } else {
+                              _expandedRuns.remove(run.firstSeq);
+                            }
+                          }),
+                  );
+                },
+              ),
             ),
           ),
         ),
@@ -1157,7 +1399,12 @@ class _TranscriptViewState extends State<TranscriptView>
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
             if (message.text.isNotEmpty) ...[
-              _UserText(message.text),
+              _UserText(
+                message.text,
+                checklist: message.hasChecklistItem()
+                    ? message.checklistItem
+                    : null,
+              ),
               const SizedBox(height: Space.xs),
             ],
             // Each file as it uploads.
@@ -1183,6 +1430,7 @@ class _TranscriptViewState extends State<TranscriptView>
           message.text,
           files: message.attachments,
           voice: heard ? message.transcription : null,
+          checklist: message.hasChecklistItem() ? message.checklistItem : null,
         ),
         CrossAxisAlignment.end,
       ),
@@ -1354,86 +1602,102 @@ class _TranscriptViewState extends State<TranscriptView>
             (_) => _maybeLoadEarlier(),
           );
         }
-        return ToolViewScope(
-          transcript: widget.transcript,
-          agentId: widget.transcript.agentId,
-          child: _WithLatest(
-            away: _controller.away,
+        return FindScope(
+          target: _find,
+          child: ToolViewScope(
             transcript: widget.transcript,
-            onTap: _followAgain,
-            child: SelectableArea(
-              onSelectionChanged: (content) => _selecting.value =
-                  content != null && content.plainText.isNotEmpty,
-              // Reply, for the message the right click is on.
-              menuItems: () => [
-                if (_pointed.value case final pointed?)
-                  MenuItem('Reply', () => _reply(pointed)),
-              ],
-              child: MessageSelection(
-                selecting: _selecting,
-                child: _ReplyScope(
-                  pointed: _pointed,
-                  reply: _reply,
-                  child: ConversationScrollbar(
-                    controller: _controller,
-                    heights: _heights,
-                    order: _order,
-                    unseen: _unseen,
-                    after: Space.xl,
-                    child: CustomScrollView(
+            agentId: widget.transcript.agentId,
+            child: _WithLatest(
+              away: _controller.away,
+              transcript: widget.transcript,
+              onTap: _followAgain,
+              child: SelectableArea(
+                onSelectionChanged: (content) => _selecting.value =
+                    content != null && content.plainText.isNotEmpty,
+                // Reply, for the message the right click is on.
+                menuItems: () => [
+                  if (_pointed.value case final pointed?)
+                    MenuItem('Reply', () => _reply(pointed)),
+                  if (_pointed.value?.report case final seq?)
+                    MenuItem(
+                      'Report…',
+                      () => reportReply(context, _reportedIn(context, seq)),
+                    ),
+                  // Find in this conversation, as ⌘F does.
+                  MenuItem(
+                    'Find…',
+                    () => FindSessions.instance.within(context)?.open(),
+                  ),
+                ],
+                child: MessageSelection(
+                  selecting: _selecting,
+                  child: _ReplyScope(
+                    pointed: _pointed,
+                    reply: _reply,
+                    child: ConversationScrollbar(
                       controller: _controller,
-                      center: _liveKey,
-                      // On a phone, scrolling the conversation tucks the
-                      // keyboard away, as Messages does.
-                      keyboardDismissBehavior: isPhoneLayout(context)
-                          ? ScrollViewKeyboardDismissBehavior.onDrag
-                          : ScrollViewKeyboardDismissBehavior.manual,
-                      slivers: [
-                        SliverList(
-                          delegate: SliverChildBuilderDelegate(
-                            (context, index) => index == split
-                                ? MeasuredItem(
-                                    id: 'earlier',
-                                    heights: _heights,
-                                    child: _EarlierRow(
-                                      failed: _earlierFailed,
-                                      onRetry: () {
-                                        setState(() => _earlierFailed = null);
-                                        _maybeLoadEarlier();
-                                      },
-                                    ),
-                                  )
-                                : _measured(split - 1 - index),
-                            childCount: split + (hasEarlier ? 1 : 0),
+                      heights: _heights,
+                      order: _order,
+                      unseen: _unseen,
+                      after: Space.xl,
+                      child: CustomScrollView(
+                        controller: _controller,
+                        center: _liveKey,
+                        // On a phone, scrolling the conversation tucks the
+                        // keyboard away, as Messages does.
+                        keyboardDismissBehavior: isPhoneLayout(context)
+                            ? ScrollViewKeyboardDismissBehavior.onDrag
+                            : ScrollViewKeyboardDismissBehavior.manual,
+                        slivers: [
+                          SliverList(
+                            delegate: SliverChildBuilderDelegate(
+                              (context, index) => index == split
+                                  ? MeasuredItem(
+                                      id: 'earlier',
+                                      heights: _heights,
+                                      child: _EarlierRow(
+                                        failed: _earlierFailed,
+                                        onRetry: () {
+                                          setState(() => _earlierFailed = null);
+                                          _maybeLoadEarlier();
+                                        },
+                                      ),
+                                    )
+                                  : _measured(split - 1 - index),
+                              childCount: split + (hasEarlier ? 1 : 0),
+                            ),
                           ),
-                        ),
-                        // With no entries yet, the extras on their own,
-                        // just above the center line.
-                        if (length == 0 && _placed.before.isNotEmpty)
-                          SliverToBoxAdapter(
-                            child: MeasuredItem(
-                              id: 'extras',
-                              heights: _heights,
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  for (final item in _placed.before)
-                                    _extraItem(item),
-                                ],
+                          // With no entries yet, the extras on their own,
+                          // just above the center line.
+                          if (length == 0 && _placed.before.isNotEmpty)
+                            SliverToBoxAdapter(
+                              child: MeasuredItem(
+                                id: 'extras',
+                                heights: _heights,
+                                child: ScrolledSelection(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      for (final item in _placed.before)
+                                        _extraItem(item),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          SliverPadding(
+                            key: _liveKey,
+                            padding: const EdgeInsets.only(bottom: Space.xl),
+                            sliver: SliverList(
+                              delegate: SliverChildBuilderDelegate(
+                                (context, index) => _measured(split + index),
+                                childCount: length - split + _waiting.length,
                               ),
                             ),
                           ),
-                        SliverPadding(
-                          key: _liveKey,
-                          padding: const EdgeInsets.only(bottom: Space.xl),
-                          sliver: SliverList(
-                            delegate: SliverChildBuilderDelegate(
-                              (context, index) => _measured(split + index),
-                              childCount: length - split + _waiting.length,
-                            ),
-                          ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -1444,6 +1708,48 @@ class _TranscriptViewState extends State<TranscriptView>
       },
     );
   }
+}
+
+/// The occurrence gone to for [marks], where it's laid out.
+typedef _Exact = ({FindMarks marks, FindExact exact});
+
+/// Marks a find's matches in [child] (an entry, or an extra), and the
+/// match gone to when [isAt] says it's this: the [exact] occurrence, where
+/// it's known, else all of the entry's.
+class _Marked extends StatelessWidget {
+  const _Marked({
+    super.key,
+    required this.marks,
+    required this.exact,
+    required this.isAt,
+    required this.child,
+  });
+
+  final ValueListenable<FindMarks> marks;
+  final ValueListenable<_Exact?> exact;
+  final bool Function(FoundAt at) isAt;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: marks,
+    child: child,
+    builder: (context, marks, child) => ValueListenableBuilder(
+      valueListenable: exact,
+      child: child,
+      builder: (context, exact, child) {
+        final current = marks.at != null && isAt(marks.at!);
+        return FindHighlight(
+          query: marks.query,
+          current: current,
+          exact: current && exact != null && exact.marks == marks
+              ? exact.exact
+              : null,
+          child: child!,
+        );
+      },
+    ),
+  );
 }
 
 /// While the conversation is scrolled up away from its end: a button to go
@@ -1468,13 +1774,20 @@ class _WithLatest extends StatefulWidget {
   State<_WithLatest> createState() => _WithLatestState();
 }
 
-class _WithLatestState extends State<_WithLatest> {
+class _WithLatestState extends State<_WithLatest>
+    with WidgetsBindingObserver {
   /// The transcript's length when the view left its end.
   int? _from;
+
+  /// On a phone, whether something in the conversation has focus (a card's
+  /// comment being typed): Latest steps aside meanwhile, rather than sit on
+  /// the field (#321).
+  var _typing = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     widget.away.addListener(_changed);
     widget.transcript.addListener(_changed);
     if (widget.away.value) _from = widget.transcript.length;
@@ -1495,9 +1808,59 @@ class _WithLatestState extends State<_WithLatest> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _text?.removeListener(_revealFocused);
     widget.away.removeListener(_changed);
     widget.transcript.removeListener(_changed);
     super.dispose();
+  }
+
+  /// The focused field's text, followed while the person types: the
+  /// conversation keeps its end in place, so a field that grows a line
+  /// grows upward, under the header, unless it's brought back. Only on a
+  /// change to the text, never as the person scrolls away to read.
+  TextEditingController? _text;
+
+  void _focusChanged(bool focused) {
+    if (focused != _typing) setState(() => _typing = focused);
+    _text?.removeListener(_revealFocused);
+    _text = null;
+    if (!focused) return;
+    _text = FocusManager.instance.primaryFocus?.context
+        ?.findAncestorStateOfType<EditableTextState>()
+        ?.widget
+        .controller;
+    _text?.addListener(_revealFocused);
+    _revealFocused();
+  }
+
+  /// The keyboard rising (or the window changing) while the person types
+  /// in the conversation: the field follows it up.
+  @override
+  void didChangeMetrics() {
+    if (_typing) _revealFocused();
+  }
+
+  /// Brings the focused field into sight whole, with room under it for the
+  /// line it may have beneath, above the message box and the keyboard
+  /// (#321). The field's own scrolling shows only its caret, which can leave
+  /// it half behind the box. After the frame that lays the conversation out
+  /// at its new height.
+  void _revealFocused() {
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_typing) return;
+      final object = FocusManager.instance.primaryFocus?.context
+          ?.findRenderObject();
+      if (object is! RenderBox || !object.attached || !object.hasSize) return;
+      object.showOnScreen(
+        rect: Rect.fromLTRB(
+          0,
+          -Space.s,
+          object.size.width,
+          object.size.height + Space.xl,
+        ),
+      );
+    });
   }
 
   void _changed() {
@@ -1622,14 +1985,22 @@ class _WithLatestState extends State<_WithLatest> {
 
   @override
   Widget build(BuildContext context) {
-    final shown = _from != null;
     final count = _new;
-    if (!isPhoneLayout(context)) return _mac(context, shown, count);
+    if (!isPhoneLayout(context)) return _mac(context, _from != null, count);
+    final shown = _from != null && !_typing;
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     return Stack(
       children: [
-        Positioned.fill(child: widget.child),
+        Positioned.fill(
+          child: Focus(
+            canRequestFocus: false,
+            skipTraversal: true,
+            includeSemantics: false,
+            onFocusChange: _focusChanged,
+            child: widget.child,
+          ),
+        ),
         Positioned(
           left: 0,
           right: 0,
@@ -1966,7 +2337,7 @@ class _EntryViewState extends State<EntryView> {
   VoidCallback? _replyTo(String text, String? from) {
     final scope = context.getInheritedWidgetOfExactType<_ReplyScope>();
     if (scope == null) return null;
-    return () => scope.reply((text: text, from: from));
+    return () => scope.reply((text: text, from: from, report: null));
   }
 
   Widget _build() {
@@ -1982,6 +2353,9 @@ class _EntryViewState extends State<EntryView> {
           files: entry.user.attachments,
           voice: entry.user.hasVoice() ? entry.user.voice : null,
           sentMs: entry.timestampMs.toInt(),
+          checklist: entry.user.hasChecklistItem()
+              ? entry.user.checklistItem
+              : null,
         ),
         Space.l,
       ),
@@ -2111,6 +2485,8 @@ class _EntryViewState extends State<EntryView> {
         splitAlsoSentTo(entry.event.text).$1,
       _ => null,
     };
+    // The agent's own reply can be reported to Claktory's team.
+    final report = entry.whichKind() == Entry_Kind.assistant ? seq : null;
     final from = entry.whichKind() == Entry_Kind.event
         ? senderName(
             entry.event,
@@ -2124,10 +2500,14 @@ class _EntryViewState extends State<EntryView> {
           : _Repliable(
               text: words,
               from: from,
+              report: report,
               child: MessageActions(
                 text: words,
                 markdown: entry.whichKind() != Entry_Kind.user,
                 onReply: _replyTo(words, from),
+                onReport: report == null
+                    ? null
+                    : () => reportReply(context, _reportedIn(context, report)),
                 child: child,
               ),
             ),
@@ -2146,6 +2526,7 @@ class AgentTints extends InheritedWidget {
     required this.byId,
     this.agents = const {},
     this.open,
+    this.userNote = '',
     required super.child,
   });
 
@@ -2160,12 +2541,18 @@ class AgentTints extends InheritedWidget {
   /// Opens the conversation of the agent with this id.
   final ValueChanged<String>? open;
 
+  /// Under each of the person's messages, faint: whom it went to, where
+  /// that isn't plain ("To Tove only" in a pipe's view, which shows its
+  /// liaison's conversation among the pipe's messages); "" for none.
+  final String userNote;
+
   static AgentTints? of(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<AgentTints>();
 
   @override
   bool updateShouldNotify(AgentTints old) =>
       old.own != own ||
+      old.userNote != userNote ||
       !mapEquals(old.byId, byId) ||
       !mapEquals(old.agents, agents);
 }
@@ -2183,9 +2570,13 @@ class _UserText extends StatelessWidget {
     this.voice,
     this.waitingVoice,
     this.sentMs = 0,
+    this.checklist,
   });
 
   final String text;
+
+  /// The checklist item it replies on, over the bubble; null for none.
+  final ChecklistItemRef? checklist;
 
   /// When it was sent, at the bubble's foot; 0 for none (still waiting).
   final int sentMs;
@@ -2208,10 +2599,12 @@ class _UserText extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = AgentTints.of(context)?.own ?? Palette.of(context).signal;
-    final words = Text(
-      text,
-      style: TypeScale.of(context).body
-          .copyWith(color: const Color(0xFFFFFFFF)),
+    final words = Text.rich(
+      FindHighlight.markText(
+        context,
+        text,
+        TypeScale.of(context).body.copyWith(color: const Color(0xFFFFFFFF)),
+      ),
     );
     final voice = this.voice;
     final waiting = waitingVoice;
@@ -2267,18 +2660,52 @@ class _UserText extends StatelessWidget {
         const PersonAvatar(size: userAvatarSize),
       ],
     );
-    if (from == null) return message;
+    final checklist = this.checklist;
+    final note = AgentTints.of(context)?.userNote ?? '';
+    if (from == null && checklist == null && note.isEmpty) return message;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
-        message,
-        Padding(
-          padding: const EdgeInsets.only(
-            right: Space.m + userAvatarSize + Space.xs,
-            top: 2,
+        // What it replies on, which opens it; not copied with the message.
+        if (checklist != null)
+          Padding(
+            padding: const EdgeInsets.only(
+              left: Space.xl,
+              right: Space.m + userAvatarSize + Space.xs,
+              bottom: 2,
+            ),
+            child: Unselectable(child: ChecklistRef(checklist)),
           ),
-          child: DeviceMark(from),
-        ),
+        message,
+        if (from != null || note.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(
+              left: Space.xl,
+              right: Space.m + userAvatarSize + Space.xs,
+              top: 2,
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                // Whom it went to; not copied with the message.
+                if (note.isNotEmpty)
+                  Flexible(
+                    child: Unselectable(
+                      child: Text(
+                        note,
+                        textAlign: TextAlign.end,
+                        style: TypeScale.of(context).caption.copyWith(
+                          color: Palette.of(context).textFaint,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (from != null && note.isNotEmpty)
+                  const SizedBox(width: Space.xs),
+                if (from != null) DeviceMark(from),
+              ],
+            ),
+          ),
       ],
     );
   }
@@ -2620,7 +3047,12 @@ class _ProposalCardState extends State<ProposalCard> {
             ],
           ),
           const SizedBox(height: Space.s),
-          Markdown(proposal.text, color: dismissed ? palette.textMuted : null),
+          // What the agent proposes, to decide on: what reorders text shows
+          // by its code (proseCodes, Fugo).
+          Markdown(
+            proseCodes(proposal.text),
+            color: dismissed ? palette.textMuted : null,
+          ),
           const SizedBox(height: Space.m),
           if (pending) ...[
             Row(
@@ -2738,7 +3170,9 @@ class _AgentMessageState extends State<_AgentMessage> {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final tints = AgentTints.of(context);
-    final (message, also) = splitAlsoSentTo(widget.event.text);
+    // What reorders text shows by its code: a message can repeat what
+    // came from outside (proseCodes, Fugo).
+    final (message, also) = splitAlsoSentTo(proseCodes(widget.event.text));
     final color = tints?.byId[_sender];
     final known = color != null && tints?.open != null;
     final nameColor = color ?? palette.textMuted;
@@ -2827,9 +3261,21 @@ class _AgentMessageState extends State<_AgentMessage> {
   }
 }
 
+/// Reply [seq] of the conversation around [context]: a chat's, or its
+/// agent's.
+ReportedReply _reportedIn(BuildContext context, int seq) {
+  final chatId = ChatScope.chatIdOf(context) ?? '';
+  return (
+    agentId: chatId.isEmpty ? AppScope.of(context).transcript.agentId : '',
+    chatId: chatId,
+    seq: seq,
+  );
+}
+
 /// A message in the conversation, its words and who sent it when it's
-/// another agent (null for the agent's own and the person's).
-typedef _Pointed = ({String text, String? from});
+/// another agent (null for the agent's own and the person's), and, for
+/// the agent's own reply, its seq, to report it.
+typedef _Pointed = ({String text, String? from, int? report});
 
 /// Where a message tells the conversation that the pointer is over it, and
 /// how to reply to one ([_Repliable]).
@@ -2855,17 +3301,21 @@ class _Repliable extends StatelessWidget {
     required this.text,
     required this.from,
     required this.child,
+    this.report,
   });
 
   final String text;
   final String? from;
+
+  /// The agent's own reply's seq, which can be reported; null otherwise.
+  final int? report;
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
     final scope = context.getInheritedWidgetOfExactType<_ReplyScope>();
     if (scope == null) return child;
-    final me = (text: text, from: from);
+    final me = (text: text, from: from, report: report);
     return MouseRegion(
       opaque: false,
       hitTestBehavior: HitTestBehavior.translucent,
@@ -2908,7 +3358,9 @@ class _OwnReply extends StatelessWidget {
       outgoing: false,
       wide: true,
       sentMs: sentMs,
-      child: Markdown(text),
+      // What reorders text shows by its code: a reply can repeat what came
+      // from outside (proseCodes, Fugo).
+      child: Markdown(proseCodes(text)),
     );
     final answers = this.answers;
     if (answers == null) return bubble;
@@ -3121,7 +3573,7 @@ class _ReplyQuoteState extends State<ReplyQuote> {
   static String _excerpt(Entry message) {
     final text = switch (message.whichKind()) {
       Entry_Kind.user => message.user.text,
-      Entry_Kind.event => splitAlsoSentTo(message.event.text).$1,
+      Entry_Kind.event => splitAlsoSentTo(proseCodes(message.event.text)).$1,
       _ => '',
     };
     final words = text.replaceAll(RegExp(r'\s+'), ' ').trim();
@@ -3182,7 +3634,9 @@ class _EventLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final line = event.summary.isEmpty ? event.text : event.summary;
+    // What reorders text shows by its code (proseCodes, Fugo).
+    final text = proseCodes(event.text);
+    final line = event.summary.isEmpty ? text : proseCodes(event.summary);
     final more = event.summary.isNotEmpty && event.text != event.summary;
     final task = event.source == EventSource.EVENT_SOURCE_TASK;
     return _Opening(
@@ -3219,12 +3673,12 @@ class _EventLine extends StatelessWidget {
         ),
         child: task
             ? Text(
-                event.text,
+                text,
                 style: TypeScale.of(context).code
                     .copyWith(color: palette.textMuted),
               )
             : Text(
-                event.text,
+                text,
                 style: TypeScale.of(context).body
                     .copyWith(color: palette.textMuted),
               ),
@@ -3424,9 +3878,14 @@ class _Disclosure extends StatefulWidget {
     required this.header,
     required this.body,
     this.under,
+    this.found = false,
   });
 
   final bool expanded;
+
+  /// A find went to a match inside what it folds away: it opens, once, as
+  /// if clicked. It never closes for a find; the person's own click wins.
+  final bool found;
   final ValueChanged<bool> onToggle;
   final Widget Function(BuildContext context, bool open, bool hovered) header;
   final WidgetBuilder body;
@@ -3441,6 +3900,27 @@ class _Disclosure extends StatefulWidget {
 
 class _DisclosureState extends State<_Disclosure> {
   late var _open = widget.expanded;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.found) _openForFind();
+  }
+
+  @override
+  void didUpdateWidget(_Disclosure old) {
+    super.didUpdateWidget(old);
+    if (widget.found && !old.found) _openForFind();
+  }
+
+  /// Opens for a find, kept open as a click keeps it (onToggle).
+  void _openForFind() {
+    if (_open) return;
+    _open = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _open) widget.onToggle(true);
+    });
+  }
 
   void _toggle() {
     setState(() => _open = !_open);
@@ -3543,7 +4023,7 @@ class _ThinkingView extends StatelessWidget {
         ),
       ),
       body: (context) => Text(
-        text,
+        proseCodes(text),
         style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
       ),
     );
@@ -3802,6 +4282,7 @@ class _ToolCallView extends StatelessWidget {
     final failed = info.failed;
     final running = info.running;
     final view = toolViewFor(info);
+    final found = _foundInside(context, call);
     // On a phone how long it ran and whether it failed go under the line,
     // which needs the width; only the chevron stays at its end.
     final phone = isPhoneLayout(context);
@@ -3865,6 +4346,7 @@ class _ToolCallView extends StatelessWidget {
       return _Disclosure(
         expanded: expanded,
         onToggle: onToggle,
+        found: found,
         header: (context, open, hovered) => _HeaderLine(
           child: Row(
             children: [
@@ -3909,12 +4391,15 @@ class _ToolCallView extends StatelessWidget {
             children: [
               ?body,
               if (error)
-                Text(
-                  call.output.trim(),
+                Text.rich(
+                  FindHighlight.markText(
+                    context,
+                    visibleCodes(call.output.trim()),
+                    TypeScale.of(context).caption
+                        .copyWith(color: palette.danger),
+                  ),
                   maxLines: 3,
                   overflow: TextOverflow.ellipsis,
-                  style: TypeScale.of(context).caption
-                      .copyWith(color: palette.danger),
                 ),
             ],
           );
@@ -3922,13 +4407,22 @@ class _ToolCallView extends StatelessWidget {
         body: (context) => _ToolCallBody(call: call, running: running),
       );
     }
-    final summary = toolSummary(call.name, call.input);
+    // What it does, and its name, as the agent wrote them: shown so
+    // nothing in them can make them read as something else (Fugo).
+    final named = toolSummary(call.name, call.input);
+    final summary = ToolSummary(
+      named.code ? visibleCodes(named.text) : proseCodes(named.text),
+      more: named.more,
+      code: named.code,
+    );
+    final name = visibleCodes(call.name);
     if (phone) {
       // Its name over what it does, and how long it ran under that: on one
       // line they'd leave each other no room.
       return _Disclosure(
         expanded: expanded,
         onToggle: onToggle,
+        found: found,
         header: (context, open, hovered) => _HeaderLine(
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: Space.xs),
@@ -3950,7 +4444,7 @@ class _ToolCallView extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        call.name,
+                        name,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TypeScale.of(context).label.copyWith(
@@ -3958,18 +4452,20 @@ class _ToolCallView extends StatelessWidget {
                         ),
                       ),
                       if (summary.text.isNotEmpty)
-                        Text(
-                          [
-                            summary.text,
-                            if (summary.more.isNotEmpty) summary.more,
-                          ].join(' '),
+                        Text.rich(
+                          FindHighlight.markText(
+                            context,
+                            [
+                              summary.text,
+                              if (summary.more.isNotEmpty) summary.more,
+                            ].join(' '),
+                            (summary.code
+                                    ? TypeScale.of(context).code
+                                    : TypeScale.of(context).secondary)
+                                .copyWith(color: palette.textMuted),
+                          ),
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
-                          style:
-                              (summary.code
-                                      ? TypeScale.of(context).code
-                                      : TypeScale.of(context).secondary)
-                                  .copyWith(color: palette.textMuted),
                         ),
                       ?meta(),
                     ],
@@ -3986,6 +4482,7 @@ class _ToolCallView extends StatelessWidget {
     return _Disclosure(
       expanded: expanded,
       onToggle: onToggle,
+      found: found,
       header: (context, open, hovered) => _HeaderLine(
         child: Row(
           children: [
@@ -3999,24 +4496,26 @@ class _ToolCallView extends StatelessWidget {
               ),
             ),
             Text(
-              call.name,
+              name,
               style: TypeScale.of(context).label
                   .copyWith(color: failed ? palette.danger : palette.text),
             ),
             const SizedBox(width: Space.s),
             // What it does: the command, the path, whom it messages.
             Expanded(
-              child: Text(
-                summary.text,
+              child: Text.rich(
+                FindHighlight.markText(
+                  context,
+                  summary.text,
+                  (summary.code
+                          ? TypeScale.of(context).code
+                          : TypeScale.of(context).body)
+                      .copyWith(
+                        color: hovered ? palette.text : palette.textMuted,
+                      ),
+                ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style:
-                    (summary.code
-                            ? TypeScale.of(context).code
-                            : TypeScale.of(context).body)
-                        .copyWith(
-                          color: hovered ? palette.text : palette.textMuted,
-                        ),
               ),
             ),
             if (summary.more.isNotEmpty) ...[
@@ -4034,6 +4533,17 @@ class _ToolCallView extends StatelessWidget {
       body: (context) => _ToolCallBody(call: call, running: running),
     );
   }
+}
+
+/// Whether a find went to [call] (the [FindHighlight] above it is
+/// current) and its query is in what the call's view folds away: its
+/// input or output, as they show, escaped.
+bool _foundInside(BuildContext context, ToolCall call) {
+  final find = context.dependOnInheritedWidgetOfExactType<FindHighlight>();
+  if (find == null || !find.current || find.query.isEmpty) return false;
+  final query = find.query.toLowerCase();
+  return visibleCodes(call.input).toLowerCase().contains(query) ||
+      visibleCodes(call.output).toLowerCase().contains(query);
 }
 
 /// A tool call's clock: while it runs, how long it has so far and, for
@@ -4090,10 +4600,10 @@ class _ToolCallBody extends StatelessWidget {
         style: TypeScale.of(context).caption.copyWith(color: palette.textFaint),
       );
     } else if (call.name == 'edit_file' && !failed) {
-      output = DiffView(call.output);
+      output = DiffView(visibleCodes(call.output));
     } else {
       output = CodeBlock(
-        call.output,
+        visibleCodes(call.output),
         color: failed ? palette.danger : null,
         // A CLI's sign-in page, say, opened through the tunnel's forwarding.
         links: call.name == 'bash',
@@ -4104,7 +4614,7 @@ class _ToolCallBody extends StatelessWidget {
       children: [
         if (call.input.isNotEmpty) ...[
           label('Input'),
-          CodeBlock(call.input),
+          CodeBlock(visibleCodes(call.input)),
           const SizedBox(height: Space.m),
         ],
         label('Output'),
@@ -4165,7 +4675,11 @@ class DiffView extends StatelessWidget {
             vertical: Space.s + 2,
           ),
           child: Text.rich(
-            TextSpan(style: TypeScale.of(context).code, children: spans),
+            // A find's matches marked within each line.
+            FindHighlight.mark(
+              context,
+              TextSpan(style: TypeScale.of(context).code, children: spans),
+            ),
             softWrap: false,
           ),
         ),

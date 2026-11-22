@@ -104,28 +104,47 @@ class _MarketplaceViewState extends State<MarketplaceView> {
                   ),
                   child: Row(
                     children: [
-                      // A phone has room for the tabs alone.
-                      if (!isPhoneLayout(context) && !inPane) ...[
-                        Text(
-                          'Marketplace',
-                          style: TypeScale.of(context).label.copyWith(
-                            color: palette.text,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(width: Space.xl),
-                      ],
                       Expanded(
-                        child: SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Row(
+                        // What Done leaves: the title in at most a third,
+                        // cut short at the largest text in a narrow window,
+                        // and the tabs in the rest.
+                        child: LayoutBuilder(
+                          builder: (context, constraints) => Row(
                             children: [
-                              for (final kind in _Kind.values)
-                                _Tab(
-                                  title: kind.title,
-                                  selected: kind == _kind,
-                                  onTap: () => setState(() => _kind = kind),
+                              // A phone has room for the tabs alone.
+                              if (!isPhoneLayout(context) && !inPane) ...[
+                                ConstrainedBox(
+                                  constraints: BoxConstraints(
+                                    maxWidth: constraints.maxWidth / 3,
+                                  ),
+                                  child: Text(
+                                    'Marketplace',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TypeScale.of(context).label.copyWith(
+                                      color: palette.text,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
                                 ),
+                                const SizedBox(width: Space.xl),
+                              ],
+                              Expanded(
+                                child: SingleChildScrollView(
+                                  scrollDirection: Axis.horizontal,
+                                  child: Row(
+                                    children: [
+                                      for (final kind in _Kind.values)
+                                        _Tab(
+                                          title: kind.title,
+                                          selected: kind == _kind,
+                                          onTap: () =>
+                                              setState(() => _kind = kind),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ),
                             ],
                           ),
                         ),

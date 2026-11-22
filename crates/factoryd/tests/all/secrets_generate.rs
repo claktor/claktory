@@ -164,3 +164,81 @@ async fn a_generate_request_names_one_key_type_and_one_variable() {
         call(&mut client, &mut view, "bo", "secrets_request", r#"{"name":"K","generate":"ssh-ed25519","grant":"all","reason":"x"}"#).await;
     assert!(grant.contains("\"me\" or \"nobody\""), "{grant}");
 }
+
+/// Every file under `dir` holding `value` in the clear, but `except`.
+fn files_holding(dir: &std::path::Path, value: &str, except: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut folders = vec![dir.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                folders.push(path);
+            } else if path != except
+                && std::fs::read(&path).is_ok_and(|bytes| bytes.windows(value.len()).any(|window| window == value.as_bytes()))
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+#[tokio::test]
+async fn the_vault_generates_a_password_that_no_one_sees() {
+    let (dir, mut client, mut view) = setup().await;
+    // Weaker than the bounds: refused when asked, with the reason.
+    let short = r#"{"name":"Pin","generate":"password","password":{"digits":true,"max_length":12},"reason":"x"}"#;
+    let refused = call(&mut client, &mut view, "bo", "secrets_request", short).await;
+    assert!(refused.contains("weaker than the vault allows"), "{refused}");
+    let eleven = r#"{"name":"Pin","generate":"password","password":{"length":11},"reason":"x"}"#;
+    assert!(call(&mut client, &mut view, "bo", "secrets_request", eleven).await.contains("out of bounds"));
+    let not_a_key = r#"{"name":"K","generate":"ssh-ed25519","password":{"length":20},"reason":"x"}"#;
+    assert!(call(&mut client, &mut view, "bo", "secrets_request", not_a_key).await.contains("goes with generate"));
+
+    // Pericolo's: letters and digits, 32, no look-alikes.
+    let ask = r#"{"name":"Review page","description":"Basic auth for the review page.","generate":"password","password":{"length":32,"lowercase":true,"uppercase":true,"digits":true,"avoid_similar":true},"reason":"For App Review."}"#;
+    let asked = call(&mut client, &mut view, "bo", "secrets_request", ask).await;
+    assert!(asked.starts_with("Asked the vault to generate Review page, a 32-character password (letters and digits, 185 bits);"), "{asked}");
+    let request = pending(&view);
+    let spec = request.password.clone().expect("its spec");
+    assert_eq!((spec.length, spec.alphabet_size, spec.shortest, spec.longest), (32, 56, 16, 256));
+    assert!(spec.lowercase && spec.uppercase && spec.digits && !spec.symbols && spec.avoid_similar);
+    let variable = &request.new_secret.clone().expect("wanted").variables[0];
+    assert_eq!((variable.name.as_str(), variable.file), ("PASSWORD", false));
+
+    // The person can't make it shorter than the bounds; longer, yes.
+    let too_short = v1::DecideSecretRequest { password_length: 15, ..decide_body(&request.id) };
+    let refused = apply_request(&mut client, &mut view, client_message::Body::DecideSecretRequest(too_short)).await;
+    assert!(matches!(refused, v1::server_message::Body::Error(_)));
+    let longer = v1::DecideSecretRequest { password_length: 40, ..decide_body(&request.id) };
+    apply_request(&mut client, &mut view, client_message::Body::DecideSecretRequest(longer)).await;
+    view.follow(&mut client, |view| event_text(view, "the vault generated Review page").is_some() && idle(view, "bo")).await;
+    let told = event_text(&view, "the vault generated Review page").expect("told");
+    assert!(told.contains("a 40-character password (letters and digits, 232 bits)"), "{told}");
+    assert!(told.contains("PASSWORD holds the password; you never see the password itself."), "{told}");
+    let generated = decided(&view, &request.id);
+    assert_eq!(generated.state(), v1::SecretRequestState::Granted);
+    assert_eq!(generated.password.clone().expect("spec").length, 40);
+    assert!(generated.public_key.is_empty());
+
+    // Hidden from every output; the agent uses it without seeing it.
+    let echo = call(&mut client, &mut view, "bo", "bash", r#"{"command":"echo \"$PASSWORD\"","secrets":["Review page"]}"#).await;
+    assert!(echo.contains("[secret Review page/PASSWORD]"), "{echo}");
+    let out = dir.join("site").join("made.txt");
+    call(&mut client, &mut view, "bo", "bash", r#"{"command":"printf %s \"$PASSWORD\" > made.txt","secrets":["Review page"]}"#).await;
+    let password = std::fs::read_to_string(&out).expect("written");
+    assert_eq!(password.len(), 40);
+    assert!(password.bytes().all(|c| c.is_ascii_alphanumeric() && !b"0Oo1lI".contains(&c)), "{password}");
+    // Nowhere in the clear: not the tool results, events or requests, not
+    // the list, not any file Claktory keeps (its database and logs).
+    let listed = call(&mut client, &mut view, "bo", "secrets_requests", "{}").await;
+    assert!(listed.contains("a 40-character password") && !listed.contains(&password), "{listed}");
+    assert!(!format!("{:?}", view.entries).contains(&password));
+    assert!(!format!("{:?}", view.workspace).contains(&password));
+    assert_eq!(files_holding(&dir, &password, &out), Vec::<std::path::PathBuf>::new());
+}
+
+fn decide_body(id: &str) -> v1::DecideSecretRequest {
+    v1::DecideSecretRequest { agent_id: "bo".into(), request_id: id.into(), approve: true, ask_each_time: Some(false), ..Default::default() }
+}

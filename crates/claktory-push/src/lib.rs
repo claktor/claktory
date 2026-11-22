@@ -31,6 +31,7 @@ pub mod apns;
 pub mod db;
 pub mod fcm;
 mod limits;
+pub mod local;
 pub mod server;
 
 use std::future::Future;

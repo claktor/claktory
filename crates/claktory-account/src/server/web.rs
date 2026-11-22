@@ -395,10 +395,10 @@ async fn sign_in(service: &Service, call: &Call, form: &Form) -> Result<Reply, A
     }
 }
 
-fn verify(service: &Service, _call: &Call, form: &Form) -> Result<Reply, ApiError> {
+fn verify(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
     let email = form.get("email");
     let next = Next::of(form);
-    let request = match check_code(service, form.get("request"), form.get("code"), "web") {
+    let request = match check_code(service, form.get("request"), form.get("code"), "web", &call.ip) {
         Ok(request) => request,
         Err(error) if error.body.error == "wrong_code" => {
             let left = error.body.attempts_left.unwrap_or(0);
@@ -474,7 +474,7 @@ fn remove_device(service: &Service, call: &Call, form: &Form) -> Result<Reply, A
             StatusCode::OK,
             &format!("Remove {}?", device.name),
             &format!(
-                "<p>{name} is signed out of your account, so it can't find your Claktories here until you sign in on it again. \
+                "<p>{name} is signed out of your account. If you sign in on it again, it starts over as a new device. \
                  Claktories it already connects to still allow it: remove it in their Settings → Devices.</p>\
                  <form method=\"post\" action=\"/account/remove-device\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
                  <input type=\"hidden\" name=\"device\" value=\"{key}\"><input type=\"hidden\" name=\"confirm\" value=\"yes\">\
@@ -485,7 +485,7 @@ fn remove_device(service: &Service, call: &Call, form: &Form) -> Result<Reply, A
             ),
         ));
     }
-    db::unbind_device(&mut conn, &device.account_key, Some(&account.id))?;
+    db::remove_device(&mut conn, &device.account_key, &account.id, service.now())?;
     tracing::info!("removed: a device of account {}", account.id);
     Ok(redirect(None))
 }

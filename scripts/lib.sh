@@ -205,6 +205,45 @@ PLIST
   codesign --force --sign - "$app"
 }
 
+# Claktory's own apps, shipped in every release (apps/dist/<id>.clapp in the
+# source, signed with the apps publisher key): checked, then copied into
+# DEST/apps. factoryd offers what it finds there (beside claktory-apps, or in
+# the running version's release folder) in Settings -> Apps. Each must be
+# signed by a key pinned as Claktory's (CLAKTORY_KEYS in bundle.rs), with a
+# signature that holds, and carry no trace of this Mac (check_no_traces).
+bundled_apps() { # SRC DEST
+  local src="$1" dest="$2" clapp work public pinned
+  rm -rf "$dest/apps"
+  compgen -G "$src/apps/dist/*.clapp" >/dev/null || return 0
+  mkdir -p "$dest/apps"
+  pinned="$(grep -A20 '^const CLAKTORY_KEYS' "$src/crates/factoryd/src/apps/bundle.rs" | sed '/\];/q')"
+  for clapp in "$src"/apps/dist/*.clapp; do
+    work="$(mktemp -d)"
+    tar -xf "$clapp" -C "$work" manifest.toml app.wasm signature 2>/dev/null || { rm -rf "$work"; echo "$(basename "$clapp") isn't a .clapp" >&2; return 1; }
+    public="$(sed -n 's/^key ed25519://p' "$work/signature")"
+    grep -qF "\"$public\"" <<<"$pinned" || { rm -rf "$work"; echo "$(basename "$clapp") isn't signed by Claktory's apps key (CLAKTORY_KEYS in bundle.rs)" >&2; return 1; }
+    ( cd "$work"
+      { printf 'claktory-app-v1\n'; shasum -a 256 app.wasm manifest.toml; } >message
+      sed -n 's/^sig //p' signature | base64 -d >sig.bin
+      { printf '302a300506032b6570032100' | xxd -r -p; printf '%s' "$public" | base64 -d; } >pub.der
+      openssl pkey -pubin -inform DER -in pub.der -out pub.pem 2>/dev/null &&
+        openssl pkeyutl -verify -pubin -inkey pub.pem -rawin -in message -sigfile sig.bin >/dev/null 2>&1
+    ) || { rm -rf "$work"; echo "$(basename "$clapp")'s signature doesn't hold" >&2; return 1; }
+    rm -rf "$work"
+    cp "$clapp" "$dest/apps/"
+  done
+  # Raw bytes, as for the binaries: a path in a wasm's panic strings is a trace.
+  local needle found=""
+  while IFS= read -r needle; do
+    [[ -n "$needle" ]] || continue
+    for clapp in "$dest"/apps/*.clapp; do
+      LC_ALL=C grep -a -q -F "$needle" "$clapp" && found="$found $(basename "$clapp")"
+    done
+  done < <(traces)
+  [[ -z "$found" ]] || { echo "these apps carry this Mac's home folder, user or host name; not shipping them:$found (build the wasm with --remap-path-prefix=\$HOME=~)" >&2; return 1; }
+  echo "bundled apps: $(cd "$dest/apps" && ls | tr '\n' ' ')"
+}
+
 # Puts the helpers in the app (Contents/Helpers): the backend (factoryd),
 # the apps host (claktory-apps), the speech host (claktory-speech, which
 # writes what voice messages say) and the supervisor's app, as the release has
@@ -219,6 +258,10 @@ add_helpers() {
   cp "$release/factoryd" "$helpers/factoryd"
   if [[ -f "$release/claktory-apps" ]]; then cp "$release/claktory-apps" "$helpers/claktory-apps"; fi
   if [[ -f "$release/claktory-speech" ]]; then cp "$release/claktory-speech" "$helpers/claktory-speech"; fi
+  # Claktory's own apps are data, not code: in Resources, since codesign
+  # refuses anything unsigned in Helpers ("code object is not signed at all").
+  rm -rf "$app/Contents/Resources/apps"
+  if [[ -d "$release/apps" ]]; then cp -R "$release/apps" "$app/Contents/Resources/apps"; fi
   if [[ -d "$release/supervisor/Claktory Agents.app" ]]; then
     ditto "$release/supervisor/Claktory Agents.app" "$helpers/Claktory Agents.app"
   fi

@@ -96,6 +96,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "database",
             "database:factory",
             "devices",
+            "handoff",
             "highlight",
             "memory",
             "memory:factory",
@@ -111,7 +112,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "web"
         ]
     );
-    let manual = &view.workspace.extensions[10];
+    let manual = &view.workspace.extensions[11];
     assert_eq!((manual.name.as_str(), manual.base.as_str(), manual.admin_default), ("Claktory manual", "memory", true));
     let records = &view.workspace.extensions[6];
     assert_eq!((records.name.as_str(), records.base.as_str(), records.admin_default), ("Claktory's records", "database", true));
@@ -120,10 +121,10 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
     assert!(builder[0].options["reachable"].on && !builder[0].options["admin"].on && builder[0].options["also"].agent_ids.is_empty());
     let rivet = &view.agent("rivet").extensions[0];
     assert!(rivet.options["admin"].on && !rivet.options["reachable"].on, "Rivet is the admin agent, and no one messages it");
-    assert!(view.agent("rivet").extensions[8].enabled && !builder[8].enabled, "a new Factory's Rivet points at things");
+    assert!(view.agent("rivet").extensions[9].enabled && !builder[9].enabled, "a new Factory's Rivet points at things");
     assert!(view.agent("rivet").extensions[7].enabled && !builder[7].enabled, "admins add the person's devices");
-    assert!(view.agent("rivet").extensions[12].enabled && !builder[12].enabled, "admins move Claktory for the person");
-    assert!(view.agent("rivet").extensions[13].enabled && !builder[13].enabled, "admins start pipes for the person");
+    assert!(view.agent("rivet").extensions[13].enabled && !builder[13].enabled, "admins move Claktory for the person");
+    assert!(view.agent("rivet").extensions[14].enabled && !builder[14].enabled, "admins start pipes for the person");
     assert!(view.agent("rivet").extensions[1].enabled && !builder[1].enabled, "admins propose app access for the person");
     assert!(builder[4].enabled, "comments on unless turned off");
     assert!(
@@ -791,17 +792,30 @@ async fn an_item_blocked_on_the_person_with_nothing_asked_reminds_its_owner_dail
         }
     };
 
-    // The worker asks the person something first: its blocker is covered.
-    call(&mut client, &mut view, "worker", "ask_person", r#"{"title":"Which logo?","body":"Round or square?"}"#).await;
-
     // Two items block on the person (however the person is named): Lead's
-    // own, and one owned by the worker.
+    // own, and one owned by the worker, which asks the person about it
+    // first (naming it: a question names the items it covers).
     call(&mut client, &mut view, "lead", "checklist_add", r#"{"items":["Fix login","Choose the logo"]}"#).await;
+    call(&mut client, &mut view, "lead", "checklist_update", r#"{"updates":[{"id":2,"owner":"worker"}]}"#).await;
+    call(&mut client, &mut view, "worker", "ask_person", r#"{"title":"Which logo?","body":"Round or square?","item":"Lead#2"}"#).await;
     let blocked = r#"{"updates":[{"id":1,"status":"blocked","blocked_on":"person"},{"id":2,"status":"blocked","blocked_on":"The Person","owner":"worker"}]}"#;
     assert_eq!(
         call(&mut client, &mut view, "lead", "checklist_update", blocked).await,
-        "#1 blocked, blocks on person; #2 blocked, blocks on person, owner worker."
+        "#1 blocked, blocks on person; #2 blocked, blocks on person, owner worker. #1 doesn't show in the person's Needs you until \
+         you ask: ask_person with item 1, one question (or secrets_request or propose_to_rivet with item 1, if it waits on a secret or \
+         on Rivet)."
     );
+
+    // Needs you has only the worker's, as its card in the worker's
+    // conversation; Lead's own, with no question, isn't there.
+    view.follow(&mut client, |view| !view.agent("lead").waiting_items.is_empty()).await;
+    let shown: Vec<(u32, String, bool)> = view
+        .agent("lead")
+        .waiting_items
+        .iter()
+        .map(|item| (item.item, item.card_agent_id.clone(), view.agent("worker").waiting_seqs.contains(&item.card_seq)))
+        .collect();
+    assert_eq!(shown, [(2, "worker".to_owned(), true)]);
 
     // Lead is told of its own, once; the worker's is covered by its ask.
     apply_request(&mut client, &mut view, select("lead")).await;
@@ -811,8 +825,9 @@ async fn an_item_blocked_on_the_person_with_nothing_asked_reminds_its_owner_dail
     assert_eq!(
         events[0].text,
         "1 checklist item blocks on the person and you have no question waiting for them: #1 Fix login. \
-         A decision that gates work is asked the day it blocks: file ask_person now, one card per real decision \
-         (only pure preferences batch into one question) — or note on the item why you can't ask yet."
+         None of it shows in their Needs you until you ask: file ask_person now with item naming it, one card per \
+         decision or action (secrets_request or propose_to_rivet with item, if one waits on a secret or on Rivet) — or note \
+         on the item why you can't ask yet."
     );
     quiet(&mut client, &mut view).await;
     assert_eq!(reminded(&view).len(), 1, "not again for a day");

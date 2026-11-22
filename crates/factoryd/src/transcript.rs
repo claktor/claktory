@@ -182,6 +182,10 @@ pub struct Transcript {
     /// event, which quotes nothing) and taken by the first assistant text.
     awaiting_reply: Option<u64>,
     live: Live,
+    /// The model that wrote each finished response ("anthropic/claude-…"),
+    /// as runs: from the response whose first entry is this seq on, until
+    /// the next. For reporting a reply (`report`).
+    models: Vec<(u64, String)>,
 }
 
 /// What a snapshot of the conversation holds at most: the latest entries,
@@ -219,6 +223,7 @@ impl Transcript {
             waiting: BTreeSet::new(),
             awaiting_reply: None,
             live: Live::default(),
+            models: Vec::new(),
         };
         let mut numbers = Vec::new();
         match std::fs::read_dir(&transcript.dir) {
@@ -270,6 +275,7 @@ impl Transcript {
             waiting: BTreeSet::new(),
             awaiting_reply: None,
             live: Live::default(),
+            models: Vec::new(),
         };
         transcript.push(now, notice(CLEARED.to_owned(), NoticeLevel::Info));
         let persist = transcript.persist()?;
@@ -325,6 +331,17 @@ impl Transcript {
 
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// The model that wrote the response whose first entry is `reply`
+    /// (Entry.reply), as "provider/model"; None while it's still being
+    /// written.
+    pub fn response_model(&self, reply: u64) -> Option<&str> {
+        if self.live.reply == Some(reply) {
+            return None;
+        }
+        let run = self.models.partition_point(|(first, _)| *first <= reply);
+        run.checked_sub(1).map(|run| self.models[run].1.as_str())
     }
 
     /// The model's current context.
@@ -389,6 +406,25 @@ impl Transcript {
     /// entry, or None if the conversation doesn't show it.
     pub fn set_proposal(&mut self, proposal: v1::Proposal) -> Option<Entry> {
         self.replace_shown(Kind::Proposal(proposal))
+    }
+
+    /// Marks the add-secret cards shown for request `id` closed; the
+    /// entries that changed.
+    fn close_collect_cards(&mut self, id: &str) -> Vec<Entry> {
+        let mut closed = Vec::new();
+        for entry in &mut self.entries {
+            if let Some(Kind::SecretRequest(request)) = &mut entry.kind
+                && request.id == id
+                && request.collecting
+            {
+                request.collecting = false;
+                closed.push(entry.clone());
+            }
+        }
+        for entry in &closed {
+            self.track(entry);
+        }
+        closed
     }
 
     /// Shows an agent's request for a secret as it is now (decided, say); the
@@ -616,6 +652,9 @@ impl Transcript {
                 }
                 // And the add-secret card an admin agent opens for one.
                 if let Some(request) = crate::vault::asks::collected(&result.tool_name, result.is_error, &result.details) {
+                    // A card opened again for the same request: the earlier one
+                    // is closed, so only the new one waits.
+                    changed.extend(self.close_collect_cards(&request.id));
                     changed.push(self.push(result.timestamp as i64, Kind::SecretRequest(request)));
                 }
                 // And a proposal to connect a service.
@@ -701,6 +740,12 @@ impl Transcript {
             };
             if let AssistantPart::ToolCall { id, .. } = part {
                 self.live.tools.insert(id.clone(), seq);
+            }
+        }
+        if let Some(reply) = self.live.reply {
+            let model = format!("{}/{}", message.provider, message.model);
+            if self.models.last().is_none_or(|(_, last)| *last != model) {
+                self.models.push((reply, model));
             }
         }
         self.live.parts.clear();
@@ -945,6 +990,7 @@ fn user_kind(message: &UserMessage) -> Kind {
                 language: voice.language.clone(),
                 ..Default::default()
             }),
+            checklist_item: message.checklist_item.as_ref().map(checklist_item),
         });
     };
     let source = match event.source {
@@ -970,6 +1016,11 @@ fn user_kind(message: &UserMessage) -> Kind {
 }
 
 /// A file attached to the person's message, for clients.
+/// A checklist item a message of the person's replies on, as clients see it.
+pub(crate) fn checklist_item(item: &factory_agent::ChecklistItemRef) -> v1::ChecklistItemRef {
+    v1::ChecklistItemRef { agent_id: item.agent.clone(), id: item.id, text: item.text.clone() }
+}
+
 pub(crate) fn attachment(attached: &factory_agent::Attachment) -> v1::Attachment {
     v1::Attachment { path: attached.path.clone(), name: attached.name.clone(), size: attached.size, mime: attached.mime.clone() }
 }
@@ -1091,6 +1142,13 @@ fn timeout_ms(name: &str, arguments: &serde_json::Value) -> u64 {
 
 fn pretty(value: &serde_json::Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
+}
+
+/// A millisecond timestamp in this computer's time zone; out-of-range timestamps are empty.
+pub(crate) fn local_time(ms: i64, format: &str) -> String {
+    jiff::Timestamp::from_millisecond(ms)
+        .map(|time| time.to_zoned_datetime(jiff::tz::TimeZone::system()).strftime(format).to_string())
+        .unwrap_or_default()
 }
 
 pub fn now_ms() -> i64 {

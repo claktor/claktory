@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use claktory_account::protocol::normalize_email;
 use claktory_account::server::{self, Config, Mailer, Secrets, Service, mail};
 
 const USAGE: &str = "\
@@ -43,6 +44,9 @@ serve options:
   --geoip FILE            a GeoIP city file (.mmdb: DB-IP's IP to City Lite, or
                           GeoLite2 City) to know roughly where Claktories are
   --relay URL             a relay for Claktories to use; repeat for more
+  --vouch-claktory-email ADDRESS
+                          a claktory.com address pipes may show as verified
+                          (none by default); repeat for more
   --service-key-statement FILE
                           the account root's word for the service key, served
                           at well-known (from service-key-statement --out)
@@ -51,6 +55,11 @@ serve options:
   --user-apps-uid UID     the worker's user: whatever listens on the socket
                           must run as it, or it's sent nothing (needed with
                           --user-apps)
+  --review-account FILE   the store reviewers' account: FILE's one line,
+                          `<email> <salt> <sha256 of salt and code, hex>`, lets
+                          that email sign in with that 6-digit code instead of
+                          an emailed one (nothing is sent to it); off while
+                          FILE isn't there
 
 init-secrets writes new keys to FILE (never over one): back up its k_share and
 signing_key offline.
@@ -164,10 +173,12 @@ fn serve(args: &[String]) -> Result<(), String> {
             "--email-daily-cap",
             "--admin-email",
             "--relay",
+            "--vouch-claktory-email",
             "--geoip",
             "--service-key-statement",
             "--user-apps",
             "--user-apps-uid",
+            "--review-account",
         ],
         &["--trust-proxy"],
     )?;
@@ -188,6 +199,7 @@ fn serve(args: &[String]) -> Result<(), String> {
         config.email_daily_cap = cap.parse().map_err(|_| "--email-daily-cap takes a number")?;
     }
     config.admins = options.values("--admin-email");
+    config.vouched_claktory_emails = options.values("--vouch-claktory-email");
     config.user_apps = match (options.value("--user-apps")?, options.value("--user-apps-uid")?) {
         (None, None) => None,
         (Some(socket), Some(uid)) => Some(server::UserApps {
@@ -196,6 +208,19 @@ fn serve(args: &[String]) -> Result<(), String> {
         }),
         _ => return Err("--user-apps and --user-apps-uid go together".to_owned()),
     };
+    if let Some(path) = options.value("--review-account")? {
+        config.review_account = server::review::ReviewAccount::read(&PathBuf::from(&path))?;
+        match &config.review_account {
+            // Never vouched for: pipes would show it as Claktory's staff.
+            Some(review)
+                if config.vouched_claktory_emails.iter().any(|email| normalize_email(email).is_some_and(|email| review.is(&email))) =>
+            {
+                return Err("the review account's email can't also be a --vouch-claktory-email".to_owned());
+            }
+            Some(_) => tracing::info!("review account: on"),
+            None => tracing::info!("review account: off ({path} isn't there)"),
+        }
+    }
     let service_key = claktory_account::protocol::b64(secrets.signing_key.verifying_key().to_bytes());
     if let Some(path) = options.value("--service-key-statement")? {
         // A wrong one isn't served, rather than stopping the service: check-statement catches it.

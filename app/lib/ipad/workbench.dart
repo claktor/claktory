@@ -247,15 +247,42 @@ class _SafeWindow extends StatelessWidget {
         padding.right,
         0,
       ),
-      child: MediaQuery(
-        data: MediaQuery.of(context)
-            .removePadding(removeLeft: true, removeTop: true, removeRight: true)
-            .removeViewInsets(removeBottom: true),
-        child: child,
+      child: _WindowKeyboard(
+        height: MediaQuery.viewInsetsOf(context).bottom,
+        child: MediaQuery(
+          data: MediaQuery.of(context)
+              .removePadding(
+                removeLeft: true,
+                removeTop: true,
+                removeRight: true,
+              )
+              .removeViewInsets(removeBottom: true),
+          child: child,
+        ),
       ),
     );
   }
 }
+
+/// The on-screen keyboard's height over the window, kept for what's laid
+/// over the whole window from inside it (an expanded pane, in the
+/// window's overlay), which sees no keyboard in its MediaQuery.
+class _WindowKeyboard extends InheritedWidget {
+  const _WindowKeyboard({required this.height, required super.child});
+
+  final double height;
+
+  @override
+  bool updateShouldNotify(_WindowKeyboard old) => old.height != height;
+}
+
+/// How much of the window's bottom the on-screen keyboard covers, for
+/// what fills the whole window (ExpandedPane): inside the iPad's
+/// workbench, the keyboard it took out of the MediaQuery; elsewhere, the
+/// MediaQuery's own.
+double keyboardOverWindow(BuildContext context) =>
+    context.dependOnInheritedWidgetOfExactType<_WindowKeyboard>()?.height ??
+    MediaQuery.viewInsetsOf(context).bottom;
 
 /// What the on-screen keyboard leaves of the content's and the panel's
 /// room: they end above it, so the message box being written in stays in
@@ -351,7 +378,22 @@ class _WorkbenchState extends State<Workbench> {
     // Choosing an agent in the sidebar over the window closes it.
     if (old.agent?.id != widget.agent?.id) {
       WorkbenchScope.of(context)._closeOverlayWhileBuilding();
+      return;
     }
+    // A pane opened from the sidebar over the window (Needs you, Usage):
+    // the sidebar goes and the pane shows, as an agent chosen there does.
+    final agent = widget.agent;
+    final focus = WorkbenchScope.of(context);
+    if (agent == null || old.agent == null || !focus.overlayOpen) return;
+    final before = {for (final leaf in leaves(layoutOf(old.agent!))) leaf.id};
+    final added = [
+      for (final leaf in leaves(layoutOf(agent)))
+        if (!before.contains(leaf.id)) leaf,
+    ];
+    if (added.isEmpty) return;
+    focus._closeOverlayWhileBuilding();
+    focus._focused[agent.id] = added.last.id;
+    focus._noteDocument(agent.id, added.last);
   }
 
   @override

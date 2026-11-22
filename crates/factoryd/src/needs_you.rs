@@ -3,8 +3,8 @@
 //! answered ("the one about emails") and open its conversation at the card.
 //!
 //! Read only, over the tables the cards are kept in: asks, proposals,
-//! pipe_secret_approvals, pipe_starts and app_grant_proposals in
-//! factory.db; requests and
+//! pipe_secret_approvals, pipe_starts, app_grant_proposals and
+//! pipe_handoff_changes (where reports go, changed) in factory.db; requests and
 //! connect_proposals in vault.db (names, comments and states only, never a
 //! value), and pipe_decisions, kept here, for the decisions on a pipe that
 //! leave no other trace (a held message let through or discarded, a loop
@@ -140,8 +140,20 @@ struct Row {
     /// A pipe's: its held message's seq in the pipe, and its text.
     seq: u64,
     excerpt: String,
+    /// REPORT_TYPE and PIPE_FORWARD: the report types it's about.
+    types: Types,
     /// All the text a search looks in, lowercase.
     search: String,
+}
+
+/// A change of report types, as History shows it.
+#[derive(Default)]
+struct Types {
+    made: Option<v1::ReportSchema>,
+    before: Option<v1::ReportSchema>,
+    widens: bool,
+    /// The types a forward's change turned on.
+    enabled: Vec<v1::ReportSchema>,
 }
 
 impl Row {
@@ -159,6 +171,7 @@ impl Row {
             pipe: String::new(),
             seq: 0,
             excerpt: String::new(),
+            types: Types::default(),
             search: String::new(),
         }
     }
@@ -250,7 +263,13 @@ fn gather(
 }
 
 /// `names`: each agent's name now, by id.
-fn from_factory(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
+fn from_factory(
+    db: &Connection,
+    window: &Window,
+    names: &HashMap<String, String>,
+    projects: &HashMap<String, String>,
+    found: &mut Found,
+) -> rusqlite::Result<()> {
     found.add(rows(
         db,
         "SELECT id, agent, title, answer, state, created, decided, taint, review, body FROM asks
@@ -356,7 +375,153 @@ fn from_factory(db: &Connection, window: &Window, names: &HashMap<String, String
             Ok(found.searched(&[&row.get::<_, String>(7)?, &row.get::<_, String>(8)?]))
         },
     )?);
+    found.add(rows(
+        db,
+        "SELECT id, kind, target, old, new, by, at, kept FROM pipe_handoff_changes
+         WHERE at >= ?1 AND at < ?2 ORDER BY at DESC, id DESC LIMIT ?3",
+        window,
+        |row| {
+            let (kind, target, old, new, by): (String, String, String, String, String) = (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?);
+            let at: i64 = row.get(6)?;
+            let id = format!("forward:{}", row.get::<_, i64>(0)?);
+            let change = Change { kind: &kind, target: &target, old: &old, new: &new, by: &by, kept: row.get(7)? };
+            if kind == "type" {
+                let mut found = Row::new(Kind::ReportType, id, by.clone(), Outcome::Changed, at, at);
+                let version = |text: &str| text.parse::<u32>().ok().and_then(|version| crate::pipes::handoff::types::load_version(db, &target, version));
+                let (made, before) = (version(&new), version(&old));
+                found.title = cut(&type_title(&change, made.as_ref(), before.as_ref(), names), MAX_TITLE);
+                let searched: Vec<String> = made.iter().chain(before.iter()).map(|schema| schema.name.clone()).collect();
+                let proto = |schema: &crate::pipes::handoff::schema::Schema| crate::pipes::handoff::schema::to_proto(schema);
+                found.types = Types {
+                    widens: !new.is_empty() && made.as_ref().is_some_and(|made| !made.widened.is_empty()),
+                    // A deletion shows the version it ended at.
+                    made: made.as_ref().or(before.as_ref()).map(proto),
+                    before: if new.is_empty() { None } else { before.as_ref().map(proto) },
+                    enabled: Vec::new(),
+                };
+                let searched: Vec<&str> = searched.iter().map(String::as_str).collect();
+                return Ok(found.searched(&searched));
+            }
+            let mut found = Row::new(Kind::PipeForward, id, by.clone(), Outcome::Changed, at, at);
+            if let Some(place) = kind.strip_suffix("_types") {
+                let listed = |text: &str| -> Vec<crate::pipes::handoff::schema::Schema> {
+                    let kept: Vec<(String, u32)> = serde_json::from_str(text).unwrap_or_default();
+                    kept.into_iter().filter_map(|(id, version)| crate::pipes::handoff::types::load_version(db, &id, version)).collect()
+                };
+                let (before, now) = (listed(&old), listed(&new));
+                let added: Vec<_> = now.iter().filter(|schema| !before.iter().any(|old| old.id == schema.id)).collect();
+                let removed: Vec<_> = before.iter().filter(|schema| !now.iter().any(|new| new.id == schema.id)).collect();
+                found.title = cut(&types_title(&change, place, &added, &removed, names, projects), MAX_TITLE);
+                found.types.enabled = added.iter().map(|schema| crate::pipes::handoff::schema::to_proto(schema)).collect();
+                if place == "pipe" {
+                    found.pipe = target;
+                }
+                return Ok(found.searched(&[]));
+            }
+            found.title = cut(&forward_title(&change, names, projects), MAX_TITLE);
+            if kind == "pipe" {
+                found.pipe = target;
+            }
+            Ok(found.searched(&[]))
+        },
+    )?);
     Ok(())
+}
+
+/// A row of pipe_handoff_changes.
+struct Change<'a> {
+    /// pipe, project or reader.
+    kind: &'a str,
+    target: &'a str,
+    old: &'a str,
+    new: &'a str,
+    /// "" for the person, else the admin agent's id.
+    by: &'a str,
+    /// reader: its conversation was kept; pipe or project: the recipient was
+    /// deleted, so no one, and `old` is the name it had (its id when
+    /// Claktory restarted since).
+    kept: bool,
+}
+
+/// Claktory's sentence for a change of where reports go: "Rivet set this
+/// pipe's reports to go to Ingrid instead of Kim". Never a pipe's name (the
+/// app names the pipe, as it names pipes), only agents' and projects' names,
+/// which are this side's.
+fn forward_title(change: &Change<'_>, names: &HashMap<String, String>, projects: &HashMap<String, String>) -> String {
+    let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_owned());
+    let who = if change.by.is_empty() { "You".to_owned() } else { name(change.by) };
+    let to = if change.new.is_empty() { "no one".to_owned() } else { name(change.new) };
+    let instead = if change.old.is_empty() { String::new() } else { format!(" instead of {}", name(change.old)) };
+    let project = || projects.get(change.target).cloned().unwrap_or_else(|| change.target.to_owned());
+    match change.kind {
+        "pipe" if change.kept => format!("{} was deleted, so this pipe's reports go to no one", change.old),
+        "pipe" => format!("{who} set this pipe's reports to go to {to}{instead}"),
+        "project" if change.kept => format!("{} was deleted, so {}'s new pipes forward reports to no one", change.old, project()),
+        "project" => format!("{who} set {}'s new pipes to forward reports to {to}{instead}", project()),
+        _ if change.new.is_empty() => format!("{who} let {} stop reading reports", name(change.target)),
+        _ if change.kept => format!("{who} let {} read reports ({}'s earlier conversation is kept)", name(change.target), name(change.target)),
+        _ => format!("{who} let {} read reports, starting a fresh conversation", name(change.target)),
+    }
+}
+
+/// "\"Task request\" and \"Question\"": the names their authors wrote.
+fn type_names(schemas: &[&crate::pipes::handoff::schema::Schema]) -> String {
+    let names: Vec<String> = schemas.iter().map(|schema| format!("\u{201C}{}\u{201D}", schema.name)).collect();
+    match names.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Claktory's sentence for a report type made, changed or deleted: "Rivet
+/// changed the report type \u{201C}Recipe\u{201D}". Its name is the person's or
+/// an untainted admin agent's words, never the other side's.
+fn type_title(
+    change: &Change<'_>,
+    made: Option<&crate::pipes::handoff::schema::Schema>,
+    before: Option<&crate::pipes::handoff::schema::Schema>,
+    names: &HashMap<String, String>,
+) -> String {
+    let who = if change.by.is_empty() { "You".to_owned() } else { names.get(change.by).cloned().unwrap_or_else(|| change.by.to_owned()) };
+    let name = |schema: Option<&crate::pipes::handoff::schema::Schema>| schema.map_or_else(|| change.target.to_owned(), |schema| type_names(&[schema]));
+    match (change.old.is_empty(), change.new.is_empty()) {
+        (true, _) => format!("{who} made the report type {}", name(made)),
+        (false, true) => format!("{who} deleted the report type {}", name(before)),
+        _ if made.zip(before).is_some_and(|(made, before)| made.name != before.name) => {
+            let only_renamed = made.zip(before).is_some_and(|(made, before)| made.fields == before.fields && made.outcomes == before.outcomes);
+            if only_renamed {
+                format!("{who} renamed the report type {} to {}", name(before), name(made))
+            } else {
+                format!("{who} changed the report type {} and renamed it {}", name(before), name(made))
+            }
+        }
+        _ => format!("{who} changed the report type {}", name(made)),
+    }
+}
+
+/// Claktory's sentence for a change of the report types a pipe (`place`
+/// "pipe") or a project's new pipes can forward.
+fn types_title(
+    change: &Change<'_>,
+    place: &str,
+    added: &[&crate::pipes::handoff::schema::Schema],
+    removed: &[&crate::pipes::handoff::schema::Schema],
+    names: &HashMap<String, String>,
+    projects: &HashMap<String, String>,
+) -> String {
+    let who = if change.by.is_empty() { "You".to_owned() } else { names.get(change.by).cloned().unwrap_or_else(|| change.by.to_owned()) };
+    let place = if place == "pipe" {
+        "this pipe".to_owned()
+    } else {
+        format!("{}'s new pipes", projects.get(change.target).cloned().unwrap_or_else(|| change.target.to_owned()))
+    };
+    match (added.is_empty(), removed.is_empty()) {
+        (false, true) => format!("{who} let {place} forward {}", type_names(added)),
+        (true, false) => format!("{who} stopped {place} forwarding {}", type_names(removed)),
+        (false, false) => format!("{who} let {place} forward {} instead of {}", type_names(added), type_names(removed)),
+        (true, true) => format!("{who} changed the order of the report types {place} forwards"),
+    }
 }
 
 fn from_vault(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::Result<()> {
@@ -432,7 +597,13 @@ impl Factory {
             0 => DEFAULT_LIMIT,
             limit => limit.min(MAX_LIMIT),
         } as usize;
-        let names: HashMap<String, String> = self.lock().config.agents.iter().map(|agent| (agent.id.clone(), agent.name.clone())).collect();
+        let (names, projects): (HashMap<String, String>, HashMap<String, String>) = {
+            let inner = self.lock();
+            (
+                inner.config.agents.iter().map(|agent| (agent.id.clone(), agent.name.clone())).collect(),
+                inner.config.projects.iter().map(|project| (project.id.clone(), project.name.clone())).collect(),
+            )
+        };
         let agents: Vec<String> = if query.is_empty() {
             Vec::new()
         } else {
@@ -453,7 +624,7 @@ impl Factory {
         let keep = |row: &Row| query.is_empty() || row.search.contains(&query) || agents.contains(&row.agent);
         let (mut rows, unscanned) = gather(window, limit, keep, |window| {
             let mut found = Found::default();
-            from_factory(&self.store.db(), window, &names, &mut found)?;
+            from_factory(&self.store.db(), window, &names, &projects, &mut found)?;
             if let Some(db) = &vault {
                 from_vault(db, window, &mut found)?;
             }
@@ -475,7 +646,7 @@ impl Factory {
                 };
                 let entries =
                     inner.agents.get(&row.agent).and_then(|runtime| runtime.transcript.as_ref()).map(|transcript| transcript.entries());
-                let piped = matches!(row.kind, Kind::PipeHeld | Kind::PipeLoop);
+                let piped = matches!(row.kind, Kind::PipeHeld | Kind::PipeLoop | Kind::PipeForward);
                 let (seq, mut taint) =
                     if piped { (row.seq, Vec::new()) } else { entries.and_then(|entries| card(entries, &row)).unwrap_or_default() };
                 if taint.is_empty()
@@ -497,6 +668,10 @@ impl Factory {
                     asked_ms: row.asked,
                     decided_ms: row.decided,
                     taint,
+                    report_type: row.types.made,
+                    report_type_before: row.types.before,
+                    widens: row.types.widens,
+                    report_types: row.types.enabled,
                 }
             })
             .collect();
@@ -560,5 +735,23 @@ mod tests {
         let tables = [vec![4, 4, 4, 2]];
         let (rows, unscanned) = gather(Window { since: 0, before: 5 }, 9, all, |window| Ok(scan(&tables, 2, window))).expect("gathered");
         assert_eq!((times(&rows), unscanned), (vec![4, 4, 2], false));
+    }
+
+    #[test]
+    fn a_report_types_title_says_what_happened_to_it() {
+        let names = HashMap::from([("rivet".to_owned(), "Rivet".to_owned())]);
+        let recipe = crate::pipes::handoff::schema::builtins().remove(1);
+        let renamed = crate::pipes::handoff::schema::Schema { name: "Recipe".into(), version: 2, ..recipe.clone() };
+        let mut changed = renamed.clone();
+        changed.fields.pop();
+        let change = |old: &'static str, new: &'static str, by: &'static str| Change { kind: "type", target: "task_request", old, new, by, kept: false };
+        let title = |change: Change<'_>, made, before| type_title(&change, made, before, &names);
+        assert_eq!(title(change("", "1", ""), Some(&recipe), None), "You made the report type \u{201C}Task request\u{201D}");
+        assert_eq!(title(change("1", "2", "rivet"), Some(&renamed), Some(&recipe)), "Rivet renamed the report type \u{201C}Task request\u{201D} to \u{201C}Recipe\u{201D}");
+        assert_eq!(
+            title(change("1", "2", ""), Some(&changed), Some(&recipe)),
+            "You changed the report type \u{201C}Task request\u{201D} and renamed it \u{201C}Recipe\u{201D}"
+        );
+        assert_eq!(title(change("2", "", ""), None, Some(&renamed)), "You deleted the report type \u{201C}Recipe\u{201D}");
     }
 }

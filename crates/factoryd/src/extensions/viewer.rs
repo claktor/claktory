@@ -36,7 +36,7 @@ static MANIFEST: Manifest = Manifest {
     options: &[],
 };
 
-const SHOW: &str = "Show the person a file in the app, in a pane beside your conversation: text (code, Markdown, logs, CSV…), an image, a video (MP4 or QuickTime) or a PDF. Use it instead of opening apps such as Preview or a browser on this machine: the person may be using Claktory from another device. path: absolute, or relative to your working folder. kind: \"text\", \"image\", \"video\" or \"pdf\", inferred when left out. A file already open isn't opened twice. The person sets how many panes can be open beside your conversation (Settings → Display): past that, show refuses until they close one. Returns at once.";
+const SHOW: &str = "Show the person a file in the app, in a pane beside your conversation: text (code, Markdown, logs, CSV…), an image, a video (MP4 or QuickTime) or a PDF. Use it instead of opening apps such as Preview or a browser on this machine: the person may be using Claktory from another device. path: absolute, or relative to your working folder. kind: \"text\", \"image\", \"video\" or \"pdf\", inferred when left out. A file already open isn't opened twice. The person sets how many panes can be open beside your conversation (Settings → Display): past that, show replaces the pane opened longest ago (never the one they expanded to fill the window), and its result says which. Returns at once.";
 
 pub(crate) const SCHEMA: &str = "
 -- How each agent's main area is laid out (the Viewer extension): its
@@ -48,6 +48,14 @@ CREATE TABLE layouts (agent TEXT PRIMARY KEY, layout BLOB NOT NULL);
 /// in the layout, '' for none.
 pub(crate) const FOCUS: &str = "
 ALTER TABLE layouts ADD COLUMN focus TEXT NOT NULL DEFAULT '';
+";
+
+/// The migration that added when each pane was opened, so a full layout's
+/// show replaces the oldest: a JSON object of pane id to ms; null before
+/// it, when every pane reads as opened before any other (layout order
+/// between them).
+pub(crate) const OPENED: &str = "
+ALTER TABLE layouts ADD COLUMN opened TEXT;
 ";
 
 /// Text is read up to this much, whatever is asked…
@@ -79,31 +87,37 @@ pub(crate) struct State {
     layouts: Mutex<HashMap<String, Kept>>,
 }
 
-/// An agent's layout and the pane shown in focus ('' for none).
+/// An agent's layout, the pane shown in focus ('' for none), and when each
+/// pane was opened (ms; 0 from before it was kept).
 #[derive(Clone)]
 struct Kept {
     root: v1::ViewNode,
     focus: String,
+    opened: HashMap<String, i64>,
 }
 
 impl State {
     /// The layouts in factory.db; those that can't be read are left out.
     pub(crate) fn load(store: &Store) -> State {
         let mut layouts = HashMap::new();
-        let read = || -> rusqlite::Result<Vec<(String, Vec<u8>, String)>> {
+        /// Agent, encoded layout, focus, and when its panes were opened.
+        type Row = (String, Vec<u8>, String, Option<String>);
+        let read = || -> rusqlite::Result<Vec<Row>> {
             let db = store.db();
-            let mut statement = db.prepare("SELECT agent, layout, focus FROM layouts")?;
-            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            let mut statement = db.prepare("SELECT agent, layout, focus, opened FROM layouts")?;
+            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
             rows.collect()
         };
         match read() {
             Ok(rows) => {
-                for (agent, bytes, focus) in rows {
+                for (agent, bytes, focus, opened) in rows {
                     match v1::ViewNode::decode(bytes.as_slice()) {
                         Ok(root) => {
                             // A focus that names no pane is none.
                             let focus = if leaves(&root).iter().any(|(id, _)| *id == focus) { focus } else { String::new() };
-                            layouts.insert(agent, Kept { root, focus });
+                            let opened = opened.and_then(|opened| serde_json::from_str(&opened).ok()).unwrap_or_default();
+                            let opened = opened_now(&root, &opened, 0);
+                            layouts.insert(agent, Kept { root, focus, opened });
                         }
                         Err(error) => tracing::warn!(%agent, %error, "an agent's layout can't be read; it shows just its conversation"),
                     }
@@ -485,22 +499,27 @@ fn is_plain(root: &v1::ViewNode) -> bool {
 fn store_layout(factory: &Factory, agent: &str, root: Option<v1::ViewNode>, focus: &str) -> Result<(), RequestError> {
     let root = root.filter(|root| !is_plain(root));
     let focus = if root.is_some() { focus } else { "" };
+    // Panes it had keep when they were opened; new ones are opened now.
+    let opened = root.as_ref().map(|root| {
+        let before = factory.viewer.lock().get(agent).map(|kept| kept.opened.clone()).unwrap_or_default();
+        opened_now(root, &before, crate::transcript::now_ms())
+    });
     {
         let db = factory.store.db();
-        match &root {
-            Some(root) => db.execute(
-                "INSERT INTO layouts (agent, layout, focus) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (agent) DO UPDATE SET layout = excluded.layout, focus = excluded.focus",
-                rusqlite::params![agent, root.encode_to_vec(), focus],
+        match (&root, &opened) {
+            (Some(root), Some(opened)) => db.execute(
+                "INSERT INTO layouts (agent, layout, focus, opened) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (agent) DO UPDATE SET layout = excluded.layout, focus = excluded.focus, opened = excluded.opened",
+                rusqlite::params![agent, root.encode_to_vec(), focus, serde_json::to_string(opened).unwrap_or_default()],
             )?,
-            None => db.execute("DELETE FROM layouts WHERE agent = ?1", [agent])?,
+            _ => db.execute("DELETE FROM layouts WHERE agent = ?1", [agent])?,
         };
     }
     {
         let mut layouts = factory.viewer.lock();
-        match root {
-            Some(root) => layouts.insert(agent.to_owned(), Kept { root, focus: focus.to_owned() }),
-            None => layouts.remove(agent),
+        match (root, opened) {
+            (Some(root), Some(opened)) => layouts.insert(agent.to_owned(), Kept { root, focus: focus.to_owned(), opened }),
+            _ => layouts.remove(agent),
         };
     }
     // Panes it no longer has leave where each device was reading.
@@ -533,6 +552,57 @@ pub(crate) fn forget(factory: &Factory, agent: &str) -> rusqlite::Result<()> {
     factory.store.db().execute("DELETE FROM layouts WHERE agent = ?1", [agent])?;
     factory.viewer.lock().remove(agent);
     Ok(())
+}
+
+/// When each pane of `root` was opened: as in `before`, else `now`.
+fn opened_now(root: &v1::ViewNode, before: &HashMap<String, i64>, now: i64) -> HashMap<String, i64> {
+    leaves(root).into_iter().map(|(id, _)| (id.to_owned(), before.get(id).copied().unwrap_or(now))).collect()
+}
+
+/// The pane show replaces in a full layout: the one opened longest ago
+/// (in layout order between panes opened at once), never the conversation
+/// or the pane in `focus`; None when there's no other.
+fn oldest<'a>(root: &'a v1::ViewNode, opened: &HashMap<String, i64>, focus: &str) -> Option<(&'a str, &'a v1::ViewLeaf)> {
+    leaves(root)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, (id, leaf))| leaf.kind != CHAT && *id != focus)
+        .min_by_key(|(at, (id, _))| (opened.get(*id).copied().unwrap_or(0), *at))
+        .map(|(_, pane)| pane)
+}
+
+/// `root` with the node `id` made `with`.
+fn replace(node: &mut v1::ViewNode, id: &str, with: &v1::ViewNode) -> bool {
+    if node.id == id {
+        *node = with.clone();
+        return true;
+    }
+    match &mut node.node {
+        Some(Node::Split(split)) => split.children.iter_mut().any(|child| replace(child, id, with)),
+        _ => false,
+    }
+}
+
+/// What a pane shows, in a few words: its title, its file's name, or its kind.
+fn named(leaf: &v1::ViewLeaf) -> String {
+    if !leaf.title.trim().is_empty() {
+        return leaf.title.trim().to_owned();
+    }
+    match Path::new(&leaf.path).file_name() {
+        Some(name) if !leaf.path.is_empty() => name.to_string_lossy().into_owned(),
+        // A page, as its pane's header names it in the app.
+        _ => match leaf.kind.as_str() {
+            "inbox" => "Needs you",
+            "settings" => "Settings",
+            "marketplace" => "Marketplace",
+            "changelog" => "What's new",
+            "map" => "Map",
+            "usage" => "Usage",
+            "files" => "Files",
+            other => other,
+        }
+        .to_owned(),
+    }
 }
 
 /// An id no node of `root` has: "pane-1", "pane-2"…
@@ -648,25 +718,37 @@ fn show(factory: &Factory, agent: &str, args: Value) -> Result<ToolResult, Strin
         node: Some(Node::Leaf(v1::ViewLeaf { kind: CHAT.to_owned(), path: String::new(), title: String::new(), ..Default::default() })),
     });
     let open = leaves(&root).into_iter().find(|(_, leaf)| leaf.path == path_text && leaf.kind == kind).map(|(id, _)| id.to_owned());
+    // What a full layout's new pane took the place of.
+    let mut replaced: Option<v1::ViewLeaf> = None;
     let pane = match open {
         Some(pane) => pane,
         None => {
-            // Full, it refuses rather than take a pane the person may be
-            // reading; a file already open still shows (above). Every pane
-            // counts, whoever opened it: files, and pages such as Settings.
-            let panes = leaves(&root).iter().filter(|(_, leaf)| leaf.kind != CHAT).count();
-            if panes >= most {
-                return Err(format!(
-                    "This conversation already has {panes} panes open beside it, the most show opens at once ({most}; {person} can change it in Settings → Display). Ask {person} to close one, or show an already-open file to point at it."
-                ));
-            }
             let id = new_id(&root, "pane");
             let title = path.file_name().map_or_else(|| path_text.clone(), |name| name.to_string_lossy().into_owned());
             let leaf = v1::ViewLeaf { kind: kind.to_owned(), path: path_text.clone(), title, ..Default::default() };
-            let root = add_pane(root, v1::ViewNode { id: id.clone(), node: Some(Node::Leaf(leaf)) });
-            validate(&root).map_err(|why| format!("The layout couldn't take it: {why}"))?;
+            let node = v1::ViewNode { id: id.clone(), node: Some(Node::Leaf(leaf)) };
             // A pane in focus stays so: the new one waits behind it.
             let focus = factory.viewer.focus(agent);
+            // Full (every pane counts, whoever opened it: files, and pages
+            // such as Settings), the new one takes the place, size and spot
+            // of the pane opened longest ago, never the one in focus. A new
+            // id, so no device carries its place in the old file over.
+            let panes = leaves(&root).iter().filter(|(_, leaf)| leaf.kind != CHAT).count();
+            let root = if panes >= most {
+                let opened = factory.viewer.lock().get(agent).map(|kept| kept.opened.clone()).unwrap_or_default();
+                let Some((old, leaf)) = oldest(&root, &opened, &focus).map(|(old, leaf)| (old.to_owned(), leaf.clone())) else {
+                    return Err(format!(
+                        "The only pane beside this conversation is the one {person} expanded to fill the window, and Settings → Display lets it have {most}: show it again once they've closed that pane or allowed more."
+                    ));
+                };
+                let mut root = root;
+                replace(&mut root, &old, &node);
+                replaced = Some(leaf);
+                root
+            } else {
+                add_pane(root, node)
+            };
+            validate(&root).map_err(|why| format!("The layout couldn't take it: {why}"))?;
             store_layout(factory, agent, Some(root), &focus).map_err(|error| format!("Couldn't save the layout: {error}"))?;
             id
         }
@@ -678,8 +760,15 @@ fn show(factory: &Factory, agent: &str, args: Value) -> Result<ToolResult, Strin
         from_agent_id: agent.to_owned(),
         kind: v1::HighlightKind::Agent.into(),
     }));
-    let details = json!({"path": path_text, "kind": kind, "pane": pane, "agent": agent});
-    Ok(ToolResult::text(format!("Showing {path_text} to {person}."), details))
+    let mut details = json!({"path": path_text, "kind": kind, "pane": pane, "agent": agent});
+    let said = match &replaced {
+        Some(old) => {
+            details["replaced"] = json!({"kind": old.kind, "path": old.path});
+            format!("Showing {path_text} to {person}, in place of {} (the oldest pane).", named(old))
+        }
+        None => format!("Showing {path_text} to {person}."),
+    };
+    Ok(ToolResult::text(said, details))
 }
 
 pub(crate) struct Viewer;
@@ -734,6 +823,17 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_is_named_as_its_header_reads() {
+        let named = |kind: &str, path: &str, title: &str| {
+            named(&v1::ViewLeaf { kind: kind.into(), path: path.into(), title: title.into(), ..Default::default() })
+        };
+        let pages = ["inbox", "settings", "marketplace", "changelog", "map", "usage", "files"].map(|kind| named(kind, "", ""));
+        assert_eq!(pages, ["Needs you", "Settings", "Marketplace", "What's new", "Map", "Usage", "Files"]);
+        assert_eq!(named("text", "/Users/someone/notes/a.md", ""), "a.md");
+        assert_eq!(named("app", "", "Budget"), "Budget");
+    }
+
+    #[test]
     fn viewers_open_right_of_the_conversation_and_stack_there() {
         let mut root = leaf("chat", CHAT, "");
         for name in ["a", "b", "c"] {
@@ -746,6 +846,23 @@ mod tests {
         let mut flipped = split("s".into(), v1::ViewAxis::Row, vec![leaf("x", "image", "x"), leaf("chat", CHAT, "")]);
         flipped = add_pane(flipped, leaf("pane-1", "text", "y"));
         assert_eq!(shape(&flipped), "row(x row(chat y))");
+    }
+
+    #[test]
+    fn a_full_layout_gives_up_its_oldest_pane_but_never_the_one_in_focus() {
+        let col = split("v".into(), v1::ViewAxis::Column, vec![leaf("a", "text", "a"), leaf("b", "text", "b"), leaf("c", "text", "c")]);
+        let mut root = split("s".into(), v1::ViewAxis::Row, vec![leaf("chat", CHAT, ""), col]);
+        let opened: HashMap<String, i64> = [("chat", 0), ("a", 30), ("b", 10), ("c", 20)].map(|(id, at)| (id.to_owned(), at)).into();
+        assert_eq!(oldest(&root, &opened, "").map(|(id, _)| id), Some("b"));
+        assert_eq!(oldest(&root, &opened, "b").map(|(id, _)| id), Some("c"), "the pane in focus is skipped");
+        // Opened before times were kept: oldest, in layout order.
+        assert_eq!(oldest(&root, &HashMap::new(), "").map(|(id, _)| id), Some("a"));
+        assert!(replace(&mut root, "b", &leaf("pane-1", "text", "d")));
+        assert_eq!(shape(&root), "row(chat col(a d c))", "in its place");
+        let alone = split("s".into(), v1::ViewAxis::Row, vec![leaf("chat", CHAT, ""), leaf("a", "text", "a")]);
+        assert!(oldest(&alone, &opened, "a").is_none());
+        let opened_again = opened_now(&root, &opened, 99);
+        assert_eq!((opened_again["a"], opened_again["pane-1"], opened_again.contains_key("b")), (30, 99, false));
     }
 
     #[test]

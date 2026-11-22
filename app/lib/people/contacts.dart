@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import '../user_apps/session.dart';
+import '../visible_codes.dart' show proseCodes;
 
 // D3b: friend requests, friends and blocks, as the account service keeps
 // them (D1b, crates/claktory-user-apps/README.md, "Requests, friends and
@@ -24,8 +25,10 @@ class PeoplePerson {
     this.accountId = '',
   });
 
+  // The name they chose, which only ever shows: what reorders text shows by
+  // its code (proseCodes, Fugo).
   factory PeoplePerson.fromJson(Map<String, Object?> json) => PeoplePerson(
-    name: _text(json, 'name'),
+    name: proseCodes(_text(json, 'name')),
     avatarSeed: _text(json, 'avatar_seed'),
     tag: _text(json, 'tag'),
     accountId: _text(json, 'account_id'),
@@ -239,6 +242,10 @@ String newActionId() {
 }
 
 /// The requests, friends and blocks routes, through [session].
+/// A message the person chose to show Claktory's team with a report: its
+/// text as their device shows it (dms-e2ee §2: not verifiable).
+typedef ReportedMessage = ({int seq, String text, bool mine, int sentMs});
+
 class ContactsApi {
   const ContactsApi(this.session);
 
@@ -340,6 +347,7 @@ class ContactsApi {
     required ReportReason reason,
     String note = '',
     bool includeProfile = false,
+    List<ReportedMessage> messages = const [],
   }) async => SentReport.fromJson(
     await session.post('$_dms/reports', {
       'action_id': actionId,
@@ -349,6 +357,16 @@ class ContactsApi {
       'reason': reason.name,
       if (note.isNotEmpty) 'note': note,
       if (includeProfile) 'include_profile': true,
+      if (messages.isNotEmpty)
+        'messages': [
+          for (final message in messages)
+            {
+              'seq': message.seq,
+              'text': message.text,
+              'from': message.mine ? 'you' : 'them',
+              'sent_ms': message.sentMs,
+            },
+        ],
     }),
   );
 }

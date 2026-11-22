@@ -6,6 +6,7 @@ use factory_protocol::v1;
 
 use super::{Key, Value, Vault, VaultError, env};
 use crate::decisions::note;
+use crate::extensions::checklist::Card;
 use crate::factory::{Factory, RequestError, host_event};
 
 /// How long a wrong passphrase takes to be refused, so guessing is slow.
@@ -416,11 +417,29 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
     let agent = request.agent_id.as_str();
     factory.known_agent(agent)?;
     crate::decisions::comment(&request.comment)?;
-    let asked = factory.vault.pending_request(agent, &request.request_id)?;
+    let asked = factory.vault.pending_request(agent, &request.request_id).inspect_err(|error| {
+        // It closed meanwhile: the card that asked shows how.
+        if matches!(error, VaultError::Invalid(_)) {
+            reshow(factory, &request.request_id);
+        }
+    })?;
+    if !asked.imports.is_empty() && request.approve {
+        if request.approve_only {
+            return Err(
+                VaultError::Invalid("Importing files is yours to approve: there's nothing for an admin agent to find.".to_owned()).into()
+            );
+        }
+        let imported = import(factory, &asked, request);
+        if imported.is_err() {
+            // The card shows what's wrong now.
+            refresh_imports(factory);
+        }
+        return imported;
+    }
     if !asked.generate.is_empty() && request.approve {
         if request.approve_only {
             return Err(VaultError::Invalid(
-                "A key to generate is yours to approve: there's nothing for an admin agent to find.".to_owned(),
+                "What the vault generates is yours to approve: there's nothing for an admin agent to find.".to_owned(),
             )
             .into());
         }
@@ -491,8 +510,9 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
         None => (format!("{person} dismissed your request for {}", asked.secret_name), String::new()),
     };
     summary.push('.');
+    let about = crate::extensions::checklist::card_decided(factory, &Card::Secret(asked.id.clone()), given.is_none());
     // Each note says whose it is (#253).
-    let text = format!("{summary}{what}{}\n\nYou asked because: {}", note(&person, &request.comment), asked.reason);
+    let text = format!("{summary}{what}{}\n\nYou asked because: {}{about}", note(&person, &request.comment), asked.reason);
     let event = host_event(summary);
     factory.deliver_event(agent, text, event);
     Ok(())
@@ -584,7 +604,8 @@ pub(crate) fn fulfil_request(
     let summary = format!("{person} approved your request and {admin_name} gave you {name}: pass it in bash's `secrets`");
     // The person's approval comment and the admin agent's note, each as its writer's.
     let notes = format!("{}{}", note(&person, &asked.comment), note(&admin_name, admin_note));
-    let text = format!("{summary}.\n\nIt's {label}.{notes}\n\nYou asked because: {}", asked.reason);
+    let about = crate::extensions::checklist::card_decided(factory, &Card::Secret(asked.id.clone()), false);
+    let text = format!("{summary}.\n\nIt's {label}.{notes}\n\nYou asked because: {}{about}", asked.reason);
     let event = factory_agent::Event {
         source: factory_agent::EventSource::Host,
         from: "Claktory".to_owned(),
@@ -598,11 +619,12 @@ pub(crate) fn fulfil_request(
     Ok((name, agent))
 }
 
-/// The person approves a generate request (#252): the vault makes the key,
-/// seals its private half as a new secret (asking each time only if they
+/// The person approves a generate request (#252): the vault makes the key
+/// or password, seals it as a new secret (asking each time only if they
 /// turned that on; an older app that doesn't say gets the same default),
 /// hides it from every output at once, and gives it to the asker, or to no
-/// one as it asked. The asker is told its public half only.
+/// one as it asked. The asker is told a key's public half, or what the
+/// password is made of; never the secret itself.
 fn generate(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::DecideSecretRequest) -> Result<(), RequestError> {
     let agent = asked.agent_id.as_str();
     let wanted = asked.new_secret.clone().unwrap_or_default();
@@ -610,14 +632,36 @@ fn generate(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::Dec
         "" => asked.secret_name.clone(),
         name => name.to_owned(),
     };
-    let variable = wanted.variables.first().map_or_else(|| super::generate::VARIABLE.to_owned(), |variable| variable.name.clone());
-    let made = super::generate::make(&asked.generate, name.trim())?;
-    let public_key = made.public.clone();
-    let description = match wanted.description.trim() {
-        "" => format!("Public key: {public_key}"),
-        description => format!("{description}\n\nPublic key: {public_key}"),
+    let password = asked.generate == super::generate::PASSWORD;
+    let (value, public_key, spec, variable) = if password {
+        let Some(asked_spec) = &asked.password else {
+            return Err(
+                VaultError::Invalid("This password's request no longer says what to make; ask the agent to ask again.".to_owned()).into()
+            );
+        };
+        // The length the person chose, checked against the bounds again.
+        let spec = super::generate::password_spec(&super::generate::password_ask(asked_spec), request.password_length)?;
+        let variable = wanted
+            .variables
+            .first()
+            .cloned()
+            .unwrap_or_else(|| v1::SecretVariable { name: super::generate::PASSWORD_VARIABLE.to_owned(), ..Default::default() });
+        (super::generate::make_password(&spec)?, String::new(), Some(spec), variable)
+    } else {
+        let variable = wanted.variables.first().map_or_else(|| super::generate::VARIABLE.to_owned(), |variable| variable.name.clone());
+        let made = super::generate::make(&asked.generate, name.trim())?;
+        (made.private, made.public, None, v1::SecretVariable { name: variable, file: true, ..Default::default() })
     };
-    let values = [Value { variable: variable.clone(), value: made.private, file: true }];
+    let kind = super::generate::called(&asked.generate, spec.as_ref());
+    let made_of = match &spec {
+        Some(_) => format!("Generated by the vault: {kind}."),
+        None => format!("Public key: {public_key}"),
+    };
+    let description = match wanted.description.trim() {
+        "" => made_of,
+        description => format!("{description}\n\n{made_of}"),
+    };
+    let values = [Value { variable: variable.name.clone(), value, file: variable.file, binary: false }];
     let id = factory.vault.create_secret(&name, &description, &values, "")?;
     drop(values);
     let asks = request.ask_each_time.unwrap_or(false);
@@ -628,11 +672,12 @@ fn generate(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::Dec
     factory.vault_changed();
     let name = factory.vault.state(|_, _| false).secrets.iter().find(|secret| secret.id == id).map_or(name, |secret| secret.name.clone());
     let given = if asked.grant_to_nobody { name.clone() } else { factory.vault.grant_as(&id, agent, "", &Default::default())? };
-    let decided = factory.vault.decide_generated(asked, (&id, &given), &public_key, &request.comment)?;
+    let decided =
+        factory.vault.decide_generated(asked, (&id, &given), (&public_key, spec.as_ref()), asked.grant_to_nobody, &request.comment)?;
     factory.vault_changed();
     show_everywhere(factory, decided);
     let person = factory.lock().config.person_capitalized().to_owned();
-    let kind = super::generate::called(&asked.generate);
+    let variable = variable.name;
     let (summary, how) = if asked.grant_to_nobody {
         (format!("{person} approved your request: the vault generated {name}, {kind}, and gave it to no one, as you asked"), String::new())
     } else {
@@ -645,15 +690,114 @@ fn generate(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::Dec
         } else {
             String::new()
         };
+        let holds = if password { "holds the password" } else { "is its private key's file" };
+        let never = if password { "the password" } else { "the key" };
         (
             format!("{person} approved your request: the vault generated {given}, {kind}, and gave it to you: pass it in bash's `secrets`"),
-            format!("\n\n{variable} is its private key's file; you never see the key itself.{asking}"),
+            format!("\n\n{variable} {holds}; you never see {never} itself.{asking}"),
         )
     };
+    let public = if password { String::new() } else { format!("\n\nIts public key:\n{public_key}") };
+    let about = crate::extensions::checklist::card_decided(factory, &Card::Secret(asked.id.clone()), false);
+    let text = format!("{summary}.{how}{public}{}\n\nYou asked because: {}{about}", note(&person, &request.comment), asked.reason);
+    factory.deliver_event(agent, text, host_event(format!("{summary}.")));
+    Ok(())
+}
+
+/// The person approves an import: each file is read again, held to being
+/// the same file, unchanged, and sealed straight into a new secret (a file
+/// variable each; binary as it is), its kind "import" so its values can't
+/// be edited, given to the asker only if the person chose that, then each
+/// original deleted if they asked and it's still the same file. The asker
+/// is told what was stored, never the contents; the secret's log keeps
+/// what was imported.
+fn import(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::DecideSecretRequest) -> Result<(), RequestError> {
+    let agent = asked.agent_id.as_str();
+    let kept = factory.vault.wanted(&asked.id)?;
+    let homes = super::import::homes(factory.home.root());
+    let opened = factory.vault.approved_imports(&kept.imports, &homes)?;
+    let name = match request.name.trim() {
+        "" => asked.secret_name.clone(),
+        name => name.to_owned(),
+    };
+    let values: Vec<Value> = kept
+        .imports
+        .iter()
+        .zip(&opened)
+        .map(|(file, opened)| {
+            let (value, binary) = super::import::value(&opened.bytes);
+            Value { variable: file.variable.clone(), value, file: true, binary }
+        })
+        .collect();
+    drop(opened);
+    let lines: Vec<String> = kept
+        .imports
+        .iter()
+        .zip(&values)
+        .map(|(file, value)| {
+            let kind = if value.binary { "binary file" } else { "text file" };
+            format!("{}: {} ({kind}, {} bytes, fingerprint {})", file.variable, file.path, file.size, super::import::shown(&file.keyed))
+        })
+        .collect();
+    let wanted = asked.new_secret.clone().unwrap_or_default();
+    let made_of = format!("Imported from this computer:\n{}", lines.join("\n"));
+    let description = match wanted.description.trim() {
+        "" => made_of,
+        description => format!("{description}\n\n{made_of}"),
+    };
+    let id = factory.vault.create_secret(&name, &description, &values, "")?;
+    drop(values);
+    factory.vault.mark_imported(&id)?;
+    let asks = request.ask_each_time.unwrap_or(false);
+    if asks {
+        factory.vault.set_ask_each_time(&id, true)?;
+    }
+    // Hidden from every output from now on, before anyone can use it.
+    factory.vault_changed();
+    let name = factory.vault.state(|_, _| false).secrets.iter().find(|secret| secret.id == id).map_or(name, |secret| secret.name.clone());
+    let nobody = !request.grant_to_asker;
+    let given = if nobody { name.clone() } else { factory.vault.grant_as(&id, agent, "", &Default::default())? };
+    let decided = factory.vault.decide_generated(asked, (&id, &given), ("", None), nobody, &request.comment)?;
+    factory.vault_changed();
+    show_everywhere(factory, decided);
+    // Only once it's in the vault, and only the same file.
+    let mut deleted = Vec::new();
+    if request.delete_originals {
+        for file in &kept.imports {
+            if super::import::delete_original(file) {
+                deleted.push(file.path.clone());
+            } else {
+                tracing::warn!(path = %file.path, "an imported file's original wasn't deleted: it isn't the same file any more");
+            }
+        }
+    }
+    let gave = if nobody { "no one".to_owned() } else { agent.to_owned() };
+    let originals = if !request.delete_originals {
+        "originals kept".to_owned()
+    } else if deleted.len() == kept.imports.len() {
+        "originals deleted".to_owned()
+    } else {
+        format!("originals deleted: {}", if deleted.is_empty() { "none".to_owned() } else { deleted.join(", ") })
+    };
+    factory.vault.log_import(&id, agent, &format!("{}; given to {gave}; {originals}", lines.join("; ")))?;
+    let person = factory.lock().config.person_capitalized().to_owned();
+    let summary = if nobody {
+        format!("{person} approved your request: the vault imported {name} and gave it to no one")
+    } else {
+        format!("{person} approved your request: the vault imported {given} and gave it to you: pass it in bash's `secrets`")
+    };
+    let how = if nobody {
+        ""
+    } else {
+        " Each variable holds the path of a private file with the file's contents, exactly as they were; you never see them."
+    };
+    let gone = if deleted.is_empty() { String::new() } else { format!("\n\nThe originals were deleted: {}.", deleted.join(", ")) };
     let text = format!(
-        "{summary}.{how}\n\nIts public key:\n{public_key}{}\n\nYou asked because: {}",
+        "{summary}.{how}\n\nWhat it holds:\n{}{gone}{}\n\nYou asked because: {}{}",
+        lines.join("\n"),
         note(&person, &request.comment),
-        asked.reason
+        asked.reason,
+        crate::extensions::checklist::card_decided(factory, &Card::Secret(asked.id.clone()), false)
     );
     factory.deliver_event(agent, text, host_event(format!("{summary}.")));
     Ok(())
@@ -692,6 +836,75 @@ pub(crate) fn forget_admin(factory: &Factory, id: &str) {
     }
 }
 
+/// Why a card closes when its asker is deleted.
+const ASKER_DELETED: &str = "The agent was deleted.";
+
+/// Closes the open request cards in `transcript` that `closes` picks, as
+/// withdrawn: their requests are gone with the agent that asked (deleting
+/// an agent deletes its requests). The entries that changed.
+fn close_shown(transcript: &mut crate::transcript::Transcript, closes: impl Fn(&v1::SecretRequest) -> bool) -> Vec<v1::Entry> {
+    let open: Vec<v1::SecretRequest> = transcript
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            Some(v1::entry::Kind::SecretRequest(request))
+                if matches!(request.state(), v1::SecretRequestState::Pending | v1::SecretRequestState::Approved) && closes(request) =>
+            {
+                Some(request.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let now = crate::transcript::now_ms();
+    open.into_iter()
+        .filter_map(|mut request| {
+            request.set_state(v1::SecretRequestState::Withdrawn);
+            request.collecting = false;
+            request.decided_ms = now;
+            request.comment = ASKER_DELETED.to_owned();
+            transcript.set_secret_request(request)
+        })
+        .collect()
+}
+
+/// The agent `asker` was deleted, and its requests with it: the cards for
+/// them in other agents' conversations (an admin agent's add-secret card)
+/// close, rather than waiting in Needs you for good.
+pub(crate) fn close_cards_in(factory: &Factory, inner: &mut crate::factory::Inner, asker: &str) {
+    let mut changed = Vec::new();
+    for (owner, runtime) in &mut inner.agents {
+        if let Some(transcript) = runtime.transcript.as_mut() {
+            changed.extend(close_shown(transcript, |request| request.agent_id == asker).into_iter().map(|entry| (owner.clone(), entry)));
+        }
+    }
+    if changed.is_empty() {
+        return;
+    }
+    for (owner, entry) in changed {
+        factory.send_change(inner, &owner, crate::transcript::Change::Entry(entry));
+    }
+    factory.broadcast_workspace(inner);
+}
+
+/// Closes the cards a just-loaded conversation shows open for requests the
+/// vault no longer has (their agent was deleted); nothing while the vault
+/// can't be read.
+pub(crate) fn close_missing(factory: &Factory, transcript: &mut crate::transcript::Transcript) {
+    let gone = |request: &v1::SecretRequest| matches!(factory.vault.find_request(&request.id), Ok(None));
+    close_shown(transcript, gone);
+}
+
+/// A card asked for something of request `id` that it can't do any more
+/// (it closed meanwhile): shows the request as it is now wherever it's
+/// shown, so a card that missed the change catches up and leaves Needs you.
+pub(crate) fn reshow(factory: &Factory, id: &str) {
+    match factory.vault.find_request(id) {
+        Ok(Some(request)) => show_everywhere(factory, request),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(request = %id, %error, "could not read a secret request to show it again"),
+    }
+}
+
 /// Shows a request in its asker's conversation and, when an admin agent's
 /// conversation shows its card (secrets_collect), there too.
 pub(crate) fn show_everywhere(factory: &Factory, request: v1::SecretRequest) {
@@ -725,12 +938,56 @@ fn expired(since: i64, now: i64) -> bool {
     now - since >= EXPIRE_AFTER_MS
 }
 
-/// Checks waiting requests every minute.
+/// How often the files waiting imports name are looked at again.
+const IMPORTS_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Checks waiting requests every minute, and the files of waiting imports
+/// every few seconds.
 pub(crate) async fn monitor(factory: std::sync::Weak<Factory>) {
+    let mut since_expiry = std::time::Duration::ZERO;
+    // Files can be on a mount that hangs: looked at off this task, one look
+    // at a time, so expiry never waits on them.
+    let looking = Arc::new(std::sync::atomic::AtomicBool::new(false));
     loop {
-        tokio::time::sleep(CHECK_EVERY).await;
+        tokio::time::sleep(IMPORTS_EVERY).await;
         let Some(factory) = factory.upgrade() else { return };
-        expire_requests(&factory, crate::transcript::now_ms());
+        if !looking.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            let (factory, looking) = (factory.clone(), looking.clone());
+            tokio::task::spawn_blocking(move || {
+                refresh_imports(&factory);
+                looking.store(false, std::sync::atomic::Ordering::Release);
+            });
+        }
+        since_expiry += IMPORTS_EVERY;
+        if since_expiry >= CHECK_EVERY {
+            since_expiry = std::time::Duration::ZERO;
+            expire_requests(&factory, crate::transcript::now_ms());
+        }
+    }
+}
+
+/// Shows each waiting import's card again when what's wrong with its files
+/// changed (one deleted, replaced or edited since it was asked for), so the
+/// card says so, and Import is off, before the person tries it.
+pub(crate) fn refresh_imports(factory: &Arc<Factory>) {
+    let Ok(waiting) = factory.vault.waiting_requests() else { return };
+    for (asked, _) in waiting {
+        if asked.imports.is_empty() || asked.state() != v1::SecretRequestState::Pending {
+            continue;
+        }
+        let problems = |request: &v1::SecretRequest| request.imports.iter().map(|file| file.problem.clone()).collect::<Vec<_>>();
+        let shown = {
+            let inner = factory.lock();
+            inner.agents.get(&asked.agent_id).and_then(|runtime| runtime.transcript.as_ref()).and_then(|transcript| {
+                transcript.entries().iter().rev().find_map(|entry| match &entry.kind {
+                    Some(v1::entry::Kind::SecretRequest(shown)) if shown.id == asked.id => Some(problems(shown)),
+                    _ => None,
+                })
+            })
+        };
+        if shown.is_some_and(|shown| shown != problems(&asked)) {
+            show(factory, asked);
+        }
     }
 }
 
@@ -759,7 +1016,7 @@ pub(crate) fn expire_requests(factory: &Arc<Factory>, now: i64) {
         tracing::info!(request = %asked.id, agent = %asked.agent_id, "a secret request expired");
         factory.vault_changed();
         let agent = asked.agent_id.as_str();
-        show(factory, expired);
+        show_everywhere(factory, expired);
         if factory.lock().config.agent(agent).is_none() {
             continue;
         }

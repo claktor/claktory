@@ -14,6 +14,10 @@
 //!   friendship gone) is forgotten here, history and all.
 //! - A conversation it's too far behind in is forgotten too (a device adds
 //!   it again); its own channel it rejoins by external commit.
+//! - A group that reaches a commit under a security key this leaf hasn't
+//!   been given (the person's new one, a friend's) waits there, unread,
+//!   until a device of the person's gives it. Enrolled under the person's
+//!   new key, the leaf moves to it in every group, by an Update each.
 
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
@@ -55,8 +59,10 @@ fn notify() -> &'static Notify {
     WAKE.get_or_init(Notify::new)
 }
 
-/// Something changed here (an enrollment): look now.
-pub(crate) fn wake() {
+/// Something changed here (an enrollment): a full round now, even in the
+/// middle of waiting for the feed.
+pub(crate) fn wake(factory: &Factory) {
+    factory.dm_leaf.round_now.store(true, std::sync::atomic::Ordering::SeqCst);
     notify().notify_waiters();
 }
 
@@ -116,6 +122,9 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
             Ok(()) => {
                 // The feed's cursor first, so nothing between it and the round is missed.
                 let mut outcome = Ok(());
+                if strong.dm_leaf.round_now.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    last_round = None;
+                }
                 if cursor.is_none() {
                     // Without the feed the round still runs; the feed is tried again after it.
                     if let Err(stop) = events(&strong, &mut cursor).await {
@@ -130,7 +139,12 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
                     }
                 }
                 if outcome.is_ok() {
-                    outcome = match events(&strong, &mut cursor).await {
+                    let happened = tokio::select! {
+                        happened = events(&strong, &mut cursor) => happened,
+                        // Woken (an enrollment): the round comes first.
+                        () = notify().notified() => Ok(Vec::new()),
+                    };
+                    outcome = match happened {
                         Ok(happened) => follow(&strong, happened).await,
                         Err(error) => Err(error),
                     };
@@ -217,7 +231,7 @@ async fn follow(factory: &Arc<Factory>, events: Vec<Event>) -> Result<(), Stop> 
         let Ok(group_id) = URL_SAFE_NO_PAD.decode(&event.group_id) else { continue };
         let kept = leaf::step(factory, |step| Ok(step.groups()?.into_iter().find(|group| group.group_id == group_id)))?;
         if let Some(group) = kept {
-            catch_up(factory, &group).await?;
+            waiting(catch_up(factory, &group).await)?;
         }
     }
     Ok(())
@@ -234,7 +248,75 @@ async fn full_round(factory: &Arc<Factory>) -> Result<(), Stop> {
     welcomes(factory).await?;
     groups(factory).await?;
     for group in leaf::step(factory, |step| step.groups())? {
-        catch_up(factory, &group).await?;
+        if !waiting(catch_up(factory, &group).await)? {
+            rotate(factory, &group).await?;
+        }
+    }
+    Ok(())
+}
+
+/// A group whose catching up stopped at a security key this leaf hasn't
+/// been given (`process`) waits there; the others carry on. Whether it waits.
+fn waiting(caught: Result<(), Stop>) -> Result<bool, Stop> {
+    match caught {
+        Ok(()) => Ok(false),
+        Err(Stop::Unready(Unready::Rotating | Unready::FriendsNewKey)) => Ok(true),
+        Err(stop) => Err(stop),
+    }
+}
+
+/// Moves this leaf's own place in `group` to the certificate it was last
+/// enrolled with, if it isn't there yet: after the person made a new
+/// security key (dms-e2ee.md §2.1, R2), one Update carrying the new
+/// certificate under the same leaf key and nothing else (the one commit a
+/// leaf under a replaced key may make). Which groups still need it is what
+/// MLS keeps, so a restart carries on where this stopped. `group` is caught
+/// up first; a commit that came first (409) is caught up on and it tries
+/// again. One sent but never answered stays pending: if the worker took it,
+/// catching up merges it (`OwnPendingCommit`), and if not, it goes.
+async fn rotate(factory: &Arc<Factory>, group: &KeptGroup) -> Result<(), Stop> {
+    let id = URL_SAFE_NO_PAD.encode(&group.group_id);
+    for _ in 0..3 {
+        let outgoing = leaf::step(factory, |step| {
+            let leaf = step.leaf()?;
+            let provider = step.provider()?;
+            let Some(mut mls) = Group::load(&provider, step.kind_of(&leaf, group), &group.group_id)? else { return Ok(None) };
+            // Moved already, or not in it any more (removed, and forgotten
+            // at the next round): nothing to do.
+            if !matches!(mls.holds(&leaf.me), Ok(false)) {
+                return Ok(None);
+            }
+            // Caught up to the end without it: one sent before wasn't taken.
+            mls.clear_pending(&provider)?;
+            Ok(Some(mls.update_certificate(&provider, &leaf.me)?))
+        })?;
+        let Some(outgoing) = outgoing else { return Ok(()) };
+        let mut body = json!({"commit": Envelope::new(outgoing.commit).map_err(unreadable)?.to_json()});
+        if let Some(info) = outgoing.group_info {
+            body["group_info"] = Envelope::new(info).map_err(unreadable)?.to_json();
+        }
+        let pending = |step: &mut leaf::Step<'_>, merge: bool| {
+            let leaf = step.leaf()?;
+            let provider = step.provider()?;
+            if let Some(mut mls) = Group::load(&provider, step.kind_of(&leaf, group), &group.group_id)? {
+                if merge { mls.merge_pending(&provider)? } else { mls.clear_pending(&provider)? }
+            }
+            Ok(())
+        };
+        match call(factory, "POST", &format!("groups/{id}/commits"), &[], Some(body)).await {
+            Ok(_) => {
+                leaf::step(factory, |step| pending(step, true))?;
+                tracing::info!(channel = group.channel, "this Claktory moved to the person's new security key in a group");
+                return Ok(());
+            }
+            Err(Problem::Refused(409, _)) => {
+                leaf::step(factory, |step| pending(step, false))?;
+                if waiting(catch_up(factory, group).await)? {
+                    return Ok(());
+                }
+            }
+            Err(problem) => return Err(problem.into()),
+        }
     }
     Ok(())
 }
@@ -497,12 +579,26 @@ async fn catch_up(factory: &Arc<Factory>, group: &KeptGroup) -> Result<(), Stop>
             other => other?,
         };
         let mut added = false;
+        let mut waits = None;
         for message in &page.messages {
-            let done = leaf::step(factory, |step| process(step, group, message))?;
-            added |= done.added_in_channel;
+            match leaf::step(factory, |step| process(step, group, message)) {
+                Ok(done) => added |= done.added_in_channel,
+                Err(StepError::Unready(unready @ (Unready::Rotating | Unready::FriendsNewKey))) => {
+                    waits = Some(unready);
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
         if added {
             super::sends::reposted(factory).await;
+        }
+        if group.channel {
+            // Nothing is sent in a channel stopped at the person's new key.
+            factory.dm_leaf.channel_waits.store(waits.is_some(), std::sync::atomic::Ordering::SeqCst);
+        }
+        if let Some(unready) = waits {
+            return Err(Stop::Unready(unready));
         }
         if !page.has_more || page.messages.is_empty() {
             return Ok(());
@@ -530,12 +626,22 @@ fn process(step: &mut leaf::Step<'_>, kept: &KeptGroup, message: &Message) -> Re
     if message.kind == "application" || message.epoch >= group.epoch() {
         let before = group.members(&leaf.pins).len();
         let bytes = Envelope::from_json(&message.envelope).map(Envelope::into_bytes);
-        match bytes.map_err(StepError::from).and_then(|bytes| Ok(group.process(&provider, &leaf.pins, &bytes)?)) {
+        match bytes.and_then(|bytes| group.process(&provider, &leaf.pins, &bytes)) {
             Ok(Incoming::Application { from, content }) => {
                 received(step, &leaf, kept, message, &from, &content)?;
             }
             Ok(Incoming::Committed { .. }) => done.added_in_channel = kept.channel && group.members(&leaf.pins).len() > before,
             Ok(Incoming::Proposal) => {}
+            // A change under a security key this leaf hasn't been given: the
+            // person's new one before a device enrolls this Claktory under
+            // it, or a friend's before the person's devices pass it on. Left
+            // unread (the step is taken back), the group waits here rather
+            // than fall out of step with it; the next round tries again.
+            Err(claktory_dm_crypto::Error::UnknownIdentity { account }) if message.kind != "application" => {
+                tracing::info!(seq = message.seq, channel = kept.channel, "a direct-message group waits for a new security key");
+                let own = account == leaf.account_id;
+                return Err(StepError::Unready(if own { Unready::Rotating } else { Unready::FriendsNewKey }));
+            }
             Err(error) => tracing::warn!(?error, seq = message.seq, channel = kept.channel, "a direct message this Claktory couldn't take"),
         }
     }

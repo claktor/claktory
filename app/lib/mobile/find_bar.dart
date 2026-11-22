@@ -23,7 +23,10 @@ class PhoneFindBar extends StatelessWidget {
     required this.placeholder,
     required this.count,
     required this.onStep,
+    this.canStep = true,
+    this.failed = false,
     required this.onDone,
+    this.nextIsUp = false,
   });
 
   final TextEditingController controller;
@@ -37,7 +40,18 @@ class PhoneFindBar extends StatelessWidget {
 
   /// The next match (1) or the one before (-1).
   final void Function(int by) onStep;
+
+  /// Whether there are matches to step through: the arrows are dimmed and
+  /// do nothing while there are none.
+  final bool canStep;
+
+  /// Whether [count] says why it couldn't search, shown as an error.
+  final bool failed;
   final VoidCallback onDone;
+
+  /// Whether the next match is further up the screen (a conversation, read
+  /// from its newest end): the up arrow is then Next.
+  final bool nextIsUp;
 
   @override
   Widget build(BuildContext context) {
@@ -65,6 +79,7 @@ class PhoneFindBar extends StatelessWidget {
                     color: palette.textFaint,
                   ),
                 ),
+                const SizedBox(width: Space.xs),
                 Expanded(
                   child: TextField(
                     key: const ValueKey('phone-find'),
@@ -76,11 +91,9 @@ class PhoneFindBar extends StatelessWidget {
                     kind: InputKind.text,
                     textInputAction: TextInputAction.search,
                     autocorrect: false,
-                    onSubmitted: (_) {
-                      onStep(1);
-                      // The keyboard stays up for the next Search.
-                      focusNode.requestFocus();
-                    },
+                    onSubmitted: (_) => onStep(1),
+                    // The keyboard stays up for the next Search.
+                    onEditingComplete: () {},
                   ),
                 ),
               ],
@@ -95,26 +108,31 @@ class PhoneFindBar extends StatelessWidget {
         count,
         key: const ValueKey('phone-find-count'),
         style: type.secondary.copyWith(
-          color: palette.textMuted,
+          color: failed ? palette.danger : palette.textMuted,
           fontFeatures: const [FontFeature.tabularFigures()],
         ),
       ),
     );
-    final arrows = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        HeaderButton(
-          label: 'Previous match',
-          onTap: () => onStep(-1),
-          glyph: (color) => _Chevron(color: color, up: true),
-        ),
-        HeaderButton(
-          label: 'Next match',
-          onTap: () => onStep(1),
-          glyph: (color) => _Chevron(color: color, up: false),
-        ),
-      ],
+    final arrows = _Dimmed(
+      enabled: canStep,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Up the screen first, then down, whichever way the matches go.
+          HeaderButton(
+            label: nextIsUp ? 'Next match' : 'Previous match',
+            onTap: () => onStep(nextIsUp ? 1 : -1),
+            glyph: (color) => _Chevron(color: color, up: true),
+          ),
+          HeaderButton(
+            label: nextIsUp ? 'Previous match' : 'Next match',
+            onTap: () => onStep(nextIsUp ? -1 : 1),
+            glyph: (color) => _Chevron(color: color, up: false),
+          ),
+        ],
+      ),
     );
+
     final done = Button(label: 'Done', onPressed: onDone);
     // A bar's words grow only so far, as iOS's toolbars' do; the field's
     // line of its own takes over past [_ownLine].
@@ -148,9 +166,16 @@ class PhoneFindBar extends StatelessWidget {
                 if (scale <= _ownLine) {
                   return Row(
                     children: [
+                      // The field keeps most of the line; the count (or why
+                      // it couldn't search) wraps rather than squeeze it.
                       Expanded(child: field),
                       const SizedBox(width: Space.s),
-                      countText,
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth: constraints.maxWidth / 4,
+                        ),
+                        child: countText,
+                      ),
                       arrows,
                       done,
                     ],
@@ -202,6 +227,25 @@ class _Chevron extends StatelessWidget {
       name: '',
       color: color,
       size: 22,
+    ),
+  );
+}
+
+/// [child], dimmed and out of reach unless [enabled].
+class _Dimmed extends StatelessWidget {
+  const _Dimmed({required this.enabled, required this.child});
+
+  final bool enabled;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => AnimatedOpacity(
+    duration: Motion.fast,
+    opacity: enabled ? 1 : 0.35,
+    // VoiceOver still names them, dimmed: they can't be activated.
+    child: Semantics(
+      enabled: enabled,
+      child: IgnorePointer(ignoring: !enabled, child: child),
     ),
   );
 }

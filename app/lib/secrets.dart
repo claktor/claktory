@@ -20,10 +20,13 @@ import 'mobile/metrics.dart' show TypeScale;
 import 'mobile/presentation.dart' show showPanel;
 import 'mobile/input.dart' show InputKind;
 import 'markdown.dart';
+import 'pipes.dart' show PortalGlyph, pipeColor;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart';
+import 'resources.dart' show formatBytes;
 import 'usage.dart' show formatAge;
+import 'visible_codes.dart' show hiddenRune, proseCodes, runeCode;
 
 /// How long a value shown stays on screen.
 const secretShownFor = Duration(seconds: 30);
@@ -855,6 +858,11 @@ class _UseLine extends StatelessWidget {
       'reveal' => use.detail.isEmpty ? 'Shown' : 'Shown on ${use.detail}',
       'grant' => 'Given to $who',
       'revoke' => 'Taken back from $who',
+      // From a file on this computer (vault import): who asked, and what
+      // was stored, its path's hidden characters shown as codes.
+      'import' =>
+        '${who.isEmpty ? 'Imported' : 'Imported, asked by $who'}'
+            '${use.detail.isEmpty ? '' : ': ${importPath(use.detail)}'}',
       _ => use.detail.isEmpty ? '$who used it' : '$who: ${use.detail}',
     };
     return Text.rich(
@@ -1689,7 +1697,9 @@ class _AgentSecretsFieldState extends State<AgentSecretsField> {
                           ),
                           // Off while it's limited to a pipe, which its
                           // settings say above: nothing to change here.
-                          onChanged: widget.agent.quarantined
+                          onChanged:
+                              widget.agent.quarantined ||
+                                  widget.agent.readsReports
                               ? null
                               : (value) => _set(secret, value),
                         ),
@@ -2066,6 +2076,9 @@ String secretRequestSummary(
     return 'Asks you to add a secret for $asker: $name';
   }
   if (request.generate.isNotEmpty) return 'Asks for ${keyKind(request)}';
+  if (request.imports.isNotEmpty) {
+    return 'Asks to import ${importKind(request)}';
+  }
   if (request.state == SecretRequestState.SECRET_REQUEST_STATE_APPROVED) {
     final admin = [
       for (final agent in workspace.agents)
@@ -2081,10 +2094,79 @@ String secretRequestSummary(
       : 'Asks for a secret: $name';
 }
 
+/// What an import request (SecretRequest.imports) brings into the vault:
+/// "a file", "2 files".
+String importKind(SecretRequest request) =>
+    request.imports.length == 1 ? 'a file' : '${request.imports.length} files';
+
+/// A path as it is, with what could make it read as another shown as
+/// visible codes (Fugo): control, bidi and zero-width characters as
+/// \u{202E}. Never shortened.
+String importPath(String path) => [
+  for (final rune in path.runes)
+    hiddenRune(rune) ? runeCode(rune) : String.fromCharCode(rune),
+].join();
+
+/// Where an imported file is, when that's somewhere that holds keys or
+/// credentials (SecretImport.sensitive), in a line; null otherwise.
+String? importSensitive(String kind) => switch (kind) {
+  '' => null,
+  'ssh' => 'This is in your SSH keys folder.',
+  'gnupg' => 'This is in your GnuPG keys folder.',
+  'aws' => 'This is in your AWS credentials folder.',
+  'gcloud' => 'This is in your Google Cloud credentials folder.',
+  'kube' => 'This is in your Kubernetes credentials folder.',
+  'docker' => 'This is in your Docker credentials folder.',
+  'keychains' => "This is in your Mac's keychains folder.",
+  'browser' => "This is in a web browser's profile folder.",
+  'claktory' => "This is in Claktory's own folder.",
+  _ => 'This is in a folder that holds credentials.',
+};
+
 /// What a generate request (SecretRequest.generate) asks for: "a new SSH
 /// key".
-String keyKind(SecretRequest request) =>
-    request.generate.startsWith('ssh-') ? 'a new SSH key' : 'a new key';
+String keyKind(SecretRequest request) => request.generate.startsWith('ssh-')
+    ? 'a new SSH key'
+    : request.generate == 'password'
+    ? 'a new password'
+    : 'a new key';
+
+/// What a password Claktory makes is drawn from, from its spec: "letters,
+/// digits and symbols".
+String passwordClasses(PasswordSpec spec) {
+  final classes = [
+    if (spec.lowercase && spec.uppercase)
+      'letters'
+    else if (spec.lowercase)
+      'lowercase letters'
+    else if (spec.uppercase)
+      'uppercase letters',
+    if (spec.digits) 'digits',
+    if (spec.symbols) 'symbols',
+  ];
+  if (classes.length < 2) return classes.firstOrNull ?? 'characters';
+  return '${classes.sublist(0, classes.length - 1).join(', ')} and '
+      '${classes.last}';
+}
+
+/// What a password of [length] characters is, by [spec]: "A 32-character
+/// password: letters, digits and symbols".
+String passwordSummary(PasswordSpec spec, int length) =>
+    'A $length-character password: ${passwordClasses(spec)}';
+
+/// Its strength at [length], as Claktory works it out: whole bits.
+int passwordBits(PasswordSpec spec, int length) =>
+    (length * spec.bitsPerCharacter).floor();
+
+/// Its strength in a word (Trish: bits are a number few can judge). The
+/// backend never makes one under 72 bits, so "weak" is only what's below.
+String passwordStrength(int bits) => bits >= 128
+    ? 'very strong'
+    : bits >= 96
+    ? 'strong'
+    : bits >= 72
+    ? 'fair'
+    : 'weak';
 
 /// An agent's request for a secret, in its conversation and in Needs you:
 /// what it needs and why, in its color. With an admin agent to pass it to
@@ -2167,6 +2249,9 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
             _VariableEdit(name: variable.name, file: variable.file),
         ]);
       _aliases.clear();
+      // A choice made for what it asked before isn't one for this.
+      _grantToAsker = false;
+      _deleteOriginals = false;
     }
   }
 
@@ -2194,9 +2279,25 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
   /// a values form or the admin agent.
   bool get _generates => request.generate.isNotEmpty;
 
+  /// Files for the vault to import (SecretRequest.imports): Import, never
+  /// a values form or the admin agent.
+  bool get _imports => request.imports.isNotEmpty;
+
+  /// An import goes to no one unless the person gives it to the agent
+  /// that asked (Fugo), and deletes nothing unless they say so.
+  var _grantToAsker = false;
+  var _deleteOriginals = false;
+
   /// A generated key doesn't ask each time it's used, unless the person
   /// turns it on (Matt's call).
   var _askEach = false;
+
+  /// A password to make (generate "password"): its spec, and the length
+  /// the person chose, between the spec's shortest and longest (null: as
+  /// asked).
+  bool get _password => request.generate == 'password';
+  int? _length;
+  int get _passwordLength => _length ?? request.password.length;
 
   /// The admin agent's add-secret card for the request it collects.
   bool get _collect =>
@@ -2211,6 +2312,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
       !_collect &&
       !_names &&
       !_generates &&
+      !_imports &&
       request.adminAgentId.isNotEmpty;
 
   Future<void> _give(List<SecretInfo> secrets) async {
@@ -2267,7 +2369,11 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
   Future<void> _generate() async {
     final name = _name.text.trim();
     if (name.isEmpty) {
-      setState(() => _error = 'Enter a name for the key.');
+      setState(
+        () => _error = _password
+            ? 'Enter a name for the password.'
+            : 'Enter a name for the key.',
+      );
       return;
     }
     await _decide(
@@ -2278,6 +2384,27 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         name: name,
         askEachTime: _askEach,
         comment: _comment.text.trim(),
+        passwordLength: _password ? _length ?? 0 : 0,
+      ),
+    );
+  }
+
+  Future<void> _import() async {
+    final name = _name.text.trim();
+    if (name.isEmpty) {
+      setState(() => _error = 'Enter a name for the secret.');
+      return;
+    }
+    await _decide(
+      () => AppScope.of(context).decideSecretRequest(
+        request.agentId,
+        request.id,
+        approve: true,
+        name: name,
+        askEachTime: _askEach,
+        comment: _comment.text.trim(),
+        grantToAsker: _grantToAsker,
+        deleteOriginals: _deleteOriginals,
       ),
     );
   }
@@ -2376,8 +2503,10 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         children: _pending(context, palette, name, secrets),
       );
     }
-    final String title;
-    if (_generates) {
+    String title;
+    if (_imports) {
+      title = '$name asks to import ${importKind(request)}';
+    } else if (_generates) {
       title = '$name asks for ${keyKind(request)}';
     } else if (_collect) {
       title =
@@ -2390,7 +2519,15 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     } else {
       title = '$name asks for a secret: ${request.newSecret.name}';
     }
-    if (pending && !_names && !_generates && _adding == null && !_approves) {
+    // The names in it are the agent's words: what reorders text shows by
+    // its code (proseCodes, Fugo).
+    title = proseCodes(title);
+    if (pending &&
+        !_names &&
+        !_generates &&
+        !_imports &&
+        _adding == null &&
+        !_approves) {
       // Chooses the secret that looks like the one asked for, if any;
       // otherwise adds the one it describes.
       final closest = closestSecret(request.newSecret, secrets);
@@ -2434,20 +2571,28 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
               ],
             ],
           ),
+          // What the agent wrote, to decide on: what reorders text shows by
+          // its code (proseCodes, Fugo).
           if (description.isNotEmpty) ...[
             const SizedBox(height: Space.xs),
-            Markdown(description, color: palette.textMuted, shortLinks: true),
+            Markdown(
+              proseCodes(description),
+              color: palette.textMuted,
+              shortLinks: true,
+            ),
           ],
           if (request.reason.isNotEmpty) ...[
             const SizedBox(height: Space.s),
             Markdown(
-              request.reason,
+              proseCodes(request.reason),
               color: pending ? null : palette.textMuted,
               shortLinks: true,
             ),
           ],
           const SizedBox(height: Space.m),
-          if (pending && _generates)
+          if (pending && _imports)
+            ..._importing(context, palette, name)
+          else if (pending && _generates)
             ..._generating(context, palette, name)
           else if (pending && _approves)
             ..._approval(context, palette, name, adminName)
@@ -2645,13 +2790,23 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
     return [
       Field(
         label: 'Name',
-        note: "Also the key's comment",
+        note: _password ? null : "Also the key's comment",
         child: TextField(
           controller: _name,
           kind: InputKind.text,
           semanticsLabel: 'Name',
         ),
       ),
+      if (_password) ...[
+        _PasswordLength(
+          spec: request.password,
+          length: _passwordLength,
+          onChanged: _deciding
+              ? null
+              : (length) => setState(() => _length = length),
+        ),
+        const SizedBox(height: Space.m),
+      ],
       Text(
         request.grantToNobody ? 'For no one' : 'For $agent',
         style: type.body.copyWith(color: palette.textMuted),
@@ -2666,7 +2821,10 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
       const SizedBox(height: Space.m),
       ActionLine(
         lead: Text(
-          _error ?? 'No one ever sees its private half, $agent included.',
+          _error ??
+              (_password
+                  ? 'No one ever sees it, $agent included.'
+                  : 'No one ever sees its private half, $agent included.'),
           style: type.caption.copyWith(
             color: _error == null ? palette.textFaint : palette.danger,
           ),
@@ -2675,6 +2833,92 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
           label: 'Generate',
           primary: true,
           onPressed: _deciding ? null : _generate,
+        ),
+      ),
+      const SizedBox(height: Space.m),
+      _noteAndDismiss(agent),
+    ];
+  }
+
+  /// Files for the vault: whether whom it asks for may have been led to
+  /// (it read another's words), each file as Claktory found it (its full
+  /// path, size, when it changed, a fingerprint, where it is if that
+  /// holds keys, and why it can't be imported now), the secret's name,
+  /// whether the agent that asked gets it (off: no one, Fugo), Ask each
+  /// time, deleting the originals (off), Import, and the note and Dismiss.
+  List<Widget> _importing(BuildContext context, Palette palette, String agent) {
+    final type = TypeScale.of(context);
+    final blocked = request.imports.any((file) => file.problem.isNotEmpty);
+    return [
+      if (request.askerReadPipes) ...[
+        _ReadOutside(agent: agent),
+        const SizedBox(height: Space.m),
+      ],
+      for (final file in request.imports) ...[
+        _ImportFile(file),
+        const SizedBox(height: Space.s),
+      ],
+      Text(
+        'Files are stored exactly as they are, binary files too.',
+        style: type.caption.copyWith(color: palette.textFaint),
+      ),
+      const SizedBox(height: Space.m),
+      Field(
+        label: 'Name',
+        child: TextField(
+          controller: _name,
+          kind: InputKind.text,
+          semanticsLabel: 'Name',
+        ),
+      ),
+      _ToggleRow(
+        label: 'Give it to $agent',
+        note: _grantToAsker
+            ? null
+            : 'Off: no agent gets it until you give it to one.',
+        value: _grantToAsker,
+        onChanged: _deciding
+            ? null
+            : (on) => setState(() => _grantToAsker = on),
+      ),
+      const SizedBox(height: Space.m),
+      _ToggleRow(
+        label: askEachTimeLabel,
+        note: askEachTimeNote,
+        value: _askEach,
+        onChanged: _deciding ? null : (on) => setState(() => _askEach = on),
+      ),
+      const SizedBox(height: Space.m),
+      _ToggleRow(
+        label: request.imports.length == 1
+            ? 'Delete the original after it’s imported'
+            : 'Delete the originals after they’re imported',
+        note: 'Deleted like any file, not securely erased.',
+        value: _deleteOriginals,
+        onChanged: _deciding
+            ? null
+            : (on) => setState(() => _deleteOriginals = on),
+      ),
+      const SizedBox(height: Space.m),
+      ActionLine(
+        lead: Text(
+          _error ??
+              (blocked
+                  ? "It can't be imported as it is."
+                  : _grantToAsker
+                  ? 'No one sees the contents here. $agent can use them in '
+                        'commands.'
+                  : 'No one sees the contents here, $agent included.'),
+          style: type.caption.copyWith(
+            color: _error == null && !blocked
+                ? palette.textFaint
+                : palette.danger,
+          ),
+        ),
+        action: Button(
+          label: 'Import',
+          primary: true,
+          onPressed: _deciding || blocked ? null : _import,
         ),
       ),
       const SizedBox(height: Space.m),
@@ -2905,7 +3149,11 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
                         : dismissed
                         ? 'Dismissed'
                         : generated
-                        ? 'Given to no one'
+                        ? _imports
+                              ? 'Imported, given to no one'
+                              : 'Given to no one'
+                        : _imports
+                        ? 'Imported, given to $agent'
                         : _generates
                         ? 'Given to $agent'
                         : byAdmin
@@ -2938,11 +3186,214 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
           style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
         ),
       ],
+      // What was imported (or would have been): each file, as found.
+      if (_imports)
+        for (final file in request.imports) ...[
+          const SizedBox(height: Space.xs),
+          Text(
+            '${importPath(file.path)} · ${formatBytes(file.size)} · '
+            'fingerprint ${file.fingerprint}',
+            style: TypeScale.of(context).caption.copyWith(
+              fontFamily: TextStyles.mono,
+              color: palette.textMuted,
+            ),
+          ),
+        ],
       if (request.publicKey.isNotEmpty) ...[
         const SizedBox(height: Space.m),
         _PublicKey(request.publicKey),
       ],
     ];
+  }
+}
+
+/// A password Claktory makes: what it is, its strength, and its length to
+/// change between the spec's shortest and longest, with − and +.
+class _PasswordLength extends StatelessWidget {
+  const _PasswordLength({
+    required this.spec,
+    required this.length,
+    required this.onChanged,
+  });
+
+  final PasswordSpec spec;
+  final int length;
+  final ValueChanged<int>? onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final shortest = spec.shortest;
+    final longest = spec.longest;
+    Widget step(String label, String icon, int to) {
+      final enabled = onChanged != null && to >= shortest && to <= longest;
+      return Opacity(
+        opacity: enabled ? 1 : 0.4,
+        child: GlyphButton(
+          label: label,
+          active: false,
+          onTap: enabled ? () => onChanged!(to) : () {},
+          glyph: (color) =>
+              ExtensionGlyph(icon: icon, name: label, color: color),
+        ),
+      );
+    }
+
+    final notes = [
+      if (spec.allowed.isNotEmpty) 'Only these characters: ${spec.allowed}',
+      if (spec.avoidSimilar) 'No characters that look alike, such as 0 and O.',
+      if (spec.maxLength > 0 && longest == spec.maxLength)
+        'The service accepts at most ${spec.maxLength} characters.',
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          passwordSummary(spec, length),
+          style: type.body.copyWith(color: palette.text),
+        ),
+        const SizedBox(height: Space.xs),
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: Space.s,
+          runSpacing: Space.xs,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                step('Shorter', 'minus', length - 1),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: Space.xs),
+                  child: Text(
+                    '$length',
+                    style: type.body.copyWith(
+                      color: palette.text,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+                step('Longer', 'plus', length + 1),
+              ],
+            ),
+            Text(
+              'Strength: ${passwordStrength(passwordBits(spec, length))}',
+              style: type.caption.copyWith(color: palette.textMuted),
+            ),
+          ],
+        ),
+        for (final note in notes) ...[
+          const SizedBox(height: Space.xs),
+          Text(note, style: type.caption.copyWith(color: palette.textFaint)),
+        ],
+      ],
+    );
+  }
+}
+
+/// A file an agent asks the vault to import, as Claktory found it: the
+/// variable it goes in, its full path (hidden characters shown as codes,
+/// never shortened), its size, when it changed and its fingerprint; where
+/// it is when that holds keys; and why it can't be imported now.
+class _ImportFile extends StatelessWidget {
+  const _ImportFile(this.file);
+
+  final SecretImport file;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final mono = type.caption.copyWith(fontFamily: TextStyles.mono);
+    final sensitive = importSensitive(file.sensitive);
+    final changed = DateTime.fromMillisecondsSinceEpoch(
+      file.modifiedMs.toInt(),
+    );
+    return Container(
+      padding: const EdgeInsets.all(Space.s),
+      decoration: BoxDecoration(
+        border: Border.all(color: palette.hairline),
+        borderRadius: BorderRadius.circular(Radii.control),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            '${file.variable} (file)',
+            style: mono.copyWith(color: palette.textMuted),
+          ),
+          const SizedBox(height: Space.xs),
+          Text(
+            importPath(file.path),
+            style: type.body.copyWith(
+              fontFamily: TextStyles.mono,
+              color: palette.text,
+            ),
+          ),
+          const SizedBox(height: Space.xs),
+          Text(
+            '${formatBytes(file.size)} · changed ${logTime(changed)} · '
+            'fingerprint ${file.fingerprint}',
+            style: type.caption.copyWith(color: palette.textFaint),
+          ),
+          if (sensitive != null) ...[
+            const SizedBox(height: Space.xs),
+            Text(
+              sensitive,
+              style: type.caption.copyWith(
+                color: palette.danger,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+          if (file.problem.isNotEmpty) ...[
+            const SizedBox(height: Space.xs),
+            Text(
+              file.problem,
+              style: type.caption.copyWith(color: palette.danger),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// The agent that asks had read another's words (a pipe, a direct
+/// message or a web page) when it asked: what it asks for may come from
+/// them. After a portal, as cards say where a request may come from.
+class _ReadOutside extends StatelessWidget {
+  const _ReadOutside({required this.agent});
+
+  final String agent;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(top: 2),
+          child: ExcludeSemantics(
+            child: PortalGlyph(color: pipeColor, size: 12),
+          ),
+        ),
+        const SizedBox(width: Space.xs + 2),
+        Expanded(
+          child: Text(
+            '$agent had read messages from another Claktory, a direct '
+            'message or a web page when it asked. Whoever wrote them could '
+            'have led it to ask for this. Import only if you expected it.',
+            style: type.body.copyWith(
+              color: palette.text,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      ],
+    );
   }
 }
 

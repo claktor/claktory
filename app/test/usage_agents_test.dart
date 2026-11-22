@@ -2,6 +2,7 @@
 // hour or day, over the token chart on the same time axis; pointing at a
 // bucket says both, and lights it in each.
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/selection.dart' show SelectableArea;
 import 'package:factory_app/usage_view.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
@@ -190,15 +191,79 @@ void main() {
     await gesture.up();
   });
 
+  testWidgets('a long press on a bar reads it, selecting no words nearby', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final selected = <String>[];
+    await Harness(Workspace()).show(
+      tester,
+      size: const Size(393, 852),
+      home: SelectableArea(
+        onSelectionChanged: (content) {
+          if (content != null && content.plainText.isNotEmpty) {
+            selected.add(content.plainText);
+          }
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text('Input 12K · 10 requests'),
+              UsageChart(series: _series, hourly: false, agentsSinceMs: 0),
+              const Text('Below the chart'),
+            ],
+          ),
+        ),
+      ),
+    );
+    await pumpFrames(tester);
+    final charts = find.byType(CustomPaint);
+    for (final chart in [
+      charts.at(charts.evaluate().length - 2),
+      charts.last,
+    ]) {
+      final rect = tester.getRect(chart);
+      await tester.longPressAt(
+        Offset(rect.left + rect.width * 5 / 6, rect.center.dy),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Wed Nov 18 · 4.2 at once · 9 worked · 1.2M tokens'),
+        findsOneWidget,
+      );
+      expect(selected, isEmpty, reason: 'no word selected');
+    }
+  });
+
   testWidgets('on a phone, shorter', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     await _show(tester, _series, size: const Size(393, 852));
     final gesture = await _point(tester, 2, 3);
+    const details = 'Wed Nov 18 · 4.2 at once · 9 worked · 1.2M tokens';
+    expect(find.text(details), findsOneWidget);
+    await gesture.up();
+    await tester.pump();
+    expect(find.text(details), findsOneWidget, reason: 'stays after a tap');
+
+    // A long press on the agents chart reads its bar too, and selects
+    // no words.
+    final agents = tester.getRect(
+      find
+          .byType(CustomPaint)
+          .at(find.byType(CustomPaint).evaluate().length - 2),
+    );
+    await tester.longPressAt(
+      Offset(agents.left + agents.width / 6, agents.center.dy),
+    );
+    await tester.pumpAndSettle();
     expect(
-      find.text('Wed Nov 18 · 4.2 at once · 9 worked · 1.2M tokens'),
+      find.text('Mon Nov 16 · 0.5 at once · 2 worked · 1K tokens'),
       findsOneWidget,
     );
-    await gesture.up();
+    expect(find.text('Copy'), findsNothing);
   });
 }

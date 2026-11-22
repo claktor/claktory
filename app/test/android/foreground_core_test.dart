@@ -10,7 +10,8 @@ import 'package:factory_app/identity.dart'
     show isPhoneLayout, touchFirst, deviceIdiom;
 import 'package:factory_app/mobile/metrics.dart' show Metrics;
 import 'package:factory_app/forms.dart' show FormFrame;
-import 'package:factory_app/inbox.dart' show NeedsYouChip, NeedsYouList;
+import 'package:factory_app/inbox.dart' show NeedsYouList;
+import 'package:factory_app/mobile/needs_you_button.dart';
 import 'package:factory_app/ipad/workbench.dart' show Workbench;
 import 'package:factory_app/mobile/composer.dart' show SendButton;
 import 'package:factory_app/mobile/device.dart'
@@ -618,8 +619,8 @@ void main() {
           state: AskPersonState.ASK_PERSON_STATE_PENDING,
         ),
       );
-      _target48(tester, find.byType(NeedsYouChip), 'Needs you');
-      await tester.tap(find.byType(NeedsYouChip));
+      _target48(tester, find.byType(PhoneNeedsYouButton), 'Needs you');
+      await tester.tap(find.byType(PhoneNeedsYouButton));
       await pumpFrames(tester);
       expect(find.byType(NeedsYouList), findsOneWidget);
       expect(find.text('Deploy staging?'), findsOneWidget);

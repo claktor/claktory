@@ -44,9 +44,7 @@ fn last_move(factory: &Factory) -> Option<Moved> {
 
 /// "12:04 on 22 Nov", here.
 fn when(ms: i64) -> String {
-    jiff::Timestamp::from_millisecond(ms)
-        .map(|at| at.to_zoned_datetime(jiff::tz::TimeZone::system()).strftime("%H:%M on %-d %b").to_string())
-        .unwrap_or_default()
+    crate::transcript::local_time(ms, "%H:%M on %-d %b")
 }
 
 /// The report on this Claktory after a move, for Rivet to tell the person.

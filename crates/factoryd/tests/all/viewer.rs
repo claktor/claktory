@@ -171,22 +171,24 @@ async fn an_agent_shows_the_person_a_file_once() {
 }
 
 /// show opens panes up to the person's setting (4 until changed), counting
-/// every pane but the conversation, whoever opened it: past it, show is
-/// refused, saying the way out; a file already open still shows; closing a
-/// pane, or a higher setting, makes room again.
+/// every pane but the conversation, whoever opened it. Past it, the new
+/// file takes the place of the pane opened longest ago, never the one the
+/// person expanded, and the agent is told which; a file already open just
+/// glows; the order is kept across a restart; a higher setting makes room.
 #[tokio::test]
-async fn show_refuses_past_the_open_panes_setting_until_there_is_room() {
+async fn a_full_layout_replaces_its_oldest_pane() {
     let dir = temp_dir();
-    let (addr, _factory) = start(&dir).await;
+    let (addr, factory) = start(&dir).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
     let site = dir.join("site");
     apply_request(&mut client, &mut view, create_project("Site", &site)).await;
     apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
-    for number in 1..=6 {
+    for number in 1..=8 {
         std::fs::write(site.join(format!("f{number}.md")), "notes\n").expect("write");
     }
     let path = |number: usize| std::fs::canonicalize(site.join(format!("f{number}.md"))).expect("path").display().to_string();
+    let file = |number: usize| format!("text {}", path(number));
     let show = |number: usize| send_message("builder", &format!(r#"call show {{"path":"f{number}.md"}}"#));
     let said = |view: &View| {
         view.entries.iter().rev().find_map(|entry| match &entry.kind {
@@ -194,6 +196,7 @@ async fn show_refuses_past_the_open_panes_setting_until_there_is_room() {
             _ => None,
         })
     };
+    let calls = |view: &View| view.entries.iter().filter(|entry| matches!(entry.kind, Some(Kind::ToolCall(_)))).count();
     let settings = |view: &View| view.workspace.settings.clone().expect("settings");
     assert_eq!(settings(&view).max_open_panes, 4, "the default");
 
@@ -205,31 +208,62 @@ async fn show_refuses_past_the_open_panes_setting_until_there_is_room() {
         view.follow(&mut client, |view| idle(view, "builder") && panes(view.agent("builder").layout.as_ref()).len() == number + 2).await;
     }
 
-    // The fourth file is the fifth pane: refused, saying the way out, and
-    // the layout stands.
+    // The fourth file is one too many: it takes the place of Settings,
+    // opened first, and the agent is told.
+    let before = calls(&view);
     apply_request(&mut client, &mut view, show(4)).await;
-    view.follow(&mut client, |view| idle(view, "builder")).await;
-    let refused = said(&view).expect("said");
-    assert_eq!(
-        refused,
-        "This conversation already has 4 panes open beside it, the most show opens at once (4; the person can change it in \
-         Settings → Display). Ask the person to close one, or show an already-open file to point at it."
-    );
+    view.follow(&mut client, |view| idle(view, "builder") && calls(view) > before).await;
+    assert_eq!(said(&view).expect("said"), format!("Showing {} to the person, in place of Settings (the oldest pane).", path(4)));
+    assert_eq!(panes(view.agent("builder").layout.as_ref()), ["chat", &file(4), &file(1), &file(2), &file(3)]);
+
+    // A file already open just glows: its pane, nothing replaced.
+    let glows = view.highlights.len();
+    let before = calls(&view);
+    apply_request(&mut client, &mut view, show(3)).await;
+    view.follow(&mut client, |view| idle(view, "builder") && calls(view) > before && view.highlights.len() > glows).await;
+    assert_eq!(said(&view).expect("said"), format!("Showing {} to the person.", path(3)));
     assert_eq!(panes(view.agent("builder").layout.as_ref()).len(), 5);
 
-    // A file already open still shows: its pane, not a new one.
-    let glows = view.highlights.len();
-    apply_request(&mut client, &mut view, show(3)).await;
-    view.follow(&mut client, |view| idle(view, "builder") && view.highlights.len() > glows).await;
-    assert!(said(&view).expect("said").starts_with("Showing "));
-    assert_eq!(panes(view.agent("builder").layout.as_ref()).len(), 5);
+    // The person expands f1, now the oldest: it stays, and the next oldest goes.
+    let layout = view.agent("builder").layout.clone();
+    let id = |view: &View, number: usize| {
+        fn find(node: &v1::ViewNode, path: &str) -> Option<String> {
+            match &node.node {
+                Some(Node::Leaf(leaf)) if leaf.path == path => Some(node.id.clone()),
+                Some(Node::Split(split)) => split.children.iter().find_map(|child| find(child, path)),
+                _ => None,
+            }
+        }
+        find(view.agent("builder").layout.as_ref().expect("a layout"), &path(number)).expect("its pane")
+    };
+    let first = id(&view, 1);
+    assert!(matches!(apply_request(&mut client, &mut view, focused("builder", layout, &first)).await, Body::Ack(_)));
+    let before = calls(&view);
+    apply_request(&mut client, &mut view, show(5)).await;
+    view.follow(&mut client, |view| idle(view, "builder") && calls(view) > before).await;
+    assert!(said(&view).expect("said").ends_with(", in place of f2.md (the oldest pane)."), "{said:?}", said = said(&view));
+    assert_eq!(panes(view.agent("builder").layout.as_ref()), ["chat", &file(4), &file(1), &file(5), &file(3)]);
+    assert_eq!(view.agent("builder").layout_focus, first, "still expanded");
+    drop(client);
+    drop(factory);
+
+    // Across a restart the order holds: f3 is the oldest left to replace.
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    let before = calls(&view);
+    apply_request(&mut client, &mut view, show(6)).await;
+    view.follow(&mut client, |view| idle(view, "builder") && calls(view) > before).await;
+    assert!(said(&view).expect("said").ends_with(", in place of f3.md (the oldest pane)."), "{said:?}", said = said(&view));
+    assert_eq!(panes(view.agent("builder").layout.as_ref()), ["chat", &file(4), &file(1), &file(5), &file(6)]);
 
     // The setting is from 1 to 11, or 0 for the default.
     let set = |panes: u32| client_message::Body::UpdateSettings(v1::UpdateSettings { max_open_panes: Some(panes), ..Default::default() });
     let refused = apply_request(&mut client, &mut view, set(12)).await;
     assert!(matches!(&refused, Body::Error(error) if error.message.contains("max_open_panes must be from 1 to 11")), "{refused:?}");
 
-    // Raised, there's room for more.
+    // Raised, there's room for one more, added beside the others.
     assert!(matches!(apply_request(&mut client, &mut view, set(5)).await, Body::Ack(_)));
     view.follow(&mut client, |view| settings(view).max_open_panes == 5).await;
     // Kept in factory.db: a config.json that held it would be refused whole
@@ -239,20 +273,19 @@ async fn show_refuses_past_the_open_panes_setting_until_there_is_room() {
     let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("db");
     let kept: String = db.query_row("SELECT value FROM state WHERE key = 'max_open_panes'", [], |row| row.get(0)).expect("kept");
     assert_eq!(kept, "5");
-    apply_request(&mut client, &mut view, show(4)).await;
+    apply_request(&mut client, &mut view, show(7)).await;
     view.follow(&mut client, |view| idle(view, "builder") && panes(view.agent("builder").layout.as_ref()).len() == 6).await;
-    apply_request(&mut client, &mut view, show(5)).await;
-    view.follow(&mut client, |view| idle(view, "builder")).await;
-    assert!(said(&view).expect("said").contains("already has 5 panes open beside it"));
+    assert_eq!(said(&view).expect("said"), format!("Showing {} to the person.", path(7)));
 
-    // Back to the default, and the person closes panes: room again.
-    assert!(matches!(apply_request(&mut client, &mut view, set(0)).await, Body::Ack(_)));
-    view.follow(&mut client, |view| settings(view).max_open_panes == 4).await;
-    let smaller = row("s", vec![leaf("chat", "chat", ""), leaf("p1", "text", &path(1))]);
-    assert!(matches!(apply_request(&mut client, &mut view, set_layout("builder", Some(smaller))).await, Body::Ack(_)));
-    apply_request(&mut client, &mut view, show(6)).await;
-    view.follow(&mut client, |view| idle(view, "builder") && panes(view.agent("builder").layout.as_ref()).len() == 3).await;
-    assert!(said(&view).expect("said").starts_with("Showing "));
+    // With only the expanded pane to give, show says so and changes nothing.
+    assert!(matches!(apply_request(&mut client, &mut view, set(1)).await, Body::Ack(_)));
+    let only = row("s", vec![leaf("chat", "chat", ""), leaf("p1", "text", &path(1))]);
+    assert!(matches!(apply_request(&mut client, &mut view, focused("builder", Some(only), "p1")).await, Body::Ack(_)));
+    let before = calls(&view);
+    apply_request(&mut client, &mut view, show(8)).await;
+    view.follow(&mut client, |view| idle(view, "builder") && calls(view) > before).await;
+    assert!(said(&view).expect("said").starts_with("The only pane beside this conversation is the one the person expanded"));
+    assert_eq!(panes(view.agent("builder").layout.as_ref()), ["chat", &file(1)]);
 }
 
 /// Focus (#272): the person fills the window with one pane; it's kept with

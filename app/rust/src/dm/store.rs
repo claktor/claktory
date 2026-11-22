@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// The store's tables, in order: the store at version N has run the first
 /// N. Only ever append; never change one that shipped.
-const MIGRATIONS: &[&str] = &[SCHEMA, APP, SIDE];
+const MIGRATIONS: &[&str] = &[SCHEMA, APP, SIDE, TRANSFERRED];
 
 /// The app's own tables (dm.rs). Values are sealed ([`Store::seal`]) except
 /// what the service already knows: group ids, their kinds (whose they are),
@@ -83,6 +83,18 @@ const SIDE: &str = "CREATE TABLE side (
     digest BLOB NOT NULL,
     value BLOB NOT NULL,
     PRIMARY KEY (grp, digest)
+) WITHOUT ROWID;";
+
+/// History another of the person's devices sent this one (E8,
+/// dm/transfer.rs) for a group it hasn't joined yet: sealed as `history`
+/// rows are, moved there when it joins (`transfer::adopt`), dropped after a
+/// day if it never does. No foreign key: the group isn't here yet.
+const TRANSFERRED: &str = "CREATE TABLE transferred (
+    grp BLOB NOT NULL,
+    seq INTEGER NOT NULL,
+    value BLOB NOT NULL,
+    created_ms INTEGER NOT NULL,
+    PRIMARY KEY (grp, seq)
 ) WITHOUT ROWID;";
 
 /// What the check of the seal key is made from.

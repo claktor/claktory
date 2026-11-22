@@ -11,6 +11,7 @@ import 'package:factory_app/agent_view.dart';
 import 'package:factory_app/controls.dart' show GlyphButton;
 import 'package:factory_app/inbox.dart' show NeedsYouChip, NeedsYouList;
 import 'package:factory_app/mobile/composer.dart';
+import 'package:factory_app/mobile/needs_you_button.dart';
 import 'package:factory_app/mobile/navigation.dart';
 import 'package:factory_app/mobile/platform_policy.dart';
 import 'package:factory_app/mobile/presentation.dart'
@@ -759,10 +760,9 @@ void main() {
     });
   });
 
-  testWidgets('Needs you: a chip under "…", clear of the drawer\'s edge, '
-      'opens what waits in a sheet; opening a conversation closes it', (
-    tester,
-  ) async {
+  testWidgets('Needs you: a button beside "…" in the header, clear of the '
+      'conversation, opens what waits in a sheet; opening a conversation '
+      'closes it', (tester) async {
     sheetsPresented.value = 0;
     Workspace waiting(List<int> seqs, {String selected = 'mike'}) =>
         _workspace()
@@ -774,14 +774,25 @@ void main() {
       timestampMs: Int64(500),
       proposal: Proposal(id: 'prop5', text: 'Add a designer agent'),
     );
-    final chip = find.byType(NeedsYouChip);
-    expect(find.text('1 needs you'), findsOneWidget);
+    // No chip floating over the conversation (#321).
+    expect(find.byType(NeedsYouChip), findsNothing);
+    final chip = find.byType(PhoneNeedsYouButton);
+    // The count on its glyph, and the chip's words for VoiceOver.
+    expect(find.descendant(of: chip, matching: find.text('1')), findsOneWidget);
+    expect(
+      find.bySemanticsLabel('1 thing needs your answer. Show it.'),
+      findsOneWidget,
+    );
     final rect = tester.getRect(chip);
     final more = tester.getRect(inView(find.bySemanticsLabel('Extensions')));
-    expect(rect.height, greaterThanOrEqualTo(44));
-    expect(rect.top, greaterThanOrEqualTo(more.bottom), reason: 'under "…"');
-    expect(rect.right, lessThanOrEqualTo(393 - 8));
-    expect(rect.left, greaterThan(40), reason: "clear of the drawer's edge");
+    expect(rect.size, const Size(44, 44));
+    // In the header, just before "…".
+    expect(rect.top, more.top);
+    expect(rect.right, lessThanOrEqualTo(more.left));
+    expect(
+      rect.bottom,
+      lessThanOrEqualTo(tester.getRect(find.byType(TranscriptView)).top),
+    );
 
     await tester.tap(chip);
     await pumpFrames(tester);
@@ -811,6 +822,14 @@ void main() {
     await pumpFrames(tester);
     expect(find.byType(PhoneSheet), findsOneWidget);
     expect(find.text('Nothing is waiting for your answer.'), findsOneWidget);
+    // With nothing waiting, the header has no such button.
+    expect(
+      find.descendant(
+        of: find.byType(PhoneNeedsYouButton),
+        matching: find.byType(Semantics),
+      ),
+      findsNothing,
+    );
 
     // Another conversation opened: the sheet goes with it.
     await harness.apply(tester, waiting([], selected: 'rivet'));

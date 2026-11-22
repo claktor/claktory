@@ -160,6 +160,8 @@ Future<Harness> _phone(
 Future<void> _openSearch(WidgetTester tester) async {
   await tester.tap(find.bySemanticsLabel('More').last);
   await pumpFrames(tester);
+  // Search once, the page's own (its pane can be searched).
+  expect(find.text('Search'), findsOneWidget);
   await tester.tap(find.text('Search').last);
   await pumpFrames(tester);
 }

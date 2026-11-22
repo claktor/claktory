@@ -296,7 +296,8 @@ void main() {
       await show(tester);
       const words =
           'End-to-end encrypted: only you and your friends can read these '
-          'messages, on your devices and any Claktory you give a chat to. '
+          'messages, on your devices and any Claktory either of you gives a chat '
+          'to. '
           "Claktory's servers see who you talk to and when, but not what you "
           'say.';
       expect(find.text(words), findsOneWidget, reason: "Friends' note");

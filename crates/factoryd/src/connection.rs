@@ -229,6 +229,7 @@ pub(crate) async fn serve_stream<S: Stream>(
         browser: crate::browser::Port::new(&factory, &device.device.id),
         presence: factory.notify.connect(&device.device.id),
         presentation: crate::presentation::Port::new(&factory, &device.device.id),
+        dictations: crate::speech::dictation::Port::new(),
         diagnostics: crate::diagnostics::Source::device(&device.device.id, from, kind as i32, platform, app_version),
     };
     let (id, since) = (device.device.id.clone(), std::time::Instant::now());
@@ -280,6 +281,8 @@ struct Connection {
     presentation: crate::presentation::Port,
     /// Who sends its diagnostics (`crate::diagnostics`).
     diagnostics: crate::diagnostics::Source,
+    /// What its TranscribeAudio requests heard, for it alone.
+    dictations: crate::speech::dictation::Port,
 }
 
 /// Requests in, events out, until the client leaves. `unpaired` is the
@@ -326,6 +329,7 @@ async fn session<S: Stream>(
             body = connection.views.next() => send(socket, 0, body).await?,
             body = connection.browser.next() => send(socket, 0, body).await?,
             body = connection.presentation.next() => send(socket, 0, body).await?,
+            body = connection.dictations.next() => send(socket, 0, body).await?,
             event = events.recv() => match event {
                 Ok(event) => forward(socket, &mut sent, event).await?,
                 Err(RecvError::Lagged(missed)) => {
@@ -441,6 +445,9 @@ async fn handle(
             factory.update_agent(&agent_id, change).await
         }
         Some(Request::SelectAgent(request)) => factory.select_agent(&request.agent_id).await,
+        Some(Request::SendMessage(request)) if request.voice && request.checklist_item != 0 => {
+            Err(RequestError::Checklist("Type your reply. Voice messages can't be used here.".to_owned()))
+        }
         Some(Request::SendMessage(request)) if request.voice => crate::speech::voice::send(
             factory,
             &request.agent_id,
@@ -449,12 +456,13 @@ async fn handle(
             &request.client_id,
             &request.attachments,
         ),
-        Some(Request::SendMessage(request)) => factory.send_message(
+        Some(Request::SendMessage(request)) => factory.send_message_about(
             &request.agent_id,
             &request.text,
             Some(connection.sent_from.clone()),
             &request.client_id,
             &request.attachments,
+            (request.checklist_item != 0).then_some((request.checklist_agent_id.as_str(), request.checklist_item)),
         ),
         Some(Request::StopAgent(request)) => factory.stop_agent(&request.agent_id),
         Some(Request::DeleteAgent(request)) => factory.delete_agent(&request.agent_id).await,
@@ -480,6 +488,18 @@ async fn handle(
         Some(Request::CheckForUpdates(_)) => factory.check_for_updates(),
         Some(Request::SetDiagnostics(request)) => crate::diagnostics::set(factory, &request),
         Some(Request::SendDiagnostics(request)) => crate::diagnostics::receive(factory, &connection.diagnostics, request),
+        Some(Request::AcceptPipeIdentity(request)) => crate::pipes::identity::accept(factory, &request.pipe_id),
+        // Automated pipes (pipes-automation.md).
+        Some(Request::SetPipeForward(request)) => crate::pipes::handoff::set_forward_request(factory, &request).await,
+        Some(Request::SetReportReader(request)) => crate::pipes::handoff::set_reader_request(factory, &request).await,
+        Some(Request::SaveReportType(request)) => crate::pipes::handoff::save_type_request(factory, &request),
+        Some(Request::DeleteReportType(request)) => crate::pipes::handoff::delete_type_request(factory, &request),
+        Some(Request::DecidePipeReports(request)) => {
+            crate::pipes::handoff::decide_waiting(factory, &request.pipe_id, request.send).map_err(RequestError::Remote)
+        }
+        Some(Request::ListPipeReports(request)) => {
+            return answer(crate::pipes::handoff::list(factory, &request), Body::PipeReportPage);
+        }
         // Direct messages end to end (dms-e2ee.md §2): this Claktory's leaf,
         // given only to the person's own devices, which are all that connect
         // here (a paired device, or this computer's app with its token).
@@ -738,6 +758,9 @@ async fn handle(
         Some(Request::StopChat(request)) => crate::chats::stop(factory, &request.chat_id),
         Some(Request::DeleteChat(request)) => crate::chats::delete(factory, &request.chat_id),
         Some(Request::LoadChatEntries(request)) => return answer(crate::chats::load_entries(factory, &request).await, Body::ChatEntryPage),
+        Some(Request::SearchConversation(request)) => {
+            return answer(crate::find::search(factory, &request).await, Body::ConversationMatches);
+        }
         Some(Request::RenameChat(request)) => crate::chats::rename(factory, &request.chat_id, &request.title),
         // Moving this Claktory (#217): `crate::move_run`.
         Some(Request::StartMove(request)) => crate::move_run::start(factory, &request.code),
@@ -748,7 +771,10 @@ async fn handle(
         Some(Request::RemoveSpeechModel(_)) => crate::speech::model::remove(factory),
         Some(Request::RetryVoiceMessage(request)) => crate::speech::voice::retry(factory, &request.agent_id, request.message_id),
         Some(Request::DiscardVoiceMessage(request)) => crate::speech::voice::discard(factory, &request.agent_id, request.message_id),
+        Some(Request::TranscribeAudio(request)) => crate::speech::dictation::request(factory, &request, &connection.dictations),
         Some(Request::AnswerAsk(request)) => crate::extensions::ask::answer(factory, &request).await,
+        Some(Request::SetSpendCap(request)) => crate::pipes::spend::set_caps(factory, &request),
+        Some(Request::ReportReply(request)) => return answer(crate::account::reports::report(factory, request).await, Body::ReplyReport),
         Some(Request::SetAccountService(request)) => crate::account::set_service(factory, &request.url).await,
         Some(Request::ShowRecoveryKey(_)) => return answer(vault::show_recovery_key(factory, vault_session), Body::RecoveryKey),
         Some(Request::CheckRecoveryKey(_)) => return answer(vault::check_recovery_key(factory, vault_session), Body::RecoveryKeyCheck),

@@ -43,6 +43,12 @@ import UniformTypeIdentifiers
     // The network path, to reconnect the moment it changes, as on the Mac
     // (app/macos/Runner/NetworkPath.swift).
     NetworkPath.register(with: messenger)
+    // Copying a secret, such as a device's add code, marked sensitive and
+    // expiring (app/macos/Runner/SecretClipboard.swift).
+    SecretClipboard.register(with: messenger)
+    // The keys of end-to-end direct messages, in the app's own keychain
+    // group (app/macos/Runner/DmKeys.swift).
+    DmKeys.register(with: messenger)
     // A hardware keyboard coming and going (Capabilities.swift).
     KeyboardEvents.register(with: messenger)
     // An iPad window's controls kept clear of the app (Capabilities.swift).

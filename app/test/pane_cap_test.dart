@@ -15,8 +15,9 @@ Workspace _workspace({int cap = 4}) => Workspace(
 
 const _note =
     'Once this many panes are open beside a conversation, counting '
-    "Settings, the Map and files, agents can't show you more. You can "
-    'always open more yourself.';
+    'Settings, the Map and files, an agent that shows you something new '
+    "replaces the one that's been open longest, never one you've expanded. "
+    'You can always open more yourself.';
 
 Future<void> _openDisplay(WidgetTester tester, Harness harness) async {
   await harness.show(tester);

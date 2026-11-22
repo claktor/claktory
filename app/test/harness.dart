@@ -95,6 +95,8 @@ class RecordingBackend extends Backend {
     String clientId = '',
     List<Attachment> attachments = const [],
     bool voice = false,
+    int checklistItem = 0,
+    String checklistAgentId = '',
   }) => _record(
     ClientMessage(
       sendMessage: SendMessage(
@@ -103,6 +105,8 @@ class RecordingBackend extends Backend {
         clientId: clientId,
         attachments: attachments,
         voice: voice,
+        checklistItem: checklistItem,
+        checklistAgentId: checklistAgentId,
       ),
     ),
   );
@@ -342,6 +346,93 @@ class RecordingBackend extends Backend {
           : '';
     }
     workspace.apply(now);
+  }
+
+  /// What [searchConversation] answers for each request; nothing found
+  /// when unset.
+  ConversationMatches Function(SearchConversation request)? matches;
+
+  @override
+  Future<ConversationMatches> searchConversation({
+    String agentId = '',
+    String chatId = '',
+    String pipeId = '',
+    required String query,
+    int? beforeSeq,
+    int limit = 100,
+  }) async {
+    final request = SearchConversation(
+      agentId: agentId,
+      chatId: chatId,
+      pipeId: pipeId,
+      query: query,
+      beforeSeq: beforeSeq == null ? null : Int64(beforeSeq),
+      limit: limit,
+    );
+    await _record(ClientMessage(searchConversation: request));
+    return matches?.call(request) ??
+        ConversationMatches(query: query, agentId: agentId, chatId: chatId);
+  }
+
+  /// The entries before the transcript's first, which [loadFrom] pages in
+  /// (from the seq asked for); none when empty.
+  var earlierEntries = <Entry>[];
+
+  @override
+  Future<void> loadFrom(String agentId, int seq) async {
+    if (transcript.length == 0) return;
+    final first = transcript[0].seq;
+    await _record(
+      ClientMessage(
+        loadEntries: LoadEntries(
+          agentId: agentId,
+          beforeSeq: Int64(first),
+          fromSeq: Int64(seq),
+        ),
+      ),
+    );
+    final page = [
+      for (final entry in earlierEntries)
+        if (entry.seq >= seq && entry.seq < first) entry,
+    ];
+    transcript.prepend(
+      agentId,
+      page,
+      hasEarlier: earlierEntries.any((entry) => entry.seq < seq),
+    );
+  }
+
+  /// What [reportReply] answers: what would go, as the backend has it.
+  var replyReport = ReplyReport(
+    text: 'A reply',
+    model: 'Claude Opus 4.8',
+    version: 'v0.1.17',
+  );
+
+  /// Why [reportReply] refuses a send, when it does.
+  RequestFailure? refuseReport;
+
+  @override
+  Future<ReplyReport> reportReply({
+    String agentId = '',
+    String chatId = '',
+    required int seq,
+    String note = '',
+    bool send = false,
+  }) async {
+    await _record(
+      ClientMessage(
+        reportReply: ReportReply(
+          agentId: agentId,
+          chatId: chatId,
+          seq: Int64(seq),
+          note: note,
+          send: send,
+        ),
+      ),
+    );
+    if (send && refuseReport != null) throw refuseReport!;
+    return replyReport.deepCopy()..note = note;
   }
 
   /// The code [createPairing] answers.
@@ -844,6 +935,9 @@ class RecordingBackend extends Backend {
     bool asIs = false,
     bool approveOnly = false,
     bool? askEachTime,
+    int passwordLength = 0,
+    bool deleteOriginals = false,
+    bool grantToAsker = false,
   }) => _record(
     ClientMessage(
       decideSecretRequest: DecideSecretRequest(
@@ -859,6 +953,9 @@ class RecordingBackend extends Backend {
         asIs: asIs,
         approveOnly: approveOnly,
         askEachTime: askEachTime,
+        passwordLength: passwordLength,
+        deleteOriginals: deleteOriginals,
+        grantToAsker: grantToAsker,
       ),
     ),
   );
@@ -1012,6 +1109,59 @@ class RecordingBackend extends Backend {
   Future<void> setDiagnostics(SetDiagnostics ask) =>
       _record(ClientMessage(setDiagnostics: ask));
 
+  @override
+  Future<void> setPipeForward(SetPipeForward ask) =>
+      _record(ClientMessage(setPipeForward: ask));
+
+  @override
+  Future<void> saveReportType(SaveReportType ask) =>
+      _record(ClientMessage(saveReportType: ask));
+
+  @override
+  Future<void> deleteReportType(String id) =>
+      _record(ClientMessage(deleteReportType: DeleteReportType(id: id)));
+
+  @override
+  Future<void> setSpendCap(SetSpendCap ask) =>
+      _record(ClientMessage(setSpendCap: ask));
+
+  @override
+  Future<void> setReportReader(SetReportReader ask) =>
+      _record(ClientMessage(setReportReader: ask));
+
+  @override
+  Future<void> decidePipeReports(String pipeId, {required bool send}) =>
+      _record(
+        ClientMessage(
+          decidePipeReports: DecidePipeReports(pipeId: pipeId, send: send),
+        ),
+      );
+
+  /// What [listPipeReports] pages through, newest first.
+  var pipeReports = <PipeReport>[];
+
+  /// The kinds' older versions [listPipeReports] answers with.
+  var pipeReportSchemas = <ReportSchema>[];
+
+  @override
+  Future<PipeReportPage> listPipeReports(ListPipeReports ask) async {
+    await _record(ClientMessage(listPipeReports: ask));
+    final matching = [
+      for (final report in pipeReports)
+        if ((ask.pipeId.isEmpty || report.pipeId == ask.pipeId) &&
+            (ask.recipientId.isEmpty ||
+                report.recipientId == ask.recipientId) &&
+            (ask.beforeId == 0 || report.id < ask.beforeId))
+          report,
+    ];
+    final limit = ask.limit == 0 ? 50 : ask.limit;
+    return PipeReportPage(
+      reports: matching.take(limit),
+      more: matching.length > limit,
+      schemas: pipeReportSchemas,
+    );
+  }
+
   /// What [listNeedsYouHistory] answers: those matching the query (by
   /// agent name, title or reply), as the backend would.
   var needsYouHistory = <NeedsYouRecord>[];
@@ -1079,6 +1229,7 @@ class RecordingBackend extends Backend {
     List<int> content, {
     bool approve = false,
     String sha256 = '',
+    String bundled = '',
   }) async {
     await _record(
       ClientMessage(
@@ -1086,6 +1237,7 @@ class RecordingBackend extends Backend {
           content: content,
           approve: approve,
           sha256: sha256,
+          bundled: bundled,
         ),
       ),
     );
@@ -1300,6 +1452,11 @@ class RecordingBackend extends Backend {
   );
 
   @override
+  Future<void> acceptPipeIdentity(String pipeId) => _record(
+    ClientMessage(acceptPipeIdentity: AcceptPipeIdentity(pipeId: pipeId)),
+  );
+
+  @override
   Future<void> selectPipe(String pipeId) =>
       _record(ClientMessage(selectPipe: SelectPipe(pipeId: pipeId)));
 
@@ -1397,6 +1554,7 @@ class RecordingBackend extends Backend {
     String text = '',
     bool dismiss = false,
     List<Attachment> attachments = const [],
+    int? step,
   }) => _record(
     ClientMessage(
       answerAsk: AnswerAsk(
@@ -1405,6 +1563,7 @@ class RecordingBackend extends Backend {
         text: text,
         dismiss: dismiss,
         attachments: attachments,
+        step: step,
       ),
     ),
   );

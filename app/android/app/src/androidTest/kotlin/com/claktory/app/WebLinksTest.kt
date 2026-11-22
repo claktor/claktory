@@ -74,6 +74,8 @@ class WebLinksTest {
         assertEquals(listOf(LinkActivity::class.java.name), handlers("$id:/callback?code=c1"))
         assertTrue("claktory:// is the real Claktory's", handlers("claktory://add?code=abc").isEmpty())
         assertTrue(handlers("com.claktory.app:/callback?code=c1").isEmpty())
+        // A Mac's QR code holds the pairing code itself: the phone's camera opens it here.
+        assertEquals(listOf(LinkActivity::class.java.name), handlers("factory://?t=abc&e=def"))
     }
 
     @Test
@@ -96,6 +98,9 @@ class WebLinksTest {
             val link = "$scheme://add?code=running"
             open(link)
             waitFor("the link") { heard.contains(link) }
+            val code = "factory://?t=running&e=0123"
+            open(code)
+            waitFor("the pairing code") { heard.contains(code) }
             // A link only reaches the app, which asks the person first
             // (links_test.dart): nothing native connects or keeps anything.
             Thread.sleep(500)

@@ -106,11 +106,23 @@ impl Device {
 
     /// A call to the worker as this device.
     pub async fn call(&self, method: &str, route: &str, body: Value) -> (u16, Value) {
+        self.call_apps(method, &format!("dms/{route}"), body).await
+    }
+
+    /// The person ends a grant they gave one of their Claktory's agents, as
+    /// from the app's Agents' access.
+    pub async fn revoke_grant(&self, id: &str) {
+        let (status, answer) = self.call_apps("DELETE", &format!("grants/{id}"), Value::Null).await;
+        assert_eq!(status, 204, "{answer}");
+    }
+
+    /// A call to the worker's apps as this device (`dms/…`, `grants/…`).
+    async fn call_apps(&self, method: &str, route: &str, body: Value) -> (u16, Value) {
         let uid = std::fs::metadata(&self.dir).expect("the folder").uid();
         let (path, query) = route.split_once('?').unwrap_or((route, ""));
         let request = AppRequest::Call {
             method: method.into(),
-            path: format!("/v1/apps/dms/{path}"),
+            path: format!("/v1/apps/{path}"),
             query: query.into(),
             time: factoryd::transcript::now_ms() / 1000,
             caller: Caller::Device {
@@ -199,6 +211,42 @@ impl Device {
     /// Takes in `friend`'s current list, as fetched with its keys.
     pub fn refresh(&mut self, friend: &Device) {
         self.pins.accept_list(&friend.account, &friend.signed_list).expect("its list");
+    }
+
+    /// The person makes a new security key on this device (dms-e2ee.md
+    /// §2.1): its own leaf certified again under it, the old one retired in
+    /// its pins, and the list at version 1 under it sent with
+    /// `me/keys/rotate`. It moves in no group here, and tells no one.
+    pub async fn rotate_identity(&mut self) {
+        let identity = IdentityKey::generate().expect("a new identity");
+        let certificate = LeafCertificate::issue(&identity, self.me.certificate.leaf.clone()).expect("a certificate");
+        self.me = self.me.recertified(certificate).expect("the same leaf");
+        self.identity = identity;
+        self.pins.key_changed(&self.account, self.identity.public()).expect("its own new key");
+        self.version = 1;
+        let list = DeviceList { account_id: self.account.clone(), version: 1, created_ms: 1, leaves: self.listed.clone() };
+        let bytes = list.sign(&self.identity).expect("signed").to_bytes().expect("bytes");
+        self.pins.accept_list(&self.account, &bytes).expect("its own list");
+        self.signed_list = bytes.clone();
+        let body = json!({"identity_key": b64(&self.identity.public().0), "device_list": b64(&bytes), "version": 1});
+        let (status, answer) = self.call("POST", "me/keys/rotate", body).await;
+        assert_eq!(status, 200, "{answer}");
+    }
+
+    /// Takes in `friend`'s new security key, as a friend's device does once
+    /// it fetched their keys: the old one retired for good.
+    pub fn key_changed(&mut self, friend: &Device) {
+        self.pins.key_changed(&friend.account, friend.identity.public()).expect("the new key");
+        self.refresh(friend);
+    }
+
+    /// The group's members as this device checks them now: each one's
+    /// certificate, or why it isn't a member it trusts.
+    pub fn members(&self, group_id: &str) -> Vec<Result<LeafCertificate, String>> {
+        self.with(|provider, _| {
+            let members = self.load(provider, group_id).members(&self.pins);
+            members.into_iter().map(|member| member.map(|member| member.certificate).map_err(|error| error.to_string())).collect()
+        })
     }
 
     /// Starts a group of `kind` with only this device in it, registered

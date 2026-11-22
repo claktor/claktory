@@ -30,6 +30,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
+use chacha20poly1305::aead::{Aead, Payload};
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
+
 use crate::Error;
 use crate::certificate::one_line;
 use crate::identity::IdentityKey;
@@ -217,6 +220,101 @@ struct Bundle {
     pins: Pins,
 }
 
+/// The bundle's plaintext.
+fn bundle(account_id: &str, identity: &IdentityKey, pins: &Pins) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let mut bundle = Bundle {
+        v: 1,
+        account_id: account_id.to_owned(),
+        identity: URL_SAFE_NO_PAD.encode(identity.secret().as_ref()),
+        pins: pins.clone(),
+    };
+    let plaintext = serde_json::to_vec(&bundle).map(Zeroizing::new);
+    bundle.identity.zeroize();
+    plaintext.map_err(|error| Error::Format(error.to_string()))
+}
+
+/// A bundle's account, identity and pins.
+fn unbundle(plaintext: &[u8]) -> Result<(String, IdentityKey, Pins), Error> {
+    let mut bundle: Bundle = serde_json::from_slice(plaintext).map_err(|_| Error::Format("not a device hand-off".to_owned()))?;
+    if bundle.v != 1 {
+        return Err(Error::Format(format!("device hand-off version {}", bundle.v)));
+    }
+    let secret = URL_SAFE_NO_PAD.decode(&bundle.identity).map(Zeroizing::new);
+    bundle.identity.zeroize();
+    let secret = secret.map_err(|_| Error::Format("no identity key".to_owned()))?;
+    let secret: Zeroizing<[u8; 32]> =
+        Zeroizing::new(secret.as_slice().try_into().map_err(|_| Error::Format("an identity key is 32 bytes".to_owned()))?);
+    let mut pins = bundle.pins;
+    pins.reparse()?;
+    Ok((bundle.account_id, IdentityKey::from_secret(&secret), pins))
+}
+
+/// A new identity for the person's other devices, after a rotation
+/// (dms-e2ee §2.1): the bundle sealed under a key of its own. The bytes go
+/// to each remaining device through the worker (`me/handoffs`, up to
+/// [`MAX_SEALED`]); the key goes in the person's self group, which MLS
+/// seals to exactly its members once the lost device is removed, so only
+/// they can open it. A key is made for one bundle and never used again.
+pub struct RotationSealed {
+    pub bytes: Vec<u8>,
+    pub key: Zeroizing<[u8; 32]>,
+}
+
+/// What a remaining device gets from a rotation.
+pub struct Rotated {
+    pub identity: IdentityKey,
+    pub pins: Pins,
+}
+
+const ROTATION_LABEL: &[u8] = b"claktory-dm/v1 identity rotation";
+
+fn rotation_aad(account_id: &str) -> Vec<u8> {
+    [ROTATION_LABEL, b"\0", account_id.as_bytes()].concat()
+}
+
+/// Seals the new `identity` and `pins` for the person's other devices. The
+/// pins must already have the account on the new identity (`key_changed`),
+/// the old one retired.
+pub fn seal_rotation(account_id: &str, identity: &IdentityKey, pins: &Pins) -> Result<RotationSealed, Error> {
+    if pins.get(account_id).map(|pin| pin.identity) != Some(identity.public()) {
+        return Err(Error::Refused("the pins don't have this account on the new key".to_owned()));
+    }
+    let plaintext = bundle(account_id, identity, pins)?;
+    let key = random::<32>()?;
+    let cipher = ChaCha20Poly1305::new_from_slice(key.as_slice()).expect("a 32-byte key");
+    // A fresh key for each bundle: the one nonce is never used twice.
+    let bytes = cipher
+        .encrypt(&Nonce::default(), Payload { msg: &plaintext, aad: &rotation_aad(account_id) })
+        .map_err(|_| Error::Format("couldn't seal the new key".to_owned()))?;
+    if bytes.len() > MAX_SEALED {
+        return Err(Error::TooBig { kind: "new security key", most: MAX_SEALED });
+    }
+    Ok(RotationSealed { bytes, key })
+}
+
+/// Opens what [`seal_rotation`] made, on a device of `account_id` (its
+/// own): the bundle is for that account, and its pins have it on the new
+/// identity. Whether the key came from one of the person's own devices in
+/// their self group is the caller's to check, as for any self-group
+/// message.
+pub fn open_rotation(account_id: &str, key: &[u8; 32], bytes: &[u8]) -> Result<Rotated, Error> {
+    if bytes.len() > MAX_SEALED {
+        return Err(Error::Sealed);
+    }
+    let cipher = ChaCha20Poly1305::new_from_slice(key).expect("a 32-byte key");
+    let plaintext = Zeroizing::new(
+        cipher.decrypt(&Nonce::default(), Payload { msg: bytes, aad: &rotation_aad(account_id) }).map_err(|_| Error::Sealed)?,
+    );
+    let (account, identity, pins) = unbundle(&plaintext)?;
+    if account != account_id {
+        return Err(Error::Refused("a new key for another account".to_owned()));
+    }
+    if pins.get(account_id).map(|pin| pin.identity) != Some(identity.public()) {
+        return Err(Error::Refused("the pins don't have this account on the new key".to_owned()));
+    }
+    Ok(Rotated { identity, pins })
+}
+
 /// What the scanning device sends, and the history-transfer key it shares
 /// with the new device from now on.
 pub struct Sealed {
@@ -242,15 +340,7 @@ fn transfer_key(exported: Result<Vec<u8>, hpke_rs::HpkeError>) -> Result<Zeroizi
 /// Seals the bundle for `offer`.
 pub fn seal(offer: &Offer, account_id: &str, identity: &IdentityKey, pins: &Pins) -> Result<Sealed, Error> {
     offer.device.check()?;
-    let mut bundle = Bundle {
-        v: 1,
-        account_id: account_id.to_owned(),
-        identity: URL_SAFE_NO_PAD.encode(identity.secret().as_ref()),
-        pins: pins.clone(),
-    };
-    let plaintext = serde_json::to_vec(&bundle).map(Zeroizing::new);
-    bundle.identity.zeroize();
-    let plaintext = plaintext.map_err(|error| Error::Format(error.to_string()))?;
+    let plaintext = bundle(account_id, identity, pins)?;
     let recipient = HpkePublicKey::new(offer.one_time.to_vec());
     let (mut sealed, mut context) = hpke()
         .setup_sender(&recipient, &info(offer), Some(&offer.secret), Some(PSK_ID), None)
@@ -276,18 +366,8 @@ impl Waiting {
             .map_err(|_| Error::Sealed)?;
         let plaintext = Zeroizing::new(context.open(b"", &sealed[32..]).map_err(|_| Error::Sealed)?);
         let transfer_key = transfer_key(context.export(TRANSFER_LABEL, 32))?;
-        let mut bundle: Bundle = serde_json::from_slice(&plaintext).map_err(|_| Error::Format("not a device hand-off".to_owned()))?;
-        if bundle.v != 1 {
-            return Err(Error::Format(format!("device hand-off version {}", bundle.v)));
-        }
-        let secret = URL_SAFE_NO_PAD.decode(&bundle.identity).map(Zeroizing::new);
-        bundle.identity.zeroize();
-        let secret = secret.map_err(|_| Error::Format("no identity key".to_owned()))?;
-        let secret: Zeroizing<[u8; 32]> =
-            Zeroizing::new(secret.as_slice().try_into().map_err(|_| Error::Format("an identity key is 32 bytes".to_owned()))?);
-        let mut pins = bundle.pins;
-        pins.reparse()?;
-        Ok(Received { account_id: bundle.account_id, identity: IdentityKey::from_secret(&secret), pins, transfer_key })
+        let (account_id, identity, pins) = unbundle(&plaintext)?;
+        Ok(Received { account_id, identity, pins, transfer_key })
     }
 }
 
@@ -394,5 +474,34 @@ mod tests {
         let mut forged = waiting.offer.clone();
         forged.device.name = "iPad\u{200b}".to_owned();
         assert!(Offer::from_qr(&forged.qr()).is_err());
+    }
+
+    /// After a rotation the new key reaches the person's other devices
+    /// sealed under a key of its own (that key goes in the self group):
+    /// only for their account, only with pins already on the new key, and
+    /// nothing opens under another key.
+    #[test]
+    fn a_new_identity_reaches_the_persons_other_devices_sealed() {
+        let (old, new) = (IdentityKey::generate().unwrap(), IdentityKey::generate().unwrap());
+        let mut pins = Pins::default();
+        pins.first_contact("matt", old.public()).unwrap();
+        assert_eq!(
+            sealed_error(seal_rotation("matt", &new, &pins)),
+            Some("refused: the pins don't have this account on the new key".to_owned()),
+            "the pins move first"
+        );
+        pins.key_changed("matt", new.public()).unwrap();
+        let sealed = seal_rotation("matt", &new, &pins).unwrap();
+        let opened = open_rotation("matt", &sealed.key, &sealed.bytes).unwrap();
+        assert_eq!(opened.identity.public(), new.public());
+        assert!(opened.pins.get("matt").unwrap().retired.contains(&old.public()));
+        // Another account's device, another key or changed bytes: nothing.
+        assert_eq!(sealed_error(open_rotation("ana", &sealed.key, &sealed.bytes)), Some("a sealed value didn't open".to_owned()));
+        assert_eq!(sealed_error(open_rotation("matt", &[9; 32], &sealed.bytes)), Some("a sealed value didn't open".to_owned()));
+        let mut changed = sealed.bytes.clone();
+        changed[0] ^= 1;
+        assert!(open_rotation("matt", &sealed.key, &changed).is_err());
+        // Each seal has its own key.
+        assert_ne!(seal_rotation("matt", &new, &pins).unwrap().key.as_slice(), sealed.key.as_slice());
     }
 }

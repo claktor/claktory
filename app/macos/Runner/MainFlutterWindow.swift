@@ -1,6 +1,7 @@
 import AuthenticationServices
 import Cocoa
 import CoreImage
+import CoreText
 import FlutterMacOS
 
 class MainFlutterWindow: NSWindow {
@@ -53,6 +54,12 @@ class MainFlutterWindow: NSWindow {
     AudioPlayer.register(with: flutterViewController.engine.binaryMessenger)
     // The network path, to reconnect the moment it changes (NetworkPath.swift).
     NetworkPath.register(with: flutterViewController.engine.binaryMessenger)
+    // Copying a secret, such as a device's add code, hidden from clipboard
+    // managers (SecretClipboard.swift).
+    SecretClipboard.register(with: flutterViewController.engine.binaryMessenger)
+    // The keys of end-to-end direct messages, in the data-protection
+    // keychain (DmKeys.swift).
+    DmKeys.register(with: flutterViewController.engine.binaryMessenger)
     // The system's notifications, and whether the person is using the app
     // (Notifications.swift).
     Notifications.register(with: flutterViewController.engine.binaryMessenger, window: self)
@@ -68,6 +75,7 @@ class MainFlutterWindow: NSWindow {
       case "pickFolder": return self?.pickFolder(from: call.arguments as? String, result) ?? result(nil)
       case "pickFiles": return self?.pickFiles(result) ?? result([])
       case "takeFiles": self?.takesFiles = call.arguments as? Bool ?? false
+      case "devMark": self?.showDevMark()
       case "band":
         // The app's zoom scales its top band (app/lib/zoom.dart).
         if let height = call.arguments as? Double, height > 0 {
@@ -315,6 +323,19 @@ class MainFlutterWindow: NSWindow {
     controller.mouseUp(with: up)
   }
 
+  /// Claktory Dev's faint "DEV VERSION" across the window (app/lib/main.dart
+  /// asks for it in dev builds only). Drawn here rather than by Flutter: a
+  /// Flutter-painted mark over a native view, such as the PDF viewer, takes
+  /// its clicks and wheel, whatever IgnorePointer says.
+  private func showDevMark() {
+    guard let flutterView = contentViewController?.view,
+      !flutterView.subviews.contains(where: { $0 is DevMarkView })
+    else { return }
+    let mark = DevMarkView(frame: flutterView.bounds)
+    mark.autoresizingMask = [.width, .height]
+    flutterView.addSubview(mark)
+  }
+
   /// Asks for a folder in a sheet on this window, starting in `from` when
   /// it exists; answers its path, or nil when cancelled. A new folder can be
   /// made in the sheet.
@@ -522,5 +543,88 @@ final class WebAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
 
   func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
     NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
+  }
+}
+
+/// Claktory Dev's watermark (docs/IDENTITY.md): "DEV VERSION" in Geist
+/// SemiBold, 120pt with 12pt between letters, in the signal orange at 7%,
+/// tilted 0.35 rad up to the right, centred, on two lines when the window is
+/// too narrow for one. It never takes an event: AppKit carries on to the
+/// views under it (Flutter's, and native ones such as the PDF viewer).
+final class DevMarkView: NSView {
+  override init(frame: NSRect) {
+    super.init(frame: frame)
+    wantsLayer = true
+    // Over everything the Flutter view composites, platform views included.
+    layer?.zPosition = 100_000
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { false }
+  override var isOpaque: Bool { false }
+
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    needsDisplay = true
+  }
+
+  /// The app's own Geist SemiBold, from its Flutter assets; the system's
+  /// semibold if it can't be read.
+  private static let font: NSFont = {
+    let size: CGFloat = 120
+    if let frameworks = Bundle.main.privateFrameworksURL {
+      let url = frameworks.appendingPathComponent(
+        "App.framework/Resources/flutter_assets/fonts/Geist-SemiBold.ttf")
+      if let data = try? Data(contentsOf: url) as CFData,
+        let descriptor = CTFontManagerCreateFontDescriptorFromData(data)
+      {
+        return CTFontCreateWithFontDescriptor(descriptor, size, nil) as NSFont
+      }
+    }
+    return NSFont.systemFont(ofSize: size, weight: .semibold)
+  }()
+
+  /// The palette's signal (app/lib/identity.dart): #FF5B1F dark, #E5480F light.
+  private static func signal(dark: Bool) -> NSColor {
+    (dark
+      ? NSColor(srgbRed: 1, green: 0x5B / 255.0, blue: 0x1F / 255.0, alpha: 1)
+      : NSColor(srgbRed: 0xE5 / 255.0, green: 0x48 / 255.0, blue: 0x0F / 255.0, alpha: 1))
+      .withAlphaComponent(0.07)
+  }
+
+  override func draw(_ dirtyRect: NSRect) {
+    let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    let paragraph = NSMutableParagraphStyle()
+    paragraph.alignment = .center
+    // Flutter's height 1.2.
+    paragraph.minimumLineHeight = 144
+    paragraph.maximumLineHeight = 144
+    let text = NSAttributedString(
+      string: "DEV VERSION",
+      attributes: [
+        .font: Self.font,
+        .kern: 12,
+        .foregroundColor: Self.signal(dark: dark),
+        .paragraphStyle: paragraph,
+      ])
+    // As wide as the window allows, as Flutter lays it out before turning it.
+    let width = bounds.width
+    let size = text.boundingRect(
+      with: NSSize(width: width, height: .greatestFiniteMagnitude),
+      options: [.usesLineFragmentOrigin, .usesFontLeading]
+    ).size
+    guard let context = NSGraphicsContext.current?.cgContext else { return }
+    context.saveGState()
+    context.translateBy(x: bounds.midX, y: bounds.midY)
+    // Flutter's -0.35 turns it counterclockwise on a y-down canvas; AppKit's
+    // y runs up, so the same turn is +0.35.
+    context.rotate(by: isFlipped ? -0.35 : 0.35)
+    text.draw(
+      with: NSRect(x: -width / 2, y: -size.height / 2, width: width, height: size.height),
+      options: [.usesLineFragmentOrigin, .usesFontLeading])
+    context.restoreGState()
   }
 }

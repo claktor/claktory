@@ -77,6 +77,16 @@ if [[ -f "$RELEASE/claktory-apps" ]]; then
   chmod 755 "$HOME_DIR/bin/claktory-apps.new"
   mv -f "$HOME_DIR/bin/claktory-apps.new" "$HOME_DIR/bin/claktory-apps"
 fi
+# Claktory's own apps, beside them (apps/<id>.clapp), the folder replaced
+# whole so an app a release no longer ships goes too.
+rm -rf "$HOME_DIR/bin/apps.new"
+if [[ -d "$RELEASE/apps" ]]; then
+  cp -R "$RELEASE/apps" "$HOME_DIR/bin/apps.new"
+  rm -rf "$HOME_DIR/bin/apps"
+  mv "$HOME_DIR/bin/apps.new" "$HOME_DIR/bin/apps"
+else
+  rm -rf "$HOME_DIR/bin/apps"
+fi
 # The speech host, beside them (releases before voice have none).
 if [[ -f "$RELEASE/claktory-speech" ]]; then
   cp "$RELEASE/claktory-speech" "$HOME_DIR/bin/claktory-speech.new"

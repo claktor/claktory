@@ -163,6 +163,22 @@ void main() {
     //Y
   });
 
+  testWidgets('a claktory:// code is taken as a factory:// one', (
+    tester,
+  ) async {
+    final harness = await mac(tester);
+    final code = _code.replaceFirst('factory://', 'claktory://');
+    setupLinks.receive(code);
+    await settle(tester);
+    expect(harness.connections.current?.code, code);
+    expect(said.last, {'state': 'connecting', 'name': 'box'});
+    harness.backend.connectedSince.value = DateTime.now();
+    await settle(tester);
+    expect(said.last, {'state': 'connected', 'name': 'box'});
+    await tester.tap(find.text('OK'));
+    await settle(tester);
+  });
+
   testWidgets('a Mac set up already takes none', (tester) async {
     final harness = await mac(tester);
     final other = parsePairingCode(

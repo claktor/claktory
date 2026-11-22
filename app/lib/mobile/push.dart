@@ -35,6 +35,39 @@ import '../rail.dart' show Claktories, Claktory;
 /// Claktory's own push relay, when a Claktory's settings name none.
 const defaultPushRelay = 'https://push.claktory.com';
 
+/// The relay a dev build registers with (`--dart-define=FACTORY_PUSH_RELAY=`
+/// a local or fake relay); never read by a release build.
+const _devPushRelay = String.fromEnvironment('FACTORY_PUSH_RELAY');
+const _dev = bool.fromEnvironment('FACTORY_DEV');
+
+/// A dev build may reach a relay on this computer over plain http (a local
+/// claktory-push for tests); every other relay is https, since the token
+/// goes to it.
+bool loopbackDevRelay(Uri relay, {bool dev = _dev}) =>
+    dev &&
+    relay.scheme == 'http' &&
+    (relay.host == '127.0.0.1' || relay.host == 'localhost');
+
+/// The relay this device registers with for a Claktory whose settings name
+/// [configured] (empty: Claktory's own); empty when it registers with none.
+/// A dev build never uses Claktory's own: it allows so many registrations
+/// an hour from one address, and the person's iPhone shares this Mac's, so
+/// a Simulator's tests could keep it from registering. A dev build uses
+/// FACTORY_PUSH_RELAY, else a relay the Claktory names other than Claktory's
+/// own, else none.
+String pushRelayFor(
+  String configured, {
+  bool dev = _dev,
+  String devRelay = _devPushRelay,
+}) {
+  if (!dev) return configured.isEmpty ? defaultPushRelay : configured;
+  if (devRelay.isNotEmpty) return devRelay;
+  final named = Uri.tryParse(configured);
+  final production = Uri.parse(defaultPushRelay);
+  if (configured.isEmpty || named?.host == production.host) return '';
+  return configured;
+}
+
 /// How long a handle from the relay is used before it's asked for afresh.
 const pushRefresh = Duration(days: 30);
 
@@ -301,7 +334,14 @@ class PushRegistrar {
     // This device's own Claktory: an iPhone has none.
     if (id == 'local') return;
     final settings = backend.workspace.workspace.settings.notifications;
-    final relayUrl = settings.relay.isEmpty ? defaultPushRelay : settings.relay;
+    final relayUrl = pushRelayFor(settings.relay);
+    if (relayUrl.isEmpty) {
+      debugPrint(
+        'a dev build registers for notifications only with '
+        'FACTORY_PUSH_RELAY, never Claktory\'s own relay',
+      );
+      return;
+    }
     var step = PushStep.other;
     var fresh = false;
     try {
@@ -540,7 +580,7 @@ class HttpPushRelay implements PushRelay {
     Map<String, String> body,
   ) async {
     final base = Uri.parse(relay);
-    if (base.scheme != 'https') {
+    if (base.scheme != 'https' && !loopbackDevRelay(base)) {
       throw ArgumentError('a push relay is an https address: $relay');
     }
     final url = base.resolve(

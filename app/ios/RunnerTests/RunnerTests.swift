@@ -2,11 +2,96 @@ import AVFoundation
 import CoreImage
 import Flutter
 import Network
+import Security
 import Testing
+import UIKit
 
 @testable import Runner
 
 struct RunnerTests {
+  /// The keys of end-to-end direct messages (factory/dm-keys, E6): kept in
+  /// the app's own keychain group, given back, replaced and deleted; absent
+  /// is nil; names and sizes as Android's; the store's folder.
+  @Test func keepsDirectMessageKeys() throws {
+    let store = DmKeyStore(
+      group: nil, dataProtection: false, service: "com.claktory.dm-keys.test-\(UUID())")
+    #expect(store.available())
+    #expect(try store.get("identity") == nil)
+    let key = Data((0..<32).map { UInt8($0) })
+    try store.put("identity", key)
+    #expect(try store.get("identity") == key)
+    try store.put("identity", Data(repeating: 7, count: 32))
+    #expect(try store.get("identity") == Data(repeating: 7, count: 32))
+    try store.delete("identity")
+    #expect(try store.get("identity") == nil)
+    try store.delete("identity")
+    #expect(throws: DmKeyFailure.self) { try store.put("Identity", key) }
+    #expect(throws: DmKeyFailure.self) {
+      try store.put("leaf", Data(count: DmKeyStore.valueLimit + 1))
+    }
+    try store.put("leaf", Data(count: DmKeyStore.valueLimit))
+    try store.delete("leaf")
+
+    // Not in the notifications group the extension shares.
+    let shared = try #require(
+      Bundle.main.object(forInfoDictionaryKey: "ClaktoryPushKeychainGroup") as? String)
+    try store.put("store", key)
+    var lookup: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: store.service,
+      kSecAttrAccount as String: "store",
+      kSecReturnAttributes as String: true,
+    ]
+    var found: CFTypeRef?
+    #expect(SecItemCopyMatching(lookup as CFDictionary, &found) == errSecSuccess)
+    let group = (found as? [String: Any])?[kSecAttrAccessGroup as String] as? String
+    // Exactly the app's own group, <team>.<bundle id>: the first of
+    // Runner.entitlements' keychain-access-groups. Were the notifications
+    // group ever first, the extension could read these keys (Fugo).
+    let team = try #require(KeychainPushKeys.teamPrefix(of: shared))
+    let bundle = try #require(Bundle.main.bundleIdentifier)
+    #expect(group == "\(team).\(bundle)")
+    #expect(group != shared)
+    lookup[kSecAttrSynchronizable as String] = true
+    #expect(SecItemCopyMatching(lookup as CFDictionary, &found) == errSecItemNotFound)
+    try store.delete("store")
+
+    // The folder: the same every time, never backed up, protected until the
+    // first unlock.
+    let folder = try DmKeyStore.folder()
+    #expect(try DmKeyStore.folder() == folder)
+    #expect(folder.hasSuffix("/Library/Application Support/dm"))
+    let url = URL(fileURLWithPath: folder)
+    #expect(try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+    let protection = try FileManager.default.attributesOfItem(atPath: folder)[.protectionKey]
+      as? FileProtectionType
+    #expect(protection == nil || protection == .completeUntilFirstUserAuthentication)
+  }
+
+  /// Copying a secret (factory/secret-clipboard), on a pasteboard of its
+  /// own: plain text that expires, its token the write's changeCount, and
+  /// cleared only while it still holds that write.
+  @Test func copiesASecretAndClearsOnlyItsOwnWrite() throws {
+    let board = try #require(UIPasteboard(name: .init("claktory-check-\(UUID())"), create: true))
+    defer { UIPasteboard.remove(withName: board.name) }
+
+    let token = SecretClipboard.copy("add-code-123", seconds: 1800, on: board)
+    #expect(token == board.changeCount)
+    #expect(board.string == "add-code-123")
+    SecretClipboard.clear(token: token, on: board)
+    #expect(board.string == nil)
+
+    let again = SecretClipboard.copy("add-code-456", seconds: 1800, on: board)
+    board.string = "the person's own"
+    SecretClipboard.clear(token: again, on: board)
+    #expect(board.string == "the person's own")
+
+    // Expired: gone by itself.
+    _ = SecretClipboard.copy("add-code-789", seconds: 1, on: board)
+    Thread.sleep(forTimeInterval: 1.5)
+    #expect(board.string == nil)
+  }
+
   /// The camera's reading of QR codes, on an image of a pairing code drawn
   /// as the Mac draws it: the Simulator has no camera.
   @Test func readsAPairingCodeFromAQRImage() throws {

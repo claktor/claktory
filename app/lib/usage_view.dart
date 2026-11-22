@@ -267,14 +267,20 @@ class _UsageViewState extends State<UsageView> {
                         ),
                         child: Row(
                           children: [
-                            Text(
-                              'Usage',
-                              style: TypeScale.of(context).label.copyWith(
-                                color: palette.text,
-                                fontWeight: FontWeight.w600,
+                            // Cut short at the largest text in a narrow
+                            // window, Done kept at the end.
+                            Expanded(
+                              child: Text(
+                                'Usage',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TypeScale.of(context).label.copyWith(
+                                  color: palette.text,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ),
-                            const Spacer(),
+                            const SizedBox(width: Space.s),
                             Button(label: 'Done', onPressed: close),
                           ],
                         ),
@@ -875,69 +881,88 @@ class _UsageChartState extends State<UsageChart> {
         track: palette.hairline,
       ),
     );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Text(
-          caption,
-          // VoiceOver reads a sliver as words.
-          semanticsLabel: caption.replaceAll('<0.1', 'under 0.1'),
-          style: TypeScale.of(context).caption.copyWith(
-            color: hovered == null ? palette.textFaint : palette.textMuted,
-            fontFeatures: const [FontFeature.tabularFigures()],
+    // Not text to select: a long press on a bar reads it, rather than
+    // picking a word of the label over it.
+    return Unselectable(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            caption,
+            // VoiceOver reads a sliver as words.
+            semanticsLabel: caption.replaceAll('<0.1', 'under 0.1'),
+            style: TypeScale.of(context).caption.copyWith(
+              color: hovered == null ? palette.textFaint : palette.textMuted,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
           ),
-        ),
-        const SizedBox(height: Space.s),
-        LayoutBuilder(
-          builder: (context, constraints) => MouseRegion(
-            onHover: (event) =>
-                _point(event.localPosition, constraints.maxWidth),
-            onExit: (_) => setState(() => _hovered = null),
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onPanDown: (details) =>
-                  _point(details.localPosition, constraints.maxWidth),
-              onPanUpdate: (details) =>
-                  _point(details.localPosition, constraints.maxWidth),
-              onPanEnd: (_) => setState(() => _hovered = null),
-              onPanCancel: () => setState(() => _hovered = null),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (agents) ...[
-                    Text('Agents working', style: label),
-                    const SizedBox(height: Space.xs),
+          const SizedBox(height: Space.s),
+          LayoutBuilder(
+            builder: (context, constraints) => MouseRegion(
+              onHover: (event) =>
+                  _point(event.localPosition, constraints.maxWidth),
+              onExit: (_) => setState(() => _hovered = null),
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                // A long press is the chart's, reading the bar it's on, so
+                // the selection around it doesn't pick a word nearby.
+                onLongPressStart: (details) =>
+                    _point(details.localPosition, constraints.maxWidth),
+                onLongPressMoveUpdate: (details) =>
+                    _point(details.localPosition, constraints.maxWidth),
+                onPanDown: (details) =>
+                    _point(details.localPosition, constraints.maxWidth),
+                onPanUpdate: (details) =>
+                    _point(details.localPosition, constraints.maxWidth),
+                // On a phone the bucket stays once the finger lifts, so a
+                // tap reads it; a pointer's goes as it leaves.
+                onPanEnd: (_) {
+                  if (!touchFirst(context)) setState(() => _hovered = null);
+                },
+                onPanCancel: () {
+                  if (!touchFirst(context)) setState(() => _hovered = null);
+                },
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (agents) ...[
+                      Text('Agents working', style: label),
+                      const SizedBox(height: Space.xs),
+                      chart(
+                        [for (final b in series) b.workingAgents],
+                        40,
+                        palette.textMuted,
+                      ),
+                      const SizedBox(height: Space.m),
+                      Text('Tokens', style: label),
+                      const SizedBox(height: Space.xs),
+                    ],
                     chart(
-                      [for (final b in series) b.workingAgents],
-                      40,
-                      palette.textMuted,
+                      [
+                        for (final b in series)
+                          totalTokens(b.tokens).toDouble(),
+                      ],
+                      72,
+                      palette.signal,
                     ),
-                    const SizedBox(height: Space.m),
-                    Text('Tokens', style: label),
-                    const SizedBox(height: Space.xs),
                   ],
-                  chart(
-                    [for (final b in series) totalTokens(b.tokens).toDouble()],
-                    72,
-                    palette.signal,
-                  ),
-                ],
+                ),
               ),
             ),
           ),
-        ),
-        // Earlier, nothing was kept: say so, rather than let empty bars
-        // pass for no agents working.
-        if (startsLate) ...[
-          const SizedBox(height: Space.xs),
-          Text(
-            widget.hourly
-                ? 'Agents working starts at ${_minute(sinceTime)}.'
-                : 'Agents working starts on ${_day(sinceTime)}.',
-            style: label,
-          ),
+          // Earlier, nothing was kept: say so, rather than let empty bars
+          // pass for no agents working.
+          if (startsLate) ...[
+            const SizedBox(height: Space.xs),
+            Text(
+              widget.hourly
+                  ? 'Agents working starts at ${_minute(sinceTime)}.'
+                  : 'Agents working starts on ${_day(sinceTime)}.',
+              style: label,
+            ),
+          ],
         ],
-      ],
+      ),
     );
   }
 }

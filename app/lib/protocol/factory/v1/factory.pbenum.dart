@@ -91,13 +91,22 @@ class UploadPurpose extends $pb.ProtobufEnum {
   static const UploadPurpose UPLOAD_PURPOSE_INK =
       UploadPurpose._(1, _omitEnumNames ? '' : 'UPLOAD_PURPOSE_INK');
 
+  /// A recording to transcribe for the person (TranscribeAudio): AAC in .m4a
+  /// ("audio/mp4"), 16 kHz mono, at most 10 minutes and 16 MiB. `agent_id`
+  /// is empty. Kept privately, where no agent's tools reach, only until a
+  /// TranscribeAudio takes it, or an hour; then it's deleted. FinishUpload
+  /// answers UploadedFile with neither an attachment nor a blob hash.
+  static const UploadPurpose UPLOAD_PURPOSE_DICTATION =
+      UploadPurpose._(2, _omitEnumNames ? '' : 'UPLOAD_PURPOSE_DICTATION');
+
   static const $core.List<UploadPurpose> values = <UploadPurpose>[
     UPLOAD_PURPOSE_AGENT,
     UPLOAD_PURPOSE_INK,
+    UPLOAD_PURPOSE_DICTATION,
   ];
 
   static final $core.List<UploadPurpose?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 1);
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
   static UploadPurpose? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -1751,6 +1760,50 @@ class PipePause extends $pb.ProtobufEnum {
   const PipePause._(super.value, super.name);
 }
 
+/// How a pipe's other side changed from the identity pinned with the pipe.
+/// Only a statement checked here raises one: while this Claktory can't
+/// check (signed out, or another account service), nothing changes.
+class PipeIdentityChange extends $pb.ProtobufEnum {
+  static const PipeIdentityChange PIPE_IDENTITY_CHANGE_NONE =
+      PipeIdentityChange._(
+          0, _omitEnumNames ? '' : 'PIPE_IDENTITY_CHANGE_NONE');
+
+  /// It stopped being vouched for: its statement ran out (a week) or it
+  /// signed out. "No longer verified"; nothing is held.
+  /// AcceptPipeIdentity dismisses it.
+  static const PipeIdentityChange PIPE_IDENTITY_CHANGE_LAPSED =
+      PipeIdentityChange._(
+          1, _omitEnumNames ? '' : 'PIPE_IDENTITY_CHANGE_LAPSED');
+
+  /// The same account, with another email (verified_email; previous_email
+  /// the old one): a notice, nothing held. AcceptPipeIdentity dismisses it.
+  static const PipeIdentityChange PIPE_IDENTITY_CHANGE_EMAIL_CHANGED =
+      PipeIdentityChange._(
+          2, _omitEnumNames ? '' : 'PIPE_IDENTITY_CHANGE_EMAIL_CHANGED');
+
+  /// Another account (verified_email, if it's vouched for; previous_email
+  /// the old one): a warning in red. Until AcceptPipeIdentity, what comes
+  /// from the other side waits for the person (HELD_INCOMING) and agents
+  /// can't send to it; the person still can.
+  static const PipeIdentityChange PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED =
+      PipeIdentityChange._(
+          3, _omitEnumNames ? '' : 'PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED');
+
+  static const $core.List<PipeIdentityChange> values = <PipeIdentityChange>[
+    PIPE_IDENTITY_CHANGE_NONE,
+    PIPE_IDENTITY_CHANGE_LAPSED,
+    PIPE_IDENTITY_CHANGE_EMAIL_CHANGED,
+    PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED,
+  ];
+
+  static final $core.List<PipeIdentityChange?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static PipeIdentityChange? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const PipeIdentityChange._(super.value, super.name);
+}
+
 class PipeAuthorKind extends $pb.ProtobufEnum {
   static const PipeAuthorKind PIPE_AUTHOR_KIND_UNSPECIFIED =
       PipeAuthorKind._(0, _omitEnumNames ? '' : 'PIPE_AUTHOR_KIND_UNSPECIFIED');
@@ -1910,6 +1963,34 @@ class SecretApprovalState extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const SecretApprovalState._(super.value, super.name);
+}
+
+class AskStepState extends $pb.ProtobufEnum {
+  /// Read as PENDING.
+  static const AskStepState ASK_STEP_STATE_UNSPECIFIED =
+      AskStepState._(0, _omitEnumNames ? '' : 'ASK_STEP_STATE_UNSPECIFIED');
+  static const AskStepState ASK_STEP_STATE_PENDING =
+      AskStepState._(1, _omitEnumNames ? '' : 'ASK_STEP_STATE_PENDING');
+  static const AskStepState ASK_STEP_STATE_DONE =
+      AskStepState._(2, _omitEnumNames ? '' : 'ASK_STEP_STATE_DONE');
+
+  /// The person couldn't do it: the procedure stops here.
+  static const AskStepState ASK_STEP_STATE_CANT =
+      AskStepState._(3, _omitEnumNames ? '' : 'ASK_STEP_STATE_CANT');
+
+  static const $core.List<AskStepState> values = <AskStepState>[
+    ASK_STEP_STATE_UNSPECIFIED,
+    ASK_STEP_STATE_PENDING,
+    ASK_STEP_STATE_DONE,
+    ASK_STEP_STATE_CANT,
+  ];
+
+  static final $core.List<AskStepState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static AskStepState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const AskStepState._(super.value, super.name);
 }
 
 class AskPersonState extends $pb.ProtobufEnum {
@@ -2185,6 +2266,25 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
       NeedsYouRecordKind._(
           10, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_APP_GRANT');
 
+  /// Where reports go changed: a pipe's forward or a project's default was
+  /// set, or an agent was made a report reader or let go (outcome CHANGED).
+  /// agent_id is the admin agent that changed it (Rivet), empty when the
+  /// person did; pipe_id is set for a pipe's forward; title is Claktory's
+  /// sentence ("Rivet set this pipe's reports to go to Ingrid"). A change
+  /// of the types a pipe (or a project's new pipes) can forward is one too:
+  /// report_types holds those it turned on.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_PIPE_FORWARD =
+      NeedsYouRecordKind._(
+          11, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_PIPE_FORWARD');
+
+  /// A report type was defined, edited or deleted (outcome CHANGED):
+  /// agent_id is the admin agent (Rivet), empty for the person; title is
+  /// Claktory's sentence; report_type and report_type_before are the
+  /// versions.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_REPORT_TYPE =
+      NeedsYouRecordKind._(
+          12, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_REPORT_TYPE');
+
   static const $core.List<NeedsYouRecordKind> values = <NeedsYouRecordKind>[
     NEEDS_YOU_RECORD_KIND_UNSPECIFIED,
     NEEDS_YOU_RECORD_KIND_QUESTION,
@@ -2197,10 +2297,12 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
     NEEDS_YOU_RECORD_KIND_PIPE_HELD,
     NEEDS_YOU_RECORD_KIND_PIPE_LOOP,
     NEEDS_YOU_RECORD_KIND_APP_GRANT,
+    NEEDS_YOU_RECORD_KIND_PIPE_FORWARD,
+    NEEDS_YOU_RECORD_KIND_REPORT_TYPE,
   ];
 
   static final $core.List<NeedsYouRecordKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 10);
+      $pb.ProtobufEnum.$_initByValueList(values, 12);
   static NeedsYouRecordKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -2225,6 +2327,10 @@ class NeedsYouOutcome extends $pb.ProtobufEnum {
   static const NeedsYouOutcome NEEDS_YOU_OUTCOME_FAILED =
       NeedsYouOutcome._(5, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_FAILED');
 
+  /// A setting changed, rather than a card answered (PIPE_FORWARD).
+  static const NeedsYouOutcome NEEDS_YOU_OUTCOME_CHANGED =
+      NeedsYouOutcome._(6, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_CHANGED');
+
   static const $core.List<NeedsYouOutcome> values = <NeedsYouOutcome>[
     NEEDS_YOU_OUTCOME_UNSPECIFIED,
     NEEDS_YOU_OUTCOME_ANSWERED,
@@ -2232,14 +2338,134 @@ class NeedsYouOutcome extends $pb.ProtobufEnum {
     NEEDS_YOU_OUTCOME_APPROVED,
     NEEDS_YOU_OUTCOME_DENIED,
     NEEDS_YOU_OUTCOME_FAILED,
+    NEEDS_YOU_OUTCOME_CHANGED,
   ];
 
   static final $core.List<NeedsYouOutcome?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 5);
+      $pb.ProtobufEnum.$_initByValueList(values, 6);
   static NeedsYouOutcome? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const NeedsYouOutcome._(super.value, super.name);
+}
+
+class ReportFieldType extends $pb.ProtobufEnum {
+  static const ReportFieldType REPORT_FIELD_TYPE_UNSPECIFIED =
+      ReportFieldType._(
+          0, _omitEnumNames ? '' : 'REPORT_FIELD_TYPE_UNSPECIFIED');
+  static const ReportFieldType REPORT_FIELD_TYPE_TEXT =
+      ReportFieldType._(1, _omitEnumNames ? '' : 'REPORT_FIELD_TYPE_TEXT');
+  static const ReportFieldType REPORT_FIELD_TYPE_TEXT_LIST =
+      ReportFieldType._(2, _omitEnumNames ? '' : 'REPORT_FIELD_TYPE_TEXT_LIST');
+  static const ReportFieldType REPORT_FIELD_TYPE_ENUM =
+      ReportFieldType._(3, _omitEnumNames ? '' : 'REPORT_FIELD_TYPE_ENUM');
+  static const ReportFieldType REPORT_FIELD_TYPE_BOOL =
+      ReportFieldType._(4, _omitEnumNames ? '' : 'REPORT_FIELD_TYPE_BOOL');
+
+  /// A known release ("v0.1.16"), or "unknown".
+  static const ReportFieldType REPORT_FIELD_TYPE_VERSION =
+      ReportFieldType._(5, _omitEnumNames ? '' : 'REPORT_FIELD_TYPE_VERSION');
+
+  /// Files from the pipe's inbox, copied into the report.
+  static const ReportFieldType REPORT_FIELD_TYPE_ATTACHMENTS =
+      ReportFieldType._(
+          6, _omitEnumNames ? '' : 'REPORT_FIELD_TYPE_ATTACHMENTS');
+
+  /// A whole number within the field's min and max.
+  static const ReportFieldType REPORT_FIELD_TYPE_NUMBER =
+      ReportFieldType._(7, _omitEnumNames ? '' : 'REPORT_FIELD_TYPE_NUMBER');
+
+  /// A day, "2026-11-22", from 1900-01-01 to 2999-12-31.
+  static const ReportFieldType REPORT_FIELD_TYPE_DATE =
+      ReportFieldType._(8, _omitEnumNames ? '' : 'REPORT_FIELD_TYPE_DATE');
+
+  static const $core.List<ReportFieldType> values = <ReportFieldType>[
+    REPORT_FIELD_TYPE_UNSPECIFIED,
+    REPORT_FIELD_TYPE_TEXT,
+    REPORT_FIELD_TYPE_TEXT_LIST,
+    REPORT_FIELD_TYPE_ENUM,
+    REPORT_FIELD_TYPE_BOOL,
+    REPORT_FIELD_TYPE_VERSION,
+    REPORT_FIELD_TYPE_ATTACHMENTS,
+    REPORT_FIELD_TYPE_NUMBER,
+    REPORT_FIELD_TYPE_DATE,
+  ];
+
+  static final $core.List<ReportFieldType?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 8);
+  static ReportFieldType? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ReportFieldType._(super.value, super.name);
+}
+
+class PipeReportState extends $pb.ProtobufEnum {
+  static const PipeReportState PIPE_REPORT_STATE_UNSPECIFIED =
+      PipeReportState._(
+          0, _omitEnumNames ? '' : 'PIPE_REPORT_STATE_UNSPECIFIED');
+
+  /// Forwarded; its reader hasn't marked it.
+  static const PipeReportState PIPE_REPORT_STATE_NEW =
+      PipeReportState._(1, _omitEnumNames ? '' : 'PIPE_REPORT_STATE_NEW');
+  static const PipeReportState PIPE_REPORT_STATE_ACCEPTED =
+      PipeReportState._(2, _omitEnumNames ? '' : 'PIPE_REPORT_STATE_ACCEPTED');
+
+  /// "Already known as A3".
+  static const PipeReportState PIPE_REPORT_STATE_KNOWN =
+      PipeReportState._(3, _omitEnumNames ? '' : 'PIPE_REPORT_STATE_KNOWN');
+
+  /// "Fixed in v0.1.16".
+  static const PipeReportState PIPE_REPORT_STATE_FIXED =
+      PipeReportState._(4, _omitEnumNames ? '' : 'PIPE_REPORT_STATE_FIXED');
+  static const PipeReportState PIPE_REPORT_STATE_WONT_FIX =
+      PipeReportState._(5, _omitEnumNames ? '' : 'PIPE_REPORT_STATE_WONT_FIX');
+
+  /// "Needs more: steps".
+  static const PipeReportState PIPE_REPORT_STATE_NEEDS_INFO = PipeReportState._(
+      6, _omitEnumNames ? '' : 'PIPE_REPORT_STATE_NEEDS_INFO');
+
+  /// Not forwarded.
+  static const PipeReportState PIPE_REPORT_STATE_REFUSED =
+      PipeReportState._(7, _omitEnumNames ? '' : 'PIPE_REPORT_STATE_REFUSED');
+
+  /// Where it goes changed before it was read: the person sends or discards
+  /// it (DecidePipeReports).
+  static const PipeReportState PIPE_REPORT_STATE_WAITING =
+      PipeReportState._(8, _omitEnumNames ? '' : 'PIPE_REPORT_STATE_WAITING');
+
+  /// The person discarded it while it waited.
+  static const PipeReportState PIPE_REPORT_STATE_DISCARDED =
+      PipeReportState._(9, _omitEnumNames ? '' : 'PIPE_REPORT_STATE_DISCARDED');
+
+  /// Its reader did what it asked.
+  static const PipeReportState PIPE_REPORT_STATE_DONE =
+      PipeReportState._(10, _omitEnumNames ? '' : 'PIPE_REPORT_STATE_DONE');
+
+  /// Its reader won't do what it asked.
+  static const PipeReportState PIPE_REPORT_STATE_DECLINED =
+      PipeReportState._(11, _omitEnumNames ? '' : 'PIPE_REPORT_STATE_DECLINED');
+
+  static const $core.List<PipeReportState> values = <PipeReportState>[
+    PIPE_REPORT_STATE_UNSPECIFIED,
+    PIPE_REPORT_STATE_NEW,
+    PIPE_REPORT_STATE_ACCEPTED,
+    PIPE_REPORT_STATE_KNOWN,
+    PIPE_REPORT_STATE_FIXED,
+    PIPE_REPORT_STATE_WONT_FIX,
+    PIPE_REPORT_STATE_NEEDS_INFO,
+    PIPE_REPORT_STATE_REFUSED,
+    PIPE_REPORT_STATE_WAITING,
+    PIPE_REPORT_STATE_DISCARDED,
+    PIPE_REPORT_STATE_DONE,
+    PIPE_REPORT_STATE_DECLINED,
+  ];
+
+  static final $core.List<PipeReportState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 11);
+  static PipeReportState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const PipeReportState._(super.value, super.name);
 }
 
 const $core.bool _omitEnumNames =

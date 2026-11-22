@@ -388,6 +388,11 @@ void main() {
     await tester.pump();
     await tester.tap(find.text('Connect'));
     await pumpFrames(tester);
+    // A pasted code connects only once confirmed (confirmPairing).
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    expect(app.connections.current, isNull);
+    await tester.tap(find.text('Connect').last);
+    await pumpFrames(tester);
     expect(_labeled('mac-mini'), findsOneWidget);
     expect(app.connections.current?.code, _mini);
     expect(app.backends[_mini]!.target?.code, _mini);

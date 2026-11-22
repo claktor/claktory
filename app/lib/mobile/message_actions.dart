@@ -15,7 +15,8 @@ import 'presentation.dart';
 
 /// What can be done with a message in a conversation on a phone (research
 /// mobile.md §4, "Message actions"): touch and hold it for Reply (where
-/// there's a message box to reply in), Copy and Select text, the way the
+/// there's a message box to reply in), Copy and Select text (and Report…,
+/// for the agent's own reply), the way the
 /// iPhone's chat apps offer them. VoiceOver finds the same among the
 /// message's actions, so nothing needs a hold.
 ///
@@ -32,6 +33,7 @@ class MessageActions extends StatelessWidget {
     required this.text,
     required this.child,
     this.onReply,
+    this.onReport,
     this.markdown = true,
   });
 
@@ -46,6 +48,10 @@ class MessageActions extends StatelessWidget {
   /// Quotes the message into the message box (Drafts.reply); null where
   /// there's no box to reply in.
   final VoidCallback? onReply;
+
+  /// Reports the message to Claktory's team: the agent's own reply only;
+  /// null for anything else.
+  final VoidCallback? onReport;
 
   final Widget child;
 
@@ -66,6 +72,7 @@ class MessageActions extends StatelessWidget {
             copyMessage(_copied(context)),
         const CustomSemanticsAction(label: 'Select text'): () =>
             showMessageText(context, text, markdown: markdown),
+        const CustomSemanticsAction(label: 'Report'): ?onReport,
       },
       child: selecting == null
           ? hold(false, child)
@@ -99,6 +106,7 @@ class MessageActions extends StatelessWidget {
         if (onReply != null) const SheetAction('Reply', _Action.reply),
         const SheetAction('Copy', _Action.copy),
         const SheetAction('Select text', _Action.select),
+        if (onReport != null) const SheetAction('Report…', _Action.report),
       ],
     );
     if (!context.mounted) return;
@@ -109,12 +117,14 @@ class MessageActions extends StatelessWidget {
         await copyMessage(_copied(context));
       case _Action.select:
         await showMessageText(context, text, markdown: markdown);
+      case _Action.report:
+        onReport?.call();
       case null:
     }
   }
 }
 
-enum _Action { reply, copy, select }
+enum _Action { reply, copy, select, report }
 
 /// Whether words are selected in the conversation around a message
 /// ([selecting]): once a selection has started, a touch and hold belongs to

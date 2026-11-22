@@ -1,3 +1,4 @@
+import 'package:factory_app/controls.dart' show ExtensionGlyph;
 import 'package:factory_app/mobile/device.dart'
     show WindowControls, windowControls;
 import 'package:factory_app/panes.dart';
@@ -196,4 +197,24 @@ void main() {
     await tester.pump();
     expect(tester.getRect(find.text('Back to Builder')).left, lessThan(70));
   });
+
+  // The Mac's traffic lights don't zoom with the app: the band keeps their
+  // room in the window's points at any zoom (Abbacchio, at 80% and 75%).
+  for (final zoom in [0.75, 0.8, 1.0, 1.25]) {
+    testWidgets("the band's Back chip keeps clear of the traffic lights at "
+        '${(zoom * 100).round()}%', (tester) async {
+      final harness = await _show(tester, expanded: 'v1');
+      final now = harness.backend.workspace.workspace.deepCopy();
+      now.settings.zoom[harness.backend.zoomKey] = zoom;
+      harness.backend.workspace.apply(now);
+      await settle(tester);
+      final chip = find.textContaining('Back to', findRichText: true);
+      expect(chip, findsOneWidget);
+      // The lights end about 70 points in; the arrow starts after them.
+      final arrow = tester.getTopLeft(
+        find.byWidgetPredicate((w) => w is ExtensionGlyph && w.name == 'Back'),
+      );
+      expect(arrow.dx, greaterThanOrEqualTo(78), reason: 'at $zoom');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+  }
 }

@@ -768,7 +768,7 @@ mod tests {
         let waiting = review.waiting("ana", 1);
         let approval = review.approval(&waiting[0]);
         let grant: String = review.world.db.query_row("SELECT id FROM grants", [], |row| row.get(0)).expect("grant");
-        let Ok(()) = grants::revoke(&mut review.world.db, &device("ana", 1), &grant) else { panic!("revoked") };
+        let Ok(()) = grants::revoke(&mut review.world.db, &device("ana", 1), &grant, review.world.now) else { panic!("revoked") };
         assert!(review.waiting("ana", 1).is_empty());
         let (status, closed) = review.approve(&id, approval.clone(), 1);
         assert_eq!((status, closed["error"].as_str(), closed["state"].as_str()), (410, Some("unsendable"), Some("closed")));

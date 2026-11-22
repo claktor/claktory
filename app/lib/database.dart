@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 
 import 'controls.dart';
 import 'explorer.dart' show shortPath;
+import 'find.dart' show RenderedFindScope;
 import 'identity.dart';
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/lines.dart';
@@ -17,8 +18,14 @@ class DatabaseView extends StatelessWidget {
 
   final Database database;
 
+  /// Searchable with ⌘F, by the words it shows (find.dart).
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => RenderedFindScope(
+    placeholder: 'Search the database',
+    child: _view(context),
+  );
+
+  Widget _view(BuildContext context) {
     final palette = Palette.of(context);
     final tables = [
       for (final table in database.tables)
@@ -29,44 +36,53 @@ class DatabaseView extends StatelessWidget {
         if (table.view) table,
     ];
     return ListView(
+      // All of it laid out, for find.
+      scrollCacheExtent: RenderedFindScope.everything,
       padding: const EdgeInsets.fromLTRB(Space.s, Space.s, Space.s, Space.l),
       children: [
-        if (database.path.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Space.s,
-              Space.xs,
-              Space.s,
-              Space.xs,
+        // Each selectable where the pointer is at any zoom.
+        for (final child in <Widget>[
+          if (database.path.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                Space.s,
+                Space.xs,
+                Space.s,
+                Space.xs,
+              ),
+              child: Text(
+                shortPath(database.path),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: palette.textFaint),
+              ),
             ),
-            child: Text(
-              shortPath(database.path),
-              style: TypeScale.of(context).caption
-                  .copyWith(color: palette.textFaint),
+          if (database.tables.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: Space.s,
+                vertical: Space.s,
+              ),
+              child: Text(
+                'No tables yet. The agent makes them when it has data to keep.',
+                style: TypeScale.of(context).body
+                    .copyWith(color: palette.textFaint),
+              ),
             ),
+          if (tables.isNotEmpty) ...[
+            const _Heading('Tables'),
+            for (final table in tables)
+              _Table(key: ValueKey('t/${table.name}'), table: table),
+          ],
+          if (views.isNotEmpty) ...[
+            const _Heading('Views'),
+            for (final table in views)
+              _Table(key: ValueKey('v/${table.name}'), table: table),
+          ],
+        ])
+          ScrolledSelection(
+            key: child.key == null ? null : ValueKey(child.key),
+            child: child,
           ),
-        if (database.tables.isEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: Space.s,
-              vertical: Space.s,
-            ),
-            child: Text(
-              'No tables yet. The agent makes them when it has data to keep.',
-              style: TypeScale.of(context).body
-                  .copyWith(color: palette.textFaint),
-            ),
-          ),
-        if (tables.isNotEmpty) ...[
-          const _Heading('Tables'),
-          for (final table in tables)
-            _Table(key: ValueKey('t/${table.name}'), table: table),
-        ],
-        if (views.isNotEmpty) ...[
-          const _Heading('Views'),
-          for (final table in views)
-            _Table(key: ValueKey('v/${table.name}'), table: table),
-        ],
       ],
     );
   }

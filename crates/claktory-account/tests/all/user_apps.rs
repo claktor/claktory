@@ -586,3 +586,64 @@ async fn an_account_deleted_while_the_worker_is_down_is_purged_once_it_answers()
     instance.advance(3600);
     assert_eq!(instance.service.retry_app_purges().await, 0, "nothing left to ask");
 }
+
+/// Hostile test 24 (dms-e2ee.md §9, L0): a device another of the person's
+/// devices removed (lost or stolen) still holds their identity key, but
+/// every call it makes to the worker is answered 401 before the worker
+/// hears it, so a device list it signs is never accepted, and its relay
+/// keys drop.
+#[tokio::test]
+async fn test_24_a_removed_device_reaches_the_worker_no_more() {
+    use claktory_dm_crypto::certificate::LeafKind;
+    use claktory_dm_crypto::device_list::{DeviceList, Listed};
+    use claktory_dm_crypto::identity::IdentityKey;
+
+    let dir = tempfile::tempdir().expect("a folder");
+    let socket = worker(dir.path(), uid(dir.path()));
+    let instance = with_apps(Some(socket), uid(dir.path())).await;
+    let phone = Device::new("192.0.2.86");
+    let account = instance.sign_in_device(&phone, "matt@example.com", "Matt's iPhone").await.account_id;
+    let stolen = Device::new("192.0.2.87");
+    instance.sign_in_device(&stolen, "matt@example.com", "Matt's iPad").await;
+    let identity = IdentityKey::generate().expect("a key");
+    let list = |version: u64, devices: &[(&Device, u8)]| {
+        let leaves = devices
+            .iter()
+            .map(|(device, n)| Listed { kind: LeafKind::Device, leaf_id: device.account_key(), signature_key: [*n; 32] })
+            .collect();
+        let signed = DeviceList { account_id: account.clone(), version, created_ms: 1, leaves }.sign(&identity).expect("signed");
+        b64(signed.to_bytes().expect("bytes"))
+    };
+    let first = json!({"identity_key": b64(identity.public().0), "device_list": list(1, &[(&phone, 1), (&stolen, 2)]),
+                       "version": 1, "previous_version": 0});
+    let answer = instance.device_signed(&phone, "PUT", "/v1/apps/dms/me/keys", Some(&first), None).await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+    assert_eq!(instance.device_signed(&stolen, "GET", "/v1/apps/dms/me", None, None).await.status, 200, "signed in, it reaches it");
+    instance.device_signed(&stolen, "POST", "/v1/devices/assertion", Some(&json!({"device_key": "c".repeat(64)})), None).await;
+    assert_eq!(instance.relay_allowlist(None, &instance.relay_bearer).await.json::<Allowlist>().endpoints, vec!["c".repeat(64)]);
+
+    // Lost: the phone removes it.
+    let answer =
+        instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&json!({"account_key": stolen.account_key()})), None).await;
+    assert_eq!(answer.json::<DeviceRemoved>(), DeviceRemoved { removed: true });
+    instance.advance(1);
+
+    // With the identity it holds, it lists itself alone, or rotates to a
+    // key of its own; it reads anything: 401, every time.
+    let itself = json!({"device_list": list(2, &[(&stolen, 2)]), "version": 2, "previous_version": 1});
+    let rotate = json!({"identity_key": b64([9; 32]), "device_list": list(1, &[(&stolen, 2)]), "version": 1});
+    for (method, path, body) in [
+        ("PUT", "/v1/apps/dms/me/keys", Some(itself)),
+        ("POST", "/v1/apps/dms/me/keys/rotate", Some(rotate)),
+        ("GET", "/v1/apps/dms/me", None),
+        ("GET", "/v1/apps/dms/groups", None),
+        ("GET", &format!("/v1/apps/dms/keys/{account}") as &str, None),
+    ] {
+        let answer = instance.device_signed(&stolen, method, path, body.as_ref(), None).await;
+        assert_eq!((answer.status, answer.error().as_str()), (401, "unauthorized"), "{path}");
+    }
+    assert!(instance.relay_allowlist(None, &instance.relay_bearer).await.json::<Allowlist>().endpoints.is_empty());
+    // The account's keys are as the phone left them.
+    let keys = instance.device_signed(&phone, "GET", &format!("/v1/apps/dms/keys/{account}"), None, None).await.value();
+    assert_eq!((keys["version"].as_i64(), keys["device_list"].as_str()), (Some(1), first["device_list"].as_str()), "{keys}");
+}

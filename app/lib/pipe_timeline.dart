@@ -316,6 +316,8 @@ class _LiaisonPipeBodyState extends State<LiaisonPipeBody> {
           other.id: identityOf(other),
       },
       open: (id) => AppScope.scope(context).history.follow(liaison.id, id),
+      // The person's words here went to the liaison, not through the pipe.
+      userNote: 'To ${liaison.name} only',
       child: ListenableBuilder(
         listenable: Listenable.merge([
           transcript,
@@ -345,6 +347,12 @@ class _LiaisonPipeBodyState extends State<LiaisonPipeBody> {
             loadFrom: (seq) => backend.loadFrom(liaison.id, seq),
             extras: _extras,
             hidden: (entry) => hiddenInPipe(entry, _seqs),
+            // Found in with the liaison's conversation (⌘F).
+            pipeFind: (
+              pipeId: pipe.id,
+              keyOf: pipeItemKey,
+              loadFrom: (seq) => backend.loadPipeFrom(pipe.id, seq),
+            ),
           );
         },
       ),

@@ -21,6 +21,7 @@ const settingsSections = {
   'providers',
   'secrets',
   'apps',
+  'pipes',
   'defaults',
   'devices',
   'resources',

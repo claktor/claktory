@@ -6,11 +6,47 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.18
+Released 2026-11-22 22:32 UTC.
+- Fixed: A card asking you to add a secret for an agent no longer stays in Needs you after that agent withdraws its request. It closes and shows how the request ended, and a card already stuck this way clears when Claktory updates.
+- Added: Claktory for iPad, made for iPad rather than as a larger iPhone. Files and pages open in panes beside an agent's conversation, which you can resize and rearrange, full screen, in Split View or in Stage Manager. Use a trackpad and keyboard (hold ⌘ to see the shortcuts), and draw on PDFs with Apple Pencil or your finger: drawings save to your Claktory, so they're on all your iPads, and you can answer an agent's review of a PDF with them.
+- Added: Apps, starting with Charts, which comes with Claktory: live charts of what your agents do, such as their runs, messages and tokens, which you and your agents can change. Install it in Settings → Apps, choose what it may read and which agents can use it, and pin it to the dock at the foot of the window, or to the drawer on a phone. Each app runs walled off and reaches only the sites you approve.
+- Added: A pipe can forward reports to one of your agents: bug reports, task requests, questions and more, or report types you make in Settings → Pipes. The agent you choose reads them and keeps track of them, with no way to run commands or reach anyone; set it in the pipe's settings, or ask Rivet.
+- Added: Search a whole conversation, chat or pipe, not only what's on screen. Press ⌘F, or click the magnifying glass at the top of a conversation; on iPhone and Android, tap Search in the ⋯ menu. ⌘F also searches a file you're viewing, Needs you, Settings and an agent's panels.
+- Added: Answer by voice. Use the mic in an answer, a review reply, a checklist reply or a comment, and what you said fills the field, for you to check before you send.
+- Added: Pipes show whose Claktory is on the other side: when you're both signed in to claktory.com, the pipe shows Verified with their email, and warns you if that ever changes.
+- Added: A pipe's agent has a daily spending limit, $10 unless you change it in the pipe's settings. Past it, messages from the other side wait until midnight, so they can't run up your costs; yours still reach the agent.
+- Added: An agent can ask for a new password for a service, and Claktory makes a strong one: you see how long and how strong it'll be, choose Generate, and it's saved in Settings → Secrets without anyone ever seeing it, the agent included.
+- Added: An agent can ask to import a file from this computer into your secrets, such as a signing key. You see exactly which file it is, choose whether the agent gets it, and Claktory keeps it as it is, with no copying and pasting.
+- Added: You can report an agent's reply to Claktory's team. Right-click it on the Mac, or touch and hold it on your phone, and choose Report. Only that reply is sent, with a note if you add one.
+- Added: Reply on a checklist item right where it is, in the Checklist panel. The agent knows which item you mean.
+- Added: The Android app now updates with every Claktory release. Like the iPhone app, it connects when you scan your Claktory's code or open its link.
+- Changed: Agents ask you one thing at a time, and a longer task comes one step at a time. Do a step and choose Done to see the next; if you can't, choose Can't do this and say what's in the way.
+- Changed: Needs you shows only things you can answer. A checklist item waiting on you shows there once the agent asks you for something about it (an answer, a secret or an approval for Rivet), one entry each, instead of as a row with nothing to answer.
+- Changed: When an agent asks you to review a file, answer right where you're looking at it: type below the file and press Return, or Approve. You're back where you were when you're done.
+- Changed: When an agent shows you a file and your panes are full, it replaces the one that's been open longest instead of asking you to close one. The pane you've expanded to fill the window is never replaced.
+- Changed: In a pipe with its own agent, your messages to that agent are marked "To Kai only", so it's clear they didn't go to the other side.
+- Fixed: A pipe no longer goes unanswered without you knowing. If the agent that answered it is unticked or deleted, the pipe's own agent or another agent limited to the pipe takes over, the pipe says who, and it catches up on what it missed. If none is left, new messages wait for you in Needs you until you choose one in the pipe's settings.
+- Fixed: Pasting a code under Your Claktories, or when setting up a Mac to use another Claktory, now asks "Connect to this Claktory?" and shows its code to check first, as scanning a code and opening a link already did.
+- Fixed: Text in a conversation can't be disguised. Characters that reverse or hide words, such as in a file's name, show as codes like \u{202E} in what an agent's tool calls show; in messages and in what agents ask you to decide, characters that reverse words do too.
+- Fixed: On iPhone and Android, Needs you, new copies and quiet messages show at the top of a conversation instead of over what you're reading. The Latest button also moves aside while you comment on a step, so the comment stays in view above the message box.
+- Fixed: On iPhone, an agent limited to a pipe says so under its name at the top of its conversation, as on the Mac, and one that reads a pipe's reports shows Reads reports there: tap it to see them.
+- Fixed: You can select and copy any words in Needs you and its History, such as a secret request's description, to talk about them with an agent. Copied text keeps its lines, and messages and requests no longer run together.
+- Fixed: Selecting text with the mouse or trackpad lands where you point when Claktory is zoomed in or out, however far you've scrolled, and the view no longer scrolls away while you drag. Copying several lines of a file in Plain keeps its line breaks and blank lines.
+- Fixed: When you type a comment on a video, Space types a space instead of playing or pausing it, and a viewer's own keys never take what you type in a field. Escape in an expanded file's answer leaves the field and keeps your words, instead of closing the file.
+- Fixed: In a PDF on the Mac, Search and ⌘F open the same find bar as a conversation's, over the page. It keeps your typing once matches show, and its arrows, ⌘G and ⇧⌘G go to the next and previous match.
+- Fixed: In a PDF on iPhone, the words you search for are marked in yellow, and the arrows take you to each match in turn, marked apart from the rest. The marks go when you tap Done, instead of staying on the page in red and piling up with each search.
+- Fixed: On a Mac whose sound output is also a microphone, such as a USB headset or a dock, opening a video no longer asks for the microphone. If macOS asks at all, it's when you press Play and the sound starts.
+- Fixed: On a phone with large text, app charts stay readable: side-by-side panels stack, and labels, titles and table headings wrap without overlapping. Apps also stop refreshing while Claktory is in the background.
+- Fixed: At the largest text sizes, the count of what needs you is no longer cut off at the top and bottom.
+- Fixed: Zoomed out, a file you've expanded to fill the window keeps its Back button clear of the window's close, minimize and zoom buttons.
+- Fixed: The Comments extension shows its icon instead of a letter C.
+
 ## v0.1.17
 Released 2026-11-22 12:51 UTC.
 - Fixed: On iPhone, notifications could stop arriving, with nothing to say why, when the iPhone couldn't finish setting them up with your Claktory. Now it tries again each time it connects, and Settings → Notifications says when it couldn't, with Try again.
 - Fixed: Agents' web searches fail far less often. When a search engine shows a CAPTCHA or stops answering, Claktory tries the next of several free engines, such as DuckDuckGo, Bing and Yahoo, and favours the ones that have been answering. When none can answer, the agent learns when to try again.
-- Fixed: On a Mac with an Intel processor, Claktory couldn't connect to your other Claktories or pair devices, because part of it failed to load.
+- Fixed: The Claktory app on a Mac with an Intel processor couldn't connect to your Claktory running on another computer, because part of the app failed to load.
 - Added: Turn on Advanced diagnostics in Settings when something keeps going wrong, such as connecting: Claktory and your devices record how it happens, so your agents can find the cause. It stays on your Claktory, never includes messages, and is kept for 14 days.
 - Changed: A key the vault generates for an agent no longer asks you each time it's used, unless you turn on Ask each time when you approve it.
 - Added: Usage shows how many agents were working at once, above the token chart, so you can see when they were busiest.

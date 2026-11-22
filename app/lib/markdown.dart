@@ -9,9 +9,11 @@ import 'package:markdown/markdown.dart' as md;
 import 'identity.dart';
 import 'mentions.dart';
 import 'protocol/factory/v1/factory.pb.dart' show Agent;
+import 'controls.dart' show ScrolledSelection;
 import 'selection.dart' show CopyShape, Unselectable;
 import 'mobile/metrics.dart';
 import 'mobile/navigation.dart';
+import 'find.dart' show FindHighlight;
 import 'loopback_forward.dart' show openLink;
 import 'transcript.dart' show AgentTints;
 
@@ -124,6 +126,9 @@ class _MarkdownState extends State<Markdown> {
       },
       widget.shortLinks ? (_shortened..clear()) : null,
       mentions,
+      // What a find in the conversation marks, from the next build after
+      // it searches.
+      (span) => FindHighlight.mark(context, span),
     );
     final blocks = renderer.blocks(nodes);
     _links.finish();
@@ -403,22 +408,35 @@ class CodeBlock extends StatelessWidget {
             horizontal: Space.m,
             vertical: Space.s + 2,
           ),
-          child:
-              text ??
-              (links && webAddresses.hasMatch(this.code)
-                  ? _LinkedCode(
-                      this.code,
-                      style: code.copyWith(color: color ?? palette.text),
-                    )
-                  : Text(
-                      this.code,
-                      softWrap: false,
-                      style: code.copyWith(color: color ?? palette.text),
-                    )),
+          // Selected where the pointer is at any zoom, scrolled or not.
+          child: ScrolledSelection(
+            child:
+                text ??
+                (links && webAddresses.hasMatch(this.code)
+                    ? _LinkedCode(
+                        this.code,
+                        style: code.copyWith(color: color ?? palette.text),
+                      )
+                    : _plainCode(
+                        context,
+                        this.code,
+                        code.copyWith(color: color ?? palette.text),
+                      )),
+          ),
         ),
       ),
     );
   }
+}
+
+/// [code] as a plain [Text], or with a find's matches marked (a tool
+/// call's input and output) while there are any.
+Widget _plainCode(BuildContext context, String code, TextStyle style) {
+  final span = TextSpan(text: code, style: style);
+  final marked = FindHighlight.mark(context, span);
+  return identical(marked, span)
+      ? Text(code, softWrap: false, style: style)
+      : Text.rich(marked, softWrap: false);
 }
 
 /// http and https addresses in plain text, up to the first space, quote or
@@ -501,7 +519,11 @@ class _LinkedCodeState extends State<_LinkedCode> {
     if (at < code.length) spans.add(TextSpan(text: code.substring(at)));
     _links.finish();
     return Text.rich(
-      TextSpan(style: widget.style, children: spans),
+      // A find's matches marked, the addresses still opening.
+      FindHighlight.mark(
+        context,
+        TextSpan(style: widget.style, children: spans),
+      ),
       softWrap: false,
     );
   }
@@ -559,7 +581,14 @@ class _Renderer {
     this.link,
     this.shortened,
     this.mentions,
+    this.mark,
   ]);
+
+  /// A find's matches marked in a span ([FindHighlight]); null where
+  /// nothing's found.
+  final TextSpan Function(TextSpan span)? mark;
+
+  TextSpan _marked(TextSpan span) => mark?.call(span) ?? span;
 
   final Palette palette;
   final Color color;
@@ -599,7 +628,7 @@ class _Renderer {
       if (text.isEmpty) return null;
       final blocks = textBlocks;
       return blocks == null
-          ? Text(text, style: _body)
+          ? Text.rich(_marked(TextSpan(text: text, style: _body)))
           : blocks.block(TextSpan(text: text, style: _body), _plainRich);
     }
     if (node is! md.Element) return null;
@@ -628,15 +657,18 @@ class _Renderer {
       case 'pre':
         final code = _trimTrailingNewline(node.textContent);
         final blocks = textBlocks;
+        final span = TextSpan(
+          text: code,
+          style: type.code.copyWith(color: palette.text),
+        );
+        final marked = _marked(span);
         return CodeBlock(
           code,
-          text: blocks?.block(
-            TextSpan(
-              text: code,
-              style: type.code.copyWith(color: palette.text),
-            ),
-            (span) => Text.rich(span, softWrap: false),
-          ),
+          // Found in, it shows its matches (and its addresses don't open
+          // meanwhile).
+          text: blocks == null && marked != span
+              ? Text.rich(marked, softWrap: false)
+              : blocks?.block(span, (span) => Text.rich(span, softWrap: false)),
         );
       case 'ul':
       case 'ol':
@@ -659,6 +691,7 @@ class _Renderer {
                 link,
                 shortened,
                 mentions,
+                mark,
               ).blocks(node.children ?? const []),
             ),
           ),
@@ -789,12 +822,15 @@ class _Renderer {
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         // Copied, a row's cells are tab-separated, rows on lines of their
-        // own, as a spreadsheet takes them.
-        child: CopyShape(
-          cells: true,
-          child: Table(
-            defaultColumnWidth: const IntrinsicColumnWidth(),
-            children: rows,
+        // own, as a spreadsheet takes them. Selected where the pointer is
+        // at any zoom, scrolled sideways or not.
+        child: ScrolledSelection(
+          child: CopyShape(
+            cells: true,
+            child: Table(
+              defaultColumnWidth: const IntrinsicColumnWidth(),
+              children: rows,
+            ),
           ),
         ),
       ),
@@ -806,7 +842,9 @@ class _Renderer {
     _inline(nodes ?? const [], style, spans);
     final span = TextSpan(style: style, children: spans);
     final blocks = textBlocks;
-    return blocks == null ? Text.rich(span) : blocks.block(span, _plainRich);
+    return blocks == null
+        ? Text.rich(_marked(span))
+        : blocks.block(span, _plainRich);
   }
 
   void _inline(List<md.Node> nodes, TextStyle style, List<InlineSpan> out) {
@@ -943,9 +981,10 @@ class _Plain {
 
   final Iterable<Agent> agents;
 
-  String blocks(List<md.Node> nodes, [String separator = '\n\n']) => [
-    for (final node in nodes) ?_block(node),
-  ].where((part) => part.isNotEmpty).join(separator);
+  String blocks(List<md.Node> nodes, [String separator = '\n\n']) =>
+      [for (final node in nodes) ?_block(node)]
+          .where((part) => part.isNotEmpty)
+          .join(separator);
 
   String? _block(md.Node node) {
     if (node is md.Text) return node.text.trim();

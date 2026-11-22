@@ -192,16 +192,18 @@ Words (Trish's OK):
   - "Some drawings on this file can't be read."
   - "This PDF has 2,400 pages, more than the 2,000 Claktory can open here." When the count is unknown: "This PDF is too long to open here."
 - A link in the PDF: "Open example.com?" or "Email june@example.com?", with "Not now" and "Open". Nothing opens by itself. While a finger draws (Draw with finger on) or with a Pencil, a tap draws, as in Apple's Markup (Prosciutto's call): Draw with finger is in the tool bar itself, lit while it's on, in place of More, so the person sees why a link doesn't open and turns it off.
-- The review:
-  - The phone's words: "Theo asks you to review this", Dismiss and Approve.
-  - The shared comment control (DecisionComment; Matt's rule: approve or dismiss, always with an optional comment): "Add a comment", the placeholder "A comment for Theo, if you like" and the note "Theo gets it with your answer." The comment goes with either answer.
+- The review, answered in the pane (Matt's request; the same model and words on the Mac and iPhone, Trish's words):
+  - "Theo asks you to review this", then the ask's title, the question.
+  - The answer field, always open: placeholder "Your answer to Theo", VoiceOver hint "Return sends it to Theo.", the note "Theo gets it with your answer." Return (a hardware keyboard's, or the on-screen keyboard's Send) answers with what's typed; on an empty field it does nothing, so a stray Return never approves. Shift+Return starts a line.
+  - Dismiss (quiet) and the main button: "Approve" while the field is empty, "Send" once something is typed, and always "Send", faint until there are words, when the agent wants a written answer. Whatever is typed goes with either, and so do the drawings.
+  - Answered, the pane showing the file closes (SetLayout): an expanded pane gives the window back and the conversation has the focus again, so the person is back where they were.
   - "Your drawing on 1 page goes with your answer." / "Your drawings on 3 pages go with your answer."
   - "Sending your drawing…" / "Sending your drawings… 2 of 3"
-  - "Couldn't send your drawings, so your answer wasn't sent. Try again."
+  - "Couldn't send your answer. Try again." (the words and the pane stay); "Couldn't send your drawings, so your answer wasn't sent. Try again."
 
-### Handwriting into the comment (phase 4)
+### Handwriting into the answer (phase 4)
 
-On an iPad that reads handwriting (iPadOS 27+, as `ready` says), the review bar offers to turn what's drawn into the comment, under "Add a comment": native reads the lasso's strokes, or every drawn page, and the text goes after what the comment has, on a new line, opened to change, sent only with an answer. An answer the ink changed under (native's `stale`, or a stroke or lasso change while it read) is dropped without a word. Below 27 nothing shows. Only where there's a comment to fill: with no review waiting, a lasso selection offers nothing. Words (Trish): "Turn handwriting into a comment", "Turn selected handwriting into a comment", "Reading your handwriting…", "No handwriting to read.", "Couldn't read your handwriting. Try again."
+On an iPad that reads handwriting (iPadOS 27+, as `ready` says), the review bar offers to turn what's drawn into the answer, under its field: native reads the lasso's strokes, or every drawn page, and the text goes after what the comment has, on a new line, opened to change, sent only with an answer. An answer the ink changed under (native's `stale`, or a stroke or lasso change while it read) is dropped without a word. Below 27 nothing shows. Only where there's a comment to fill: with no review waiting, a lasso selection offers nothing. Words (Trish): "Turn handwriting into your answer", "Turn selected handwriting into your answer", "Reading your handwriting…", "No handwriting to read.", "Couldn't read your handwriting. Try again."
 
 ### A PDF that changes while open
 

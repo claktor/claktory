@@ -22,6 +22,7 @@ mod encoding;
 mod explorer;
 mod extensions;
 pub mod factory;
+mod find;
 mod forward;
 pub mod home;
 mod idle;

@@ -12,7 +12,7 @@ import 'connections.dart';
 import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
-import 'links.dart' show pairingFingerprint;
+import 'links.dart' show confirmPairing, pairingFingerprint;
 import 'mobile/device.dart' show deviceCapabilities;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/metrics.dart' show TypeScale;
@@ -24,6 +24,7 @@ import 'tunnel_client.dart';
 import 'settings_view.dart';
 import 'usage.dart';
 import 'tell_rivet.dart';
+import 'visible_codes.dart' show proseCodes;
 import 'your_claktories.dart'
     show YourClaktories, deadlineDay, showConfirmSignIn;
 
@@ -379,7 +380,9 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
           if (waiting != null || _deciding || _error != null) {
             final device = waiting ?? PendingDevice(name: _name.text.trim());
             return FormFrame(
-              title: 'Allow ${device.name} to connect?',
+              // The name the device gave itself: what reorders text shows
+              // by its code (proseCodes, Fugo).
+              title: 'Allow ${proseCodes(device.name)} to connect?',
               body: device.number.isEmpty
                   ? null
                   : 'Check that its screen shows ${device.number}.',
@@ -876,6 +879,26 @@ class _FactoryChooserState extends State<FactoryChooser> {
     AppScope.switchFactory(context, target);
   }
 
+  /// A pasted code connects only once the person says so, as every way a
+  /// code comes in does (confirmPairing, Fugo).
+  Future<void> _connectPasted(RemoteFactory target) async {
+    // One question at a time: a second click while it asks does nothing
+    // (Abbacchio).
+    if (_asking) return;
+    _asking = true;
+    final bool yes;
+    try {
+      yes = await confirmPairing(context, target);
+    } finally {
+      _asking = false;
+    }
+    if (!yes || !mounted) return;
+    _show(target);
+  }
+
+  /// Whether [confirmPairing] is asking about a pasted code.
+  var _asking = false;
+
   @override
   Widget build(BuildContext context) {
     final connections = AppScope.scope(context).connections;
@@ -895,7 +918,9 @@ class _FactoryChooserState extends State<FactoryChooser> {
               ? "That isn't a Claktory code."
               : null,
           submitLabel: 'Connect',
-          onSubmit: target == null ? null : () => _show(target),
+          onSubmit: target == null
+              ? null
+              : () => unawaited(_connectPasted(target)),
           onCancel: widget.close,
           fields: [
             if (hasLocalBackend)
@@ -945,7 +970,7 @@ class _FactoryChooserState extends State<FactoryChooser> {
                 textCapitalization: TextCapitalization.none,
                 autofocus: true,
                 onSubmitted: (_) {
-                  if (target != null) _show(target);
+                  if (target != null) unawaited(_connectPasted(target));
                 },
               ),
             ),

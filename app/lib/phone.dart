@@ -29,12 +29,13 @@ import 'mobile/extension_list.dart';
 import 'mobile/header.dart';
 import 'mobile/metrics.dart' show PhoneType, TypeScale, withoutInsets;
 import 'mobile/navigation.dart';
+import 'mobile/page_find.dart';
 import 'mobile/platform_policy.dart';
 import 'mobile/review_bar.dart';
 import 'mobile/presentation.dart'
     show PhoneSheetHost, SheetOverlay, presentSheet;
 import 'pairing.dart';
-import 'panes.dart' show AppPane, appKind, paneGlyph, paneTitle;
+import 'panes.dart' show AppPane, appKind, pageOfKind, paneGlyph, paneTitle;
 import 'pipes.dart' show PipeView, selectedPipe;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scanner.dart';
@@ -106,6 +107,9 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
   /// What's pushed over the conversation, bottom first.
   final _stack = <_Entry>[];
 
+  /// The conversation's find: its ⋯ list offers Search when it can.
+  final _rootFind = GlobalKey<PhoneFindHostState>();
+
   PhoneDrawerHostState? _host;
   var _attached = false;
 
@@ -113,6 +117,9 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
   /// (screens.dart): it comes to the front.
   Listenable? _opened;
   ValueNotifier<AppPage>? _page;
+
+  /// The page [_showViewer] showed for a page pane on an iPad, if any.
+  AppPage? _pageOfPane;
 
   /// The drawer opened by itself once, for a Claktory with nothing chosen.
   var _offered = false;
@@ -148,6 +155,14 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
     if (_attached) _host?.detach(this);
     _opened?.removeListener(_toFront);
     _page?.removeListener(_pageChanged);
+    // An iPad window widening: a page shown for a pane of the layout
+    // ([_showViewer]) goes back to its pane, in the workbench.
+    final page = _page, ofPane = _pageOfPane;
+    if (page != null && ofPane != null && page.value == ofPane) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (page.value == ofPane) page.value = AppPage.agent;
+      });
+    }
     _waitingPaneTimer?.cancel();
     for (final entry in _stack) {
       entry.done?.complete();
@@ -155,16 +170,16 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
     super.dispose();
   }
 
-  /// After the frame when told during a build; else now.
+  /// After this frame, with one asked for. Told from builds: a build can
+  /// run outside a frame too (the app's first, at launch, or one the
+  /// framework runs between frames, while the phase reads idle), so it's
+  /// never run straight away.
   void _soon(VoidCallback action) {
-    if (SchedulerBinding.instance.schedulerPhase ==
-        SchedulerPhase.persistentCallbacks) {
-      SchedulerBinding.instance.addPostFrameCallback((_) {
+    SchedulerBinding.instance
+      ..addPostFrameCallback((_) {
         if (mounted) action();
-      });
-    } else {
-      action();
-    }
+      })
+      ..ensureVisualUpdate();
   }
 
   void _changed() => _host?.pagesChanged();
@@ -207,7 +222,8 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
     _stack.add(
       _Entry(
         id: id,
-        overKeyboard: page == AppPage.settings,
+        // Their fields (a reply, an answer) stay above the keyboard.
+        overKeyboard: page == AppPage.settings || page == AppPage.inbox,
         builder: (context) => switch (page) {
           AppPage.settings => const SettingsView(),
           AppPage.marketplace => const MarketplaceView(),
@@ -434,6 +450,19 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
       return agent?.id == agentId ? agent : null;
     }
 
+    // A page in the layout (Needs you beside the conversation on a Mac or
+    // a wide iPad) is that page here, as the drawer opens it: Back goes to
+    // the conversation and leaves the pane in the layout.
+    final shown = agent();
+    final pane = shown == null ? null : find(layoutOf(shown), paneId);
+    final page = pane == null ? null : pageOfKind(pane.leaf.kind);
+    if (page != null) {
+      _page?.value = page;
+      // On an iPad, widening the window again shows it in its pane.
+      if (_workbenchFocus != null) _pageOfPane = page;
+      return;
+    }
+
     setState(() {
       _stack.removeWhere((entry) => entry.id.startsWith('viewer:'));
       _stack.add(
@@ -527,6 +556,14 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
       builder: (context, close) => PhoneExtensionList(
         agent: agent,
         chosen: close,
+        // The conversation can be searched: Search first.
+        onSearch: switch (_rootFind.currentState?.session) {
+          final session? => () {
+            close();
+            session.open();
+          },
+          null => null,
+        },
         viewed: (id) {
           close();
           _showViewer(agent.id, id);
@@ -644,6 +681,7 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
                       onMenu: () => _host?.openDrawer(),
                       onBack: _back,
                       onMore: _listExtensions,
+                      find: _rootFind,
                     ),
                   ),
                   for (final entry in _stack)
@@ -706,7 +744,11 @@ class _Root extends StatelessWidget {
     required this.onMenu,
     required this.onBack,
     required this.onMore,
+    required this.find,
   });
+
+  /// The conversation's find, for Search in its ⋯ list.
+  final GlobalKey<PhoneFindHostState> find;
 
   final VoidCallback onMenu;
   final void Function(Agent agent) onBack;
@@ -726,6 +768,7 @@ class _Root extends StatelessWidget {
         if (chat != null) {
           return _Screen(
             overKeyboard: true,
+            find: find,
             child: ChatView(
               key: ValueKey('chat/${chat.id}'),
               chat: chat,
@@ -737,6 +780,7 @@ class _Root extends StatelessWidget {
         if (pipe != null) {
           return _Screen(
             overKeyboard: true,
+            find: find,
             child: PipeView(
               key: ValueKey('pipe/${pipe.id}'),
               pipe: pipe,
@@ -767,6 +811,7 @@ class _Root extends StatelessWidget {
         final back = scope.history.back;
         return _Screen(
           overKeyboard: true,
+          find: find,
           child: AnimatedContainer(
             duration: Motion.base,
             color: conversationTint(agent),
@@ -791,17 +836,27 @@ class _Root extends StatelessWidget {
 /// indicator (or with [overKeyboard], the keyboard, whichever is higher),
 /// and beside the notch on its side. It owns those insets: what's inside
 /// reads none (mobile/navigation.dart).
+///
+/// A page whose pane can be searched shows the find bar at its foot while
+/// its find is open ([PhoneFindHost]).
 class _Screen extends StatelessWidget {
-  const _Screen({required this.child, this.overKeyboard = false});
+  const _Screen({required this.child, this.overKeyboard = false, this.find});
 
   final Widget child;
   final bool overKeyboard;
+
+  /// The conversation's own, so its ⋯ list can offer Search.
+  final GlobalKey<PhoneFindHostState>? find;
 
   @override
   Widget build(BuildContext context) {
     final safe = MediaQuery.paddingOf(context);
     final keyboard = MediaQuery.viewInsetsOf(context).bottom;
-    final inner = withoutInsets(context, keyboard: overKeyboard, child: child);
+    final inner = withoutInsets(
+      context,
+      keyboard: overKeyboard,
+      child: PhoneFindHost(key: find, child: child),
+    );
     return ColoredBox(
       color: Palette.of(context).canvas,
       child: Padding(
@@ -937,8 +992,8 @@ class _ViewerScreen extends StatelessWidget {
   /// its own review bar. Null for a project's file.
   final ViewNode? node;
 
-  /// The agent whose pane it is: a review it asks of the file shows at
-  /// its foot ([PhoneReviewBar]). Null for a project's file.
+  /// The agent whose pane it is: a review it asks of the file is answered
+  /// at its foot ([PhoneReviewBar]). Null for a project's file.
   final String? agentId;
   final Widget glyph;
   final VoidCallback onBack;
@@ -967,12 +1022,11 @@ class _ViewerScreen extends StatelessWidget {
               ? AppPane(leaf: leaf)
               : viewerBody(context, leaf);
           if (agentId == null || leaf.path.isEmpty) return body;
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(child: body),
-              PhoneReviewBar(agentId: agentId, path: leaf.path),
-            ],
+          return PhoneReviewBar(
+            agentId: agentId,
+            path: leaf.path,
+            kind: leaf.kind,
+            child: body,
           );
         },
       ),

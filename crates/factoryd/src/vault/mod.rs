@@ -21,6 +21,7 @@ pub(crate) mod dm;
 pub(crate) mod env;
 pub(crate) mod generate;
 pub mod handoff;
+pub(crate) mod import;
 pub mod memory;
 pub(crate) mod recovery;
 pub(crate) mod requests;
@@ -205,6 +206,11 @@ ALTER TABLE requests ADD COLUMN collecting INTEGER NOT NULL DEFAULT 0;
 -- than free. Secrets from before were sealed without it: 0, as they are.
 ALTER TABLE secrets ADD COLUMN ask INTEGER NOT NULL DEFAULT 0;
 ",
+    "
+-- A file's bytes that aren't text (an imported .p12), sealed as standard
+-- base64; a command's file gets the bytes themselves.
+ALTER TABLE variables ADD COLUMN binary INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 /// How long a command's approval stays armed between the gate that passed
@@ -260,6 +266,8 @@ pub(crate) struct Value {
     pub variable: String,
     pub value: Zeroizing<String>,
     pub file: bool,
+    /// A file's bytes that aren't text, as standard base64 in `value`.
+    pub binary: bool,
 }
 
 impl fmt::Debug for Value {
@@ -270,7 +278,7 @@ impl fmt::Debug for Value {
 
 impl Value {
     pub(crate) fn from_entry(entry: &v1::SecretEntry) -> Value {
-        Value { variable: entry.variable.trim().to_owned(), value: Zeroizing::new(entry.value.clone()), file: entry.file }
+        Value { variable: entry.variable.trim().to_owned(), value: Zeroizing::new(entry.value.clone()), file: entry.file, binary: false }
     }
 }
 
@@ -417,7 +425,9 @@ fn check_values(values: &[Value]) -> Result<(), VaultError> {
         if !seen.insert(value.variable.as_str()) {
             return Err(VaultError::Invalid(format!("{} is there twice.", value.variable)));
         }
-        if value.value.len() > MAX_VALUE {
+        // A binary file's base64 is a third longer than the file.
+        let size = if value.binary { value.value.len() / 4 * 3 } else { value.value.len() };
+        if size > MAX_VALUE {
             return Err(VaultError::Invalid(format!("{}'s value is over 1 MB.", value.variable)));
         }
     }
@@ -873,9 +883,10 @@ impl Vault {
         db.execute("DELETE FROM variables WHERE secret = ?1", [id])?;
         for (position, value) in (0i64..).zip(values) {
             let sealed = crypto::seal(&dek, value.value.as_bytes(), &aad(&["value", vault_id, id, &version, &value.variable]));
+            let hint = if value.binary { String::new() } else { hint(&value.value) };
             db.execute(
-                "INSERT INTO variables (secret, position, name, file, hint, short, sealed_value) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![id, position, value.variable, value.file, hint(&value.value), value.value.len() < SHORT, sealed],
+                "INSERT INTO variables (secret, position, name, file, hint, short, sealed_value, binary) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![id, position, value.variable, value.file, hint, value.value.len() < SHORT, sealed, value.binary],
             )?;
         }
         Ok(sealed_dek)
@@ -921,10 +932,20 @@ impl Vault {
         let transaction = db.transaction()?;
         let (id, before) = Self::secret_id(&transaction, id)?;
         Self::name_taken(&transaction, &name, &id)?;
-        if values.is_some() && !Self::kind_of(&transaction, &id)?.is_empty() {
-            return Err(VaultError::Invalid(format!(
-                "{before} is made from a connected service, so its values can't be edited. Rename it, or connect the service again."
-            )));
+        if values.is_some() {
+            match Self::kind_of(&transaction, &id)?.as_str() {
+                "" => {}
+                import::KIND_IMPORT => {
+                    return Err(VaultError::Invalid(format!(
+                        "{before} was imported from a file, so its values can't be edited. Rename it, or import the file again."
+                    )));
+                }
+                _ => {
+                    return Err(VaultError::Invalid(format!(
+                        "{before} is made from a connected service, so its values can't be edited. Rename it, or connect the service again."
+                    )));
+                }
+            }
         }
         let now = now_ms();
         transaction.execute(
@@ -1065,13 +1086,13 @@ impl Vault {
             let resealed = crypto::seal(vmk, dek.as_slice(), &dek_aad(vault_id, id, &version, true));
             db.execute("UPDATE secrets SET sealed_dek = ?2 WHERE id = ?1 AND sealed_dek = ?3", params![id, resealed, sealed_dek])?;
         }
-        let mut statement = db.prepare("SELECT name, file, sealed_value FROM variables WHERE secret = ?1 ORDER BY position")?;
-        let rows = statement.query_map([id], crate::store::row3::<String, bool, Vec<u8>>)?.collect::<Result<Vec<_>, _>>()?;
+        let mut statement = db.prepare("SELECT name, file, sealed_value, binary FROM variables WHERE secret = ?1 ORDER BY position")?;
+        let rows = statement.query_map([id], crate::store::row4::<String, bool, Vec<u8>, bool>)?.collect::<Result<Vec<_>, _>>()?;
         let mut values = Vec::with_capacity(rows.len());
-        for (variable, file, sealed) in rows {
+        for (variable, file, sealed, binary) in rows {
             let bytes = crypto::open(&dek, &sealed, &aad(&["value", vault_id, id, &version, &variable])).ok_or_else(corrupt)?;
             let value = String::from_utf8(bytes.to_vec()).map_err(|_| corrupt())?;
-            values.push(Value { variable, value: Zeroizing::new(value), file });
+            values.push(Value { variable, value: Zeroizing::new(value), file, binary });
         }
         Ok(values)
     }
@@ -1378,6 +1399,7 @@ impl Vault {
                         variable,
                         value: value.value.clone(),
                         file: value.file,
+                        binary: value.binary,
                     });
                 }
             }
@@ -1479,6 +1501,7 @@ impl Vault {
                         value: value.value,
                         file: value.file,
                         public: false,
+                        binary: value.binary,
                     });
                 }
             }
@@ -1541,7 +1564,7 @@ mod tests {
     }
 
     fn value(variable: &str, value: &str) -> Value {
-        Value { variable: variable.to_owned(), value: Zeroizing::new(value.to_owned()), file: false }
+        Value { variable: variable.to_owned(), value: Zeroizing::new(value.to_owned()), file: false, binary: false }
     }
 
     fn unlock(vault: &Vault, given: &str) -> bool {

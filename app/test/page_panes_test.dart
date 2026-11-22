@@ -1,6 +1,6 @@
 import 'package:factory_app/changelog.dart';
 import 'package:factory_app/controls.dart';
-import 'package:factory_app/layout.dart' show leaves;
+import 'package:factory_app/layout.dart' show leaves, sharesOf;
 import 'package:factory_app/map.dart';
 import 'package:factory_app/marketplace.dart';
 import 'package:factory_app/panes.dart';
@@ -13,7 +13,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
-import 'panes_test.dart' show beside, glyphButton, snapshot;
+import 'panes_test.dart' show beside, glyphButton, leaf, row, snapshot, split;
 
 /// Settings, the Marketplace and What's new open as panes beside the
 /// selected agent's conversation on a Mac, as the backend keeps them in its
@@ -155,15 +155,17 @@ void main() {
     expect(active('Map'), isFalse);
   });
 
-  testWidgets('squeezed to 280, a page keeps 320 and scrolls sideways, its '
-      'cut edge fading', (tester) async {
-    // Settings as a 280pt pane, as Abbacchio's B6 pass had it.
+  testWidgets('squeezed under 320, a page keeps 320 and scrolls sideways, '
+      'its cut edge fading', (tester) async {
+    // Settings as a pane narrower than a page's least, as Abbacchio's B6
+    // pass had it: a window too narrow for it and the conversation's least
+    // both (with room for both, it gets its least).
     final harness = Harness(snapshot(layout: beside('settings', '')));
     harness.backend.appliesLayouts = true;
-    await harness.show(tester, size: const Size(848, 900));
+    await harness.show(tester, size: const Size(790, 900));
     await settle(tester);
     final pane = find.byType(PageSideways);
-    expect(tester.getSize(pane).width, closeTo(280, 4));
+    expect(tester.getSize(pane).width, lessThan(pagePaneMinWidth - 40));
     expect(tester.getSize(find.byType(SettingsView)).width, pagePaneMinWidth);
     PageSidewaysState fades() => tester.state<PageSidewaysState>(pane);
     // More to the right: that edge fades, the left doesn't.
@@ -188,5 +190,60 @@ void main() {
     await settle(tester);
     expect(fades().fadesRight, isFalse);
     expect(fades().fadesLeft, isTrue);
+  });
+
+  // Abbacchio's row 512: a wide file beside the conversation, then Needs
+  // you and Settings: their room comes from the file, and the conversation
+  // keeps a width it can be read at.
+  test('a page opened beside the conversation takes its room from the '
+      'widest pane', () {
+    final root = split(
+      's1',
+      row,
+      [leaf('chat', 'chat'), leaf('v1', 'text', '/w/p5.md')],
+      [0.25, 0.75],
+    );
+    final opened = withPage(root, AppPage.inbox);
+    final shares = sharesOf(opened.split);
+    expect(opened.split.children.map((each) => each.leaf.kind), [
+      'chat',
+      'inbox',
+      'text',
+    ]);
+    expect(shares[0], closeTo(0.25, 0.001));
+    expect(shares[1], closeTo(0.375, 0.001));
+    expect(shares[2], closeTo(0.375, 0.001));
+  });
+
+  testWidgets('squeezed by shares, every pane keeps its least while the '
+      'window has room for them all', (tester) async {
+    final harness = Harness(
+      snapshot(
+        layout: split(
+          's1',
+          row,
+          [
+            leaf('chat', 'chat'),
+            leaf('n1', 'inbox'),
+            leaf('g1', 'settings'),
+            leaf('v1', 'text', '/w/main.rs'),
+          ],
+          [0.04, 0.08, 0.08, 0.8],
+        ),
+      ),
+    );
+    harness.backend.appliesLayouts = true;
+    await harness.show(tester, size: const Size(1600, 900));
+    await settle(tester);
+    expect(tester.takeException(), isNull);
+    final widths = {
+      for (final element in find.byType(Pane).evaluate())
+        (element.widget as Pane).node.leaf.kind: tester
+            .getSize(find.byWidget(element.widget))
+            .width,
+    };
+    expect(widths['chat'], greaterThanOrEqualTo(paneMinWidth - 1));
+    expect(widths['inbox'], greaterThanOrEqualTo(pagePaneMinWidth - 1));
+    expect(widths['settings'], greaterThanOrEqualTo(pagePaneMinWidth - 1));
   });
 }

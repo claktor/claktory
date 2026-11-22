@@ -9,7 +9,7 @@
 // AppKitView on a Mac), one channel per view "claktory/ink/<id>" with
 // attach, goToPage, search; ready, pageChanged, linkTapped, error. Mac
 // only: findRequested {forward}, when ⌘F (⌘G, ⇧⌘G) is pressed with the
-// page focused, for Dart's find field. The app-wide "claktory/ink" channel
+// page focused, for the app's find bar. The app-wide "claktory/ink" channel
 // is the render cache (PaperCache.swift).
 
 import Cocoa
@@ -200,7 +200,9 @@ final class PaperPane: NSView, PDFViewDelegate {
       let n = args["page_1based"] as? Int ?? 1
       if let page = pdf.document?.page(at: n - 1) {
         if let region = PaperCore.region(args["region"]) {
-          pdf.go(to: PaperCore.pageRect(region, on: page), on: page)
+          let rect = PaperCore.pageRect(region, on: page)
+          if args["match"] as? Bool == true { markMatch(rect, on: page) }
+          pdf.go(to: rect, on: page)
         } else {
           pdf.go(to: page)
         }
@@ -226,6 +228,16 @@ final class PaperPane: NSView, PDFViewDelegate {
     send("pageChanged", ["page_1based": currentPage, "page_count": doc.pageCount])
   }
 
+  /// The find's match gone to, selected as Preview does, so it stands
+  /// apart from the others' yellow.
+  private var matchShown = false
+
+  private func markMatch(_ rect: CGRect, on page: PDFPage) {
+    let match = pdf.highlightedSelections?.first { $0.bounds(for: page).intersects(rect) }
+    matchShown = match != nil
+    pdf.setCurrentSelection(match, animate: false)
+  }
+
   /// Finds the text in a copy of the document of its own, off the main
   /// thread, then highlights the matches; an older search's answer says
   /// it was overtaken.
@@ -234,6 +246,10 @@ final class PaperPane: NSView, PDFViewDelegate {
     let generation = searches
     let query = (args["query"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     let limit = max(1, min(args["max_results"] as? Int ?? 200, 1000))
+    if matchShown {
+      matchShown = false
+      pdf.clearSelection()
+    }
     guard !query.isEmpty, let url else {
       pdf.highlightedSelections = nil
       return result(["query": query, "matches": [], "truncated": false])

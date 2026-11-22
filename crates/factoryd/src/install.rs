@@ -253,6 +253,15 @@ fn put_in(setup: &Setup, found: &Found) -> Result<Report, Report> {
             crate::update::write_executable(&installed, &bytes).map_err(copying)?;
         }
     }
+    // Claktory's own apps (`apps/*.clapp`), for Settings → Apps to offer
+    // (`apps::bundled`): data, so in the bundle's Resources (codesign
+    // refuses data in Helpers); updates bring theirs in their release
+    // folders.
+    let apps = setup.helpers.parent().map_or_else(|| setup.helpers.join("apps"), |contents| contents.join("Resources/apps"));
+    let installed_apps = bin.join("apps");
+    if apps.is_dir() && !installed_apps.exists() {
+        copy_apps(&apps, &installed_apps).map_err(copying)?;
+    }
     let supervisor = launch_agent::supervisors(&setup.home)[0].clone();
     if !supervisor.is_file() {
         eprintln!("copying the supervisor");
@@ -307,6 +316,22 @@ fn verify(codesign: &Path, piece: &Path, deep: bool) -> Result<(), String> {
     } else {
         Err(format!("{} isn't signed as it should be: {}", piece.display(), String::from_utf8_lossy(&output.stderr).trim()))
     }
+}
+
+/// Copies the bundle's `apps` folder (its .clapp files) into place whole.
+fn copy_apps(from: &Path, to: &Path) -> std::io::Result<()> {
+    let staged = to.with_extension("new");
+    let _ = std::fs::remove_dir_all(&staged);
+    std::fs::create_dir_all(&staged)?;
+    for entry in std::fs::read_dir(from)? {
+        let path = entry?.path();
+        if path.is_file()
+            && let Some(name) = path.file_name()
+        {
+            std::fs::copy(&path, staged.join(name))?;
+        }
+    }
+    std::fs::rename(&staged, to)
 }
 
 /// Copies the supervisor's app into place without the download's quarantine
@@ -535,6 +560,9 @@ mod tests {
         executable(&helpers.join("factoryd"), "the bundle's backend");
         executable(&helpers.join("claktory-apps"), "the bundle's host");
         executable(&helpers.join(SUPERVISOR_APP).join(SUPERVISOR_PROGRAM), "the bundle's supervisor");
+        let resources = dir.join("Claktory.app/Contents/Resources");
+        std::fs::create_dir_all(resources.join("apps")).expect("apps");
+        std::fs::write(resources.join("apps/charts.clapp"), "the bundle's Charts").expect("Charts");
         helpers
     }
 
@@ -593,6 +621,7 @@ mod tests {
         let bin = setup.home.root().join("bin");
         assert_eq!(read(&bin.join("factoryd")), "the bundle's backend");
         assert_eq!(read(&bin.join("claktory-apps")), "the bundle's host");
+        assert_eq!(read(&bin.join("apps/charts.clapp")), "the bundle's Charts");
         let supervisor = launch_agent::supervisors(&setup.home)[0].clone();
         assert_eq!(read(&supervisor), "the bundle's supervisor");
         assert!(!flag(&supervisor), "no quarantine on the installed supervisor");

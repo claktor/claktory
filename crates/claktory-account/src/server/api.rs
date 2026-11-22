@@ -2,7 +2,7 @@
 
 use hyper::StatusCode;
 
-use super::{ApiError, Call, Reply, Service, db, mail};
+use super::{ApiError, Call, Reply, Service, db, mail, review};
 use crate::protocol::{self, *};
 
 /// Sign-ins an IP may start a day.
@@ -34,12 +34,32 @@ pub(super) fn new_code() -> String {
     }
 }
 
-/// Records a sign-in and emails its code; the request's id.
+/// The limit's key for the review account's wrong codes by its email; by
+/// the address they come from, it's `review-wrong-ip:<ip>`. 5 an hour each.
+fn review_wrong(email: &str) -> String {
+    db::email_key("review-wrong", email)
+}
+
+/// Records a sign-in and emails its code; the request's id. The review
+/// account's is verified by its fixed code instead, and nothing is sent;
+/// refused for the rest of the hour once its email had 5 wrong codes.
 pub(super) async fn start(service: &Service, mut request: db::Request, code: &str) -> Result<String, ApiError> {
+    let review = service.review(&request.email);
+    if review.is_some() {
+        let by_email = review_wrong(&request.email);
+        if let Some(wait) = db::spent(&service.db(), &[(&by_email, 3600, review::WRONG_PER_HOUR)], service.now())? {
+            tracing::warn!("review account: a sign-in ({}) refused, locked for the hour", request.kind);
+            return Err(ApiError::rate_limited(wait));
+        }
+    }
     request.id = b64(&random_32()[..16]);
-    request.code_hash = db::code_hash(code, &request.id);
+    request.code_hash = db::code_hash(review.map_or(code, |review| review.digest()), &request.id);
     request.expires = service.now() + CODE_LIFETIME;
     db::insert_request(&service.db(), &request)?;
+    if review.is_some() {
+        tracing::info!("review account: a sign-in ({}) started", request.kind);
+        return Ok(request.id);
+    }
     let mail = match (request.kind.as_str(), &request.name) {
         ("device", Some(device)) => mail::device_code_mail(&service.config.mail_domain, &request.email, code, device),
         _ => mail::code_mail(&service.config.mail_domain, &request.email, code),
@@ -51,8 +71,10 @@ pub(super) async fn start(service: &Service, mut request: db::Request, code: &st
     Ok(request.id)
 }
 
-/// The request a code is right for, of `kind`; counts a wrong one.
-pub(super) fn check_code(service: &Service, request_id: &str, code: &str, kind: &str) -> Result<db::Request, ApiError> {
+/// The request a code is right for, of `kind`; counts a wrong one. The
+/// review account's is its fixed code, while neither its email nor the
+/// address `ip` had 5 wrong ones this hour: locked, every code is wrong.
+pub(super) fn check_code(service: &Service, request_id: &str, code: &str, kind: &str, ip: &str) -> Result<db::Request, ApiError> {
     let conn = service.db();
     let expired = || ApiError::new(StatusCode::GONE, "code_expired", "This code has expired. Ask for a new one.");
     let Some(request) = db::request(&conn, request_id)?.filter(|request| request.kind == kind) else { return Err(expired()) };
@@ -60,7 +82,22 @@ pub(super) fn check_code(service: &Service, request_id: &str, code: &str, kind: 
         db::delete_request(&conn, &request.id)?;
         return Err(expired());
     }
-    if db::code_hash(code.trim(), &request.id) != request.code_hash {
+    let review = service.review(&request.email);
+    let (by_email, by_ip) = (review_wrong(&request.email), format!("review-wrong-ip:{ip}"));
+    let wrong = [(by_email.as_str(), 3600, review::WRONG_PER_HOUR), (by_ip.as_str(), 3600, review::WRONG_PER_HOUR)];
+    let right = match review {
+        None => db::code_hash(code.trim(), &request.id) == request.code_hash,
+        Some(review) => {
+            db::spent(&conn, &wrong, service.now())?.is_none()
+                && db::code_hash(&review.digest_of(code.trim()), &request.id) == request.code_hash
+        }
+    };
+    if !right {
+        if review.is_some() {
+            // Counted while there's room; once full, it stays full.
+            let _ = db::take(&conn, &wrong, service.now())?;
+            tracing::warn!("review account: a wrong code ({kind})");
+        }
         db::count_attempt(&conn, &request.id)?;
         let left = CODE_TRIES - request.attempts - 1;
         if left == 0 {
@@ -69,6 +106,12 @@ pub(super) fn check_code(service: &Service, request_id: &str, code: &str, kind: 
         let mut error = ApiError::new(StatusCode::BAD_REQUEST, "wrong_code", "That code isn't right.");
         error.body.attempts_left = Some(left);
         return Err(error);
+    }
+    if review.is_some() {
+        // The audit line: the route, and roughly where from (the log's
+        // time is its own); never the email or the IP.
+        let place = service.locate(ip).map(|place| [place.region, place.country].into_iter().flatten().collect::<Vec<_>>().join(", "));
+        tracing::info!("review sign-in: {kind}, from {}", place.filter(|place| !place.is_empty()).as_deref().unwrap_or("an unknown place"));
     }
     Ok(request)
 }
@@ -118,7 +161,7 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
     let eph_pub = unb64_32(&body.eph_pub)
         .filter(|key| seal_share(&[0; 32], key, "check", 0).is_some())
         .ok_or_else(|| ApiError::invalid("eph_pub isn't a key to seal to."))?;
-    let request = check_code(service, &body.request_id, &body.code, "claktory")?;
+    let request = check_code(service, &body.request_id, &body.code, "claktory", &call.ip)?;
     let proven = holds_key(service, call, request.claktory_id.as_deref().unwrap_or_default())?;
     let token = b64(*random_32());
     let now = service.now();

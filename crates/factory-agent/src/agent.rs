@@ -107,6 +107,7 @@ fn fallback_note(text: String) -> UserMessage {
         client_id: String::new(),
         attachments: Vec::new(),
         voice: None,
+        checklist_item: None,
     }
 }
 

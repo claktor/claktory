@@ -108,6 +108,9 @@ String cellText(Object? cell) => switch (cell) {
   _ => '$cell',
 };
 
+/// The most a chart's axes' words grow with the text size.
+const maxAxisTextScale = 1.5;
+
 /// [value] for an axis: "980", "12K", "1.2M", "0.25".
 String shortNumber(double value) {
   final sign = value < 0 ? '−' : '';
@@ -170,8 +173,8 @@ String axisTime(DateTime time, Duration span) =>
     : '${time.day} ${_months[time.month - 1]}';
 
 /// The step between a time axis's labels for [span]: a round one (5
-/// minutes, an hour, a day, a week…) giving at most about five labels.
-Duration timeStep(Duration span) {
+/// minutes, an hour, a day, a week…) giving at most about [most] labels.
+Duration timeStep(Duration span, {int most = 5}) {
   const steps = [
     Duration(minutes: 1),
     Duration(minutes: 5),
@@ -190,9 +193,9 @@ Duration timeStep(Duration span) {
     Duration(days: 365),
   ];
   for (final step in steps) {
-    if (span.inMilliseconds / step.inMilliseconds <= 5) return step;
+    if (span.inMilliseconds / step.inMilliseconds <= most) return step;
   }
-  return Duration(milliseconds: (span.inMilliseconds / 5).ceil());
+  return Duration(milliseconds: (span.inMilliseconds / most).ceil());
 }
 
 /// A time in a readout: "22 Nov", or "22 Nov 14:00" when it has a time of
@@ -416,7 +419,7 @@ class _AppChartState extends State<AppChart> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             spacing: Space.xs,
-            children: [_heading(context, widget.label), note(text)],
+            children: [_heading(context, widget.label, lines: 2), note(text)],
           );
     if (table == null || built == null) {
       return labelled("Can't show this chart.");
@@ -453,17 +456,20 @@ class _AppChartState extends State<AppChart> {
         mainAxisSize: MainAxisSize.min,
         spacing: Space.xs,
         children: [
-          // The label, or what the pointer is on: one line, so nothing
-          // moves as it changes.
+          // The label, on two lines at most (large text), or in its
+          // place what the pointer is on, in as many lines as the label
+          // takes, so nothing moves as it changes.
+          ExcludeSemantics(child: _labelOrReadout(context)),
           ExcludeSemantics(
-            child: _heading(
-              context,
-              _readout ?? widget.label,
-              readout: _readout != null,
+            // Its axes' words grow with the text only so far: past that
+            // they'd break up in their room and cover the label.
+            child: SizedBox(
+              height: widget.height,
+              child: MediaQuery.withClampedTextScaling(
+                maxScaleFactor: maxAxisTextScale,
+                child: drawn.chart,
+              ),
             ),
-          ),
-          ExcludeSemantics(
-            child: SizedBox(height: widget.height, child: drawn.chart),
           ),
           if (widget.kind != 'pie' && series.length > 1)
             ExcludeSemantics(
@@ -480,17 +486,56 @@ class _AppChartState extends State<AppChart> {
     );
   }
 
-  Widget _heading(BuildContext context, String text, {bool readout = false}) {
+  Widget _labelOrReadout(BuildContext context) {
+    final readout = _readout;
+    final label = _heading(context, widget.label, lines: 2);
+    if (readout == null) return label;
+    if (widget.label.isEmpty) return _heading(context, readout, readout: true);
+    return Stack(
+      children: [
+        Visibility.maintain(visible: false, child: label),
+        Positioned.fill(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final style = _headingStyle(context, readout: true);
+              final line = TextPainter(
+                text: TextSpan(text: 'A', style: style),
+                textScaler: MediaQuery.textScalerOf(context),
+                textDirection: Directionality.of(context),
+              )..layout();
+              final lines = math.max(
+                1,
+                (constraints.maxHeight / line.height + 0.01).floor(),
+              );
+              line.dispose();
+              return _heading(context, readout, readout: true, lines: lines);
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  TextStyle _headingStyle(BuildContext context, {bool readout = false}) {
     final palette = Palette.of(context);
+    return TypeScale.of(context).caption.copyWith(
+      color: readout ? palette.textMuted : palette.textFaint,
+      fontWeight: readout ? null : FontWeight.w500,
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
+  }
+
+  Widget _heading(
+    BuildContext context,
+    String text, {
+    bool readout = false,
+    int lines = 1,
+  }) {
     return Text(
       text,
-      maxLines: 1,
+      maxLines: lines,
       overflow: TextOverflow.ellipsis,
-      style: TypeScale.of(context).caption.copyWith(
-        color: readout ? palette.textMuted : palette.textFaint,
-        fontWeight: readout ? null : FontWeight.w500,
-        fontFeatures: const [FontFeature.tabularFigures()],
-      ),
+      style: _headingStyle(context, readout: readout),
     );
   }
 
@@ -516,6 +561,14 @@ class _AppChartState extends State<AppChart> {
       ? fullNumber(value)
       : '${fullNumber(value)} ${widget.unit}';
 
+  /// How much bigger than at the standard size the axes' words are drawn
+  /// (the text size, up to [maxAxisTextScale]), for the room they're given.
+  double _axisScale(BuildContext context) =>
+      MediaQuery.textScalerOf(context)
+          .clamp(maxScaleFactor: maxAxisTextScale)
+          .scale(11) /
+      11;
+
   TextStyle _axis(BuildContext context) =>
       TypeScale.of(context).caption.copyWith(
         color: Palette.of(context).textFaint,
@@ -538,11 +591,18 @@ class _AppChartState extends State<AppChart> {
   AxisTitles _valueAxis(BuildContext context, double step) => AxisTitles(
     sideTitles: SideTitles(
       showTitles: true,
-      reservedSize: 40,
+      reservedSize: 40 * _axisScale(context),
       interval: step,
       getTitlesWidget: (value, meta) => SideTitleWidget(
         meta: meta,
-        child: Text(shortNumber(value), style: _axis(context)),
+        // The top one inside the chart, never over its label.
+        fitInside: SideTitleFitInsideData.fromTitleMeta(meta),
+        child: Text(
+          shortNumber(value),
+          maxLines: 1,
+          softWrap: false,
+          style: _axis(context),
+        ),
       ),
     ),
   );
@@ -594,105 +654,115 @@ class _AppChartState extends State<AppChart> {
       last += 3600000;
     }
     final span = Duration(milliseconds: (last - first).round());
-    final step = timeStep(span).inMilliseconds.toDouble();
     final range = _range([
       for (final spots in lines)
         for (final spot in spots) spot.y,
     ]);
     String timeOf(double x) =>
         readoutTime(DateTime.fromMillisecondsSinceEpoch(x.round()));
-    final chart = LineChart(
-      duration: Motion.base,
-      LineChartData(
-        minX: first,
-        maxX: last,
-        minY: range.min,
-        maxY: range.max,
-        gridData: _grid(palette, range.step),
-        borderData: _border(palette),
-        titlesData: FlTitlesData(
-          topTitles: _none,
-          rightTitles: _none,
-          leftTitles: _valueAxis(context, range.step),
-          bottomTitles: AxisTitles(
-            sideTitles: SideTitles(
-              showTitles: true,
-              reservedSize: 22,
-              interval: step,
-              getTitlesWidget: (value, meta) {
-                // fl_chart puts labels on the step's multiples, and adds
-                // both ends: those only when they fall on one too.
-                final off = value % step;
-                final onStep = off < step * 0.01 || off > step * 0.99;
-                if ((value == meta.min || value == meta.max) && !onStep) {
-                  return const SizedBox.shrink();
-                }
-                return SideTitleWidget(
-                  meta: meta,
-                  fitInside: SideTitleFitInsideData.fromTitleMeta(meta),
-                  child: Text(
-                    axisTime(
-                      DateTime.fromMillisecondsSinceEpoch(value.round()),
-                      span,
-                    ),
-                    style: _axis(context),
+    // Time labels where there's room for them, at their size: about one
+    // per 64px of the standard size, at most five.
+    final chart = LayoutBuilder(
+      builder: (context, constraints) {
+        final room = constraints.maxWidth - 40 * _axisScale(context);
+        final most = (room / (64 * _axisScale(context))).floor().clamp(1, 5);
+        final step = timeStep(span, most: most).inMilliseconds.toDouble();
+        return LineChart(
+          duration: Motion.base,
+          LineChartData(
+            minX: first,
+            maxX: last,
+            minY: range.min,
+            maxY: range.max,
+            gridData: _grid(palette, range.step),
+            borderData: _border(palette),
+            titlesData: FlTitlesData(
+              topTitles: _none,
+              rightTitles: _none,
+              leftTitles: _valueAxis(context, range.step),
+              bottomTitles: AxisTitles(
+                sideTitles: SideTitles(
+                  showTitles: true,
+                  reservedSize: 22 * _axisScale(context),
+                  interval: step,
+                  getTitlesWidget: (value, meta) {
+                    // fl_chart puts labels on the step's multiples, and adds
+                    // both ends: those only when they fall on one too.
+                    final off = value % step;
+                    final onStep = off < step * 0.01 || off > step * 0.99;
+                    if ((value == meta.min || value == meta.max) && !onStep) {
+                      return const SizedBox.shrink();
+                    }
+                    return SideTitleWidget(
+                      meta: meta,
+                      fitInside: SideTitleFitInsideData.fromTitleMeta(meta),
+                      child: Text(
+                        axisTime(
+                          DateTime.fromMillisecondsSinceEpoch(value.round()),
+                          span,
+                        ),
+                        maxLines: 1,
+                        softWrap: false,
+                        style: _axis(context),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+            lineBarsData: [
+              for (var i = 0; i < lines.length; i++)
+                LineChartBarData(
+                  spots: lines[i],
+                  color: colors[i],
+                  barWidth: 1.5,
+                  isStrokeCapRound: true,
+                  dotData: FlDotData(show: lines[i].length == 1),
+                  belowBarData: BarAreaData(
+                    show: lines.length == 1,
+                    color: colors[i].withValues(alpha: 0.08),
                   ),
-                );
+                ),
+            ],
+            lineTouchData: LineTouchData(
+              touchSpotThreshold: double.infinity,
+              touchTooltipData: LineTouchTooltipData(
+                getTooltipItems: (spots) => [for (final _ in spots) null],
+              ),
+              getTouchedSpotIndicator: (bar, indexes) => [
+                for (final _ in indexes)
+                  TouchedSpotIndicatorData(
+                    FlLine(color: palette.textFaint, strokeWidth: 1),
+                    FlDotData(
+                      getDotPainter: (spot, percent, bar, index) =>
+                          FlDotCirclePainter(
+                            radius: 3,
+                            color: bar.color ?? palette.signal,
+                            strokeWidth: 1.5,
+                            strokeColor: palette.canvas,
+                          ),
+                    ),
+                  ),
+              ],
+              touchCallback: (event, response) {
+                final spots = response?.lineBarSpots;
+                if (spots == null || spots.isEmpty) {
+                  return _point(event, null, null);
+                }
+                final named = series.length > 1;
+                final readout = [
+                  timeOf(spots.first.x),
+                  for (final spot in spots)
+                    named
+                        ? '${_seriesName(context, series[spot.barIndex].name)} ${_value(spot.y)}'
+                        : _value(spot.y),
+                ].join(' · ');
+                _point(event, readout, null);
               },
             ),
           ),
-        ),
-        lineBarsData: [
-          for (var i = 0; i < lines.length; i++)
-            LineChartBarData(
-              spots: lines[i],
-              color: colors[i],
-              barWidth: 1.5,
-              isStrokeCapRound: true,
-              dotData: FlDotData(show: lines[i].length == 1),
-              belowBarData: BarAreaData(
-                show: lines.length == 1,
-                color: colors[i].withValues(alpha: 0.08),
-              ),
-            ),
-        ],
-        lineTouchData: LineTouchData(
-          touchSpotThreshold: double.infinity,
-          touchTooltipData: LineTouchTooltipData(
-            getTooltipItems: (spots) => [for (final _ in spots) null],
-          ),
-          getTouchedSpotIndicator: (bar, indexes) => [
-            for (final _ in indexes)
-              TouchedSpotIndicatorData(
-                FlLine(color: palette.textFaint, strokeWidth: 1),
-                FlDotData(
-                  getDotPainter: (spot, percent, bar, index) =>
-                      FlDotCirclePainter(
-                        radius: 3,
-                        color: bar.color ?? palette.signal,
-                        strokeWidth: 1.5,
-                        strokeColor: palette.canvas,
-                      ),
-                ),
-              ),
-          ],
-          touchCallback: (event, response) {
-            final spots = response?.lineBarSpots;
-            if (spots == null || spots.isEmpty) {
-              return _point(event, null, null);
-            }
-            final named = series.length > 1;
-            final readout = [
-              timeOf(spots.first.x),
-              for (final spot in spots)
-                named
-                    ? '${_seriesName(context, series[spot.barIndex].name)} ${_value(spot.y)}'
-                    : _value(spot.y),
-            ].join(' · ');
-            _point(event, readout, null);
-          },
-        ),
-      ),
+        );
+      },
     );
     final from = readoutTime(
       DateTime.fromMillisecondsSinceEpoch(first.round()),
@@ -760,12 +830,14 @@ class _AppChartState extends State<AppChart> {
     return _Drawn(
       LayoutBuilder(
         builder: (context, constraints) {
+          final scale = _axisScale(context);
           final room =
-              math.max(1.0, constraints.maxWidth - 40) / categories.length;
+              math.max(1.0, constraints.maxWidth - 40 * scale) /
+              categories.length;
           final rods = stacked ? 1 : series.length;
           final width = (room * 0.7 / rods).clamp(2.0, 24.0);
           // Labels where there's room for them: every one, or every few.
-          final every = math.max(1, (56 / room).ceil());
+          final every = math.max(1, (56 * scale / room).ceil());
           return BarChart(
             duration: Motion.base,
             BarChartData(
@@ -781,7 +853,7 @@ class _AppChartState extends State<AppChart> {
                 bottomTitles: AxisTitles(
                   sideTitles: SideTitles(
                     showTitles: true,
-                    reservedSize: 22,
+                    reservedSize: 22 * _axisScale(context),
                     getTitlesWidget: (value, meta) {
                       final i = value.round();
                       if (i < 0 || i >= categories.length || i % every != 0) {
@@ -1084,11 +1156,16 @@ class _AppChartState extends State<AppChart> {
           bottomTitles: AxisTitles(
             sideTitles: SideTitles(
               showTitles: true,
-              reservedSize: 22,
+              reservedSize: 22 * _axisScale(context),
               interval: xs.step,
               getTitlesWidget: (value, meta) => SideTitleWidget(
                 meta: meta,
-                child: Text(shortNumber(value), style: _axis(context)),
+                child: Text(
+                  shortNumber(value),
+                  maxLines: 1,
+                  softWrap: false,
+                  style: _axis(context),
+                ),
               ),
             ),
           ),
@@ -1368,6 +1445,52 @@ class AppTableView extends StatelessWidget {
       ),
     );
     final tabular = const [FontFeature.tabularFigures()];
+    final headStyle = type.caption.copyWith(
+      color: palette.textFaint,
+      fontWeight: FontWeight.w500,
+    );
+    TextStyle bodyStyle(String format) => type.body.copyWith(
+      color: palette.text,
+      fontFeatures: format == 'text' ? null : tabular,
+    );
+    final cells = [
+      for (final row in rows)
+        [
+          for (final column in shown)
+            column.index < row.length
+                ? cell(row[column.index], column.format)
+                : '',
+        ],
+    ];
+    // Each column as wide as its widest cell, or its heading's longest
+    // word: a long heading wraps between words (at large text, say)
+    // rather than widening the table past its place.
+    final scaler = MediaQuery.textScalerOf(context);
+    final direction = Directionality.of(context);
+    double measured(String text, TextStyle style) {
+      final painter = TextPainter(
+        text: TextSpan(text: text, style: style),
+        textScaler: scaler,
+        textDirection: direction,
+        maxLines: 1,
+      )..layout();
+      final width = painter.width;
+      painter.dispose();
+      return width;
+    }
+
+    final widths = <int, TableColumnWidth>{
+      for (var c = 0; c < shown.length; c++)
+        c: FixedColumnWidth(
+          (c == 0 ? 0 : Space.m) +
+              [
+                for (final word in shown[c].title.split(RegExp(r'\s+')))
+                  measured(word, headStyle),
+                for (final row in cells)
+                  measured(row[c], bodyStyle(shown[c].format)),
+              ].fold(0.0, math.max).ceilToDouble(),
+        ),
+    };
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -1376,7 +1499,7 @@ class AppTableView extends StatelessWidget {
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Table(
-            defaultColumnWidth: const IntrinsicColumnWidth(),
+            columnWidths: widths,
             defaultVerticalAlignment: TableCellVerticalAlignment.middle,
             border: TableBorder(
               horizontalInside: BorderSide(color: palette.hairline),
@@ -1390,10 +1513,10 @@ class AppTableView extends StatelessWidget {
                       child: padded(
                         Text(
                           shown[c].title,
-                          style: type.caption.copyWith(
-                            color: palette.textFaint,
-                            fontWeight: FontWeight.w500,
-                          ),
+                          textAlign: shown[c].format == 'number'
+                              ? TextAlign.end
+                              : TextAlign.start,
+                          style: headStyle,
                         ),
                         c,
                         end: shown[c].format == 'number',
@@ -1401,22 +1524,12 @@ class AppTableView extends StatelessWidget {
                     ),
                 ],
               ),
-              for (final row in rows)
+              for (final row in cells)
                 TableRow(
                   children: [
                     for (var c = 0; c < shown.length; c++)
                       padded(
-                        Text(
-                          shown[c].index < row.length
-                              ? cell(row[shown[c].index], shown[c].format)
-                              : '',
-                          style: type.body.copyWith(
-                            color: palette.text,
-                            fontFeatures: shown[c].format == 'text'
-                                ? null
-                                : tabular,
-                          ),
-                        ),
+                        Text(row[c], style: bodyStyle(shown[c].format)),
                         c,
                         end: shown[c].format == 'number',
                       ),

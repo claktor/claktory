@@ -107,14 +107,15 @@ pub(crate) fn deliverable(queue: &[Queued]) -> Vec<bool> {
         .collect()
 }
 
-/// Wakes the worker that transcribes.
+/// Wakes the worker that transcribes; and the dictations it does first.
 pub(crate) struct Voices {
     work: Arc<tokio::sync::Notify>,
+    pub(crate) dictations: crate::speech::dictation::Dictations,
 }
 
 impl Voices {
     pub(crate) fn new() -> Voices {
-        Voices { work: Arc::new(tokio::sync::Notify::new()) }
+        Voices { work: Arc::new(tokio::sync::Notify::new()), dictations: crate::speech::dictation::Dictations::default() }
     }
 
     /// There may be something to transcribe.
@@ -208,6 +209,7 @@ pub(crate) fn discard(factory: &Arc<Factory>, agent: &str, id: i64) -> Result<()
 /// The model came or went: voice messages waiting for it are transcribed
 /// once it's ready, and fail when it can't be had.
 pub(crate) fn model_changed(factory: &Arc<Factory>) {
+    crate::speech::dictation::model_changed(factory);
     let (code, why) = match factory.speech.state() {
         ModelState::Ready => {
             factory.voices.kick();
@@ -268,11 +270,39 @@ fn next_job(factory: &Factory) -> Option<Job> {
 /// How long `claktory-speech` keeps the model in memory with nothing to do.
 const KEEP: Duration = Duration::from_secs(5 * 60);
 
-/// Transcribes voice messages as they come, one at a time.
+/// A dictation to transcribe, once the model is ready: they go first.
+fn next_dictation(factory: &Factory) -> Option<(crate::speech::dictation::Job, PathBuf, PathBuf)> {
+    if !factory.voices.dictations.any() {
+        return None;
+    }
+    let model = factory.speech.ready_path()?;
+    let program = factory.speech.program()?;
+    Some((factory.voices.dictations.next()?, program, model))
+}
+
+/// Transcribes dictations and voice messages as they come, one at a time.
 pub(crate) async fn work(factory: Weak<Factory>) {
-    let Some(work) = factory.upgrade().map(|factory| factory.voices.work.clone()) else { return };
+    let Some(work) = factory.upgrade().map(|factory| {
+        crate::speech::dictation::clear(&factory.home);
+        factory.voices.work.clone()
+    }) else {
+        return;
+    };
     let mut sidecar: Option<Sidecar> = None;
     loop {
+        let dictation = match factory.upgrade() {
+            Some(factory) => next_dictation(&factory),
+            None => return,
+        };
+        if let Some((dictation, program, model)) = dictation {
+            let outcome =
+                transcribe(&mut sidecar, &program, &model, &dictation.recording, |_| {}, Some(crate::speech::dictation::MAX_MS)).await;
+            match outcome {
+                Ok(heard) => dictation.answer(heard.text, "", heard.duration_ms),
+                Err(failure) => dictation.answer(String::new(), crate::speech::dictation::error_for(&failure.code), failure.duration_ms),
+            }
+            continue;
+        }
         let job = match factory.upgrade() {
             Some(factory) => next_job(&factory),
             None => return,
@@ -285,7 +315,12 @@ pub(crate) async fn work(factory: Weak<Factory>) {
             }
             continue;
         };
-        let outcome = transcribe(&mut sidecar, &job, &factory).await;
+        let decoded = |duration_ms| {
+            if let Some(factory) = factory.upgrade() {
+                read(&factory, &job, duration_ms);
+            }
+        };
+        let outcome = transcribe(&mut sidecar, &job.program, &job.model, &job.recording, decoded, None).await;
         let Some(factory) = factory.upgrade() else { return };
         finish(&factory, &job, outcome);
     }
@@ -305,11 +340,13 @@ struct Failure {
     error: String,
     /// The program stopped answering, or ended: it's started afresh.
     dead: bool,
+    /// How long the recording is, when it was read.
+    duration_ms: u64,
 }
 
 impl Failure {
     fn new(code: &str, error: impl Into<String>) -> Failure {
-        Failure { code: code.to_owned(), error: error.into(), dead: false }
+        Failure { code: code.to_owned(), error: error.into(), dead: false, duration_ms: 0 }
     }
 
     fn dead(code: &str, error: impl Into<String>) -> Failure {
@@ -317,17 +354,22 @@ impl Failure {
     }
 }
 
-async fn transcribe(sidecar: &mut Option<Sidecar>, job: &Job, factory: &Weak<Factory>) -> Result<Heard, Failure> {
+/// Transcribes `recording`, starting `claktory-speech` if it isn't running;
+/// `decoded` hears its length once it's read, and one over `max_ms` stops
+/// there (too_long).
+async fn transcribe(
+    sidecar: &mut Option<Sidecar>,
+    program: &Path,
+    model: &Path,
+    recording: &Path,
+    decoded: impl FnMut(u64),
+    max_ms: Option<u64>,
+) -> Result<Heard, Failure> {
     if sidecar.is_none() {
-        *sidecar = Some(Sidecar::start(&job.program, &job.model).await?);
+        *sidecar = Some(Sidecar::start(program, model).await?);
     }
     let running = sidecar.as_mut().expect("started");
-    let decoded = |duration_ms| {
-        if let Some(factory) = factory.upgrade() {
-            read(&factory, job, duration_ms);
-        }
-    };
-    let result = running.transcribe(&job.recording, decoded).await;
+    let result = running.transcribe(recording, decoded, max_ms).await;
     if result.as_ref().is_err_and(|failure| failure.dead) {
         *sidecar = None;
     }
@@ -417,7 +459,9 @@ impl Sidecar {
     }
 
     /// Transcribes a recording; `decoded` hears its length once it's read.
-    async fn transcribe(&mut self, recording: &Path, mut decoded: impl FnMut(u64)) -> Result<Heard, Failure> {
+    /// One longer than `max_ms` isn't transcribed: the program is stopped
+    /// (too_long), since it can't be told to drop what it's doing.
+    async fn transcribe(&mut self, recording: &Path, mut decoded: impl FnMut(u64), max_ms: Option<u64>) -> Result<Heard, Failure> {
         let id = self.next;
         self.next += 1;
         let request = serde_json::json!({"id": id, "transcribe": recording});
@@ -438,6 +482,10 @@ impl Sidecar {
             }
             if answer["decoded"] == true {
                 let duration_ms = answer["duration_ms"].as_u64().unwrap_or_default();
+                if max_ms.is_some_and(|max_ms| duration_ms > max_ms) {
+                    let failure = Failure::dead("too_long", "The recording is too long.");
+                    return Err(Failure { duration_ms, ..failure });
+                }
                 decoded(duration_ms);
                 deadline = tokio::time::Instant::now() + SPARE + Duration::from_millis(duration_ms);
             } else if let Some(text) = answer["text"].as_str() {

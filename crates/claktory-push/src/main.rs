@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use claktory_push::server::{self, Config, Service};
-use claktory_push::{Gateways, apns, fcm};
+use claktory_push::{Gateways, Transport, apns, fcm, local};
 
 const USAGE: &str = "\
 claktory-push: Claktory's push relay
@@ -23,6 +23,9 @@ Options:
   --apns-topic BUNDLE       the app's bundle id (com.claktory.app)
   --fcm-service-account FILE
                             the Firebase project's service account (JSON)
+  --local FILE              for tests on this computer: no keys, and nothing
+                            goes to Apple or Google; each push is logged and
+                            appended to FILE as a JSON line instead
 
 The keys are read once, at start. Under systemd, give them as credentials
 (LoadCredentialEncrypted=apns.p8:… and fcm.json:…): with no --apns-key or
@@ -104,29 +107,21 @@ fn read(path: &Path) -> Result<String, String> {
 fn serve(args: &[String]) -> Result<(), String> {
     let options = Options(args.to_vec());
     options.check(
-        &["--db", "--listen", "--apns-key", "--apns-key-id", "--apns-team", "--apns-topic", "--fcm-service-account"],
+        &["--db", "--listen", "--apns-key", "--apns-key-id", "--apns-team", "--apns-topic", "--fcm-service-account", "--local"],
         &["--trust-proxy"],
     )?;
     let db = options.value("--db")?.ok_or(format!("--db is needed\n\n{USAGE}"))?;
     let listen = options.value("--listen")?.unwrap_or_else(|| "127.0.0.1:8090".to_owned());
-    let apns = match key_file(&options, "--apns-key", "apns.p8")? {
-        Some(path) => {
-            let key_id = options.value("--apns-key-id")?.ok_or("--apns-key-id is needed with an APNs key")?;
-            let team = options.value("--apns-team")?.ok_or("--apns-team is needed with an APNs key")?;
-            let topic = options.value("--apns-topic")?.unwrap_or_else(|| "com.claktory.app".to_owned());
-            Some(apns::Apns::new(&read(&path)?, &key_id, &team, &topic)?)
+    let transport: Arc<dyn Transport> = match options.value("--local")? {
+        Some(file) => {
+            if ["--apns-key", "--apns-key-id", "--apns-team", "--apns-topic", "--fcm-service-account"].iter().any(|key| options.flag(key)) {
+                return Err("--local sends nothing to Apple or Google, so it takes no keys".to_owned());
+            }
+            tracing::info!(%listen, held = %file, "claktory-push starting, local: pushes are held in a file, never sent");
+            Arc::new(local::Local::new(Path::new(&file)))
         }
-        None => None,
+        None => gateways(&options, &listen)?,
     };
-    let fcm = match key_file(&options, "--fcm-service-account", "fcm.json")? {
-        Some(path) => Some(fcm::Fcm::new(&read(&path)?)?),
-        None => None,
-    };
-    if apns.is_none() && fcm.is_none() {
-        tracing::warn!("no APNs key and no Firebase service account: every push will be refused");
-    }
-    tracing::info!(apns = apns.is_some(), fcm = fcm.is_some(), %listen, "claktory-push starting");
-    let transport = Arc::new(Gateways { apns, fcm });
     let config = Config { trust_proxy: options.flag("--trust-proxy"), ..Config::default() };
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     runtime.block_on(async move {
@@ -138,4 +133,26 @@ fn serve(args: &[String]) -> Result<(), String> {
             _ = tokio::signal::ctrl_c() => Ok(()),
         }
     })
+}
+
+/// Apple's and Google's gateways, with the keys given.
+fn gateways(options: &Options, listen: &str) -> Result<Arc<dyn Transport>, String> {
+    let apns = match key_file(options, "--apns-key", "apns.p8")? {
+        Some(path) => {
+            let key_id = options.value("--apns-key-id")?.ok_or("--apns-key-id is needed with an APNs key")?;
+            let team = options.value("--apns-team")?.ok_or("--apns-team is needed with an APNs key")?;
+            let topic = options.value("--apns-topic")?.unwrap_or_else(|| "com.claktory.app".to_owned());
+            Some(apns::Apns::new(&read(&path)?, &key_id, &team, &topic)?)
+        }
+        None => None,
+    };
+    let fcm = match key_file(options, "--fcm-service-account", "fcm.json")? {
+        Some(path) => Some(fcm::Fcm::new(&read(&path)?)?),
+        None => None,
+    };
+    if apns.is_none() && fcm.is_none() {
+        tracing::warn!("no APNs key and no Firebase service account: every push will be refused");
+    }
+    tracing::info!(apns = apns.is_some(), fcm = fcm.is_some(), %listen, "claktory-push starting");
+    Ok(Arc::new(Gateways { apns, fcm }))
 }

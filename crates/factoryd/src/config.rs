@@ -42,6 +42,10 @@ const SHIPPED_RIVET_PROMPTS: &[&str] = &[
     "d36d20a71ddcb3df22e8bc47fcd49b3e3e663af41041aef7167b6514924507c8",
     // Approved secret requests (#223).
     "7d84d2855daa56e7a63dae5da9571ee5dd12213651d1541dd0cc773eb47857ae",
+    // Files are imported, never copied into the vault by hand.
+    "19152eda56fc949cadf3208f1ca9e1e723423ed2bc2a191737884ab84512808f",
+    // One thing per card; a procedure as steps.
+    "e8d474fd24e29bf2ef91b6aa0926e5fe60bd43a770e1b04f5b46b84a747d2090",
 ];
 /// Rivet is interactive, so it gets medium effort, the Opus 5.5 default.
 const RIVET_EFFORT: &str = "medium";

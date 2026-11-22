@@ -217,7 +217,7 @@ pub(crate) fn layout_changed(factory: &Factory, agent: &str) {
     let changed = (|| -> rusqlite::Result<Vec<String>> {
         let records: Vec<(String, String, String)> = {
             let mut statement = db.prepare("SELECT device, focused_leaf, places FROM presentations WHERE agent = ?1")?;
-            statement.query_map([agent], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect::<rusqlite::Result<_>>()?
+            statement.query_map([agent], crate::store::row3)?.collect::<rusqlite::Result<_>>()?
         };
         let mut changed = Vec::new();
         for (device, focused, places) in records {

@@ -38,6 +38,17 @@ pub(crate) struct Wanted {
     /// The generated key's public half, once made.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub public_key: String,
+    /// A password to generate: what it's made of, as checked (with the
+    /// length the person chose, once made).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<super::generate::Password>,
+    /// Files to import, as read when asked (`import`): set only by Claktory
+    /// from what it read, never from what an agent sends.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<super::import::Asked>,
+    /// The agent had read a pipe, a direct message or a page when it asked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_pipes: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -68,6 +79,11 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
     let wanted = serde_json::from_str::<Wanted>(&new_secret).ok();
     let (generate, grant_to_nobody, public_key) =
         wanted.as_ref().map(|wanted| (wanted.generate.clone(), wanted.nobody, wanted.public_key.clone())).unwrap_or_default();
+    let password = wanted.as_ref().and_then(|wanted| wanted.password.as_ref()).and_then(spec);
+    let state: String = row.get(6)?;
+    let pending = state == "pending";
+    let imports = wanted.as_ref().map(|wanted| imports(&wanted.imports, pending)).unwrap_or_default();
+    let asker_read_pipes = wanted.as_ref().is_some_and(|wanted| wanted.read_pipes);
     let new_secret = wanted.map(|wanted| v1::NewSecret {
         name: wanted.name,
         description: wanted.description,
@@ -77,11 +93,13 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
             .map(|variable| v1::SecretVariable { name: variable.name, hint: String::new(), file: variable.file })
             .collect(),
     });
-    let state: String = row.get(6)?;
     Ok(v1::SecretRequest {
         generate,
         grant_to_nobody,
         public_key,
+        password,
+        imports,
+        asker_read_pipes,
         id: row.get(0)?,
         agent_id: row.get(1)?,
         secret_id: row.get(2)?,
@@ -98,6 +116,29 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
         admin_agent_id: row.get(13)?,
         collecting: row.get(14)?,
     })
+}
+
+/// The files a request imports, as its card shows them; with what's wrong
+/// with each now while it waits.
+fn imports(asked: &[super::import::Asked], pending: bool) -> Vec<v1::SecretImport> {
+    asked
+        .iter()
+        .map(|file| v1::SecretImport {
+            variable: file.variable.clone(),
+            path: file.path.clone(),
+            size: file.size as i64,
+            modified_ms: file.modified_ms,
+            fingerprint: super::import::shown(&file.keyed),
+            sensitive: super::import::sensitive(std::path::Path::new(&file.path)).to_owned(),
+            problem: if pending { super::import::problem(file) } else { String::new() },
+        })
+        .collect()
+}
+
+/// A kept password ask as its spec (None if it no longer passes, which
+/// leaves nothing to generate).
+fn spec(password: &super::generate::Password) -> Option<v1::PasswordSpec> {
+    super::generate::password_spec(password, 0).ok()
 }
 
 /// The tool agents ask with.
@@ -123,6 +164,16 @@ pub(crate) fn details(request: &v1::SecretRequest) -> serde_json::Value {
         "generate": request.generate,
         "nobody": request.grant_to_nobody,
         "public_key": request.public_key,
+        "password": request.password.as_ref().map(super::generate::password_ask),
+        "imports": request.imports.iter().map(|file| serde_json::json!({
+            "variable": file.variable,
+            "path": file.path,
+            "size": file.size,
+            "modified_ms": file.modified_ms,
+            "fingerprint": file.fingerprint,
+            "sensitive": file.sensitive,
+        })).collect::<Vec<_>>(),
+        "read_pipes": request.asker_read_pipes,
     })
 }
 
@@ -196,6 +247,33 @@ fn parsed(details: &serde_json::Value) -> Option<v1::SecretRequest> {
         generate: text("generate"),
         grant_to_nobody: details.get("nobody").and_then(serde_json::Value::as_bool).unwrap_or_default(),
         public_key: text("public_key"),
+        password: details
+            .get("password")
+            .and_then(|password| serde_json::from_value::<super::generate::Password>(password.clone()).ok())
+            .as_ref()
+            .and_then(spec),
+        imports: details
+            .get("imports")
+            .and_then(serde_json::Value::as_array)
+            .map(|files| {
+                files
+                    .iter()
+                    .map(|file| {
+                        let text = crate::transcript::text_fields(file);
+                        v1::SecretImport {
+                            variable: text("variable"),
+                            path: text("path"),
+                            size: file.get("size").and_then(serde_json::Value::as_i64).unwrap_or_default(),
+                            modified_ms: file.get("modified_ms").and_then(serde_json::Value::as_i64).unwrap_or_default(),
+                            fingerprint: text("fingerprint"),
+                            sensitive: text("sensitive"),
+                            problem: String::new(),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        asker_read_pipes: details.get("read_pipes").and_then(serde_json::Value::as_bool).unwrap_or_default(),
         ..v1::SecretRequest::default()
     })
 }
@@ -252,11 +330,20 @@ fn check_variables(given: &[WantedVariable]) -> Result<Vec<WantedVariable>, Vaul
 }
 
 /// A generate request's variables (#252): the one its key's file goes in,
-/// a file, `SSH_KEY` when none is named; any other request's as given.
+/// a file, `SSH_KEY` when none is named; the one a password goes in,
+/// `PASSWORD` when none is named (a file only if asked); any other
+/// request's as given.
 fn check_generated(generate: &str, variables: Vec<WantedVariable>) -> Result<Vec<WantedVariable>, VaultError> {
     let generate = generate.trim();
     if generate.is_empty() {
         return Ok(variables);
+    }
+    if generate == super::generate::PASSWORD {
+        return match variables.as_slice() {
+            [] => Ok(vec![WantedVariable { name: super::generate::PASSWORD_VARIABLE.to_owned(), file: false }]),
+            [one] => Ok(vec![one.clone()]),
+            _ => Err(VaultError::Invalid("A generated password goes in one variable: name one, or none for PASSWORD.".to_owned())),
+        };
     }
     if !super::generate::KINDS.contains(&generate) {
         return Err(VaultError::Invalid(format!(
@@ -302,14 +389,40 @@ impl Vault {
             )
         })?;
         let description = check_description(&wanted.description)?;
-        let variables = check_generated(&wanted.generate, check_variables(&wanted.variables)?)?;
+        let imports = wanted.imports;
+        let variables = if imports.is_empty() {
+            check_generated(&wanted.generate, check_variables(&wanted.variables)?)?
+        } else {
+            if !wanted.generate.trim().is_empty() || wanted.password.is_some() {
+                return Err(VaultError::Invalid("Ask to import files or to generate a secret, not both.".to_owned()));
+            }
+            // Each file's variable, holding its path.
+            imports.iter().map(|file| WantedVariable { name: file.variable.clone(), file: true }).collect()
+        };
+        let generate = wanted.generate.trim().to_owned();
+        // A password is checked against the bounds now, and kept as checked
+        // (its length filled in): anything weaker is refused here, not at
+        // approval.
+        let password = match (generate.as_str(), wanted.password) {
+            (super::generate::PASSWORD, password) => {
+                let spec = super::generate::password_spec(&password.unwrap_or_default(), 0)?;
+                Some(super::generate::password_ask(&spec))
+            }
+            (_, Some(_)) => {
+                return Err(VaultError::Invalid("password goes with generate: \"password\"; leave it out otherwise.".to_owned()));
+            }
+            (_, None) => None,
+        };
         let wanted = Wanted {
             name: name.clone(),
             description,
             variables,
-            generate: wanted.generate.trim().to_owned(),
+            generate,
             nobody: wanted.nobody,
             public_key: String::new(),
+            password,
+            imports,
+            read_pipes: wanted.read_pipes,
         };
         let json = serde_json::to_string(&wanted).map_err(|error| VaultError::Invalid(error.to_string()))?;
         let mut inner = self.lock();
@@ -403,6 +516,14 @@ impl Vault {
         }
     }
 
+    /// The request `id`, whoever asked and however it stands; None if
+    /// there's no such request. An error while the vault can't be read.
+    pub(crate) fn find_request(&self, id: &str) -> Result<Option<v1::SecretRequest>, VaultError> {
+        let inner = self.lock();
+        let db = Self::db(&inner)?;
+        Ok(db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id.trim()], row).optional()?)
+    }
+
     /// Hands back the open requests `admin` held (it's being deleted):
     /// they lose their admin and stop collecting, so the asker's card is
     /// the person's to answer directly again. The changed requests, as
@@ -458,23 +579,29 @@ impl Vault {
         Self::changed_request(&mut inner, id)
     }
 
-    /// Marks a generate request decided (#252): its key `given` (id, and
-    /// the name the asker has it under) made, with `public_key`, and given
-    /// to the asker or, `nobody`, to no one. Returns it as it is now.
+    /// Marks a generate request decided (#252): its key or password
+    /// `given` (id, and the name the asker has it under) made (`made`: a
+    /// key's public half, or the password's spec as made), and given to
+    /// the asker or, `nobody`, to no one. Returns it as it is now.
     pub(crate) fn decide_generated(
         &self,
         request: &v1::SecretRequest,
         given: (&str, &str),
-        public_key: &str,
+        made: (&str, Option<&v1::PasswordSpec>),
+        nobody: bool,
         comment: &str,
     ) -> Result<v1::SecretRequest, VaultError> {
+        let (public_key, password) = made;
         let mut inner = self.lock();
         let db = Self::db(&inner)?;
         let json: String = db.query_row("SELECT new_secret FROM requests WHERE id = ?1", [&request.id], |row| row.get(0))?;
         let mut wanted: Wanted = serde_json::from_str(&json).unwrap_or_default();
         wanted.public_key = public_key.to_owned();
+        if let Some(password) = password {
+            wanted.password = Some(super::generate::password_ask(password));
+        }
         let json = serde_json::to_string(&wanted).map_err(|error| VaultError::Invalid(error.to_string()))?;
-        let state = if request.grant_to_nobody { "generated" } else { "granted" };
+        let state = if nobody { "generated" } else { "granted" };
         let changed = db.execute(
             "UPDATE requests SET state = ?3, decided = ?4, comment = ?5, given = ?6, given_name = ?7, new_secret = ?8, collecting = 0
              WHERE id = ?1 AND agent = ?2 AND state = 'pending'",
@@ -516,6 +643,10 @@ impl Vault {
             name: current.secret_name.clone(),
             generate: current.generate.clone(),
             nobody: current.grant_to_nobody,
+            password: current.password.as_ref().map(super::generate::password_ask),
+            // What was read of the files stays as it was.
+            imports: self.wanted(&current.id)?.imports,
+            read_pipes: current.asker_read_pipes,
             ..current.new_secret.as_ref().map_or_else(Wanted::default, |wanted| Wanted {
                 name: wanted.name.clone(),
                 description: wanted.description.clone(),
@@ -531,6 +662,11 @@ impl Vault {
             wanted.description = check_description(description)?;
         }
         if let Some(variables) = &change.variables {
+            if !wanted.imports.is_empty() {
+                return Err(VaultError::Invalid(
+                    "An import's variables come with its files: withdraw it with secrets_request_cancel and ask again.".to_owned(),
+                ));
+            }
             wanted.variables = check_generated(&wanted.generate, check_variables(variables)?)?;
         }
         let reason = match &change.reason {
@@ -575,6 +711,14 @@ impl Vault {
             return Err(VaultError::Invalid(format!("Your request {id} isn't waiting any more.")));
         }
         Self::changed_request(&mut inner, id)
+    }
+
+    /// The request `id` as kept, with what the card doesn't show (an
+    /// import's files as read when asked).
+    pub(crate) fn wanted(&self, id: &str) -> Result<Wanted, VaultError> {
+        let inner = self.lock();
+        let json: String = Self::db(&inner)?.query_row("SELECT new_secret FROM requests WHERE id = ?1", [id], |row| row.get(0))?;
+        Ok(serde_json::from_str(&json).unwrap_or_default())
     }
 
     /// `agent`'s own request `id`, if it's still open (waiting, or approved

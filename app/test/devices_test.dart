@@ -4,6 +4,7 @@ import 'package:factory_app/backend.dart';
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/controls.dart' show Button, showModal;
 import 'package:factory_app/devices.dart' show FactoryChooser, QrCode;
+import 'package:factory_app/links.dart' show pairingFingerprint;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/settings_view.dart';
@@ -55,6 +56,8 @@ Finder labeled(String label) => find.byWidgetPredicate(
 );
 
 void main() {
+  _claktoryCodes();
+
   group('pairing codes', () {
     test('read host, port, key, pin and name', () {
       final target = parsePairingCode('  $_code\n')!;
@@ -465,10 +468,29 @@ void main() {
     expect(find.text("That isn't a Claktory code."), findsOneWidget);
     await tester.enterText(find.byType(EditableText).last, _code);
     await tester.pump();
+    // Asked first, as every way a code comes in is (Fugo): its
+    // fingerprint, and Cancel leaves everything as it was.
+    final target = parsePairingCode(_code)!;
     await tester.tap(find.text('Connect'));
     await pumpFrames(tester);
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    expect(
+      find.textContaining(pairingFingerprint(target), findRichText: true),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Cancel').last);
+    await pumpFrames(tester);
+    expect(find.text('Connect to this Claktory?'), findsNothing);
+    expect(harness.connections.current, isNull);
+    expect(harness.backend.target, isNot(target));
+    // Return in the field asks too; then Connect connects.
+    await tester.showKeyboard(find.byType(EditableText).last);
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await pumpFrames(tester);
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    await tester.tap(find.text('Connect').last);
+    await pumpFrames(tester);
 
-    final target = parsePairingCode(_code)!;
     expect(harness.connections.current, target);
     expect(harness.connectionStorage.kept.current, _code);
     expect(harness.backend.target, target);
@@ -491,6 +513,45 @@ void main() {
     expect(harness.backend.target, isNull);
     expect(harness.backend.refused.value, isNull);
     expect(harness.connections.saved, [target], reason: 'still known');
+  });
+}
+
+/// The chooser connects to a claktory:// code as to a factory:// one, asking
+/// first.
+void _claktoryCodes() {
+  testWidgets('the chooser takes a claktory:// code, asking first', (
+    tester,
+  ) async {
+    final code = _code.replaceFirst('factory://', 'claktory://');
+    final harness = Harness(workspace());
+    await harness.show(tester);
+    await pumpFrames(tester);
+    unawaited(
+      showModal(
+        tester.element(find.byType(Sidebar).first),
+        (context, close) => FactoryChooser(close: close),
+      ),
+    );
+    await pumpFrames(tester);
+    await tester.enterText(find.byType(EditableText).last, code);
+    await tester.pump();
+    expect(find.text("That isn't a Claktory code."), findsNothing);
+    // A quick double click asks once (Abbacchio).
+    await tester.tap(find.text('Connect'));
+    await tester.tap(find.text('Connect'));
+    await pumpFrames(tester);
+    final target = parsePairingCode(code)!;
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    expect(
+      find.textContaining(pairingFingerprint(target), findRichText: true),
+      findsOneWidget,
+    );
+    expect(harness.connections.current, isNull);
+    await tester.tap(find.text('Connect').last);
+    await pumpFrames(tester);
+    expect(harness.connections.current, target);
+    expect(harness.connectionStorage.kept.current, code);
+    expect(harness.backend.target, target);
   });
 }
 

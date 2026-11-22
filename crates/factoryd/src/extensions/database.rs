@@ -87,11 +87,15 @@ struct Args {
     instance: Option<String>,
 }
 
-/// Whether the agent has its own database on, and Factory's records.
+/// Whether the agent has its own database on, and Factory's records. A
+/// curator (`crate::pipes::curator`) always has its own and never the
+/// records, whatever its settings say: it reads friends' words, and its
+/// database is where it keeps them.
 fn on(factory: &Factory, agent: &str) -> (bool, bool) {
+    let curator = factory.pipes.curator(agent);
     let inner = factory.lock();
     let config = inner.config.agent(agent);
-    (config.is_some_and(|config| enabled(config, ID)), config.is_some_and(|config| enabled(config, FACTORY.key)))
+    (curator || config.is_some_and(|config| enabled(config, ID)), !curator && config.is_some_and(|config| enabled(config, FACTORY.key)))
 }
 
 /// Which database a call of `agent`'s means (`instance` as it gave it), and
@@ -208,13 +212,14 @@ impl Extension for Database {
         &MANIFEST
     }
 
-    fn prompt(&self, _factory: &Factory, _inner: &Inner, agent: &AgentConfig) -> Vec<PromptSection> {
-        let own = enabled(agent, ID);
+    fn prompt(&self, factory: &Factory, _inner: &Inner, agent: &AgentConfig) -> Vec<PromptSection> {
+        let curator = factory.pipes.curator(&agent.id);
+        let own = curator || enabled(agent, ID);
         let mut sections = Vec::new();
         if own {
             sections.push(PromptSection { kind: PromptKind::Static, text: PROMPT.to_owned() });
         }
-        if enabled(agent, FACTORY.key) {
+        if !curator && enabled(agent, FACTORY.key) {
             let instance = if own { ", with instance: \"factory\"" } else { "" };
             sections.push(PromptSection { kind: PromptKind::Static, text: RECORDS_PROMPT.replace("{instance}", instance) });
         }

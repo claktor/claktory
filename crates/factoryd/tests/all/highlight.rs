@@ -69,7 +69,7 @@ async fn agents_highlight_parts_of_the_app_and_messages_light_up_both_agents() {
     view.highlights.clear();
     for (target, why) in [
         (r#"{"kind":"agent","id":"nobody"}"#, "No agent has the id \"nobody\"."),
-        (r#"{"kind":"checklist_item","id":"lead#3"}"#, "lead's checklist has no item #3."),
+        (r#"{"kind":"checklist_item","id":"lead#3"}"#, "Lead's checklist has no item #3."),
         (r#"{"kind":"extension","id":"writer/memory"}"#, "Writer doesn't have Memory turned on"),
     ] {
         let said = call(&mut client, &mut view, "lead", &format!(r#"call highlight {{"targets":[{target}]}}"#)).await;
@@ -109,6 +109,8 @@ async fn agents_open_a_screen_in_the_app_the_person_is_using() {
     let said = call(&mut client, &mut view, "lead", r#"call show_screen {"screen":"settings","id":"devices"}"#).await;
     assert!(said.starts_with("tool show_screen: Nothing opened: the person's app didn't answer"), "{said}");
     assert!(said.ends_with("Settings → Devices."), "{said}");
+    let said = call(&mut client, &mut view, "lead", r#"call show_screen {"screen":"settings","id":"pipes"}"#).await;
+    assert!(said.ends_with("Settings → Pipes."), "{said}");
 
     // Another app answers, as the one in use or not; what it was asked is kept.
     let in_use = Arc::new(AtomicBool::new(true));

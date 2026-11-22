@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -8,16 +9,24 @@ import '../forms.dart';
 import '../identity.dart';
 import '../mobile/metrics.dart';
 import '../user_apps/session.dart';
+import '../tunnel/api/dm.dart' show DmMessage;
 import 'contacts.dart';
+import 'e2ee.dart';
 import 'problems.dart';
 
 // D-S5: reporting someone in People to Claktory's team (Mista's routes,
 // crates/claktory-user-apps/README.md, "Reports"): why, the person's own
 // words if they like, and their name and picture only if they choose.
 // Nobody else is told, and reporting neither declines nor blocks.
+// Messages are end to end (E5), so the team sees none unless the person
+// ticks some here: their text goes as this device shows it.
 
 /// The most a report's note may say, as the service checks too.
 const reportNoteLimit = 1000;
+
+/// The most messages a report may include, and their text in all.
+const reportMessageLimit = 50;
+const reportMessagesBytes = 64 * 1024;
 
 /// What each reason reads as.
 String reportReasonLabel(ReportReason reason) => switch (reason) {
@@ -38,9 +47,14 @@ class ReportForm extends StatefulWidget {
     this.requestId,
     this.contactId,
     this.blockId,
+    this.conversationId = '',
   });
 
   final ContactsApi api;
+
+  /// The conversation with them, whose messages the person may include;
+  /// empty for none.
+  final String conversationId;
   final PeoplePerson person;
   final VoidCallback close;
   final String? requestId;
@@ -65,11 +79,79 @@ class _ReportFormState extends State<ReportForm> {
   /// The service's words once it's sent.
   String? _sent;
 
+  /// The conversation's messages on this device, oldest first, and the
+  /// ones ticked, by seq.
+  E2ee? _e2ee;
+  String _group = '';
+  var _messages = const <DmMessage>[];
+  var _hasEarlier = false;
+  final _picked = <int>{};
+  static const _page = 30;
+
   @override
   void initState() {
     super.initState();
     _note.addListener(() => setState(() {}));
+    if (widget.conversationId.isNotEmpty) {
+      _e2ee = e2eeOf(context);
+      unawaited(_read());
+    }
   }
+
+  /// The newest page of the conversation's current group, or [_page] more
+  /// before what's here.
+  Future<void> _read({bool earlier = false}) async {
+    final e2ee = _e2ee;
+    if (e2ee == null) return;
+    if (_group.isEmpty) {
+      final groups = [
+        for (final group in e2ee.groups.values)
+          if (group.kind == 'conversation' &&
+              group.conversationId == widget.conversationId)
+            group,
+      ]..sort((a, b) => b.generation.compareTo(a.generation));
+      if (groups.isEmpty) return;
+      _group = groups.first.groupId;
+    }
+    final page = await e2ee.history(
+      _group,
+      before: earlier && _messages.isNotEmpty ? _messages.first.seq : null,
+      limit: _page + 1,
+    );
+    if (!mounted) return;
+    final more = page.length > _page;
+    final shown = [
+      for (final message in more ? page.sublist(1) : page)
+        if (message.members == null && (message.content.text ?? '').isNotEmpty)
+          message,
+    ];
+    setState(() {
+      _messages = earlier ? [...shown, ..._messages] : shown;
+      _hasEarlier = more;
+    });
+  }
+
+  /// A tick that would take the report past what it may hold in all.
+  var _tooMuch = false;
+
+  int get _pickedBytes => [
+    for (final message in _messages)
+      if (_picked.contains(message.seq))
+        utf8.encode(message.content.text ?? '').length,
+  ].fold(0, (all, each) => all + each);
+
+  void _pick(DmMessage message) => setState(() {
+    _tooMuch = false;
+    if (_picked.remove(message.seq) || _picked.length >= reportMessageLimit) {
+      return;
+    }
+    final bytes = utf8.encode(message.content.text ?? '').length;
+    if (_pickedBytes + bytes > reportMessagesBytes) {
+      _tooMuch = true;
+      return;
+    }
+    _picked.add(message.seq);
+  });
 
   @override
   void dispose() {
@@ -93,6 +175,16 @@ class _ReportFormState extends State<ReportForm> {
         reason: reason,
         note: _note.text.trim(),
         includeProfile: _includeProfile,
+        messages: [
+          for (final message in _messages)
+            if (_picked.contains(message.seq))
+              (
+                seq: message.seq,
+                text: message.content.text ?? '',
+                mine: message.fromAccount == _e2ee?.accountId,
+                sentMs: message.arrivedMs,
+              ),
+        ],
       );
       if (mounted) {
         setState(
@@ -170,11 +262,75 @@ class _ReportFormState extends State<ReportForm> {
           onTap: () => setState(() => _includeProfile = !_includeProfile),
         ),
         const SizedBox(height: Space.l),
+        if (_messages.isNotEmpty) _messagesField(type, palette),
       ],
       error: _error,
       submitLabel: _busy ? 'Sending…' : 'Send report',
       onSubmit: _busy || _reason == null ? null : _send,
       onCancel: widget.close,
+    );
+  }
+}
+
+extension on _ReportFormState {
+  /// Include messages: the conversation's, newest at the bottom, each with
+  /// its box; past the limit, the rest dimmed.
+  Widget _messagesField(TypeScale type, Palette palette) {
+    final full = _picked.length >= reportMessageLimit;
+    final name = widget.person.name.isEmpty ? 'Them' : widget.person.name;
+    final me = _e2ee?.accountId ?? '';
+    return Field(
+      label: 'Include messages',
+      note:
+          "Claktory's team can't read your messages, so tick any you want "
+          'them to see. They get the text as it shows here.',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_hasEarlier)
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: Button(
+                label: 'Show earlier',
+                onPressed: () => _read(earlier: true),
+              ),
+            ),
+          for (final message in _messages)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.s),
+              child: Opacity(
+                opacity: full && !_picked.contains(message.seq) ? 0.4 : 1,
+                child: _CheckRow(
+                  on: _picked.contains(message.seq),
+                  label:
+                      '${message.fromAccount == me ? 'You' : name}: '
+                      '${message.content.text}',
+                  onTap: () => _pick(message),
+                ),
+              ),
+            ),
+          if (_picked.isNotEmpty) ...[
+            const SizedBox(height: Space.s),
+            Text(
+              _picked.length == 1
+                  ? '1 message included'
+                  : '${_picked.length} messages included',
+              style: type.caption.copyWith(color: palette.textMuted),
+            ),
+          ],
+          if (full)
+            Text(
+              'You can include up to $reportMessageLimit messages.',
+              style: type.caption.copyWith(color: palette.textMuted),
+            ),
+          if (_tooMuch)
+            Text(
+              "That's as much as one report can include. Untick a long "
+              'message to add this one.',
+              style: type.caption.copyWith(color: palette.textMuted),
+            ),
+        ],
+      ),
     );
   }
 }

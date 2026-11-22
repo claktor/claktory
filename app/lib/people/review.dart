@@ -1,17 +1,17 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
-// D3d: what an agent suggests in a chat, for the person to decide (Mista's
-// D4b and Ghiaccio's D4a, crates/claktory-user-apps/README.md, "Agents" and
-// "Agents' messages, reviewed"). A proposal is a message an agent wants
-// sent: it goes only once the person approved exactly it, here, from this
-// device; this device works out what it approves (the content hash) from
-// what it shows, never taking the service's word for it, and shows every
-// hidden character in the text, so what's read is what's sent. An agent's
-// draft is only a suggestion: Edit puts it in the person's own box,
-// and their Send is their own message.
+// D3d, end to end since E5 (dms-e2ee §6; crates/claktory-user-apps/README.md,
+// "Agents' messages, reviewed" and "End to end"): what an agent suggests in
+// a chat, for the person to decide. A proposal is a message an agent wants
+// sent, sealed by its Claktory's leaf in the person's channel with it: this
+// device opens it (E2ee.openProposal), shows every hidden character in
+// what it opened, and approving seals exactly that again in the
+// conversation's group, by its agent, with the digest of what it opened;
+// so what's read is what's sent, and the service never had the text. An
+// agent's draft is only a suggestion: Edit puts it in the person's own
+// box, and their Send is their own message.
 
 /// A message an agent proposed, as the service lists it.
 class DmProposal {
@@ -28,6 +28,9 @@ class DmProposal {
     required this.text,
     this.createdMs = 0,
     this.expiresMs = 0,
+    this.envelope = '',
+    this.epoch = 0,
+    this.clientMessageId = '',
   });
 
   factory DmProposal.fromJson(Map<String, Object?> json) {
@@ -48,8 +51,37 @@ class DmProposal {
       text: _text(json, 'text'),
       createdMs: _int(json, 'created_ms'),
       expiresMs: _int(json, 'expires_ms'),
+      envelope: json['envelope'] == null ? '' : jsonEncode(json['envelope']),
+      epoch: _int(json, 'epoch'),
     );
   }
+
+  /// This proposal as this device opened it from its Claktory's channel:
+  /// who and what from inside the encryption, never the service's word.
+  DmProposal opened({
+    required String claktoryId,
+    required String agentId,
+    required String incarnation,
+    required String agentName,
+    required String text,
+    required String clientMessageId,
+  }) => DmProposal(
+    id: id,
+    revision: revision,
+    state: state,
+    conversationId: conversationId,
+    generation: generation,
+    claktoryId: claktoryId,
+    agentId: agentId,
+    incarnation: incarnation,
+    agentName: agentName,
+    text: text,
+    createdMs: createdMs,
+    expiresMs: expiresMs,
+    envelope: envelope,
+    epoch: epoch,
+    clientMessageId: clientMessageId,
+  );
 
   final String id;
 
@@ -75,7 +107,28 @@ class DmProposal {
   final int createdMs;
   final int expiresMs;
 
+  /// What the service keeps of it: sealed in the Claktory's channel (an
+  /// envelope's JSON), and the channel's epoch then.
+  final String envelope;
+  final int epoch;
+
+  /// Its sending device's id for the message, once opened: the message
+  /// approving it sends goes by it.
+  final String clientMessageId;
+
   bool get pending => state == 'pending';
+
+  /// What approving it names: SHA-256, lowercase hex, of the envelope's
+  /// bytes as this device fetched and opened them.
+  String get digest {
+    final json = jsonDecode(envelope) as Map<String, Object?>;
+    final bytes = json['bytes'] as String? ?? '';
+    return sha256
+        .convert(
+          base64Url.decode(bytes.padRight((bytes.length + 3) ~/ 4 * 4, '=')),
+        )
+        .toString();
+  }
 }
 
 /// An agent's suggested draft, as the service lists it.
@@ -88,6 +141,7 @@ class DmAgentDraft {
     required this.text,
     this.updatedMs = 0,
     this.conversationId = '',
+    this.envelope = '',
   });
 
   factory DmAgentDraft.fromJson(Map<String, Object?> json) {
@@ -106,8 +160,25 @@ class DmAgentDraft {
       },
       updatedMs: _int(json, 'updated_ms'),
       conversationId: _text(json, 'conversation_id'),
+      envelope: json['envelope'] == null ? '' : jsonEncode(json['envelope']),
     );
   }
+
+  /// This draft as this device opened it from its Claktory's channel.
+  DmAgentDraft opened({
+    required String claktoryId,
+    required String agentName,
+    required String text,
+  }) => DmAgentDraft(
+    id: id,
+    agentName: agentName,
+    claktoryId: claktoryId,
+    revision: revision,
+    text: text,
+    updatedMs: updatedMs,
+    conversationId: conversationId,
+    envelope: envelope,
+  );
 
   final String id;
 
@@ -121,33 +192,9 @@ class DmAgentDraft {
   final int revision;
   final String text;
   final int updatedMs;
-}
 
-/// What approving [proposal] approves (v1): SHA-256, lowercase hex, of
-/// "claktory-dm-review/1\n" and each field the person reviews, as
-/// `name:<UTF-8 length>:<value>\n`, in the service's order. Worked out
-/// here from what this device shows, so a service that lists one thing
-/// can't get another approved.
-String reviewHash(DmProposal proposal) {
-  final bytes = BytesBuilder()..add(utf8.encode('claktory-dm-review/1\n'));
-  for (final (name, value) in [
-    ('proposal', proposal.id),
-    ('revision', '${proposal.revision}'),
-    ('conversation', proposal.conversationId),
-    ('generation', '${proposal.generation}'),
-    ('claktory', proposal.claktoryId),
-    ('agent', proposal.agentId),
-    ('incarnation', proposal.incarnation),
-    ('agent_name', proposal.agentName),
-    ('text', proposal.text),
-  ]) {
-    final encoded = utf8.encode(value);
-    bytes
-      ..add(utf8.encode('$name:${encoded.length}:'))
-      ..add(encoded)
-      ..addByte(0x0a);
-  }
-  return sha256.convert(bytes.takeBytes()).toString();
+  /// Sealed in the Claktory's channel: an envelope's JSON.
+  final String envelope;
 }
 
 /// Whether [rune] changes how text reads without showing itself: controls

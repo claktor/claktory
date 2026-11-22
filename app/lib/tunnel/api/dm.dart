@@ -7,9 +7,10 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `add_group`, `apply_view`, `become_leaf`, `bytes32`, `change_group`, `change_pins`, `commit`, `committed`, `envelope_json`, `from_content`, `group_kind`, `group_row`, `json`, `keep`, `load`, `member_line`, `merge_own`, `message`, `of`, `openmls_group_id`, `pending_commit`, `place`, `read_envelope`, `read_view`, `refusal`, `roster`, `safety`, `save_pins`, `save_row`, `sql`, `state`, `take`, `to_content`, `view_name`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Kept`, `Pending`, `State`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `try_from`
+// These functions are ignored because they are not marked as `pub`: `add_group`, `apply_view`, `become_leaf`, `bytes32`, `change_group`, `change_pins`, `commit`, `committed`, `delete_row`, `envelope_json`, `from_content`, `group_kind`, `group_row`, `json`, `keep_rotation`, `keep`, `listed_ids`, `load`, `member_line`, `merge_own`, `message`, `of`, `openmls_group_id`, `pending_commit`, `place`, `read_envelope`, `read_row`, `read_view`, `recertify`, `refusal`, `roster`, `rotated_pins`, `safety`, `save_pins`, `save_row`, `snapshot`, `sql`, `state`, `store`, `take`, `to_content`, `unchecked`, `view_name`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Kept`, `PendingRow`, `Pending`, `Snapshot`, `State`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `try_from`
+// These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// 32 new random bytes: a key for the platform key store (the identity,
 /// this device's leaf, the store's seal key).
@@ -38,6 +39,9 @@ abstract class DmDevice implements RustOpaqueInterface {
     required List<String> keyPackages,
   });
 
+  /// Keeps [removal] as the one under way, in place of any before.
+  Future<void> beginRemoval({required DmRemoval removal});
+
   /// The worker refused this device's commit (another came first): drop
   /// it; the change can be made again on the new epoch.
   Future<void> commitRefused({required List<int> groupId});
@@ -57,12 +61,23 @@ abstract class DmDevice implements RustOpaqueInterface {
   /// lists these with the change.
   DmDeviceList? deviceList({required String account});
 
+  /// Forgets a pending rotation that can't be taken (its bundle never
+  /// came, or didn't open).
+  Future<void> dropPendingRotation();
+
+  /// Gives up on a rotation that never reached the self group.
+  Future<void> dropRotation();
+
   /// Gives up on sending [client_message_id] to [group_id] (the person
   /// removed it, or the service refused it for good).
   Future<void> dropUnsent({
     required List<int> groupId,
     required String clientMessageId,
   });
+
+  /// The removal under way is done (signed out, with no new key to
+  /// follow).
+  Future<void> endRemoval();
 
   /// The pins as JSON, for the person's other devices (the self group).
   Future<Uint8List> exportPins();
@@ -75,6 +90,11 @@ abstract class DmDevice implements RustOpaqueInterface {
     required List<int> sealed,
     required BigInt nowMs,
   });
+
+  /// The worker took the new key: this device takes it too, with its
+  /// leaf certified under it (same leaf, same signature key) and the
+  /// person's pins on it. Gives the new certificate.
+  Future<Uint8List> finishRotation({required List<int> identityKey});
 
   /// Pins [account]'s identity at first contact; a different key than
   /// the one pinned is refused (that's [key_changed]).
@@ -89,6 +109,11 @@ abstract class DmDevice implements RustOpaqueInterface {
 
   /// Every group this device is in.
   Future<List<DmGroup>> groups();
+
+  /// Whether this device can still send its history to the new device
+  /// [leaf_id] (it added it in the last 30 minutes, and it hasn't all
+  /// come over yet): what a `history_again` from that leaf is answered by.
+  bool hasHistoryFor({required String leafId});
 
   /// [group_id]'s history, newest last: up to [limit] messages before
   /// [before_seq] (all the newest without it).
@@ -133,9 +158,27 @@ abstract class DmDevice implements RustOpaqueInterface {
   /// the one-time ones are gone.
   Future<String> lastResortKeyPackage();
 
+  /// Every leaf in [group_id] by id, checked or not: a Claktory's leaf
+  /// still under the person's old key is there, though not a member that
+  /// passes the checks until it moves.
+  Future<List<String>> leafIds({required List<int> groupId});
+
+  /// Every leaf in [group_id] as its certificate claims (account, kind,
+  /// id, name), **unchecked**: for removal decisions only. A leaf taken
+  /// off its list, a revoked Claktory's or one under a replaced key fails
+  /// [members]' checks, yet must still be removed; trusting its claimed
+  /// account is fine there, since removing only takes access away. Never
+  /// for showing who's in or trusting what a leaf says ([members] does).
+  Future<List<DmMember>> leaves({required List<int> groupId});
+
   /// Who's in [group_id] now, as their certificates say (those that
   /// pass the checks now).
   Future<List<DmMember>> members({required List<int> groupId});
+
+  /// Moves this device's leaf in [group_id] to its certificate under the
+  /// person's new security key (same leaf, same signature key; dms-e2ee
+  /// §2.1): the one commit a leaf under a replaced key may make there.
+  Future<DmCommit> moveGroup({required List<int> groupId});
 
   /// Opens the store at [path] with its seal key [store_key], as the leaf
   /// [leaf_key], with the person's identity [identity_key] once this device
@@ -153,6 +196,12 @@ abstract class DmDevice implements RustOpaqueInterface {
     identityKey: identityKey,
   );
 
+  /// Opens the new key's bundle [sealed] (from `me/handoffs`) with the
+  /// pending rotation's key: the new identity's secret, for the platform
+  /// key store (`identity_next`) before [DmDevice::take_rotation].
+  /// Nothing here changes.
+  Future<Uint8List> openRotation({required List<int> sealed});
+
   /// A proposal or an agent's draft in the channel [group_id], which
   /// come by their own routes rather than the feed: decrypted once and
   /// kept by its digest, so asked again it gives what it gave. Refused
@@ -163,7 +212,25 @@ abstract class DmDevice implements RustOpaqueInterface {
     required PlatformInt64 arrivedMs,
   });
 
+  /// Another of the person's devices changed their security key, and
+  /// this one hasn't taken it yet.
+  Future<DmPendingRotation?> pendingRotation();
+
   DmPin? pin({required String account});
+
+  /// Starts changing the person's security key on this device (Lost or
+  /// stolen, dms-e2ee §2.1), once the lost devices are removed: with
+  /// [identity_key] (new, kept as `identity_next` first), the person's
+  /// devices [kept] (confirmed by name) and [removed]. The self group
+  /// must hold exactly this device and [kept], each on the current list
+  /// with the signature key its leaf has there (Fugo: never a key only a
+  /// list names). Asked again with the same key, the same rotation.
+  Future<DmRotation> prepareRotation({
+    required List<int> identityKey,
+    required List<String> kept,
+    required List<String> removed,
+    required BigInt nowMs,
+  });
 
   /// The feed's next message for [group_id]: [seq] from the worker and its
   /// [envelope] (JSON). In one transaction with what it changes; call in
@@ -187,11 +254,21 @@ abstract class DmDevice implements RustOpaqueInterface {
     required PlatformInt64 seq,
   });
 
+  /// The removal under way on this device, if any.
+  Future<DmRemoval?> removal();
+
   /// Removes the leaves [leaf_ids] from [group_id].
   Future<DmCommit> removeMembers({
     required List<int> groupId,
     required List<String> leafIds,
   });
+
+  /// The rotation under way on this device, if any.
+  Future<DmRotation?> rotation();
+
+  /// The rotation message went to the self group: from now on the same
+  /// new key is used, never another.
+  Future<void> rotationSaid();
 
   /// Whether [account]'s scanned QR code shows the same two keys.
   bool safetyMatches({required String account, required List<int> scanned});
@@ -236,6 +313,10 @@ abstract class DmDevice implements RustOpaqueInterface {
     required List<DmListed> leaves,
   });
 
+  /// Gives up on the feed's message [seq] in [group_id], held until now
+  /// ([DmOutcome::Held]): the position moves past it.
+  Future<void> skip({required List<int> groupId, required PlatformInt64 seq});
+
   /// Starts adding this device, [leaf_id] (its account key) called
   /// [name] on [platform], reachable for history at the iroh endpoint
   /// [endpoint_id], to the person's: shows the returned hand-off's QR code
@@ -248,6 +329,15 @@ abstract class DmDevice implements RustOpaqueInterface {
   });
 
   DmStatus status();
+
+  /// Takes the new key ([identity_key], from [DmDevice::open_rotation],
+  /// in the key store already) with the bundle [sealed]'s pins: this
+  /// device's leaf certified under it, the old key retired. Gives the new
+  /// certificate.
+  Future<Uint8List> takeRotation({
+    required List<int> identityKey,
+    required List<int> sealed,
+  });
 
   /// What was encrypted here and hasn't come back: to send again, as it is.
   Future<List<DmUnsent>> unsent();
@@ -395,16 +485,25 @@ class DmGroup {
   final PlatformInt64 seq;
   final BigInt epoch;
 
+  /// This device's leaf here carries its current certificate: false
+  /// until it moves to the person's new security key ([DmDevice::move_group]).
+  final bool moved;
+
   const DmGroup({
     required this.groupId,
     required this.kind,
     required this.seq,
     required this.epoch,
+    required this.moved,
   });
 
   @override
   int get hashCode =>
-      groupId.hashCode ^ kind.hashCode ^ seq.hashCode ^ epoch.hashCode;
+      groupId.hashCode ^
+      kind.hashCode ^
+      seq.hashCode ^
+      epoch.hashCode ^
+      moved.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -414,7 +513,8 @@ class DmGroup {
           groupId == other.groupId &&
           kind == other.kind &&
           seq == other.seq &&
-          epoch == other.epoch;
+          epoch == other.epoch &&
+          moved == other.moved;
 }
 
 /// Which group, from the person's own records (the worker's group list as
@@ -582,16 +682,25 @@ class DmMember {
   /// The name its certificate gives (a device's, or a Claktory's).
   final String name;
 
+  /// When its certificate was made: when it was added, or the person's
+  /// last new security key.
+  final BigInt sinceMs;
+
   const DmMember({
     required this.account,
     required this.leafId,
     required this.kind,
     required this.name,
+    required this.sinceMs,
   });
 
   @override
   int get hashCode =>
-      account.hashCode ^ leafId.hashCode ^ kind.hashCode ^ name.hashCode;
+      account.hashCode ^
+      leafId.hashCode ^
+      kind.hashCode ^
+      name.hashCode ^
+      sinceMs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -601,7 +710,8 @@ class DmMember {
           account == other.account &&
           leafId == other.leafId &&
           kind == other.kind &&
-          name == other.name;
+          name == other.name &&
+          sinceMs == other.sinceMs;
 }
 
 /// Who a commit added and removed.
@@ -609,10 +719,19 @@ class DmMembers {
   final List<DmMember> added;
   final List<DmMember> removed;
 
-  const DmMembers({required this.added, required this.removed});
+  /// The accounts (not this device's) whose leaves moved to a new
+  /// security key in this commit: the key-changed line goes here, before
+  /// anything said under it (Fugo).
+  final List<String> keyChanged;
+
+  const DmMembers({
+    required this.added,
+    required this.removed,
+    required this.keyChanged,
+  });
 
   @override
-  int get hashCode => added.hashCode ^ removed.hashCode;
+  int get hashCode => added.hashCode ^ removed.hashCode ^ keyChanged.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -620,7 +739,8 @@ class DmMembers {
       other is DmMembers &&
           runtimeType == other.runtimeType &&
           added == other.added &&
-          removed == other.removed;
+          removed == other.removed &&
+          keyChanged == other.keyChanged;
 }
 
 /// A message in a group's history, as this device keeps it.
@@ -695,6 +815,41 @@ enum DmOutcome {
   /// Refused by the checks, or not readable here: dropped, with
   /// [DmProcessed::why] (for the log, not the person).
   dropped,
+
+  /// A commit under a security key this device hasn't pinned for the
+  /// account in [DmProcessed::why] (a rotation, dms-e2ee §2.1): left
+  /// unread, the position kept, to take once that account's keys are in
+  /// (never dropped: every commit after it would fail).
+  held,
+}
+
+/// A rotation another of the person's devices made, waiting for its
+/// bundle and for the worker to serve its key.
+class DmPendingRotation {
+  final String fromLeaf;
+
+  /// That device's name, from its certificate.
+  final String fromName;
+  final Uint8List identityPublic;
+
+  const DmPendingRotation({
+    required this.fromLeaf,
+    required this.fromName,
+    required this.identityPublic,
+  });
+
+  @override
+  int get hashCode =>
+      fromLeaf.hashCode ^ fromName.hashCode ^ identityPublic.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DmPendingRotation &&
+          runtimeType == other.runtimeType &&
+          fromLeaf == other.fromLeaf &&
+          fromName == other.fromName &&
+          identityPublic == other.identityPublic;
 }
 
 /// What this device knows of an account's security key.
@@ -776,6 +931,106 @@ class DmProcessed {
           epoch == other.epoch &&
           why == other.why &&
           handshake == other.handshake;
+}
+
+/// A removal the person confirmed (Remove…, or Lock out with a new
+/// security key, dms-e2ee §2.1), kept in the sealed store from its start
+/// until it's finished, so one stopped part-way (a dialog closed, the app
+/// quit) carries on at the next launch (Abbacchio's R5b, Fugo).
+class DmRemoval {
+  /// The person's devices being removed, by leaf.
+  final List<String> remove;
+
+  /// Their names when it started, in the same order: once off the list
+  /// and out of the self group, nothing else names them.
+  final List<String> names;
+
+  /// The devices kept, for the new key.
+  final List<String> keep;
+
+  /// A new security key follows (Lock out): kept until the new key is
+  /// taken here ([DmDevice::finish_rotation]), not only until signed out.
+  final bool newKey;
+
+  const DmRemoval({
+    required this.remove,
+    required this.names,
+    required this.keep,
+    required this.newKey,
+  });
+
+  static Future<DmRemoval> default_() =>
+      RustLib.instance.api.crateApiDmDmRemovalDefault();
+
+  @override
+  int get hashCode =>
+      remove.hashCode ^ names.hashCode ^ keep.hashCode ^ newKey.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DmRemoval &&
+          runtimeType == other.runtimeType &&
+          remove == other.remove &&
+          names == other.names &&
+          keep == other.keep &&
+          newKey == other.newKey;
+}
+
+/// A rotation under way on this device (dms-e2ee §2.1), kept in the sealed
+/// store from its start to the new key being taken, so a crash carries on
+/// with the same new key.
+class DmRotation {
+  /// The new identity's public half; its secret is in the platform key
+  /// store (`identity_next`) until [DmDevice::finish_rotation].
+  final Uint8List identityPublic;
+
+  /// The person's device list, version 1, signed by the new key.
+  final Uint8List deviceList;
+
+  /// The new identity and pins, sealed for the kept devices.
+  final Uint8List sealed;
+
+  /// The key to [sealed], for the self group.
+  final Uint8List key;
+  final List<String> kept;
+  final List<String> removed;
+
+  /// The rotation message went to the self group.
+  final bool said;
+
+  const DmRotation({
+    required this.identityPublic,
+    required this.deviceList,
+    required this.sealed,
+    required this.key,
+    required this.kept,
+    required this.removed,
+    required this.said,
+  });
+
+  @override
+  int get hashCode =>
+      identityPublic.hashCode ^
+      deviceList.hashCode ^
+      sealed.hashCode ^
+      key.hashCode ^
+      kept.hashCode ^
+      removed.hashCode ^
+      said.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DmRotation &&
+          runtimeType == other.runtimeType &&
+          identityPublic == other.identityPublic &&
+          deviceList == other.deviceList &&
+          sealed == other.sealed &&
+          key == other.key &&
+          kept == other.kept &&
+          removed == other.removed &&
+          said == other.said;
 }
 
 /// Two people's safety number: 60 digits in twelve groups, the same on

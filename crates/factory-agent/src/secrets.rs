@@ -36,6 +36,27 @@ pub struct SecretVariable {
     /// Not secret (an AWS region beside its keys): set like the rest, but
     /// never hidden.
     pub public: bool,
+    /// A file's bytes that aren't text (an imported .p12), held as standard
+    /// base64 in `value`: the file gets the bytes themselves, and what's
+    /// hidden is the bytes' forms. Only ever with `file`.
+    pub binary: bool,
+}
+
+impl SecretVariable {
+    /// The value's bytes: decoded for a binary one.
+    pub fn bytes(&self) -> Zeroizing<Vec<u8>> {
+        value_bytes(&self.value, self.binary)
+    }
+}
+
+/// `value`'s bytes: itself, or for a binary one its base64 decoded (empty
+/// if it isn't base64, which the vault never stores).
+fn value_bytes(value: &str, binary: bool) -> Zeroizing<Vec<u8>> {
+    if binary {
+        Zeroizing::new(base64::engine::general_purpose::STANDARD.decode(value.as_bytes()).unwrap_or_default())
+    } else {
+        Zeroizing::new(value.as_bytes().to_vec())
+    }
 }
 
 impl fmt::Debug for SecretVariable {
@@ -95,8 +116,9 @@ pub struct Secrets {
 /// becomes "[secret AWS/AWS_SECRET_ACCESS_KEY]".
 #[derive(Default)]
 pub struct Redactor {
-    /// What it was built from, so it can be extended (`with`).
-    values: Vec<(Arc<str>, Zeroizing<String>)>,
+    /// What it was built from, so it can be extended (`with`): each value's
+    /// label, bytes, and whether they're text.
+    values: Vec<(Arc<str>, Zeroizing<Vec<u8>>, bool)>,
     /// None when there's nothing to hide.
     automaton: Option<AhoCorasick>,
     /// Each pattern's replacement.
@@ -123,7 +145,7 @@ impl Redactor {
             variables
                 .iter()
                 .filter(|variable| !variable.public)
-                .map(|variable| (format!("{}/{}", variable.secret, variable.variable).into(), variable.value.clone()))
+                .map(|variable| (format!("{}/{}", variable.secret, variable.variable).into(), variable.bytes(), !variable.binary))
                 .collect(),
         )
     }
@@ -138,18 +160,18 @@ impl Redactor {
             variables
                 .iter()
                 .filter(|variable| !variable.public)
-                .map(|variable| (format!("{}/{}", variable.secret, variable.variable).into(), variable.value.clone())),
+                .map(|variable| (format!("{}/{}", variable.secret, variable.variable).into(), variable.bytes(), !variable.binary)),
         );
         Redactor::build(values)
     }
 
-    fn build(values: Vec<(Arc<str>, Zeroizing<String>)>) -> Redactor {
+    fn build(values: Vec<(Arc<str>, Zeroizing<Vec<u8>>, bool)>) -> Redactor {
         let mut patterns: Vec<Zeroizing<Vec<u8>>> = Vec::new();
         let mut replacements: Vec<Arc<str>> = Vec::new();
         let mut seen = hashbrown::HashSet::new();
-        for (label, value) in &values {
+        for (label, value, text) in &values {
             let replacement: Arc<str> = format!("[secret {label}]").into();
-            for form in forms(value.as_bytes()) {
+            for form in forms(value, *text) {
                 if form.len() >= MIN_REDACTED && seen.insert(form.to_vec()) {
                     patterns.push(form);
                     replacements.push(replacement.clone());
@@ -277,8 +299,35 @@ impl Redactor {
 }
 
 /// Every form of a value the redactor hides, short ones included (the
-/// caller drops those).
-fn forms(value: &[u8]) -> Vec<Zeroizing<Vec<u8>>> {
+/// caller drops those). Bytes that aren't text (`text` false) are hidden
+/// raw, in base64 and in hex: their lines, percent-encoding and JSON
+/// escapes mean nothing.
+fn forms(value: &[u8], text: bool) -> Vec<Zeroizing<Vec<u8>>> {
+    if !text {
+        let mut forms = Vec::new();
+        if value.len() >= MIN_REDACTED {
+            forms.push(Zeroizing::new(value.to_vec()));
+            for engine in [&STANDARD_NO_PAD, &URL_SAFE_NO_PAD] {
+                for offset in 0..3 {
+                    forms.push(base64_aligned(engine, value, offset));
+                }
+            }
+            // Base64 as tools wrap it (openssl's 64 columns, MIME's 76):
+            // each whole line, and the last if it's long enough.
+            let encoded = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(value));
+            for width in [64, 76] {
+                if encoded.len() > width {
+                    for line in encoded.as_bytes().chunks(width) {
+                        forms.push(Zeroizing::new(line.to_vec()));
+                    }
+                }
+            }
+            let hex = Zeroizing::new(value.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+            forms.push(Zeroizing::new(hex.to_ascii_uppercase().into_bytes()));
+            forms.push(Zeroizing::new(hex.as_bytes().to_vec()));
+        }
+        return forms;
+    }
     let mut bases: Vec<&[u8]> = vec![value];
     let trimmed = value.trim_ascii();
     if trimmed.len() != value.len() {
@@ -443,12 +492,19 @@ fn utf8(bytes: Vec<u8>) -> String {
 /// command itself.
 pub const FILTER_VALUES: &str = "CLAKTORY_REDACT";
 
+/// Marks a binary value's label in `FILTER_VALUES` (its value is base64):
+/// no secret's name can hold it.
+const BINARY_LABEL: char = '\u{1}';
+
 /// The values `filter_main` gets, for a command's secrets.
 pub(crate) fn filter_values(variables: &[SecretVariable]) -> Zeroizing<String> {
     let pairs: Vec<(String, &str)> = variables
         .iter()
         .filter(|variable| !variable.public)
-        .map(|variable| (format!("{}/{}", variable.secret, variable.variable), variable.value.as_str()))
+        .map(|variable| {
+            let mark = if variable.binary { BINARY_LABEL.to_string() } else { String::new() };
+            (format!("{mark}{}/{}", variable.secret, variable.variable), variable.value.as_str())
+        })
         .collect();
     Zeroizing::new(serde_json::to_string(&pairs).unwrap_or_default())
 }
@@ -471,7 +527,17 @@ pub fn filter_main() -> std::process::ExitCode {
 /// `FILTER_VALUES`) hidden.
 pub fn filter(mut input: impl std::io::Read, mut output: impl std::io::Write, values: &str) -> std::io::Result<()> {
     let pairs: Vec<(String, String)> = serde_json::from_str(values).unwrap_or_default();
-    let redactor = Redactor::build(pairs.into_iter().map(|(label, value)| (Arc::from(label), Zeroizing::new(value))).collect());
+    let values = pairs
+        .into_iter()
+        .map(|(label, value)| {
+            let value = Zeroizing::new(value);
+            match label.strip_prefix(BINARY_LABEL) {
+                Some(label) => (Arc::from(label), value_bytes(&value, true), false),
+                None => (Arc::from(label.as_str()), Zeroizing::new(value.as_bytes().to_vec()), true),
+            }
+        })
+        .collect();
+    let redactor = Redactor::build(values);
     let mut stream = StreamRedactor::new(Arc::new(redactor));
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
@@ -523,7 +589,14 @@ mod tests {
     use super::*;
 
     fn variable(secret: &str, variable: &str, value: &str) -> SecretVariable {
-        SecretVariable { secret: secret.into(), variable: variable.into(), value: Zeroizing::new(value.into()), file: false, public: false }
+        SecretVariable {
+            secret: secret.into(),
+            variable: variable.into(),
+            value: Zeroizing::new(value.into()),
+            file: false,
+            public: false,
+            binary: false,
+        }
     }
 
     const KEY: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
@@ -670,6 +743,51 @@ mod tests {
         let mut output = Vec::new();
         filter(Trickle(input.clone(), 5), &mut output, "").unwrap();
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn a_binary_value_is_hidden_raw_in_base64_and_in_hex() {
+        let bytes: Vec<u8> = (0..48u8).map(|byte| byte.wrapping_mul(37) ^ 0xa5).collect();
+        let p12 = SecretVariable {
+            file: true,
+            binary: true,
+            ..variable("Android", "UPLOAD_P12", &base64::engine::general_purpose::STANDARD.encode(&bytes))
+        };
+        assert_eq!(p12.bytes().as_slice(), bytes.as_slice(), "decoded for the file");
+        let hidden = b"[secret Android/UPLOAD_P12]";
+        let redactor = Redactor::new(std::slice::from_ref(&p12));
+        let mut raw = b"before ".to_vec();
+        raw.extend_from_slice(&bytes);
+        assert!(redactor.redact_bytes(&raw).windows(hidden.len()).any(|window| window == hidden), "raw bytes");
+        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(redactor.redact(&hex), "[secret Android/UPLOAD_P12]");
+        assert_eq!(redactor.redact(&hex.to_uppercase()), "[secret Android/UPLOAD_P12]");
+        for prefix in [&b""[..], b"x", b"xy"] {
+            let mut data = prefix.to_vec();
+            data.extend_from_slice(&bytes);
+            for engine in [&STANDARD_NO_PAD, &URL_SAFE_NO_PAD] {
+                let shown = redactor.redact(&engine.encode(&data)).into_owned();
+                assert!(shown.contains("[secret Android/UPLOAD_P12]"), "{prefix:?}: {shown}");
+            }
+        }
+        // Wrapped as openssl base64 and base64 -b 76 print it.
+        let long: Vec<u8> = (0..300u32).map(|i| (i.wrapping_mul(151) ^ 0x5a) as u8).collect();
+        let cert = SecretVariable { binary: true, ..variable("Android", "CERT", &base64::engine::general_purpose::STANDARD.encode(&long)) };
+        let wrapped = Redactor::new(std::slice::from_ref(&cert));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&long);
+        for width in [64, 76] {
+            let lines: Vec<&str> = encoded.as_bytes().chunks(width).map(|line| std::str::from_utf8(line).unwrap()).collect();
+            let shown = wrapped.redact(&lines.join("\n")).into_owned();
+            assert!(!lines.iter().any(|line| shown.contains(line)), "{width}: {shown}");
+        }
+        // A command's filter gets it marked binary, and hides the same.
+        let values = filter_values(std::slice::from_ref(&p12));
+        let mut output = Vec::new();
+        filter(Trickle(raw.clone(), 5), &mut output, &values).unwrap();
+        assert_eq!(output, [&b"before "[..], hidden].concat());
+        let mut output = Vec::new();
+        filter(Trickle(hex.into_bytes(), 3), &mut output, &values).unwrap();
+        assert_eq!(output, hidden);
     }
 
     #[test]

@@ -15,3 +15,6 @@ pub mod messages;
 pub mod reports;
 pub mod review;
 pub mod sync;
+
+#[cfg(test)]
+mod hostile;

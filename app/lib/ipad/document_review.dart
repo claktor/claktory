@@ -1,10 +1,13 @@
-// A review an agent asks of a PDF, answered on an iPad with what the
-// person drew on it (#275; docs/ipad-workbench.md §6): at the foot of the
-// document's pane while the question waits, who asks and what, the pages
-// drawn on, then Dismiss and Approve. Either answer takes the drawings
-// with it: each page with ink, whole, as a PNG with the ink on it,
-// uploaded to the agent and named in the answer (AnswerAsk.attachments),
-// so they reach the agent only when the person answers.
+// A review an agent asks of a PDF, answered on an iPad right where it's
+// read, with what the person drew on it (#275; docs/ipad-workbench.md §6):
+// at the foot of the document's pane while the question waits, who asks
+// and what, the pages drawn on, and the answer field, always open. Return
+// (or Approve, or Send) answers, Dismiss is quiet beside it; either takes
+// the field's words and the drawings with it: each page with ink, whole,
+// as a PNG with the ink on it, uploaded to the agent and named in the
+// answer (AnswerAsk.attachments), so they reach the agent only when the
+// person answers. Answered, the pane closes and the person is back where
+// they were. Nothing here is a comment of its own.
 //
 // Only a backend that takes the drawings accepts a PDF for review, so a
 // question waiting on a PDF says the answer can carry them.
@@ -13,17 +16,21 @@ import 'dart:io' show File;
 import 'dart:math' show Random, min;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../backend.dart';
 import '../characters/character.dart';
 import '../controls.dart';
-import '../decision.dart' show DecisionComment, decisionCommentLimit;
+import '../decision.dart' show decisionCommentLimit;
 import '../identity.dart';
+import '../markdown.dart' show Markdown;
 import '../mobile/metrics.dart' show Metrics, TypeScale;
-import '../mobile/review_bar.dart' show ReviewAsk;
 import '../protocol/factory/v1/factory.pb.dart';
+import '../dictation.dart' show Dictation;
+import '../review_answer.dart' show PendingReview, finishReview;
 import 'document_host.dart' show DocumentSurface;
+import '../visible_codes.dart' show proseCodes;
 
 /// Reads a drawn page's composite, as native wrote it (tests replace it).
 @visibleForTesting
@@ -96,7 +103,7 @@ class ReviewWatch extends ChangeNotifier {
   }
 
   /// The oldest question still waiting on this file.
-  ReviewAsk? get ask {
+  PendingReview? get ask {
     for (final seq in _waiting) {
       final entry = _entries[seq];
       if (entry == null || entry.whichKind() != Entry_Kind.askPerson) {
@@ -138,18 +145,56 @@ class DocumentReviewBar extends StatefulWidget {
 class _DocumentReviewBarState extends State<DocumentReviewBar> {
   var _busy = false;
 
-  /// The person's comment, sent with either answer (Matt's rule: approve
-  /// or dismiss, always with an optional comment).
+  /// The person's answer, sent with either button (Matt's rule: approve
+  /// or dismiss, always with an optional comment); the answer itself when
+  /// the agent wants words.
   final _comment = TextEditingController();
+  final _field = FocusNode(debugLabel: 'review answer');
+
+  @override
+  void initState() {
+    super.initState();
+    // The button's label follows what's typed.
+    _comment.addListener(_typed);
+  }
+
+  /// The ask whose kept answer the field was given back
+  /// ([DocumentSurface.answers]): what's typed is kept for it from then.
+  int? _restored;
+
+  void _typed() {
+    final ask = widget.watch.ask;
+    if (ask != null && ask.seq == _restored) {
+      final text = _comment.text;
+      if (text.trim().isEmpty) {
+        widget.surface.answers.remove(ask.seq);
+      } else {
+        widget.surface.answers[ask.seq] = text;
+      }
+    }
+    setState(() {});
+  }
+
+  /// The answer typed to [seq] before the pane went (another agent shown
+  /// and back), given back to the field once.
+  void _restore(int seq) {
+    if (_restored == seq) return;
+    _restored = seq;
+    final kept = widget.surface.answers[seq];
+    if (kept == null || _comment.text.isNotEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _comment.text.isEmpty) _comment.text = kept;
+    });
+  }
 
   @override
   void dispose() {
-    _comment.dispose();
+    _comment
+      ..removeListener(_typed)
+      ..dispose();
+    _field.dispose();
     super.dispose();
   }
-
-  /// The comment field, made again (open) once handwriting fills it.
-  var _commentKey = 0;
 
   /// Handwriting being read, and what came of the last reading when it
   /// gave no text.
@@ -188,8 +233,8 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
           text: filled,
           selection: TextSelection.collapsed(offset: filled.length),
         );
-        _commentKey++;
       });
+      _field.requestFocus();
     } on Object {
       if (mounted) {
         setState(
@@ -247,7 +292,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
     return attachments;
   }
 
-  Future<bool> _answer(ReviewAsk ask, {bool dismiss = false}) async {
+  Future<bool> _answer(PendingReview ask, {bool dismiss = false}) async {
     final backend = widget.watch.backend;
     if (_busy || backend == null) return false;
     setState(() {
@@ -264,9 +309,22 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
         attachments: attachments,
       );
       _comment.clear();
+      // Answered: the file's pane closes and the person is back where
+      // they pressed Review.
+      if (mounted) {
+        unawaited(
+          finishReview(
+            context,
+            widget.watch.agentId,
+            widget.watch.path,
+          ).catchError((Object _) {}),
+        );
+      }
       return true;
-    } on RequestFailure catch (failure) {
-      if (mounted) setState(() => _error = failure.message);
+    } on RequestFailure {
+      if (mounted) {
+        setState(() => _error = "Couldn't send your answer. Try again.");
+      }
       return false;
     } on Object {
       // The surface couldn't draw a page out (it went, or native failed).
@@ -288,6 +346,13 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
     }
   }
 
+  /// Return in the field: answers with what's typed; nothing when it's
+  /// empty, so a stray Return never approves.
+  void _submit(PendingReview ask) {
+    if (_busy || _comment.text.trim().isEmpty) return;
+    unawaited(_answer(ask));
+  }
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: Listenable.merge([widget.watch, widget.surface]),
@@ -298,9 +363,11 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
     final ask = widget.watch.ask;
     final agent = widget.watch.backend?.workspace.agent(widget.watch.agentId);
     if (ask == null || agent == null) return const SizedBox.shrink();
+    _restore(ask.seq);
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     final drawn = widget.surface.drawnPages.length;
+    final typed = _comment.text.trim().isNotEmpty;
     final sending = _sending;
     final String? line = sending != null
         ? (sending.of == 1
@@ -342,13 +409,33 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
                 ),
               ],
             ),
-            if (ask.ask.title.isNotEmpty) ...[
+            if (ask.ask.title.isNotEmpty || ask.ask.body.isNotEmpty) ...[
               const SizedBox(height: Space.xs),
-              Text(
-                ask.ask.title,
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-                style: type.body.copyWith(color: palette.text),
+              // The question; a long one scrolls in its own little room,
+              // as on the Mac (review_answer.dart).
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 120),
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (ask.ask.title.isNotEmpty)
+                        // The agent's words: what reorders them shows by
+                        // its code (proseCodes, Fugo).
+                        Text(
+                          proseCodes(ask.ask.title),
+                          style: type.body.copyWith(color: palette.text),
+                        ),
+                      if (ask.ask.body.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Markdown(
+                          proseCodes(ask.ask.body),
+                          color: palette.textMuted,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
               ),
             ],
             if (line != null) ...[
@@ -361,6 +448,43 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
                 ),
               ),
             ],
+            const SizedBox(height: Space.s),
+            // The answer, always open: Return sends what's typed, Shift
+            // and Return starts a new line on a hardware keyboard. Or said:
+            // the mic at its end puts what's said in, to check first.
+            Dictation(
+              controller: _comment,
+              focusNode: _field,
+              enabled: !_busy,
+              child: CallbackShortcuts(
+                bindings: {
+                  const SingleActivator(LogicalKeyboardKey.enter): () =>
+                      _submit(ask),
+                },
+                child: Semantics(
+                  hint: 'Return sends it to ${agent.name}.',
+                  child: TextField(
+                    key: const ValueKey('review-answer'),
+                    controller: _comment,
+                    focusNode: _field,
+                    placeholder: 'Your answer to ${agent.name}',
+                    semanticsLabel: 'Your answer to ${agent.name}',
+                    minLines: 1,
+                    maxLines: 6,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => _submit(ask),
+                    inputFormatters: [
+                      LengthLimitingTextInputFormatter(decisionCommentLimit),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: Space.xs),
+            Text(
+              '${agent.name} gets it with your answer.',
+              style: type.caption.copyWith(color: palette.textFaint),
+            ),
             if (_error case final error?) ...[
               const SizedBox(height: Space.xs),
               Text(
@@ -369,9 +493,9 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
               ),
             ],
             const SizedBox(height: Space.s),
-            // The answers at the end, as a pane's other actions, under
-            // each other when the pane is narrow or the text large; the
-            // comment under them, as on every card (decision.dart).
+            // The answer at the end, as a pane's other actions; Dismiss
+            // quiet before it. Under each other when the pane is narrow
+            // or the text large.
             Align(
               alignment: AlignmentDirectional.centerEnd,
               child: Wrap(
@@ -379,26 +503,24 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
                 runSpacing: Space.s,
                 children: [
                   Button(
+                    key: const ValueKey('review-dismiss'),
                     label: 'Dismiss',
                     onPressed: _busy
                         ? null
                         : () => unawaited(_answer(ask, dismiss: true)),
                   ),
                   Button(
-                    label: 'Approve',
+                    key: const ValueKey('review-send'),
+                    // No Approve when the agent wants words: they're the answer.
+                    label: typed || ask.ask.wantsText ? 'Send' : 'Approve',
                     primary: true,
-                    onPressed: _busy ? null : () => unawaited(_answer(ask)),
+                    // Words are the answer when the agent wants them.
+                    onPressed: _busy || (ask.ask.wantsText && !typed)
+                        ? null
+                        : () => unawaited(_answer(ask)),
                   ),
                 ],
               ),
-            ),
-            const SizedBox(height: Space.xs),
-            DecisionComment(
-              key: ValueKey(_commentKey),
-              controller: _comment,
-              agent: agent.name,
-              enabled: !_busy,
-              onSubmitted: _busy ? null : () => unawaited(_answer(ask)),
             ),
             ..._handwriting(context),
           ],
@@ -409,7 +531,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
 }
 
 extension on _DocumentReviewBarState {
-  /// The offer to turn what's handwritten into the comment, on an iPad
+  /// The offer to turn what's handwritten into the answer, on an iPad
   /// that reads handwriting (iPadOS 27 and later) with something drawn or
   /// chosen with the lasso; nothing at all on one that doesn't.
   List<Widget> _handwriting(BuildContext context) {
@@ -458,8 +580,8 @@ extension on _DocumentReviewBarState {
                     heightFactor: 1,
                     child: Text(
                       selected
-                          ? 'Turn selected handwriting into a comment'
-                          : 'Turn handwriting into a comment',
+                          ? 'Turn selected handwriting into your answer'
+                          : 'Turn handwriting into your answer',
                       style: type.caption.copyWith(
                         color: hovered ? palette.text : palette.textMuted,
                         fontWeight: FontWeight.w500,

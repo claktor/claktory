@@ -10,6 +10,7 @@ import 'controls.dart';
 import 'drafts.dart';
 import 'forms.dart';
 import 'identity.dart';
+import 'mobile/page_find.dart' show PhonePageFind;
 import 'mobile/composer.dart';
 import 'mobile/input.dart';
 import 'mobile/lines.dart';
@@ -831,7 +832,18 @@ class _MessageBoxState extends State<MessageBox> {
 
   @override
   Widget build(BuildContext context) {
-    if (isPhoneLayout(context)) return _buildPhone(context);
+    if (isPhoneLayout(context)) {
+      // A phone's find bar takes the box's place at the foot while it's
+      // open (mobile/page_find.dart): the box steps aside, its draft kept.
+      final finding = PhonePageFind.finding(context);
+      return Offstage(
+        offstage: finding,
+        child: TickerMode(
+          enabled: !finding,
+          child: ExcludeFocus(excluding: finding, child: _buildPhone(context)),
+        ),
+      );
+    }
     final palette = Palette.of(context);
     final target = widget.target;
     final blocked = target.blocked(context);

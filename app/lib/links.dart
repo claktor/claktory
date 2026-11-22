@@ -1,7 +1,8 @@
 // Links that open Claktory: `claktory://add?code=<pairing code>` adds the
 // Claktory the code is for (after asking), so an agent setting one up on a
 // server can hand this Mac its code with `open "claktory://add?code=…"`;
-// and a pairing code itself (`factory://?t=…&e=…`), which the iPhone's
+// and a pairing code itself (`factory://?t=…&e=…`, or the same as
+// `claktory://`), which the iPhone's
 // Camera opens from a Mac's QR code. The Mac's app takes them
 // (AppDelegate.swift), the iPhone's (SceneDelegate) and Android's
 // (MainActivity) too; Claktory Dev's scheme is claktory-dev, and debug
@@ -38,8 +39,11 @@ class AddLink {
 
 /// What [link] asks for; null when it isn't a link to add a Claktory.
 AddLink? parseLink(Uri link) {
-  // A pairing code itself, as a Mac's QR code holds it.
-  if (link.scheme == 'factory') {
+  // A pairing code itself, as a Mac's QR code holds it: factory://, or
+  // claktory:// in a code's shapes (no host, through the tunnel; or a
+  // host and port), never claktory://add or another word.
+  final shaped = link.host.isEmpty || link.hasPort;
+  if (link.scheme == 'factory' || (link.scheme == 'claktory' && shaped)) {
     return AddLink(parsePairingCode(link.toString()));
   }
   if (!linkSchemes.contains(link.scheme) || link.host != 'add') return null;

@@ -101,6 +101,68 @@ void main() {
     expect(harness.connections.saved, isEmpty);
   });
 
+  group('claktory:// pairing codes, read like factory:// ones', () {
+    final token = 'a' * 64;
+    final endpoint = 'c' * 64;
+    final shapes = {
+      'tunnel': '://?t=$token&name=box&e=$endpoint',
+      'direct': '://100.64.0.2:7443?t=$token&fp=${'b' * 64}&name=box',
+    };
+
+    test('pasted or scanned (one parser): both schemes, every shape', () {
+      for (final MapEntry(key: shape, value: rest) in shapes.entries) {
+        for (final scheme in ['factory', 'claktory']) {
+          final target = parsePairingCode('$scheme$rest');
+          expect(target, isNotNull, reason: '$scheme $shape');
+          expect(target!.name, 'box');
+          expect(target.code, '$scheme$rest', reason: 'kept as it was');
+        }
+      }
+      final direct = parsePairingCode('claktory${shapes['direct']}')!;
+      expect((direct.host, direct.port), ('100.64.0.2', 7443));
+      expect(
+        parsePairingCode('claktory${shapes['tunnel']}')!.endpointId,
+        endpoint,
+      );
+      // A Claktory found through the account, as kept on this device.
+      for (final scheme in ['factory', 'claktory']) {
+        final account = '$scheme://?account=mini&e=$endpoint&name=mini';
+        expect(parsePairingCode(account, fromAccount: true), isNotNull);
+        expect(parsePairingCode(account), isNull, reason: 'never pasted');
+      }
+      // Other schemes never are.
+      expect(parsePairingCode('claktory-dev${shapes['tunnel']}'), isNull);
+      expect(parsePairingCode('https${shapes['tunnel']}'), isNull);
+    });
+
+    test('a link: the code itself, or inside claktory://add', () {
+      for (final scheme in ['factory', 'claktory']) {
+        for (final rest in shapes.values) {
+          final code = '$scheme$rest';
+          expect(parseLink(Uri.parse(code))!.target!.name, 'box', reason: code);
+          expect(
+            parseLink(Uri.parse(link(code)))!.target!.name,
+            'box',
+            reason: 'add $code',
+          );
+        }
+      }
+      // claktory://add is still the add link, never read as a code.
+      expect(parseLink(Uri.parse('claktory://add?code=x'))!.target, isNull);
+    });
+
+    testWidgets('opened from the Camera, it asks the same', (tester) async {
+      final harness = Harness(Workspace());
+      await harness.show(tester);
+      appLinks.receive('claktory${shapes['tunnel']}');
+      await settle(tester);
+      expect(find.text('Connect to this Claktory?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await settle(tester);
+      expect(harness.connections.saved, isEmpty);
+    });
+  });
+
   testWidgets('a name never stands as the title', (tester) async {
     final harness = Harness(Workspace());
     await harness.show(tester);

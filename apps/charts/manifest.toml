@@ -1,6 +1,6 @@
 id = "charts"
 name = "Charts"
-version = "0.2.0"
+version = "0.2.1"
 world = "claktory:app@1.1"
 publisher = "claktory"
 description = "Live charts of what your agents do: runs, messages, tokens and more, from Claktory's records and your agents' databases."

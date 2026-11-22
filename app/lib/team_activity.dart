@@ -50,18 +50,23 @@ class TeamActivity extends StatelessWidget {
           onTap: () => isPhoneLayout(context)
               ? AppScope.openPage(context, AppPage.map)
               : AppScope.togglePage(context, AppPage.map),
-          builder: (context, hovered) => SizedBox(
-            // The usage circles' cell.
-            height: 24,
+          builder: (context, hovered) => ConstrainedBox(
+            // The usage circles' cell; taller with larger text, so the
+            // count is never cut (an iPad at the largest text).
+            constraints: const BoxConstraints(minHeight: 24),
             child: Center(
               child: AnimatedContainer(
                 duration: Motion.fast,
-                height: 20,
-                padding: const EdgeInsets.symmetric(horizontal: Space.s - 2),
+                constraints: const BoxConstraints(minHeight: 20),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Space.s - 2,
+                  vertical: 2,
+                ),
                 decoration: BoxDecoration(
                   color: hovered ? palette.hover : null,
                   border: Border.all(color: palette.hairline),
-                  borderRadius: BorderRadius.circular(10),
+                  // Round ends at any height.
+                  borderRadius: BorderRadius.circular(999),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,

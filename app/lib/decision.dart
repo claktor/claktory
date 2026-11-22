@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'controls.dart';
+import 'dictation.dart';
 import 'identity.dart';
 import 'mobile/metrics.dart' show Metrics, TypeScale;
 
@@ -110,22 +111,28 @@ class _DecisionCommentState extends State<DecisionComment> {
       children: [
         // Enter does the card's main action, where it has one; Shift+Enter
         // starts a new line.
-        CallbackShortcuts(
-          bindings: {
-            const SingleActivator(LogicalKeyboardKey.enter): ?onSubmitted,
-          },
-          child: TextField(
-            controller: widget.controller,
-            focusNode: _focus,
-            placeholder: 'A comment for ${widget.agent}, if you like',
-            // Named once typed in, when the placeholder is gone.
-            semanticsLabel: 'A comment for ${widget.agent}',
-            minLines: 1,
-            maxLines: 6,
-            // As much as the backend takes.
-            inputFormatters: [
-              LengthLimitingTextInputFormatter(decisionCommentLimit),
-            ],
+        // Or said: the mic puts what's said in, to check before sending.
+        Dictation(
+          controller: widget.controller,
+          focusNode: _focus,
+          enabled: widget.enabled,
+          child: CallbackShortcuts(
+            bindings: {
+              const SingleActivator(LogicalKeyboardKey.enter): ?onSubmitted,
+            },
+            child: TextField(
+              controller: widget.controller,
+              focusNode: _focus,
+              placeholder: 'A comment for ${widget.agent}, if you like',
+              // Named once typed in, when the placeholder is gone.
+              semanticsLabel: 'A comment for ${widget.agent}',
+              minLines: 1,
+              maxLines: 6,
+              // As much as the backend takes.
+              inputFormatters: [
+                LengthLimitingTextInputFormatter(decisionCommentLimit),
+              ],
+            ),
           ),
         ),
         const SizedBox(height: Space.xs),

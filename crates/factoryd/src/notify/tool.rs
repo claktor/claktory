@@ -63,7 +63,7 @@ fn notify(factory: &Arc<Factory>, agent: &str, args: Args) -> Result<ToolResult,
         crate::extensions::caller(&inner.config, agent)?;
         (inner.config.clone(), inner.config.person().to_owned())
     };
-    if factory.pipes.quarantined(agent) {
+    if factory.pipes.contained(agent) {
         return Err(format!("You're limited to a pipe, so you can't send notifications. ask_person reaches {person}. Nothing was sent."));
     }
     let settings = super::settings(factory);

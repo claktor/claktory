@@ -88,7 +88,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 53] = [
+const MIGRATIONS: [&str; 65] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -201,6 +201,22 @@ ALTER TABLE messages ADD COLUMN attachments TEXT;
     crate::diagnostics::CONNECTION,
     crate::diagnostics::SCHEMA,
     crate::user_apps::dms::sends::SEQUENCES,
+    crate::pipes::curator::SCHEMA,
+    crate::pipes::identity::SCHEMA,
+    crate::pipe_link::OUTBOX_AGENT_SQL,
+    crate::pipes::handoff::SCHEMA,
+    crate::pipes::spend::SCHEMA,
+    crate::extensions::ask::HELD,
+    "
+-- The person's reply on a checklist item (factory_agent::ChecklistItemRef,
+-- as JSON); null for any other message.
+ALTER TABLE messages ADD COLUMN checklist_item TEXT;
+",
+    crate::pipes::handoff::types::SCHEMA,
+    crate::extensions::ask::STEPS,
+    crate::extensions::viewer::OPENED,
+    crate::extensions::checklist::CARD_ITEMS,
+    crate::extensions::checklist::DISMISSED_CARD,
 ];
 
 /// A background task as recorded.
@@ -316,6 +332,7 @@ impl Store {
         let client_id = Some(queued.client_id.as_str()).filter(|id| !id.is_empty());
         let attachments = Some(&queued.attachments).filter(|list| !list.is_empty()).and_then(|list| serde_json::to_string(list).ok());
         let voice = queued.voice.as_ref().and_then(|voice| serde_json::to_string(voice).ok());
+        let checklist_item = queued.checklist_item.as_ref().and_then(|item| serde_json::to_string(item).ok());
         // An agent's message: where it stands (`extensions::agents::provenance`).
         let provenance = queued.event.as_ref().and_then(|event| event.provenance.as_ref());
         let sent = queued.sent.as_ref();
@@ -325,8 +342,8 @@ impl Store {
         let quiet = provenance.is_some_and(|provenance| provenance.quiet).then_some(1);
         let db = self.db();
         db.execute(
-            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, sent_from, client_id, attachments, voice, send_id, sender_run, reply_to, intent, taint, quiet)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, sent_from, client_id, attachments, voice, send_id, sender_run, reply_to, intent, taint, quiet, checklist_item)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 agent,
                 source,
@@ -345,6 +362,7 @@ impl Store {
                 intent,
                 sent.map(|sent| sent.taint.as_str()),
                 quiet,
+                checklist_item,
             ],
         )?;
         Ok(db.last_insert_rowid())
@@ -377,7 +395,7 @@ impl Store {
     pub(crate) fn waiting(&self) -> Result<BTreeMap<String, Vec<Queued>>, rusqlite::Error> {
         let db = self.db();
         let mut statement = db.prepare(
-            "SELECT id, agent, source, sender, sender_id, summary, text, created, sent_from, client_id, attachments, voice, reply_to, intent, quiet FROM messages WHERE delivered IS NULL AND dropped IS NULL ORDER BY id",
+            "SELECT id, agent, source, sender, sender_id, summary, text, created, sent_from, client_id, attachments, voice, reply_to, intent, quiet, checklist_item FROM messages WHERE delivered IS NULL AND dropped IS NULL ORDER BY id",
         )?;
         let mut rows = statement.query([])?;
         let mut waiting: BTreeMap<String, Vec<Queued>> = BTreeMap::new();
@@ -418,6 +436,7 @@ impl Store {
                 client_id: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
                 attachments: row.get::<_, Option<String>>(10)?.and_then(|list| serde_json::from_str(&list).ok()).unwrap_or_default(),
                 voice: row.get::<_, Option<String>>(11)?.and_then(|voice| serde_json::from_str(&voice).ok()),
+                checklist_item: row.get::<_, Option<String>>(15)?.and_then(|item| serde_json::from_str(&item).ok()),
                 sent: None,
                 held: false,
             });

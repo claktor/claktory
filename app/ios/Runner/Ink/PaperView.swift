@@ -232,7 +232,9 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
     case "goToPage":
       let n = args["page_1based"] as? Int ?? 1
       if let page = pdf.document?.page(at: n - 1) {
-        if let region = InkRegion.rect(args["region"]) {
+        if let region = InkRegion.rect(args["region"]), args["match"] as? Bool == true {
+          showMatch(Self.pageRect(region, on: page), on: page, n: n)
+        } else if let region = InkRegion.rect(args["region"]) {
           pdf.go(to: Self.pageRect(region, on: page), on: page)
         } else {
           pdf.go(to: page)
@@ -423,7 +425,8 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
     let scale = pdf.scaleFactor
     let fitted = pdf.autoScales
     searches += 1
-    pdf.highlightedSelections = nil
+    found = [:]
+    currentMatch = nil
     // The old version's overlays say nothing more.
     for canvas in canvases.values { canvas.delegate = nil }
     canvases.removeAll()
@@ -483,6 +486,86 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
     let text: String
   }
 
+  /// A find's matches by page (1-based), in the page overlay's space.
+  private(set) var found: [Int: [CGRect]] = [:]
+
+  /// Shows [selections] as the find's highlights, in place of the last:
+  /// each page's overlay washes its own (InkCanvas.found).
+  func highlight(_ selections: [PDFSelection]?) {
+    var byPage: [Int: [CGRect]] = [:]
+    for selection in selections ?? [] {
+      for line in selection.selectionsByLine() {
+        for page in line.pages {
+          guard let n = pdf.document.map({ $0.index(for: page) + 1 }) else { continue }
+          let crop = page.bounds(for: .cropBox)
+          let r = Self.tightBounds(of: line, on: page)
+          byPage[n, default: []].append(
+            CGRect(x: r.minX - crop.minX, y: crop.maxY - r.maxY, width: r.width, height: r.height))
+        }
+      }
+    }
+    found = byPage
+    currentMatch = nil
+    for (n, canvas) in canvases {
+      canvas.found = byPage[n] ?? []
+      canvas.current = nil
+    }
+  }
+
+  /// The find's current match (page 1-based, in its overlay's space).
+  private(set) var currentMatch: (page: Int, rect: CGRect)?
+
+  /// Goes to a find's match [rect] (page space) on [page]: marked apart
+  /// from the others, and brought into the view's upper part, where a find
+  /// bar and keyboard at its foot leave it in sight (Zucchero's row 91:
+  /// PDFKit's go(to:) left a match under them, the view thinking it shown).
+  /// A match already well in sight stays where it is.
+  func showMatch(_ rect: CGRect, on page: PDFPage, n: Int) {
+    let crop = page.bounds(for: .cropBox)
+    let mark = CGRect(
+      x: rect.minX - crop.minX, y: crop.maxY - rect.maxY, width: rect.width, height: rect.height)
+    currentMatch = (n, mark)
+    for (index, canvas) in canvases { canvas.current = index == n ? mark : nil }
+    guard let scroll = scrollView, pdf.bounds.height > 0 else {
+      return pdf.go(to: rect, on: page)
+    }
+    // Laid out, if it's a page not drawn yet.
+    if pdf.convert(rect, from: page).isEmpty { pdf.go(to: page) }
+    let shown = pdf.convert(rect, from: page)
+    let height = pdf.bounds.height
+    let width = pdf.bounds.width
+    var offset = scroll.contentOffset
+    if shown.minY < height * 0.08 || shown.maxY > height * 0.45 {
+      offset.y += shown.midY - height * 0.25
+    }
+    if shown.minX < 0 || shown.maxX > width {
+      offset.x += shown.midX - width / 2
+    }
+    let inset = scroll.adjustedContentInset
+    offset.y = min(
+      max(offset.y, -inset.top),
+      max(-inset.top, scroll.contentSize.height - scroll.bounds.height + inset.bottom))
+    offset.x = min(
+      max(offset.x, -inset.left),
+      max(-inset.left, scroll.contentSize.width - scroll.bounds.width + inset.right))
+    if offset != scroll.contentOffset { scroll.setContentOffset(offset, animated: false) }
+  }
+
+  /// A match's bounds on [page]: the union of its characters'. A
+  /// selection's own bounds, and its lines', can take in far more, such as
+  /// the whole column of lines in a monospaced report (Zucchero's row 91).
+  static func tightBounds(of selection: PDFSelection, on page: PDFPage) -> CGRect {
+    let range = selection.range(at: 0, on: page)
+    var bounds = CGRect.null
+    if range.location != NSNotFound {
+      for i in range.location..<(range.location + range.length) {
+        let glyph = page.characterBounds(at: i)
+        if !glyph.isEmpty { bounds = bounds.union(glyph) }
+      }
+    }
+    return bounds.isNull ? selection.bounds(for: page) : bounds
+  }
+
   /// Finds the text in a copy of the document of its own, off the main
   /// thread, then highlights the matches on the pages shown.
   private func search(_ args: [String: Any], _ result: @escaping FlutterResult) {
@@ -491,7 +574,7 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
     let query = (args["query"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     let limit = max(1, min(args["max_results"] as? Int ?? 200, 1000))
     guard !query.isEmpty, let url else {
-      pdf.highlightedSelections = nil
+      highlight(nil)
       return result(["query": query, "matches": [], "truncated": false])
     }
     searching.async { [weak self] in
@@ -509,7 +592,7 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
           matches.append(
             Match(
               page: copy.index(for: page), range: selection.range(at: 0, on: page),
-              region: Self.region(selection.bounds(for: page), on: page),
+              region: Self.region(Self.tightBounds(of: selection, on: page), on: page),
               text: (line.string ?? query).trimmingCharacters(in: .whitespacesAndNewlines)))
         }
       }
@@ -518,13 +601,10 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
         guard generation == self.searches else {
           return result(["query": query, "matches": [], "truncated": false, "superseded": true])
         }
-        self.pdf.highlightedSelections = matches.compactMap { m in
-          guard let page = self.pdf.document?.page(at: m.page),
-            let selection = page.selection(for: m.range)
-          else { return nil }
-          selection.color = UIColor.systemYellow.withAlphaComponent(0.5)
-          return selection
-        }
+        self.highlight(
+          matches.compactMap { m in
+            self.pdf.document?.page(at: m.page)?.selection(for: m.range)
+          })
         result([
           "query": query, "truncated": truncated,
           "matches": matches.map {
@@ -624,6 +704,8 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
     }
     if let canvas = canvases[n] { return canvas }
     let canvas = makeCanvas(page: n)
+    canvas.found = found[n] ?? []
+    canvas.current = currentMatch?.page == n ? currentMatch?.rect : nil
     canvases[n] = canvas
     return canvas
   }

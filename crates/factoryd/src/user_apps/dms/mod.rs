@@ -141,6 +141,13 @@ pub fn pinned_identity(factory: &Factory, account: &str) -> Option<[u8; 32]> {
     leaf::step(factory, |step| step.pinned(account)).ok().flatten()
 }
 
+/// Whether this Claktory's channel waits at the person's new security key
+/// (not given to it yet), for tests.
+#[doc(hidden)]
+pub fn channel_waits(factory: &Factory) -> bool {
+    factory.dm_leaf.channel_waits.load(Ordering::SeqCst)
+}
+
 pub(crate) fn preview() -> bool {
     PREVIEW.load(Ordering::Relaxed)
 }

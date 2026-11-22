@@ -73,14 +73,20 @@ class ChangelogView extends StatelessWidget {
                         ),
                         child: Row(
                           children: [
-                            Text(
-                              "What's new",
-                              style: TypeScale.of(context).label.copyWith(
-                                color: palette.text,
-                                fontWeight: FontWeight.w600,
+                            // Cut short at the largest text in a narrow
+                            // window, Done kept at the end.
+                            Expanded(
+                              child: Text(
+                                "What's new",
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TypeScale.of(context).label.copyWith(
+                                  color: palette.text,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ),
-                            const Spacer(),
+                            const SizedBox(width: Space.s),
                             Button(label: 'Done', onPressed: close),
                           ],
                         ),

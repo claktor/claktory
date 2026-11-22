@@ -184,6 +184,59 @@ void main() {
     expect(mine, lessThan(sent));
   });
 
+  testWidgets("the other side's words show what reorders text by its "
+      'code', (tester) async {
+    await show(
+      tester,
+      entries: [
+        _event(1, 2000, [1]),
+      ],
+      messages: [
+        _message(
+          1,
+          2000,
+          'Approve evil\u202Etxt.exe',
+          PipeAuthorKind.PIPE_AUTHOR_KIND_THEIR_AGENT,
+          name: 'B\u202Eo',
+        ),
+      ],
+    );
+    expect(find.text(r'Approve evil\u{202E}txt.exe'), findsOneWidget);
+    expect(
+      find.textContaining(r'B\u{202E}o', findRichText: true),
+      findsWidgets,
+    );
+    expect(find.textContaining('\u202E', findRichText: true), findsNothing);
+  });
+
+  testWidgets("the person's words to the liaison say they went to it "
+      'only, not through the pipe', (tester) async {
+    await show(
+      tester,
+      entries: [
+        Entry(
+          seq: Int64(1),
+          timestampMs: Int64(2000),
+          user: UserText(
+            text: 'Tell Ana hi',
+            sentFrom: SentFrom(
+              deviceName: 'MacBook',
+              kind: DeviceKind.DEVICE_KIND_LAPTOP,
+            ),
+          ),
+        ),
+        _say(2, 2100, 'I will.'),
+      ],
+    );
+    expect(find.text('Tell Ana hi'), findsOneWidget);
+    expect(find.text('To Kai only'), findsOneWidget);
+    // Under its bubble.
+    expect(
+      tester.getTopLeft(find.text('To Kai only')).dy,
+      greaterThan(tester.getBottomLeft(find.text('Tell Ana hi')).dy),
+    );
+  });
+
   testWidgets('the box writes to the liaison; picking the pipe carries the '
       'draft over, sends it through the pipe, then goes back to the '
       'liaison', (tester) async {

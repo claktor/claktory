@@ -348,12 +348,33 @@ impl Dashboard {
     }
 }
 
+/// Every bucket of the range, empty ones too, so spark lines are to scale.
+const BUCKETS: &str =
+    "WITH RECURSIVE t(at) AS (SELECT ($from / $step) * $step UNION ALL SELECT at + $step FROM t WHERE at + $step < $to)";
+
+/// The bucket of an hour of agent_usage: its own, or the range's first when
+/// the hour began before the range (a step under an hour), so tokens used
+/// inside the range in that hour still count, as Tokens by agent counts
+/// them.
+const TOKENS_AT: &str = "MAX(((hour * 1000) / $step) * $step, ($from / $step) * $step)";
+
+/// Before 0.2.1: an hour that began before the range fell outside every
+/// bucket.
+const TOKENS_AT_0_2_0: &str = "((hour * 1000) / $step) * $step";
+
+/// The Tokens stat's query, each hour bucketed by `at`.
+fn tokens_sql(at: &str) -> String {
+    format!(
+        "{BUCKETS}, c AS (SELECT {at} AS at, SUM(input + output) AS n FROM agent_usage \
+         WHERE hour >= $from_s - 3599 AND hour < $to_s AND ($agent = '' OR agent = $agent) GROUP BY 1) \
+         SELECT t.at AS time, COALESCE(c.n, 0) AS tokens FROM t LEFT JOIN c USING (at) ORDER BY t.at"
+    )
+}
+
 /// The dashboard Charts starts with: what your agents did over the last
 /// week, from Claktory's records.
 pub fn default_dashboard() -> Dashboard {
-    // Every bucket of the range, empty ones too, so spark lines are to
-    // scale.
-    let buckets = "WITH RECURSIVE t(at) AS (SELECT ($from / $step) * $step UNION ALL SELECT at + $step FROM t WHERE at + $step < $to)";
+    let buckets = BUCKETS;
     let counted = |table: &str, time: &str, filter: &str, column: &str| {
         format!(
             "{buckets}, c AS (SELECT ({time} / $step) * $step AS at, COUNT(*) AS n FROM {table} \
@@ -393,17 +414,7 @@ pub fn default_dashboard() -> Dashboard {
             stat("runs", "Runs", 0, "", counted("runs", "started", "", "runs")),
             stat("messages", "Messages", 3, "", counted("messages", "created", "", "messages")),
             stat("done", "Checklist items done", 6, "", counted("checklist_items", "updated", " AND status = 'done'", "done")),
-            stat(
-                "tokens",
-                "Tokens",
-                9,
-                "",
-                format!(
-                    "{buckets}, c AS (SELECT ((hour * 1000) / $step) * $step AS at, SUM(input + output) AS n FROM agent_usage \
-                     WHERE hour >= $from_s - 3599 AND hour < $to_s AND ($agent = '' OR agent = $agent) GROUP BY 1) \
-                     SELECT t.at AS time, COALESCE(c.n, 0) AS tokens FROM t LEFT JOIN c USING (at) ORDER BY t.at"
-                ),
-            ),
+            stat("tokens", "Tokens", 9, "", tokens_sql(TOKENS_AT)),
             Panel {
                 id: "tokens_by_agent".into(),
                 title: "Tokens by agent".into(),
@@ -570,12 +581,27 @@ pub fn restore(host: &mut impl Host, id: &str, by: &str) -> Result<Dashboard, St
     save(host, previous, None, by).map_err(|error| error.to_string())
 }
 
-/// The first start: the default dashboard, in place of C4a's.
+/// The first start: the default dashboard, in place of C4a's. Every
+/// later one: the default dashboard's fixes, where it wasn't changed.
 pub fn first_start(host: &mut impl Host) -> Result<(), String> {
     if index(host).is_some() {
-        return Ok(());
+        return upgrade(host);
     }
     host.kv_delete(LEGACY_KEY);
     write(host, INDEX_KEY, &Vec::<String>::new())?;
     save(host, default_dashboard(), None, "").map(|_| ()).map_err(|error| error.to_string())
+}
+
+/// The default dashboard's Tokens stat as 0.2.0 kept it, untouched since,
+/// gets 0.2.1's query (a new revision, the old one its previous version);
+/// one the person or an agent changed stays as it is.
+fn upgrade(host: &mut impl Host) -> Result<(), String> {
+    let Some(mut dashboard) = load(host, "claktory") else { return Ok(()) };
+    let old = tokens_sql(TOKENS_AT_0_2_0);
+    let Some(panel) = dashboard.panels.iter_mut().find(|panel| panel.id == "tokens" && panel.query.sql == old) else {
+        return Ok(());
+    };
+    panel.query.sql = tokens_sql(TOKENS_AT);
+    let rev = dashboard.rev;
+    save(host, dashboard, Some(rev), "").map(|_| ()).map_err(|error| error.to_string())
 }

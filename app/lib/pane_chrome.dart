@@ -6,6 +6,7 @@ import 'controls.dart' show ExtensionGlyph;
 import 'identity.dart';
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
+import 'mobile/page_find.dart' show phonePageSearch;
 import 'mobile/presentation.dart';
 
 /// Where a pane's header is, filled by what the pane shows: its details
@@ -46,11 +47,7 @@ class PaneChrome extends InheritedWidget {
 /// comments' count and More, which holds the viewer's own actions and,
 /// for a pane of an agent's layout, Close everywhere.
 class PhonePane {
-  const PhonePane({
-    required this.title,
-    required this.onBack,
-    this.onRemove,
-  });
+  const PhonePane({required this.title, required this.onBack, this.onRemove});
 
   /// The file's name.
   final String title;
@@ -150,9 +147,22 @@ class PhonePaneHeader extends StatelessWidget {
 
   Future<void> _more(BuildContext context) async {
     final onRemove = pane.onRemove;
+    // Find in what it shows, first (a phone's page bar, mobile/page_find).
+    final search = phonePageSearch(context);
     final chosen = await showActions<int>(
       context,
       actions: [
+        if (search != null)
+          SheetAction(
+            'Search',
+            -2,
+            glyph: (color) => ExtensionGlyph(
+              icon: 'search',
+              name: 'Search',
+              color: color,
+              size: 16,
+            ),
+          ),
         for (final (index, action) in actions.indexed)
           SheetAction(
             action.label,
@@ -171,6 +181,7 @@ class PhonePaneHeader extends StatelessWidget {
       ],
     );
     if (chosen == null || !context.mounted) return;
+    if (chosen == -2) return search?.call();
     if (chosen >= 0) {
       actions[chosen].onTap();
       return;
@@ -181,9 +192,7 @@ class PhonePaneHeader extends StatelessWidget {
       message:
           'It closes beside the conversation on every device. '
           'The file itself stays.',
-      actions: const [
-        SheetAction('Close everywhere', true, destructive: true),
-      ],
+      actions: const [SheetAction('Close everywhere', true, destructive: true)],
     );
     if (sure == true) onRemove?.call();
   }
@@ -192,7 +201,10 @@ class PhonePaneHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final more = actions.isNotEmpty || pane.onRemove != null;
+    final more =
+        actions.isNotEmpty ||
+        pane.onRemove != null ||
+        phonePageSearch(context) != null;
     return PhoneHeader(
       leading: HeaderButton.back(onTap: pane.onBack),
       title: Column(

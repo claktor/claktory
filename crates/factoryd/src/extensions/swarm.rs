@@ -188,9 +188,7 @@ fn report(home: &crate::home::Home, team: &Team, names: &HashMap<String, String>
 }
 
 fn local(ms: i64) -> String {
-    jiff::Timestamp::from_millisecond(ms)
-        .map(|time| time.to_zoned_datetime(jiff::tz::TimeZone::system()).strftime("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_default()
+    crate::transcript::local_time(ms, "%Y-%m-%d %H:%M")
 }
 
 fn pct(share: f64) -> String {

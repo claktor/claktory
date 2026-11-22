@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 
 import 'connections.dart';
 import 'controls.dart';
 import 'identity.dart';
+import 'links.dart' show confirmPairing;
 import 'name_step.dart' show StepCard;
 import 'rail.dart' show ClaktoriesScope;
 import 'scope.dart';
@@ -42,8 +45,29 @@ class _ConnectStepState extends State<ConnectStep> {
     super.dispose();
   }
 
+  /// One of the person's own, from their account: connects.
   void _connect(RemoteFactory target) =>
       AppScope.switchFactory(context, target);
+
+  /// A pasted code connects only once the person says so, as every way a
+  /// code comes in does (confirmPairing, Fugo).
+  Future<void> _connectPasted(RemoteFactory target) async {
+    // One question at a time: a second click while it asks does nothing
+    // (Abbacchio).
+    if (_asking) return;
+    _asking = true;
+    final bool yes;
+    try {
+      yes = await confirmPairing(context, target);
+    } finally {
+      _asking = false;
+    }
+    if (!yes || !mounted) return;
+    _connect(target);
+  }
+
+  /// Whether [confirmPairing] is asking about a pasted code.
+  var _asking = false;
 
   @override
   Widget build(BuildContext context) {
@@ -113,7 +137,7 @@ class _ConnectStepState extends State<ConnectStep> {
                 placeholder: 'Paste code',
                 autofocus: true,
                 onSubmitted: (_) {
-                  if (usable) _connect(target);
+                  if (usable) unawaited(_connectPasted(target));
                 },
               ),
               if (error != null) ...[
@@ -141,7 +165,9 @@ class _ConnectStepState extends State<ConnectStep> {
                   Button(
                     label: 'Connect',
                     primary: true,
-                    onPressed: usable ? () => _connect(target) : null,
+                    onPressed: usable
+                        ? () => unawaited(_connectPasted(target))
+                        : null,
                   ),
                 ],
               ),

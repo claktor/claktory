@@ -158,6 +158,15 @@ $Q down qa1                            # or: down --all (only yours)
   - **The environment:** the sandbox's factoryd runs it through
     `FACTORY_SPEECH`, kept by `restart` and printed by `env`.
   - **Not in the container:** `--container` refuses `--speech`.
+- **A release's version:** `up --version v0.1.17` starts a Claktory whose
+  factoryd says it's v0.1.17, as a release's does, so an app of another
+  version meets the same compatibility checks it would on that release. A
+  sandbox otherwise says "dev", and those checks don't run.
+  - **Only the number:** nothing else of a release is stamped in. There's no
+    update channel, and the sandbox is as sealed as any other.
+  - **Built once per commit and version,** into `bin/<commit>-<version>`, with
+    the same check as the other binaries. Only `vX.Y.Z` is taken.
+  - **Not in the container:** `--container` refuses `--version` for now.
 
 ## A feature's paths, end to end
 

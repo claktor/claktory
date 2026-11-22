@@ -190,8 +190,11 @@ fi
 # The supervisor's app, in releases that have one (scripts/lib.sh make_supervisor_app).
 SUPERVISOR_DIR=()
 [[ -d "$RELEASE/supervisor" ]] && SUPERVISOR_DIR=(supervisor)
+# Claktory's own apps (apps/), in releases that ship them.
+APPS_DIR=()
+[[ -d "$RELEASE/apps" ]] && APPS_DIR=(apps)
 COPYFILE_DISABLE=1 tar --no-xattrs -czf "$STAGE/$NAME" \
-  -C "$RELEASE" "$APP_NAME" factoryd claktory-apps claktory-speech backend-version CHANGELOG.md ${SUPERVISOR_DIR[@]+"${SUPERVISOR_DIR[@]}"} \
+  -C "$RELEASE" "$APP_NAME" factoryd claktory-apps claktory-speech backend-version CHANGELOG.md ${SUPERVISOR_DIR[@]+"${SUPERVISOR_DIR[@]}"} ${APPS_DIR[@]+"${APPS_DIR[@]}"} \
   -C "$SRC" LICENSE.md \
   -C "$SRC/scripts" install-release.sh
 
@@ -215,9 +218,10 @@ for arch in ${LINUX[@]+"${LINUX[@]}"}; do
   FACTORY_LINUX_SRC="$SRC" "$ROOT/scripts/build-linux.sh" "$arch" "$build/claktory-apps" claktory-apps
   FACTORY_LINUX_SRC="$SRC" "$ROOT/scripts/build-linux.sh" "$arch" "$build/claktory-speech" claktory-speech
   cp "$RELEASE/backend-version" "$RELEASE/CHANGELOG.md" "$build/"
+  [[ ! -d "$RELEASE/apps" ]] || cp -R "$RELEASE/apps" "$build/apps"
   linux_name="factory-$VERSION-linux-$arch.tar.gz"
   COPYFILE_DISABLE=1 tar --no-xattrs -czf "$STAGE/$linux_name" \
-    -C "$build" factoryd claktory-apps claktory-speech backend-version CHANGELOG.md \
+    -C "$build" factoryd claktory-apps claktory-speech backend-version CHANGELOG.md ${APPS_DIR[@]+"${APPS_DIR[@]}"} \
     -C "$SRC" LICENSE.md \
     -C "$SRC/scripts" install-linux.sh
   FILES+=("$STAGE/$linux_name")

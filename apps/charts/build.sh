@@ -16,7 +16,10 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 key="${CLAKTORY_APP_KEY:-$HOME/.claktory/app-dev-key.pem}"
 cd "$here"
 
-cargo build --quiet --target wasm32-wasip2 --release
+# No home folder in the build: panic messages would otherwise carry this
+# machine's paths (~/.cargo/registry/…) into app.wasm.
+CARGO_TARGET_WASM32_WASIP2_RUSTFLAGS="--remap-path-prefix=$HOME=~" \
+  cargo build --quiet --target wasm32-wasip2 --release
 
 if [[ ! -f "$key" ]]; then
   mkdir -p "$(dirname "$key")"

@@ -3,8 +3,10 @@ import 'dart:math' as math;
 import 'package:flutter/widgets.dart';
 
 import 'characters/character.dart';
+import 'checklist_reply.dart' show ChecklistReply;
 import 'backend.dart';
 import 'controls.dart';
+import 'find.dart';
 import 'database.dart';
 import 'forms.dart' show FormFrame;
 import 'extension_about.dart';
@@ -20,6 +22,7 @@ import 'monitors.dart';
 import 'resources.dart';
 import 'secrets.dart' show AgentSecretsPanel;
 import 'tasks.dart';
+import 'pipe_reports.dart' show ReportsPanel, containedKeeps;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'state.dart';
@@ -50,10 +53,13 @@ AgentExtension? agentExtension(Agent agent, String id) {
   return null;
 }
 
-/// The extensions turned on for [agent], in the workspace's order.
+/// The extensions turned on for [agent], in the workspace's order; for one
+/// limited to a pipe or reading reports, only those it can still use.
 List<Extension> enabledExtensions(Workspace workspace, Agent agent) => [
   for (final extension in workspace.extensions)
-    if (agentExtension(agent, extension.id)?.enabled ?? false) extension,
+    if ((agentExtension(agent, extension.id)?.enabled ?? false) &&
+        containedKeeps(agent, extension.id))
+      extension,
 ];
 
 /// The extension whose panel shows beside [agent]: the one it has open
@@ -117,9 +123,23 @@ class ExtensionBar extends StatelessWidget {
   final Agent? agent;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) =>
+        _bar(context, bounded: constraints.maxHeight.isFinite),
+  );
+
+  Widget _bar(BuildContext context, {required bool bounded}) {
     final palette = Palette.of(context);
     final agent = this.agent;
+    Widget buttons(Agent agent) => Column(
+      children: [
+        for (final button in extensionButtons(context, agent))
+          Padding(
+            padding: const EdgeInsets.only(bottom: Space.xs),
+            child: button,
+          ),
+      ],
+    );
     return DecoratedBox(
       decoration: BoxDecoration(
         color: palette.sidebar,
@@ -130,12 +150,15 @@ class ExtensionBar extends StatelessWidget {
         child: Column(
           children: [
             const TitleSpace(),
+            // Many extensions in a short window (an iPad on its side)
+            // scroll, so the last can still be reached; inside a scroll
+            // of its own (an iPad's workbench) the bar is as tall as they
+            // are.
             if (agent != null)
-              for (final button in extensionButtons(context, agent))
-                Padding(
-                  padding: const EdgeInsets.only(bottom: Space.xs),
-                  child: button,
-                ),
+              if (bounded)
+                Expanded(child: SingleChildScrollView(child: buttons(agent)))
+              else
+                buttons(agent),
           ],
         ),
       ),
@@ -275,6 +298,10 @@ class ExtensionPanel extends StatelessWidget {
     // Secrets has no view: the vault the workspace carries says what the
     // agent has.
     if (extension.id == 'secrets') return AgentSecretsPanel(agentId: agent.id);
+    // Reports: the reports themselves, a reader's or its pipe's.
+    if (extension.id == 'handoff') {
+      return ReportsPanel(extension: extension, agent: agent);
+    }
     // Others with no view of their own say what they do.
     if (!hasExtensionView(extension)) {
       return ExtensionAbout(extension: extension, agentId: agent.id);
@@ -348,6 +375,10 @@ class _ChecklistViewState extends State<ChecklistView> {
   /// Each item's place, to scroll to it when it's pointed at.
   final _itemKeys = <int, GlobalKey>{};
 
+  /// The item last pointed at, and when: it opens, to its history and a
+  /// reply, when the view gets to it.
+  ({int id, DateTime at})? _opened;
+
   /// What points at items (Needs you's Show in checklist, an agent's
   /// highlight), and the last pointing this view went to.
   ValueNotifier<({List<String> keys, DateTime at})?>? _pointedAt;
@@ -367,9 +398,34 @@ class _ChecklistViewState extends State<ChecklistView> {
     if (mounted) setState(() {});
   }
 
+  /// Find in the checklist (⌘F): its items' words and notes, in the order
+  /// they're listed.
+  late final _find = LocalFind(
+    placeholder: 'Search this checklist',
+    items: () => [for (final item in _order) (item.id, _findText(item))],
+    go: (id, _) {
+      if (id is! int) return;
+      _pinned = false;
+      final index = _order.indexWhere((item) => item.id == id);
+      _goTo(
+        id,
+        _order.length < 2 ? 0 : index / (_order.length - 1),
+        glow: false,
+      );
+    },
+  );
+
+  /// The items as the last build listed them.
+  var _order = const <ChecklistItem>[];
+
+  /// What find searches in [item]: its words, and its note where it shows.
+  static String _findText(ChecklistItem item) =>
+      _showsNote(item) ? '${item.text}\n${item.note}' : item.text;
+
   @override
   void dispose() {
     _pointedAt?.removeListener(_pointed);
+    _find.dispose();
     _scroll.dispose();
     super.dispose();
   }
@@ -388,6 +444,7 @@ class _ChecklistViewState extends State<ChecklistView> {
       final id = int.tryParse(key.substring(prefix.length));
       if (id != null && ids.contains(id)) {
         _wentTo = pointed.at;
+        _opened = (id: id, at: pointed.at);
         return id;
       }
     }
@@ -397,18 +454,28 @@ class _ChecklistViewState extends State<ChecklistView> {
   /// Scrolls item [id] into view once this frame is laid out. One not
   /// built yet (far down a long list) is near [fraction] of the way: the
   /// view goes there first and looks again.
-  void _goTo(int id, double fraction, {int tries = 4}) {
+  void _goTo(int id, double fraction, {int tries = 4, bool glow = true}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients) return;
       final place = _itemKeys[id]?.currentContext;
       if (place != null) {
         Scrollable.ensureVisible(place, alignment: 0.2);
+        // Found (⌘F): it's marked, not glowed.
+        if (!glow) return;
+        // Glowing as it comes into view: what pointed at it glowed it
+        // before the checklist was there (a phone's sheet still sliding
+        // up), when no one could see it.
+        final agent = AppScope.of(context).workspace.agent(widget.agentId);
+        AppScope.of(context).highlights.glow(
+          'checklist_item:${widget.agentId}#$id',
+          [agentColor(agent?.color ?? 'slate')],
+        );
         return;
       }
       if (tries == 0) return;
       final position = _scroll.position;
       position.jumpTo(position.maxScrollExtent * fraction.clamp(0.0, 1.0));
-      _goTo(id, fraction, tries: tries - 1);
+      _goTo(id, fraction, tries: tries - 1, glow: glow);
     });
   }
 
@@ -464,19 +531,23 @@ class _ChecklistViewState extends State<ChecklistView> {
       store: store,
     );
     if (checklist.items.isEmpty) {
-      return ListView(
-        padding: const EdgeInsets.fromLTRB(Space.s, 0, Space.s, Space.l),
-        children: [
-          goals,
-          Padding(
-            padding: const EdgeInsets.all(Space.s),
-            child: Text(
-              'Nothing on the checklist yet.',
-              style: TypeScale.of(context).body
-                  .copyWith(color: palette.textFaint),
+      _order = const [];
+      return FindScope(
+        target: _find,
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(Space.s, 0, Space.s, Space.l),
+          children: [
+            ScrolledSelection(child: goals),
+            Padding(
+              padding: const EdgeInsets.all(Space.s),
+              child: Text(
+                'Nothing on the checklist yet.',
+                style: TypeScale.of(context).body
+                    .copyWith(color: palette.textFaint),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       );
     }
     final goalText = {for (final goal in checklist.goals) goal.id: goal.text};
@@ -529,15 +600,17 @@ class _ChecklistViewState extends State<ChecklistView> {
     // log) as others come and go, and an item that changes section starts
     // fresh in its new place, easing in.
     final highlights = AppScope.of(context).highlights;
-    Widget item(ChecklistItem item, {String? added}) => Arrival(
+    Widget arrival(ChecklistItem item, {String? added}) => Arrival(
       key: ValueKey((item.id, added == null)),
       animate: !reduced && moved.contains(item.id),
       child: Glow(
         store: highlights,
         matches: (key) => key == 'checklist_item:${widget.agentId}#${item.id}',
         side: AxisDirection.left,
-        child: KeyedSubtree(
+        child: LocalFindMarks(
           key: _itemKeys.putIfAbsent(item.id, GlobalKey.new),
+          find: _find,
+          itemKey: item.id,
           child: _Item(
             item: item,
             store: store,
@@ -545,8 +618,21 @@ class _ChecklistViewState extends State<ChecklistView> {
             agentId: widget.agentId,
             now: now,
             goal: goalText[item.goal],
+            openedAt: _opened?.id == item.id ? _opened?.at : null,
           ),
         ),
+      ),
+    );
+    // Selected where the pointer is at any zoom, however far it's
+    // scrolled (ScrolledSelection), each item and heading on its own.
+    // Copied, each item's lines (its words, what it waits on, its note)
+    // on lines of their own, and the next item on a line after it.
+    Widget item(ChecklistItem item, {String? added}) => ScrolledSelection(
+      key: ValueKey((item.id, added == null)),
+      child: CopyShape(
+        lines: true,
+        trail: '\n',
+        child: arrival(item, added: added),
       ),
     );
     // An item pointed at (Show in checklist) is scrolled to, and the view
@@ -556,6 +642,11 @@ class _ChecklistViewState extends State<ChecklistView> {
       ...outstanding,
     ];
     _itemKeys.removeWhere((id, _) => !order.any((item) => item.id == id));
+    _order = order;
+    // What's found follows the items as they change.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _find.refresh();
+    });
     if (_target({for (final item in order) item.id}) case final id?) {
       _pinned = false;
       final index = order.indexWhere((item) => item.id == id);
@@ -579,99 +670,120 @@ class _ChecklistViewState extends State<ChecklistView> {
     // On a phone the progress scrolls with the list: held above it, it'd
     // leave no room for the list at the largest text.
     final phone = isPhoneLayout(context);
-    return LayoutBuilder(
-      builder: (context, constraints) => Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (!phone) ...[
-            _Progress(items: checklist.items),
-            // Held above the items, scrolling on its own past two fifths of
-            // the panel.
-            ConstrainedBox(
-              constraints: BoxConstraints(
-                maxHeight: constraints.maxHeight.isFinite
-                    ? constraints.maxHeight * 0.4
-                    : double.infinity,
-              ),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  border: Border(bottom: BorderSide(color: palette.hairline)),
+    return FindScope(
+      target: _find,
+      child: LayoutBuilder(
+        builder: (context, constraints) => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (!phone) ...[
+              _Progress(items: checklist.items),
+              // Held above the items, scrolling on its own past two fifths of
+              // the panel.
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: constraints.maxHeight.isFinite
+                      ? constraints.maxHeight * 0.4
+                      : double.infinity,
                 ),
-                // With no goals there's only Add goal…: nothing to scroll.
-                child: checklist.goals.isEmpty
-                    ? Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: Space.s,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: Border(bottom: BorderSide(color: palette.hairline)),
+                  ),
+                  // With no goals there's only Add goal…: nothing to scroll.
+                  child: checklist.goals.isEmpty
+                      ? Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: Space.s,
+                          ),
+                          child: goals,
+                        )
+                      : SingleChildScrollView(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: Space.s,
+                          ),
+                          child: ScrolledSelection(child: goals),
                         ),
-                        child: goals,
-                      )
-                    : SingleChildScrollView(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: Space.s,
+                ),
+              ),
+            ],
+            Expanded(
+              child: Stack(
+                children: [
+                  NotificationListener<ScrollNotification>(
+                    onNotification: _onScroll,
+                    child: NotificationListener<ScrollMetricsNotification>(
+                      // Growth (new items, an opened log) while following.
+                      onNotification: (_) {
+                        if (_pinned) _followSoon();
+                        return false;
+                      },
+                      child: ListView(
+                        controller: _scroll,
+                        padding: const EdgeInsets.fromLTRB(
+                          Space.s,
+                          0,
+                          Space.s,
+                          Space.l,
                         ),
-                        child: goals,
+                        children: [
+                          if (phone) ...[
+                            ScrolledSelection(
+                              child: _Progress(items: checklist.items),
+                            ),
+                            ScrolledSelection(child: goals),
+                          ],
+                          for (final (day, finishedThen) in history) ...[
+                            ScrolledSelection(
+                              child: heading(
+                                dayLabel(day, now),
+                                doneLabel(days[day]!),
+                              ),
+                            ),
+                            for (final done in finishedThen) item(done),
+                          ],
+                          if (outstanding.isNotEmpty) ...[
+                            ScrolledSelection(
+                              child: heading(
+                                'Outstanding',
+                                '${outstanding.length}',
+                              ),
+                            ),
+                            for (final open in outstanding)
+                              item(open, added: dayLabel(dayOf(open), now)),
+                          ],
+                        ],
                       ),
+                    ),
+                  ),
+                  Positioned(
+                    right: Space.m,
+                    bottom: Space.m,
+                    child: IgnorePointer(
+                      ignoring: _pinned,
+                      child: AnimatedOpacity(
+                        opacity: _pinned ? 0 : 1,
+                        duration: Motion.fast,
+                        curve: Curves.easeOut,
+                        child: _LatestButton(onTap: _toLatest),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
-          Expanded(
-            child: Stack(
-              children: [
-                NotificationListener<ScrollNotification>(
-                  onNotification: _onScroll,
-                  child: NotificationListener<ScrollMetricsNotification>(
-                    // Growth (new items, an opened log) while following.
-                    onNotification: (_) {
-                      if (_pinned) _followSoon();
-                      return false;
-                    },
-                    child: ListView(
-                      controller: _scroll,
-                      padding: const EdgeInsets.fromLTRB(
-                        Space.s,
-                        0,
-                        Space.s,
-                        Space.l,
-                      ),
-                      children: [
-                        if (phone) ...[
-                          _Progress(items: checklist.items),
-                          goals,
-                        ],
-                        for (final (day, finishedThen) in history) ...[
-                          heading(dayLabel(day, now), doneLabel(days[day]!)),
-                          for (final done in finishedThen) item(done),
-                        ],
-                        if (outstanding.isNotEmpty) ...[
-                          heading('Outstanding', '${outstanding.length}'),
-                          for (final open in outstanding)
-                            item(open, added: dayLabel(dayOf(open), now)),
-                        ],
-                      ],
-                    ),
-                  ),
-                ),
-                Positioned(
-                  right: Space.m,
-                  bottom: Space.m,
-                  child: IgnorePointer(
-                    ignoring: _pinned,
-                    child: AnimatedOpacity(
-                      opacity: _pinned ? 0 : 1,
-                      duration: Motion.fast,
-                      curve: Curves.easeOut,
-                      child: _LatestButton(onTap: _toLatest),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
 }
+
+/// Whether [item]'s note shows under it: while it's blocked or parked.
+bool _showsNote(ChecklistItem item) =>
+    (item.status == ChecklistStatus.CHECKLIST_STATUS_BLOCKED ||
+        item.status == ChecklistStatus.CHECKLIST_STATUS_PARKED) &&
+    item.note.isNotEmpty;
 
 /// How much of [items] is done, for a day's heading: "2 of 3 done", "All 4
 /// done", "All done", or "" when the day only has dropped items.
@@ -828,7 +940,10 @@ class _GoalsState extends State<_Goals> {
       agentId: widget.agentId,
       store: widget.store,
     );
+    // As tall as what it holds: with no goals, Add goal… alone, not the
+    // two fifths of the panel it may scroll in.
     return Column(
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (goals.isNotEmpty)
@@ -1190,10 +1305,9 @@ String resumesWords(ChecklistItem item, DateTime now) {
   return 'Resumes ${atTime(ms, now)}';
 }
 
-/// What a blocked item waits on, in words: [text], and whether it stands
-/// out (waiting on the person with nothing asked, or left with them), and
-/// whether "See question" follows (a card for it waits).
-typedef WaitingWords = ({String text, bool standsOut, bool seeQuestion});
+/// What a blocked item waits on, in words: [text], and whether "See
+/// question" follows (a card for it waits).
+typedef WaitingWords = ({String text, bool seeQuestion});
 
 /// The words for an item blocked on [kind] ([blockedOn] for one from
 /// before kinds, "person" or the blocker's words). [ref] names the agent
@@ -1238,49 +1352,36 @@ WaitingWords waitingWords({
             '${retryAtMs > now.millisecondsSinceEpoch ? ' · checks again ${at(retryAtMs)}' : ''}',
       _ => 'Blocked on $blockedOn',
     };
-    return (text: text, standsOut: false, seeQuestion: false);
+    return (text: text, seeQuestion: false);
   }
-  // How long up front: "Waiting 2 days for your decision".
-  final waited = sinceMs == 0
-      ? ''
-      : blockedFor(
-          now.difference(DateTime.fromMillisecondsSinceEpoch(sinceMs)),
-        );
-  String leadFor(String duration) => switch (kind) {
-    BlockedKind.BLOCKED_KIND_PERSON_DECISION =>
-      duration.isEmpty
-          ? 'Waiting for your decision'
-          : 'Waiting $duration for your decision',
-    BlockedKind.BLOCKED_KIND_PERSON_ACTION =>
-      duration.isEmpty
-          ? 'Waiting for you to act'
-          : 'Waiting $duration for you to act',
-    _ => duration.isEmpty ? 'Blocked on you' : 'Blocked on you for $duration',
-  };
   if (hasPendingAsk) {
-    return (text: leadFor(''), standsOut: false, seeQuestion: true);
+    // A card asks: Needs you shows it, and "See question" goes to it.
+    final text = switch (kind) {
+      BlockedKind.BLOCKED_KIND_PERSON_DECISION => 'Waiting for your decision',
+      BlockedKind.BLOCKED_KIND_PERSON_ACTION => 'Waiting for you to act',
+      _ => 'Blocked on you',
+    };
+    return (text: text, seeQuestion: true);
   }
-  final lead = leadFor(waited);
+  // No card asks: the agent's state, never a task for the person (Matt's
+  // ruling). Needs you doesn't show it; the card will when one asks.
+  final owner = nameOf(agentId);
   if (dismissedMs > 0) {
     // Dismissed: the agent decides meanwhile, and asks again no sooner
     // than a day later, when it still needs the person.
-    final left = 'you left it to ${nameOf(agentId)}';
     return (
       text: reaskAtMs > 0
-          ? '$lead · $left · asks again ${at(reaskAtMs)}'
-          : '$lead · $left',
-      standsOut: false,
+          ? 'You left it to $owner · it may ask again ${at(reaskAtMs)}'
+          : 'You left it to $owner',
       seeQuestion: false,
     );
   }
-  if (reaskAtMs > 0) {
-    return (
-      text: '$lead · asks again ${at(reaskAtMs)}',
-      standsOut: false,
-      seeQuestion: false,
-    );
-  }
-  return (text: '$lead · not asked yet', standsOut: true, seeQuestion: false);
+  return (
+    text: reaskAtMs > 0
+        ? 'Waiting for $owner to ask you ${at(reaskAtMs)}'
+        : 'Waiting for $owner to ask you',
+    seeQuestion: false,
+  );
 }
 
 /// [text] cut at a word to at most [max] characters, with "…" when cut.
@@ -1290,9 +1391,10 @@ String shortened(String text, int max) {
   return '${text.substring(0, cut > 0 ? cut : max).trimRight()}…';
 }
 
-/// What a blocked item waits on ([waitingWords]): in `textMuted`, or in
-/// signal when it stands out; with a question waiting, "· See question",
-/// which opens [agentId]'s conversation at the card waiting there.
+/// What a blocked item waits on ([waitingWords]), in `textMuted`; with a
+/// question waiting, "· See question", which opens the conversation at the
+/// card asking about it (WaitingItem.card_seq), or at [agentId]'s first
+/// card waiting when the backend names none.
 class _BlockedOn extends StatelessWidget {
   const _BlockedOn({
     required this.item,
@@ -1327,13 +1429,22 @@ class _BlockedOn extends StatelessWidget {
     );
     final text = Text(
       words.text,
-      style: caption.copyWith(
-        color: words.standsOut ? palette.signal : palette.textMuted,
-      ),
+      style: caption.copyWith(color: palette.textMuted),
     );
     if (!words.seeQuestion) return text;
-    final agent = backend.workspace.agent(agentId);
-    final waiting = agent?.waitingSeqs.firstOrNull;
+    final card = backend.workspace
+        .agent(checklistAgentId)
+        ?.waitingItems
+        .where((waiting) => waiting.item == item.id && waiting.cardSeq != 0)
+        .firstOrNull;
+    final cardAgentId = card == null
+        ? agentId
+        : card.cardAgentId.isEmpty
+        ? checklistAgentId
+        : card.cardAgentId;
+    final waiting =
+        card?.cardSeq ??
+        backend.workspace.agent(agentId)?.waitingSeqs.firstOrNull;
     return Wrap(
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
@@ -1345,8 +1456,8 @@ class _BlockedOn extends StatelessWidget {
             onTap: waiting == null
                 ? null
                 : () => fireAndLog(() async {
-                    await backend.selectAgent(agentId);
-                    backend.reveal.reachSeq(agentId, waiting.toInt());
+                    await backend.selectAgent(cardAgentId);
+                    backend.reveal.reachSeq(cardAgentId, waiting.toInt());
                   }()),
             builder: (context, hovered) => Text(
               'See question',
@@ -1406,10 +1517,14 @@ class _Item extends StatefulWidget {
     this.added,
     this.agentId = '',
     this.goal,
+    this.openedAt,
   });
 
   final ChecklistItem item;
   final WorkspaceStore store;
+
+  /// When it was last pointed at (Show in checklist): it opens then.
+  final DateTime? openedAt;
 
   /// The words of the goal it serves, if any.
   final String? goal;
@@ -1428,7 +1543,14 @@ class _Item extends StatefulWidget {
 }
 
 class _ItemState extends State<_Item> {
-  var _open = false;
+  late var _open = widget.openedAt != null;
+
+  @override
+  void didUpdateWidget(_Item old) {
+    super.didUpdateWidget(old);
+    final at = widget.openedAt;
+    if (at != null && at != old.openedAt) _open = true;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1439,11 +1561,12 @@ class _ItemState extends State<_Item> {
         item.status == ChecklistStatus.CHECKLIST_STATUS_DROPPED;
     final owner = item.owner.isEmpty ? null : widget.store.agent(item.owner);
     final phone = isPhoneLayout(context);
-    return Semantics(
+    final row = Semantics(
       container: true,
-      expanded: item.log.isEmpty ? null : _open,
+      expanded: _open,
+      // Open, its history and a field to reply on it.
       child: Pressable(
-        onTap: item.log.isEmpty ? null : () => setState(() => _open = !_open),
+        onTap: () => setState(() => _open = !_open),
         builder: (context, hovered) => Container(
           constraints: BoxConstraints(minHeight: phone ? Touch.target : 0),
           padding: const EdgeInsets.symmetric(
@@ -1451,7 +1574,7 @@ class _ItemState extends State<_Item> {
             vertical: Space.s - 2,
           ),
           decoration: BoxDecoration(
-            color: hovered && item.log.isNotEmpty ? palette.hover : null,
+            color: hovered ? palette.hover : null,
             borderRadius: BorderRadius.circular(Radii.control),
           ),
           child: Row(
@@ -1467,16 +1590,20 @@ class _ItemState extends State<_Item> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      item.text,
-                      style: TypeScale.of(context).body.copyWith(
-                        color: finished ? palette.textMuted : palette.text,
-                        decoration:
-                            item.status ==
-                                ChecklistStatus.CHECKLIST_STATUS_DROPPED
-                            ? TextDecoration.lineThrough
-                            : null,
-                        decorationColor: palette.textMuted,
+                    Text.rich(
+                      // Its words' matches marked when found (⌘F).
+                      FindHighlight.markText(
+                        context,
+                        item.text,
+                        TypeScale.of(context).body.copyWith(
+                          color: finished ? palette.textMuted : palette.text,
+                          decoration:
+                              item.status ==
+                                  ChecklistStatus.CHECKLIST_STATUS_DROPPED
+                              ? TextDecoration.lineThrough
+                              : null,
+                          decorationColor: palette.textMuted,
+                        ),
                       ),
                     ),
                     // What a blocked item waits on: on the person, for how
@@ -1507,153 +1634,155 @@ class _ItemState extends State<_Item> {
                               .copyWith(color: palette.textMuted),
                         ),
                       ),
-                    if ((item.status ==
-                                ChecklistStatus.CHECKLIST_STATUS_BLOCKED ||
-                            item.status ==
-                                ChecklistStatus.CHECKLIST_STATUS_PARKED) &&
-                        item.note.isNotEmpty)
+                    if (_showsNote(item))
                       Padding(
                         padding: const EdgeInsets.only(top: 2),
-                        child: Text(
-                          item.note,
-                          style: TypeScale.of(context).caption
-                              .copyWith(color: palette.textFaint),
+                        child: Text.rich(
+                          FindHighlight.markText(
+                            context,
+                            item.note,
+                            TypeScale.of(context).caption
+                                .copyWith(color: palette.textFaint),
+                          ),
                         ),
                       ),
                     const SizedBox(height: 2),
+                    // Its number, status, owner and day are the panel's
+                    // labels, not the item's words: a copy leaves them out.
                     if (phone)
                       // At the largest text, onto as many lines as it needs.
-                      Wrap(
-                        spacing: Space.s,
-                        runSpacing: 2,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          Text(
-                            '#${item.id}',
-                            style: TypeScale.of(context).caption.copyWith(
-                              color: palette.textFaint,
-                              fontFeatures: const [
-                                FontFeature.tabularFigures(),
-                              ],
-                            ),
-                          ),
-                          Text(
-                            statusLabel(item.status),
-                            style: TypeScale.of(context).caption
-                                .copyWith(color: palette.textMuted),
-                          ),
-                          if (item.owner.isEmpty)
+                      Unselectable(
+                        child: Wrap(
+                          spacing: Space.s,
+                          runSpacing: 2,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
                             Text(
-                              'Unassigned',
+                              '#${item.id}',
+                              style: TypeScale.of(context).caption.copyWith(
+                                color: palette.textFaint,
+                                fontFeatures: const [
+                                  FontFeature.tabularFigures(),
+                                ],
+                              ),
+                            ),
+                            Text(
+                              statusLabel(item.status),
                               style: TypeScale.of(context).caption
-                                  .copyWith(color: palette.textFaint),
-                            )
-                          else
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                owner == null
-                                    ? const UnknownCharacter(size: 20)
-                                    : AgentCharacter(agent: owner, size: 20),
-                                const SizedBox(width: Space.xs),
-                                Flexible(
-                                  child: Text(
-                                    owner?.name ?? item.owner,
-                                    style: TypeScale.of(context).caption
-                                        .copyWith(color: palette.textMuted),
+                                  .copyWith(color: palette.textMuted),
+                            ),
+                            if (item.owner.isEmpty)
+                              Text(
+                                'Unassigned',
+                                style: TypeScale.of(context).caption
+                                    .copyWith(color: palette.textFaint),
+                              )
+                            else
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  owner == null
+                                      ? const UnknownCharacter(size: 20)
+                                      : AgentCharacter(agent: owner, size: 20),
+                                  const SizedBox(width: Space.xs),
+                                  Flexible(
+                                    child: Text(
+                                      owner?.name ?? item.owner,
+                                      style: TypeScale.of(context).caption
+                                          .copyWith(color: palette.textMuted),
+                                    ),
                                   ),
-                                ),
-                              ],
-                            ),
-                          if (widget.added != null)
-                            Text(
-                              widget.added!,
-                              style: TypeScale.of(context).caption
-                                  .copyWith(color: palette.textFaint),
-                            ),
-                          if (widget.goal case final goal?)
-                            Text(
-                              goalLine(goal),
-                              style: TypeScale.of(context).caption
-                                  .copyWith(color: palette.textFaint),
-                            ),
-                          if (item.log.isNotEmpty)
+                                ],
+                              ),
+                            if (widget.added != null)
+                              Text(
+                                widget.added!,
+                                style: TypeScale.of(context).caption
+                                    .copyWith(color: palette.textFaint),
+                              ),
+                            if (widget.goal case final goal?)
+                              Text(
+                                goalLine(goal),
+                                style: TypeScale.of(context).caption
+                                    .copyWith(color: palette.textFaint),
+                              ),
                             Chevron(color: palette.textFaint, down: _open),
-                        ],
+                          ],
+                        ),
                       )
                     else
-                      Row(
-                        children: [
-                          Text(
-                            '#${item.id}',
-                            style: TypeScale.of(context).caption.copyWith(
-                              color: palette.textFaint,
-                              fontFeatures: const [
-                                FontFeature.tabularFigures(),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: Space.s),
-                          Text(
-                            statusLabel(item.status),
-                            style: TypeScale.of(context).caption
-                                .copyWith(color: palette.textMuted),
-                          ),
-                          const SizedBox(width: Space.s),
-                          if (item.owner.isEmpty)
-                            Flexible(
-                              child: Text(
-                                'Unassigned',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TypeScale.of(context).caption
-                                    .copyWith(color: palette.textFaint),
-                              ),
-                            )
-                          else ...[
-                            owner == null
-                                ? const UnknownCharacter(size: 20)
-                                : AgentCharacter(agent: owner, size: 20),
-                            const SizedBox(width: Space.xs),
-                            Flexible(
-                              child: Text(
-                                owner?.name ?? item.owner,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TypeScale.of(context).caption
-                                    .copyWith(color: palette.textMuted),
+                      Unselectable(
+                        child: Row(
+                          children: [
+                            Text(
+                              '#${item.id}',
+                              style: TypeScale.of(context).caption.copyWith(
+                                color: palette.textFaint,
+                                fontFeatures: const [
+                                  FontFeature.tabularFigures(),
+                                ],
                               ),
                             ),
-                          ],
-                          if (widget.added != null) ...[
                             const SizedBox(width: Space.s),
-                            Flexible(
-                              child: Text(
-                                widget.added!,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TypeScale.of(context).caption
-                                    .copyWith(color: palette.textFaint),
-                              ),
+                            Text(
+                              statusLabel(item.status),
+                              style: TypeScale.of(context).caption
+                                  .copyWith(color: palette.textMuted),
                             ),
-                          ],
-                          if (widget.goal case final goal?) ...[
                             const SizedBox(width: Space.s),
-                            Flexible(
-                              child: Text(
-                                goalLine(goal),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TypeScale.of(context).caption
-                                    .copyWith(color: palette.textFaint),
+                            if (item.owner.isEmpty)
+                              Flexible(
+                                child: Text(
+                                  'Unassigned',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TypeScale.of(context).caption
+                                      .copyWith(color: palette.textFaint),
+                                ),
+                              )
+                            else ...[
+                              owner == null
+                                  ? const UnknownCharacter(size: 20)
+                                  : AgentCharacter(agent: owner, size: 20),
+                              const SizedBox(width: Space.xs),
+                              Flexible(
+                                child: Text(
+                                  owner?.name ?? item.owner,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TypeScale.of(context).caption
+                                      .copyWith(color: palette.textMuted),
+                                ),
                               ),
-                            ),
-                          ],
-                          if (item.log.isNotEmpty) ...[
+                            ],
+                            if (widget.added != null) ...[
+                              const SizedBox(width: Space.s),
+                              Flexible(
+                                child: Text(
+                                  widget.added!,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TypeScale.of(context).caption
+                                      .copyWith(color: palette.textFaint),
+                                ),
+                              ),
+                            ],
+                            if (widget.goal case final goal?) ...[
+                              const SizedBox(width: Space.s),
+                              Flexible(
+                                child: Text(
+                                  goalLine(goal),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TypeScale.of(context).caption
+                                      .copyWith(color: palette.textFaint),
+                                ),
+                              ),
+                            ],
                             const Spacer(),
                             Chevron(color: palette.textFaint, down: _open),
                           ],
-                        ],
+                        ),
                       ),
                     if (_open) ...[
                       const SizedBox(height: Space.s),
@@ -1667,6 +1796,29 @@ class _ItemState extends State<_Item> {
           ),
         ),
       ),
+    );
+    if (!_open) return row;
+    // Outside the row's press, so a click beside the field doesn't fold it;
+    // under the item's words.
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        row,
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            Space.s + 14 + Space.s,
+            Space.xs,
+            Space.s,
+            Space.s,
+          ),
+          child: ChecklistReply(
+            key: ValueKey('reply:${widget.agentId}#${item.id}'),
+            checklistAgentId: widget.agentId,
+            itemId: item.id,
+            owner: item.owner,
+          ),
+        ),
+      ],
     );
   }
 }

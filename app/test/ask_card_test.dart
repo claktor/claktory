@@ -2,8 +2,11 @@
 // shows, in a conversation and in Needs you, and a command in its body has
 // Copy beside it.
 import 'package:factory_app/ask_card.dart';
+import 'package:factory_app/controls.dart' show Pressable;
+import 'package:factory_app/dictation.dart' show transcribeRecording;
 import 'package:factory_app/inbox.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/recorder.dart' show deviceRecorder;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -11,6 +14,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
 import 'selection_test.dart' show copyItem, rightClick, watchClipboard;
+import 'voice_test.dart' show FakeRecorder, io;
 
 const _command = 'sudo launchctl kickstart -k system/com.example.helper';
 
@@ -123,6 +127,54 @@ void main() {
     expect(_regions(tester, title), 1);
     expect(find.text(_command), findsOneWidget);
     expect(find.text('Copy'), findsOneWidget);
+  });
+
+  testWidgets('what reorders text shows by its code; Copy copies the '
+      'command as it is', (tester) async {
+    final copied = watchClipboard(tester);
+    final harness = Harness(_workspace());
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'june',
+        entries: [
+          Entry(
+            seq: Int64(7),
+            timestampMs: Int64(1000),
+            askPerson: AskPerson(
+              id: 'ask8',
+              title: 'Approve evil\u202Etxt.exe',
+              body: 'Because \u2066this\u2069.\n\n```sh\nrm x\u200B y\n```',
+              state: AskPersonState.ASK_PERSON_STATE_PENDING,
+            ),
+          ),
+        ],
+      ),
+    );
+    await harness.show(tester);
+    await settle(tester);
+    expect(find.text(r'Approve evil\u{202E}txt.exe'), findsOneWidget);
+    expect(
+      find.textContaining(r'Because \u{2066}this\u{2069}.', findRichText: true),
+      findsOneWidget,
+    );
+    expect(find.text(r'rm x\u{200B} y'), findsOneWidget);
+    await tester.tap(find.text('Copy'));
+    await tester.pump();
+    expect(copied.last, 'rm x\u200B y');
+  });
+
+  testWidgets("Needs you names the ask by its title, what reorders it by "
+      'its code', (tester) async {
+    final harness = Harness(_workspace(selected: ''));
+    harness.backend.entriesById['june/7'] = _entry()
+      ..askPerson.title = 'Restart evil\u202Etxt.exe';
+    await harness.show(tester);
+    await settle(tester);
+    await tester.tap(find.text('Needs you'));
+    await settle(tester);
+    await settle(tester);
+    expect(find.text(r'Restart evil\u{202E}txt.exe'), findsWidgets);
+    expect(find.textContaining('\u202E', findRichText: true), findsNothing);
   });
 
   testWidgets('a written answer dismissed sends what was typed as the '
@@ -245,5 +297,361 @@ void main() {
     await harness.show(tester);
     await settle(tester);
     expect(find.textContaining('which reads the pipe'), findsNothing);
+  });
+
+  group('a procedure, one step at a time', () {
+    AskPerson procedure({int done = 1}) => AskPerson(
+      id: 'ask9',
+      title: 'Sign the release',
+      body: 'Four steps on the Mac with the signing key.',
+      state: AskPersonState.ASK_PERSON_STATE_PENDING,
+      steps: [
+        for (final (i, text) in [
+          'Plug in the YubiKey',
+          'Run this:\n\n```sh\nscripts/sign.sh\n```',
+          'Touch the key when it blinks',
+          'Check the notarization email',
+        ].indexed)
+          AskStep(
+            text: text,
+            state: i < done
+                ? AskStepState.ASK_STEP_STATE_DONE
+                : AskStepState.ASK_STEP_STATE_PENDING,
+            comment: i == 0 && done > 0 ? 'The blue one' : '',
+            decidedMs: i < done ? Int64(2000) : Int64(0),
+          ),
+      ],
+    );
+
+    Future<Harness> show(WidgetTester tester, AskPerson ask) async {
+      final harness = Harness(_workspace());
+      harness.backend.transcript.load(
+        Transcript(
+          agentId: 'june',
+          entries: [
+            Entry(seq: Int64(7), timestampMs: Int64(1000), askPerson: ask),
+          ],
+        ),
+      );
+      await harness.show(tester);
+      await settle(tester);
+      return harness;
+    }
+
+    void update(Harness harness, AskPerson ask) =>
+        harness.backend.transcript.load(
+          Transcript(
+            agentId: 'june',
+            entries: [
+              Entry(seq: Int64(7), timestampMs: Int64(1000), askPerson: ask),
+            ],
+          ),
+        );
+
+    testWidgets('a step done shows whole in the list, its command too '
+        '(Zucchero)', (tester) async {
+      await show(tester, procedure(done: 2));
+      await tester.tap(find.textContaining('2 steps done', findRichText: true));
+      await settle(tester);
+      expect(
+        find.text('2. Run this: scripts/sign.sh · Done', findRichText: true),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('shows only the step it is at, with the ones done counted, '
+        'and Done answers that step', (tester) async {
+      final harness = await show(tester, procedure());
+      expect(find.text('June needs you to do something'), findsOneWidget);
+      expect(find.text('Step 2 of 4'), findsOneWidget);
+      expect(find.text('scripts/sign.sh'), findsOneWidget);
+      expect(find.text('Copy'), findsOneWidget);
+      // Neither the steps after it, nor the one done, until asked.
+      expect(find.textContaining('Touch the key'), findsNothing);
+      expect(find.textContaining('Plug in', findRichText: true), findsNothing);
+      await tester.tap(find.textContaining('1 step done', findRichText: true));
+      await settle(tester);
+      expect(
+        find.text('1. Plug in the YubiKey · Done', findRichText: true),
+        findsOneWidget,
+      );
+      expect(find.text('The blue one'), findsOneWidget);
+
+      await tester.tap(find.text('Add a comment'));
+      await settle(tester);
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(AskPersonCard),
+          matching: find.byType(EditableText),
+        ),
+        'Ran it twice',
+      );
+      await tester.tap(find.text('Done'));
+      await settle(tester);
+      final answer = harness.last.answerAsk;
+      expect(answer.step, 1);
+      expect(answer.hasStep(), isTrue);
+      expect(answer.dismiss, isFalse);
+      expect(answer.text, 'Ran it twice');
+
+      // The entry comes back with that step done: the next, on a clean card.
+      update(harness, procedure(done: 2));
+      await settle(tester);
+      expect(find.text('Step 3 of 4'), findsOneWidget);
+      expect(find.text('Touch the key when it blinks'), findsOneWidget);
+      expect(
+        find.textContaining('2 steps done', findRichText: true),
+        findsOneWidget,
+      );
+      expect(find.text('Ran it twice'), findsNothing);
+    });
+
+    testWidgets("Can't do this… asks what's in the way, and sends it with "
+        'the step', (tester) async {
+      final harness = await show(tester, procedure(done: 2));
+      await tester.tap(find.text("Can't do this…"));
+      await settle(tester);
+      expect(find.text('Done'), findsNothing);
+      // Its field has the keys at once: what's typed lands in it.
+      expect(
+        tester
+            .widget<EditableText>(
+              find.descendant(
+                of: find.byType(AskPersonCard),
+                matching: find.byType(EditableText),
+              ),
+            )
+            .focusNode
+            .hasFocus,
+        isTrue,
+      );
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(AskPersonCard),
+          matching: find.byType(EditableText),
+        ),
+        'The key never blinks',
+      );
+      await tester.tap(find.text("Can't do this"));
+      await settle(tester);
+      final answer = harness.last.answerAsk;
+      expect(
+        (answer.step, answer.dismiss, answer.text),
+        (2, true, 'The key never blinks'),
+      );
+
+      // Stopped there: how it ended, and the steps not reached.
+      final stopped = procedure(done: 2)
+        ..state = AskPersonState.ASK_PERSON_STATE_DISMISSED
+        ..decidedMs = Int64(3000);
+      stopped.steps[2]
+        ..state = AskStepState.ASK_STEP_STATE_CANT
+        ..comment = 'The key never blinks';
+      update(harness, stopped);
+      await settle(tester);
+      expect(find.textContaining("Couldn't do step 3 of 4"), findsOneWidget);
+      expect(find.text('The key never blinks'), findsOneWidget);
+      expect(find.text('Done'), findsNothing);
+      await tester.tap(find.textContaining('Steps', findRichText: true).last);
+      await settle(tester);
+      expect(
+        find.text(
+          '4. Check the notarization email · Not reached',
+          findRichText: true,
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a refusal shows under it, and the card stays', (tester) async {
+      final harness = await show(tester, procedure());
+      harness.backend.refuse = 'That step was already answered.';
+      await tester.tap(find.text('Done'));
+      await settle(tester);
+      expect(find.text('That step was already answered.'), findsOneWidget);
+      expect(find.text('Step 2 of 4'), findsOneWidget);
+    });
+
+    testWidgets('all done: said so, every step there to see', (tester) async {
+      final done = procedure(done: 4)
+        ..state = AskPersonState.ASK_PERSON_STATE_ANSWERED
+        ..decidedMs = Int64(3000);
+      await show(tester, done);
+      expect(find.textContaining('All 4 steps done'), findsOneWidget);
+      expect(find.text('Done'), findsNothing);
+      await tester.tap(find.textContaining('Steps', findRichText: true).last);
+      await settle(tester);
+      expect(
+        find.textContaining('· Done', findRichText: true),
+        findsNWidgets(4),
+      );
+    });
+
+    testWidgets('Needs you names it by its title and the step it is at', (
+      tester,
+    ) async {
+      final harness = Harness(_workspace(selected: ''));
+      harness.backend.entriesById['june/7'] = Entry(
+        seq: Int64(7),
+        timestampMs: Int64(1000),
+        askPerson: procedure(),
+      );
+      await harness.show(tester);
+      await settle(tester);
+      await tester.tap(find.text('Needs you'));
+      await settle(tester);
+      await settle(tester);
+      expect(find.text('Sign the release · Step 2 of 4'), findsWidgets);
+      await tester.tap(find.text('Sign the release · Step 2 of 4').first);
+      await settle(tester);
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Step 2 of 4'), findsOneWidget);
+    });
+
+    testWidgets("on a phone the steps' toggle is a finger's height, its "
+        'words centred', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final harness = Harness(_workspace());
+      harness.backend.transcript.load(
+        Transcript(
+          agentId: 'june',
+          entries: [
+            Entry(
+              seq: Int64(7),
+              timestampMs: Int64(1000),
+              askPerson: procedure(),
+            ),
+          ],
+        ),
+      );
+      await harness.show(tester, size: const Size(393, 852));
+      await settle(tester);
+      // The steps' toggle has a finger's height, its words centred in it
+      // (Prosciutto: no gap under them).
+      final toggle = find.textContaining('1 step done', findRichText: true);
+      final box = tester.getRect(
+        find.ancestor(of: toggle, matching: find.byType(Pressable)).first,
+      );
+      expect(box.height, greaterThanOrEqualTo(44));
+      // The words their own height, not stretched to the box's and drawn
+      // at its top.
+      expect(tester.getSize(toggle).height, lessThan(box.height - 8));
+      expect(tester.getCenter(toggle).dy, closeTo(box.center.dy, 1));
+    });
+
+    testWidgets('on a phone at the largest text it fits', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.platformDispatcher.textScaleFactorTestValue = 3.1;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final harness = Harness(_workspace());
+      harness.backend.transcript.load(
+        Transcript(
+          agentId: 'june',
+          entries: [
+            Entry(
+              seq: Int64(7),
+              timestampMs: Int64(1000),
+              askPerson: procedure(),
+            ),
+          ],
+        ),
+      );
+      await harness.show(tester, size: const Size(320, 700));
+      await settle(tester);
+      await tester.ensureVisible(find.text('Done'));
+      await settle(tester);
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('said rather than typed', () {
+    late FakeRecorder recorder;
+    setUp(() {
+      final was = deviceRecorder;
+      recorder = FakeRecorder();
+      deviceRecorder = recorder;
+      final wasTranscribe = transcribeRecording;
+      transcribeRecording = (backend, recording) async => 'after the release';
+      addTearDown(() {
+        deviceRecorder = was;
+        transcribeRecording = wasTranscribe;
+      });
+    });
+
+    Future<Harness> show(WidgetTester tester, AskPerson ask) async {
+      final harness = Harness(
+        _workspace()
+          ..speechModel = SpeechModel(
+            state: SpeechModelState.SPEECH_MODEL_STATE_READY,
+          ),
+      );
+      harness.backend.transcript.load(
+        Transcript(
+          agentId: 'june',
+          entries: [
+            Entry(seq: Int64(7), timestampMs: Int64(1000), askPerson: ask),
+          ],
+        ),
+      );
+      await harness.show(tester);
+      await settle(tester);
+      return harness;
+    }
+
+    Finder inCard(Finder finder) =>
+        find.descendant(of: find.byType(AskPersonCard), matching: finder);
+
+    /// Types [typed], then says the rest with the card's mic.
+    Future<void> say(WidgetTester tester, String typed) async {
+      await tester.enterText(inCard(find.byType(EditableText)), typed);
+      await tester.pump();
+      await tester.tap(inCard(find.byKey(const ValueKey('dictate'))));
+      await io(tester);
+      expect(recorder.recordingInto, isNotNull);
+      await tester.tap(inCard(find.text('Done')));
+      await io(tester);
+      await pumpFrames(tester);
+    }
+
+    testWidgets('a written answer: the words go in after what was typed, '
+        'and nothing goes until Answer', (tester) async {
+      final harness = await show(tester, _ask()..wantsText = true);
+      await say(tester, 'Do it');
+      expect(find.text('Do it after the release'), findsOneWidget);
+      expect(harness.backend.sent.where((m) => m.hasAnswerAsk()), isEmpty);
+      await tester.tap(find.text('Answer'));
+      await settle(tester);
+      expect(harness.last.answerAsk.text, 'Do it after the release');
+      expect(harness.last.answerAsk.dismiss, isFalse);
+    });
+
+    testWidgets("a step's what's in the way, said: sent with the step", (
+      tester,
+    ) async {
+      final harness = await show(
+        tester,
+        AskPerson(
+          id: 'ask9',
+          title: 'Sign the release',
+          state: AskPersonState.ASK_PERSON_STATE_PENDING,
+          steps: [
+            AskStep(text: 'Plug in the YubiKey'),
+            AskStep(text: 'Touch the key when it blinks'),
+          ],
+        ),
+      );
+      await tester.tap(find.text("Can't do this…"));
+      await settle(tester);
+      await say(tester, 'Only');
+      await tester.tap(find.text("Can't do this"));
+      await settle(tester);
+      final answer = harness.last.answerAsk;
+      expect(
+        (answer.step, answer.dismiss, answer.text),
+        (0, true, 'Only after the release'),
+      );
+    });
   });
 }

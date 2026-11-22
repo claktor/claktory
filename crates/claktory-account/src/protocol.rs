@@ -226,6 +226,43 @@ pub fn valid_label(text: &str) -> bool {
     (1..=40).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._+-".contains(&byte))
 }
 
+/// A Unicode format character (category Cf): invisible, it changes how
+/// text around it reads (direction overrides such as U+202E, zero-width
+/// joiners and spaces, tags), so no email may carry one.
+pub fn format_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
+/// Whether an email is printable ASCII only, as the ones pipe peer
+/// statements vouch for must be: no look-alike letters from other scripts,
+/// nothing that reverses or hides, so the address shown is the one owned.
+pub fn ascii_email(email: &str) -> bool {
+    !email.is_empty() && email.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+}
+
 /// An email address in the form accounts keep: trimmed, in lower case, and
 /// roughly well formed. None when it isn't an address.
 pub fn normalize_email(email: &str) -> Option<String> {
@@ -237,7 +274,9 @@ pub fn normalize_email(email: &str) -> Option<String> {
         && !domain.starts_with('.')
         && !domain.ends_with('.')
         && !domain.contains("..")
-        && !email.chars().any(|character| character.is_whitespace() || character.is_control() || "<>()[]\\,;:\"".contains(character))
+        && !email.chars().any(|character| {
+            character.is_whitespace() || character.is_control() || format_character(character) || "<>()[]\\,;:\"".contains(character)
+        })
         && !domain.contains('@');
     fine.then_some(email)
 }
@@ -718,6 +757,21 @@ pub struct ListedClaktory {
     pub last_contact_ms: i64,
 }
 
+/// `POST /v1/devices/remove`, signed: another device of the same account
+/// to sign out (lost, stolen, given away).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceRemove {
+    /// The device's account key (its DM leaf id).
+    pub account_key: String,
+}
+
+/// What `POST /v1/devices/remove` did: false when that key wasn't (or is
+/// no longer) a device of this account, so a retry is no error either.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceRemoved {
+    pub removed: bool,
+}
+
 /// `POST /v1/devices/assertion`, signed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AssertionRequest {
@@ -776,9 +830,208 @@ pub fn verify_device_assertion(service_key: &VerifyingKey, text: &str, now: i64)
         .filter(|assertion| assertion.iat <= now + ASSERTION_SKEW && now <= assertion.exp + ASSERTION_SKEW)
 }
 
+/// What a pipe peer statement says it is, in its payload and before it in
+/// what the service key signs.
+pub const PIPE_PEER_LABEL: &str = "claktory-pipe-peer/1";
+/// How long a pipe peer statement works: a week, refreshed over the pipe
+/// long before. A Claktory signed out, removed or whose account is deleted
+/// gets no new one, so its peers' verification ends by expiry.
+pub const PIPE_PEER_LIFETIME: i64 = 7 * 86_400;
+/// At most this many bytes in a pipe peer statement; a longer one isn't read.
+pub const PIPE_PEER_MAX: usize = 4096;
+
+/// `POST /v1/pipe-identity`, signed: the service's word on whose Claktory
+/// holds the pipe key `endpoint_id`, for the Claktories it has pipes with.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PipeIdentityRequest {
+    /// The Claktory's tunnel key (iroh endpoint id, 64 hex): its registered
+    /// `backend` endpoint, the key its pipes pin.
+    pub endpoint_id: String,
+    /// Unix seconds, within `MAX_SKEW` of the service's clock.
+    pub time: i64,
+    /// The endpoint key's own signature over `pipe_identity_proof(..)`
+    /// (base64url): it holds the key it asks about.
+    pub proof: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PipeIdentityIssued {
+    pub statement: String,
+    pub expires_in: i64,
+}
+
+/// What the endpoint key signs for `POST /v1/pipe-identity`: tied to the
+/// Claktory asking and the time, so it serves no other Claktory or later.
+pub fn pipe_identity_proof(claktory_id: &str, endpoint_id: &str, time: i64) -> Vec<u8> {
+    format!("{PIPE_PEER_LABEL} proof\n{claktory_id}\n{endpoint_id}\n{time}").into_bytes()
+}
+
+/// What a pipe peer statement says: the service at `service`, with the key
+/// `service_key`, vouches that whoever holds the tunnel key `endpoint_id`
+/// is a Claktory of the account `account_id`, whose email (confirmed with a
+/// code at sign-in) is `email`, from `iat` to `exp` (unix seconds). Nothing
+/// in it is what the Claktory merely says, such as names; and it vouches
+/// for the Claktory's account, not for the person.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipePeerStatement {
+    pub v: u32,
+    pub label: String,
+    pub service: String,
+    /// The service key that signs it, as the API writes keys (base64url).
+    pub service_key: String,
+    pub endpoint_id: String,
+    pub account_id: String,
+    pub email: String,
+    pub iat: i64,
+    pub exp: i64,
+}
+
+/// A pipe peer statement, signed with the service key: `b64(payload) "."
+/// b64(signature)`, the signature over `PIPE_PEER_LABEL "\n" ‖ payload`.
+pub fn sign_pipe_peer(service_key: &SigningKey, statement: &PipePeerStatement) -> String {
+    let payload = serde_json::to_vec(statement).unwrap_or_default();
+    let signature = service_key.sign(&pipe_peer_message(&payload));
+    format!("{}.{}", b64(&payload), b64(signature.to_bytes()))
+}
+
+fn pipe_peer_message(payload: &[u8]) -> Vec<u8> {
+    [PIPE_PEER_LABEL.as_bytes(), b"\n", payload].concat()
+}
+
+/// What a pipe peer statement says, if `service_key` signed it, names that
+/// key and its label, is version 1, is about `endpoint_id` (the pipe's
+/// pinned peer key, hex in either case), lasts no longer than
+/// `PIPE_PEER_LIFETIME` and works at `now` (unix seconds, give or take
+/// `ASSERTION_SKEW`). A statement for any other key is worth nothing.
+pub fn verify_pipe_peer(service_key: &VerifyingKey, text: &str, endpoint_id: &str, now: i64) -> Option<PipePeerStatement> {
+    if text.len() > PIPE_PEER_MAX {
+        return None;
+    }
+    let (payload, signature) = text.trim().split_once('.')?;
+    let payload = unb64(payload)?;
+    if !verify(service_key, &pipe_peer_message(&payload), signature) {
+        return None;
+    }
+    let statement: PipePeerStatement = serde_json::from_slice(&payload).ok()?;
+    let fine = statement.v == 1
+        && statement.label == PIPE_PEER_LABEL
+        && ascii_email(&statement.email)
+        && unb64_32(&statement.service_key) == Some(service_key.to_bytes())
+        && valid_endpoint(&statement.endpoint_id)
+        && statement.endpoint_id.eq_ignore_ascii_case(endpoint_id)
+        && statement.exp >= statement.iat
+        && statement.exp - statement.iat <= PIPE_PEER_LIFETIME
+        && statement.iat <= now + ASSERTION_SKEW
+        && now <= statement.exp + ASSERTION_SKEW;
+    fine.then_some(statement)
+}
+
+/// Where reports of AI replies go.
+pub const AI_REPORT_PATH: &str = "/v1/reports/ai";
+
+/// `POST /v1/reports/ai`: a reply a person reports to Claktory's team
+/// (Report this reply). Exactly what their sheet showed, nothing more:
+/// no account, Claktory, agent or device.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiReport {
+    /// The reply, the vault's values hidden, at most `AI_REPORT_TEXT_MAX` bytes.
+    pub text: String,
+    /// The model's name ("Claude Opus 4.5") or id, up to 100 characters.
+    pub model: String,
+    /// The Claktory's version and platform ("macos-arm64"), up to 40 each.
+    pub version: String,
+    pub platform: String,
+    /// The person's note, `ai_report_note` clean, at most
+    /// `AI_REPORT_NOTE_MAX` characters; may be empty.
+    #[serde(default)]
+    pub note: String,
+}
+
+/// The answer: kept, for this many days.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiReportKept {
+    pub keep_days: i64,
+}
+
+/// A reported reply is cut to this many bytes (16 KB).
+pub const AI_REPORT_TEXT_MAX: usize = 16 * 1024;
+/// A report's note, at most this many characters.
+pub const AI_REPORT_NOTE_MAX: usize = 1000;
+/// How long the service keeps a report.
+pub const AI_REPORT_KEEP_DAYS: i64 = 30;
+
+/// `text` cut to `AI_REPORT_TEXT_MAX` bytes on a character's boundary, and
+/// whether it was cut.
+pub fn ai_report_text(text: &str) -> (&str, bool) {
+    if text.len() <= AI_REPORT_TEXT_MAX {
+        return (text, false);
+    }
+    let mut end = AI_REPORT_TEXT_MAX;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
+}
+
+/// A report's note as it's sent: line breaks as `\n`, no control
+/// characters but line breaks and tabs, no format characters (direction
+/// overrides, zero-width ones), trimmed. Its length is checked after.
+pub fn ai_report_note(note: &str) -> String {
+    let note = note.replace("\r\n", "\n").replace('\r', "\n");
+    let kept: String = note
+        .chars()
+        .filter(|character| matches!(character, '\n' | '\t') || !(character.is_control() || format_character(*character)))
+        .collect();
+    kept.trim().to_owned()
+}
+
+/// Whether a report holds what the service keeps: a text within its cap,
+/// a clean note within its, and short single-line model, version and
+/// platform.
+pub fn valid_ai_report(report: &AiReport) -> bool {
+    let line = |text: &str, max: usize| {
+        !text.trim().is_empty()
+            && text.chars().count() <= max
+            && !text.chars().any(|character| character.is_control() || format_character(character))
+    };
+    !report.text.trim().is_empty()
+        && report.text.len() <= AI_REPORT_TEXT_MAX
+        && ai_report_note(&report.note) == report.note
+        && report.note.chars().count() <= AI_REPORT_NOTE_MAX
+        && line(&report.model, 100)
+        && line(&report.version, 40)
+        && line(&report.platform, 40)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_reports_are_cut_and_cleaned_alike_on_both_sides() {
+        let long = "é".repeat(AI_REPORT_TEXT_MAX);
+        let (cut, truncated) = ai_report_text(&long);
+        assert!(truncated && cut.len() == AI_REPORT_TEXT_MAX && cut.chars().all(|character| character == 'é'));
+        let odd = format!("a{}", "é".repeat(AI_REPORT_TEXT_MAX / 2));
+        let (cut, truncated) = ai_report_text(&odd);
+        assert!(truncated && cut.len() == AI_REPORT_TEXT_MAX - 1);
+        assert_eq!(ai_report_text("short"), ("short", false));
+        assert_eq!(ai_report_note("  It said\r\nthis\u{202E}\u{7}\tthing.  "), "It said\nthis\tthing.");
+        let report = |note: &str| AiReport {
+            text: "Hello".into(),
+            model: "Claude Opus 4.5".into(),
+            version: "v0.1.9".into(),
+            platform: "macos-arm64".into(),
+            note: note.into(),
+        };
+        assert!(valid_ai_report(&report("")) && valid_ai_report(&report("Rude.\nVery.")));
+        assert!(!valid_ai_report(&report(" padded")) && !valid_ai_report(&report("\u{202E}evil")));
+        assert!(!valid_ai_report(&report(&"x".repeat(AI_REPORT_NOTE_MAX + 1))));
+        assert!(!valid_ai_report(&AiReport { model: "a\nb".into(), ..report("") }));
+        assert!(!valid_ai_report(&AiReport { text: " ".into(), ..report("") }));
+        assert!(serde_json::from_str::<AiReport>(r#"{"text":"t","model":"m","version":"v","platform":"p","account":"x"}"#).is_err());
+    }
 
     fn statement() -> KeyStatement {
         let key = SigningKey::from_bytes(&[7; 32]);
@@ -927,6 +1180,77 @@ mod tests {
         assert!(unb64(payload).is_some());
     }
 
+    fn pipe_peer(service: &SigningKey) -> PipePeerStatement {
+        PipePeerStatement {
+            v: 1,
+            label: PIPE_PEER_LABEL.into(),
+            service: "https://account.claktory.com".into(),
+            service_key: b64(service.verifying_key().to_bytes()),
+            endpoint_id: "ab".repeat(32),
+            account_id: "acct".into(),
+            email: "ana@example.com".into(),
+            iat: 1000,
+            exp: 1000 + PIPE_PEER_LIFETIME,
+        }
+    }
+
+    /// Fugo's hostile cases for verified pipes, the verifier's part: only
+    /// the pinned service key's statement about the pipe's own peer key, in
+    /// its lifetime, with a plain email, ever counts.
+    #[test]
+    fn a_pipe_peer_statement_counts_only_for_its_key_and_week() {
+        let service = new_signing_key();
+        let key = service.verifying_key();
+        let said = pipe_peer(&service);
+        let text = sign_pipe_peer(&service, &said);
+        let endpoint = "ab".repeat(32);
+        assert_eq!(verify_pipe_peer(&key, &text, &endpoint, 1500), Some(said.clone()));
+        assert_eq!(verify_pipe_peer(&key, &text, &endpoint.to_uppercase(), 1500), Some(said.clone()), "hex in either case");
+        let end = 1000 + PIPE_PEER_LIFETIME + ASSERTION_SKEW;
+        assert!(verify_pipe_peer(&key, &text, &endpoint, end).is_some());
+        assert_eq!(verify_pipe_peer(&key, &text, &endpoint, end + 1), None, "expired");
+        assert_eq!(verify_pipe_peer(&key, &text, &endpoint, 1000 - ASSERTION_SKEW - 1), None, "not yet");
+        // Relayed from another Claktory: about a key this pipe didn't pin.
+        assert_eq!(verify_pipe_peer(&key, &text, &"cd".repeat(32), 1500), None, "another endpoint");
+        assert_eq!(verify_pipe_peer(&new_signing_key().verifying_key(), &text, &endpoint, 1500), None, "another service key");
+        // Signed by another key that the payload names: the pinned key decides.
+        let other = new_signing_key();
+        let mut theirs = said.clone();
+        theirs.service_key = b64(other.verifying_key().to_bytes());
+        assert_eq!(verify_pipe_peer(&key, &sign_pipe_peer(&other, &theirs), &endpoint, 1500), None, "signed by another key");
+        let mut named_other = said.clone();
+        named_other.service_key = b64(other.verifying_key().to_bytes());
+        assert_eq!(verify_pipe_peer(&key, &sign_pipe_peer(&service, &named_other), &endpoint, 1500), None, "names another key");
+        let (_, signature) = text.split_once('.').expect("two parts");
+        let mut changed = said.clone();
+        changed.account_id = "other".into();
+        let forged = format!("{}.{signature}", b64(serde_json::to_vec(&changed).expect("json")));
+        assert_eq!(verify_pipe_peer(&key, &forged, &endpoint, 1500), None, "changed after signing");
+        // A device assertion's signature over the same bytes isn't one.
+        let payload = serde_json::to_vec(&said).expect("json");
+        let assertion_signed = format!("{}.{}", b64(&payload), b64(service.sign(&[ASSERTION_LABEL, &payload].concat()).to_bytes()));
+        assert_eq!(verify_pipe_peer(&key, &assertion_signed, &endpoint, 1500), None, "another label");
+
+        let refused = |change: &dyn Fn(&mut PipePeerStatement), why: &str| {
+            let mut statement = said.clone();
+            change(&mut statement);
+            assert_eq!(verify_pipe_peer(&key, &sign_pipe_peer(&service, &statement), &endpoint, 1500), None, "{why}");
+        };
+        refused(&|s| s.exp = s.iat + PIPE_PEER_LIFETIME + 1, "longer than a week");
+        refused(&|s| s.exp = s.iat - 1, "ends before it starts");
+        refused(&|s| s.v = 2, "a version it doesn't know");
+        refused(&|s| s.label = "claktory-pipe-peer/2".into(), "another label inside");
+        refused(&|s| s.email = "ana@exаmple.com".into(), "a Cyrillic look-alike");
+        refused(&|s| s.email = "moc.elpmaxe\u{202E}@ana".into(), "a direction override");
+        refused(&|s| s.email = "ana@exa\u{200B}mple.com".into(), "zero width");
+        refused(&|s| s.email = String::new(), "no email");
+        refused(&|s| s.endpoint_id = "ab".repeat(31), "not an endpoint");
+        let long = format!("{text}{}", " ".repeat(PIPE_PEER_MAX));
+        assert_eq!(verify_pipe_peer(&key, &long, &endpoint, 1500), None, "too long to read");
+        assert_eq!(verify_pipe_peer(&key, "", &endpoint, 1500), None);
+        assert_eq!(verify_pipe_peer(&key, "x.y", &endpoint, 1500), None);
+    }
+
     #[test]
     fn names_and_emails_are_kept_tidy() {
         assert_eq!(clean_name("Mac mini"), "Mac mini");
@@ -940,6 +1264,19 @@ mod tests {
         for bad in ["matt", "matt@", "@example.com", "matt@example", "a b@example.com", "m@exa..mple.com", "m@a@b.com"] {
             assert_eq!(normalize_email(bad), None, "{bad}");
         }
+        // Nothing invisible that turns or hides what an address reads as.
+        for bad in [
+            "matt\u{202E}moc@example.com",
+            "ma\u{200B}tt@example.com",
+            "matt@exa\u{2066}mple.com",
+            "\u{FEFF}m@example.com",
+            "m\u{E0041}@a.com",
+        ] {
+            assert_eq!(normalize_email(bad), None, "{bad:?}");
+        }
+        assert_eq!(normalize_email("mätt@example.com"), Some("mätt@example.com".into()), "other letters still sign in");
+        assert!(ascii_email("matt@example.com"));
+        assert!(!ascii_email("mätt@example.com") && !ascii_email("") && !ascii_email("m att@example.com"));
         assert!(valid_claktory_id("abcdefgh_ijkl-mnop"));
         assert!(!valid_claktory_id("short") && !valid_claktory_id("has a space in it ok"));
     }

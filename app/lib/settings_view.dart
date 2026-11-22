@@ -12,6 +12,7 @@ import 'claktory_identity.dart' show ClaktoryIdentity, claktoryName;
 import 'controls.dart';
 import 'devices.dart';
 import 'diagnostics.dart' show DiagnosticsSettings;
+import 'find.dart' show RenderedFindScope;
 import 'identity.dart';
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/header.dart';
@@ -23,9 +24,11 @@ import 'move.dart' show BackendMove, MoveSettingRow;
 import 'notification_settings.dart'
     show NotificationSettingsView, notificationsSummary;
 import 'pane_chrome.dart';
+import 'pipes.dart' show PortalGlyph;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'provider_picker.dart' show ProviderSettings;
 import 'remove_mac.dart';
+import 'report_types.dart' show ReportTypesSettings, reportTypesAvailable;
 import 'scope.dart';
 import 'screens.dart' show SettingsScroller, SettingsSectionAnchor;
 import 'secrets.dart';
@@ -103,21 +106,37 @@ class SettingsView extends StatelessWidget {
                   return SelectableArea(
                     // Scrolls to the section an agent opens (screens.dart).
                     child: SettingsScroller(
-                      builder: (context, controller) => ListView(
-                        controller: controller,
-                        padding: const EdgeInsets.symmetric(vertical: Space.xl),
-                        children: [
-                          for (final (i, section) in settingsSectionsOf(
-                            context,
-                            workspace,
-                          ).indexed) ...[
-                            if (i > 0) const SizedBox(height: Space.xxl),
-                            _Section(
-                              title: section.title,
-                              children: section.children,
-                            ),
+                      builder: (context, controller) => RenderedFindScope(
+                        placeholder: 'Search Settings',
+                        child: ListView(
+                          controller: controller,
+                          // Every section laid out, so find sees all of it.
+                          scrollCacheExtent: RenderedFindScope.everything,
+                          padding: const EdgeInsets.symmetric(
+                            vertical: Space.xl,
+                          ),
+                          children: [
+                            // Each selectable where the pointer is at any zoom.
+                            for (final child in <Widget>[
+                              for (final (i, section) in settingsSectionsOf(
+                                context,
+                                workspace,
+                              ).indexed) ...[
+                                if (i > 0) const SizedBox(height: Space.xxl),
+                                _Section(
+                                  title: section.title,
+                                  children: section.children,
+                                ),
+                              ],
+                            ])
+                              ScrolledSelection(
+                                key: child.key == null
+                                    ? null
+                                    : ValueKey(child.key),
+                                child: child,
+                              ),
                           ],
-                        ],
+                        ),
                       ),
                     ),
                   );
@@ -242,14 +261,23 @@ List<SettingsSection> settingsSectionsOf(
       glyph: lucide('key-round'),
       children: const [SecretsSettings()],
     ),
-    // Apps shows only where the backend runs them (the dev Claktory, until
-    // Apps ships).
+    // Apps shows only where the backend offers them
+    // (Workspace.apps_available).
     if (workspace.appsAvailable)
       SettingsSection(
         title: 'Apps',
         group: 2,
         glyph: lucide('panels-top-left'),
         children: const [AppsSettings()],
+      ),
+    // The kinds of report pipes forward, where Claktory has them as data
+    // (Workspace.report_type_rules).
+    if (reportTypesAvailable(workspace))
+      SettingsSection(
+        title: 'Pipes',
+        group: 2,
+        glyph: (color) => PortalGlyph(color: color),
+        children: const [ReportTypesSettings()],
       ),
     SettingsSection(
       title: 'Defaults',
@@ -544,19 +572,8 @@ class _PhoneSettingsPage extends StatelessWidget {
               ),
               Expanded(
                 child: SelectableArea(
-                  child: ListView(
-                    padding: const EdgeInsets.fromLTRB(
-                      Touch.gutter,
-                      Space.l,
-                      Touch.gutter,
-                      Space.xl,
-                    ),
-                    children: [
-                      for (final child in section?.children ?? <Widget>[]) ...[
-                        child,
-                        const SizedBox(height: Space.s),
-                      ],
-                    ],
+                  child: _PhoneSectionList(
+                    children: section?.children ?? const <Widget>[],
                   ),
                 ),
               ),
@@ -566,6 +583,54 @@ class _PhoneSettingsPage extends StatelessWidget {
       ),
     );
   }
+}
+
+/// A phone's section page's list, which find searches (a phone's Search).
+class _PhoneSectionList extends StatefulWidget {
+  const _PhoneSectionList({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  State<_PhoneSectionList> createState() => _PhoneSectionListState();
+}
+
+class _PhoneSectionListState extends State<_PhoneSectionList> {
+  final _scroll = ScrollController();
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => RenderedFindScope(
+    placeholder: 'Search Settings',
+    child: ListView(
+      controller: _scroll,
+      scrollCacheExtent: RenderedFindScope.everything,
+      padding: const EdgeInsets.fromLTRB(
+        Touch.gutter,
+        Space.l,
+        Touch.gutter,
+        Space.xl,
+      ),
+      children: [
+        // Each selectable where the pointer is at any zoom.
+        for (final child in <Widget>[
+          for (final child in widget.children) ...[
+            child,
+            const SizedBox(height: Space.s),
+          ],
+        ])
+          ScrolledSelection(
+            key: child.key == null ? null : ValueKey(child.key),
+            child: child,
+          ),
+      ],
+    ),
+  );
 }
 
 class _Section extends StatelessWidget {
@@ -1560,7 +1625,8 @@ class _HighlightsState extends State<_Highlights> with SettingRequests {
 
 /// The most panes agents can open beside a conversation, counting every
 /// pane but the conversation, whoever opened it; past it, an agent's show
-/// is refused. The person's own opens aren't held to it.
+/// replaces the pane open longest, never an expanded one. The person's own
+/// opens aren't held to it.
 class _PaneCap extends StatefulWidget {
   const _PaneCap({required this.workspace});
 
@@ -1609,8 +1675,10 @@ class _PaneCapState extends State<_PaneCap> with SettingRequests {
               Expanded(
                 child: Text(
                   'Once this many panes are open beside a conversation, '
-                  'counting Settings, the Map and files, agents can\'t show '
-                  'you more. You can always open more yourself.',
+                  'counting Settings, the Map and files, an agent that shows '
+                  "you something new replaces the one that's been open "
+                  "longest, never one you've expanded. You can always open "
+                  'more yourself.',
                   style: TypeScale.of(context).caption
                       .copyWith(color: palette.textMuted),
                 ),

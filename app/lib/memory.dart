@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import 'controls.dart';
 import 'extensions.dart';
+import 'find.dart';
 import 'identity.dart';
 import 'mobile/metrics.dart';
 import 'markdown.dart';
@@ -12,7 +13,7 @@ import 'state.dart';
 /// An agent's memory, read-only: its preferences (each rule with why and
 /// when it was learned), its notes (a slug and summary that open to the
 /// note), and what changed lately.
-class MemoryView extends StatelessWidget {
+class MemoryView extends StatefulWidget {
   const MemoryView({super.key, required this.memory, this.now});
 
   final Memory memory;
@@ -21,7 +22,69 @@ class MemoryView extends StatelessWidget {
   final DateTime? now;
 
   @override
+  State<MemoryView> createState() => _MemoryViewState();
+}
+
+class _MemoryViewState extends State<MemoryView> {
+  final _scroll = ScrollController();
+
+  /// Find in the memory (⌘F): its preferences (and why), its notes (their
+  /// names, summaries and words) and what changed, as listed.
+  late final _find = LocalFind(
+    placeholder: 'Search this memory',
+    items: () => _items,
+    go: (key, _) {
+      final place = _places[key];
+      if (place == null) return;
+      final index = _items.indexWhere((item) => item.$1 == key);
+      bringIntoSight(
+        _scroll,
+        place,
+        _items.length < 2 ? 0 : index / (_items.length - 1),
+      );
+    },
+  );
+
+  /// What can be found, as the last build listed it, and each one's place.
+  var _items = const <(Object, String)>[];
+  final _places = <Object, GlobalKey>{};
+
+  @override
+  void dispose() {
+    _find.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  /// [child], the listed thing [key] with [text]: found in, and marked.
+  Widget _findable(Object key, String text, Widget child) {
+    (_building ??= []).add((key, text));
+    return LocalFindMarks(
+      key: _places.putIfAbsent(key, GlobalKey.new),
+      find: _find,
+      itemKey: key,
+      child: child,
+    );
+  }
+
+  List<(Object, String)>? _building;
+
+  @override
   Widget build(BuildContext context) {
+    final memory = widget.memory;
+    _building = [];
+    final list = _list(context, memory);
+    _items = _building!;
+    _building = null;
+    final keys = {for (final item in _items) item.$1};
+    _places.removeWhere((key, _) => !keys.contains(key));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _find.refresh();
+    });
+    return FindScope(target: _find, child: list);
+  }
+
+  Widget _list(BuildContext context, Memory memory) {
     final palette = Palette.of(context);
     final faint = TypeScale.of(context).body.copyWith(color: palette.textFaint);
     // A read-only memory (such as the Factory manual) is only its notes:
@@ -37,7 +100,7 @@ class MemoryView extends StatelessWidget {
         ),
       );
     }
-    final now = this.now ?? DateTime.now();
+    final now = widget.now ?? DateTime.now();
     final store = AppScope.of(context).workspace;
     Widget empty(String text) => Padding(
       padding: const EdgeInsets.symmetric(
@@ -47,23 +110,52 @@ class MemoryView extends StatelessWidget {
       child: Text(text, style: faint),
     );
     return ListView(
+      controller: _scroll,
       padding: const EdgeInsets.fromLTRB(Space.s, Space.s, Space.s, Space.l),
       children: [
-        if (!readOnly) ...[
-          const _Heading('Preferences'),
-          if (memory.preferences.isEmpty) empty('No preferences yet.'),
-          for (final preference in memory.preferences)
-            _Preference(preference: preference, now: now),
-        ],
-        const _Heading('Notes'),
-        if (memory.notes.isEmpty) empty('No notes yet.'),
-        for (final note in memory.notes)
-          _Note(key: ValueKey(note.slug), note: note, now: now),
-        if (!readOnly && memory.changes.isNotEmpty) ...[
-          const _Heading('Recent changes'),
-          for (final change in memory.changes)
-            _Change(change: change, store: store, now: now),
-        ],
+        // Each selectable where the pointer is at any zoom.
+        for (final child in <Widget>[
+          if (!readOnly) ...[
+            const _Heading('Preferences'),
+            if (memory.preferences.isEmpty) empty('No preferences yet.'),
+            for (final preference in memory.preferences)
+              _findable(
+                'preference:${preference.id}',
+                [
+                  preference.rule,
+                  if (preference.why.isNotEmpty) 'Why: ${preference.why}',
+                ].join('\n'),
+                _Preference(preference: preference, now: now),
+              ),
+          ],
+          const _Heading('Notes'),
+          if (memory.notes.isEmpty) empty('No notes yet.'),
+          for (final note in memory.notes)
+            _findable(
+              'note:${note.slug}',
+              [note.slug, note.summary, note.body].join('\n'),
+              _Note(
+                key: ValueKey(note.slug),
+                note: note,
+                now: now,
+                find: _find,
+                findKey: 'note:${note.slug}',
+              ),
+            ),
+          if (!readOnly && memory.changes.isNotEmpty) ...[
+            const _Heading('Recent changes'),
+            for (final (index, change) in memory.changes.indexed)
+              _findable(
+                'change:$index',
+                '${_who(change, store)} ${changeSummary(change)}',
+                _Change(change: change, store: store, now: now),
+              ),
+          ],
+        ])
+          ScrolledSelection(
+            key: child.key == null ? null : ValueKey(child.key),
+            child: child,
+          ),
       ],
     );
   }
@@ -127,16 +219,21 @@ class _Preference extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  preference.rule,
-                  style: TypeScale.of(context).body
-                      .copyWith(color: palette.text),
+                Text.rich(
+                  FindHighlight.markText(
+                    context,
+                    preference.rule,
+                    TypeScale.of(context).body.copyWith(color: palette.text),
+                  ),
                 ),
                 if (preference.why.isNotEmpty)
-                  Text(
-                    'Why: ${preference.why}',
-                    style: TypeScale.of(context).caption
-                        .copyWith(color: palette.textMuted),
+                  Text.rich(
+                    FindHighlight.markText(
+                      context,
+                      'Why: ${preference.why}',
+                      TypeScale.of(context).caption
+                          .copyWith(color: palette.textMuted),
+                    ),
                   ),
                 Text(
                   [
@@ -159,10 +256,20 @@ class _Preference extends StatelessWidget {
 
 /// A note: its slug and summary, opening to its body.
 class _Note extends StatefulWidget {
-  const _Note({super.key, required this.note, required this.now});
+  const _Note({
+    super.key,
+    required this.note,
+    required this.now,
+    this.find,
+    this.findKey = '',
+  });
 
   final MemoryNote note;
   final DateTime now;
+
+  /// The memory's find: a note found opens, to show its words.
+  final LocalFind? find;
+  final Object findKey;
 
   @override
   State<_Note> createState() => _NoteState();
@@ -170,6 +277,25 @@ class _Note extends StatefulWidget {
 
 class _NoteState extends State<_Note> {
   var _open = false;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.find?.marks.addListener(_found);
+  }
+
+  @override
+  void dispose() {
+    widget.find?.marks.removeListener(_found);
+    super.dispose();
+  }
+
+  /// Gone to by find: open, so the match in its words shows.
+  void _found() {
+    if (widget.find?.marks.value.at == widget.findKey && !_open && mounted) {
+      setState(() => _open = true);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -208,16 +334,22 @@ class _NoteState extends State<_Note> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          note.slug,
-                          style: TypeScale.of(context).code
-                              .copyWith(color: palette.textMuted),
+                        Text.rich(
+                          FindHighlight.markText(
+                            context,
+                            note.slug,
+                            TypeScale.of(context).code
+                                .copyWith(color: palette.textMuted),
+                          ),
                         ),
                         if (note.summary.isNotEmpty)
-                          Text(
-                            note.summary,
-                            style: TypeScale.of(context).body
-                                .copyWith(color: palette.text),
+                          Text.rich(
+                            FindHighlight.markText(
+                              context,
+                              note.summary,
+                              TypeScale.of(context).body
+                                  .copyWith(color: palette.text),
+                            ),
                           ),
                       ],
                     ),
@@ -274,7 +406,7 @@ class _Change extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final actor = change.actor.isEmpty ? null : store.agent(change.actor);
-    final who = change.actor.isEmpty ? 'You' : actor?.name ?? change.actor;
+    final who = _who(change, store);
     final time = _date(change.time.toInt());
     return Padding(
       padding: const EdgeInsets.symmetric(
@@ -282,29 +414,32 @@ class _Change extends StatelessWidget {
         vertical: Space.xs / 2,
       ),
       child: Text.rich(
-        TextSpan(
-          children: [
-            TextSpan(
-              text: '${logTime(time, now: now)}  ',
-              style: TextStyle(
-                color: palette.textFaint,
-                fontFeatures: const [FontFeature.tabularFigures()],
+        FindHighlight.mark(
+          context,
+          TextSpan(
+            children: [
+              TextSpan(
+                text: '${logTime(time, now: now)}  ',
+                style: TextStyle(
+                  color: palette.textFaint,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
               ),
-            ),
-            TextSpan(
-              text: '$who ',
-              style: TextStyle(
-                color: actor == null
-                    ? palette.textMuted
-                    : agentColor(actor.color),
-                fontWeight: FontWeight.w500,
+              TextSpan(
+                text: '$who ',
+                style: TextStyle(
+                  color: actor == null
+                      ? palette.textMuted
+                      : agentColor(actor.color),
+                  fontWeight: FontWeight.w500,
+                ),
               ),
-            ),
-            TextSpan(
-              text: changeSummary(change),
-              style: TextStyle(color: palette.textMuted),
-            ),
-          ],
+              TextSpan(
+                text: changeSummary(change),
+                style: TextStyle(color: palette.textMuted),
+              ),
+            ],
+          ),
         ),
         style: TypeScale.of(context).caption,
       ),
@@ -343,6 +478,11 @@ String changeSummary(MemoryChange change) {
 }
 
 DateTime _date(int ms) => DateTime.fromMillisecondsSinceEpoch(ms);
+
+/// Who made [change]: the person, or the agent by name.
+String _who(MemoryChange change, WorkspaceStore store) => change.actor.isEmpty
+    ? 'You'
+    : store.agent(change.actor)?.name ?? change.actor;
 
 /// "today", "yesterday", or a day heading's date ("Mon 16 Nov").
 String _when(DateTime time, DateTime now) {

@@ -26,7 +26,7 @@ const PROD: &str = "prod-secret-abcdefgh";
 const HIDDEN: &str = "[secret Stripe/STRIPE_KEY]";
 
 fn variable(secret: &str, name: &str, value: &str, file: bool) -> SecretVariable {
-    SecretVariable { secret: secret.into(), variable: name.into(), value: Zeroizing::new(value.into()), file, public: false }
+    SecretVariable { secret: secret.into(), variable: name.into(), value: Zeroizing::new(value.into()), file, public: false, binary: false }
 }
 
 fn kubeconfig() -> String {

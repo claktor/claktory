@@ -35,6 +35,14 @@ CREATE TABLE IF NOT EXISTS dm_identities (
     version INTEGER NOT NULL,
     updated INTEGER NOT NULL
 );
+-- Identity keys an account replaced with a new one (me/keys/rotate):
+-- never its key again (L5), so no rotation goes back to one.
+CREATE TABLE IF NOT EXISTS dm_retired_identities (
+    account_id TEXT NOT NULL,
+    identity_key BLOB NOT NULL,
+    retired INTEGER NOT NULL,
+    PRIMARY KEY (account_id, identity_key)
+) WITHOUT ROWID;
 -- Each leaf's KeyPackages, by their reference (OpenMLS's hash): one-time
 -- ones, and at most one last-resort one.
 CREATE TABLE IF NOT EXISTS dm_key_packages (
@@ -331,10 +339,22 @@ fn rotate(transaction: &Transaction<'_>, account: &str, rotate: Rotate, now_ms: 
     if current.identity == identity {
         return Err(invalid("That's the key the account has."));
     }
+    let replaced: bool = transaction.query_row(
+        "SELECT COUNT(*) > 0 FROM dm_retired_identities WHERE account_id = ?1 AND identity_key = ?2",
+        params![account, identity.0.to_vec()],
+        |row| row.get(0),
+    )?;
+    if replaced {
+        return Err(invalid("That security key was replaced before; it's never the account's again."));
+    }
     take(transaction, &format!("rotate:{account}"), 86_400, ROTATIONS_A_DAY, now_ms)?;
     transaction.execute(
         "UPDATE dm_identities SET identity_key = ?2, device_list = ?3, version = ?4, updated = ?5 WHERE account_id = ?1",
         params![account, identity.0.to_vec(), raw, list.list.version as i64, now_ms],
+    )?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO dm_retired_identities (account_id, identity_key, retired) VALUES (?1, ?2, ?3)",
+        params![account, current.identity.0.to_vec(), now_ms],
     )?;
     // Every KeyPackage the old key certified is no use to anyone now.
     keep_listed(transaction, account, &list)?;
@@ -537,6 +557,7 @@ pub fn answer(db: &mut Connection, method: &str, route: &str, caller: &Caller, b
 /// Deleting an account: its keys and KeyPackages go.
 pub fn purge(transaction: &Transaction<'_>, account: &str) -> rusqlite::Result<()> {
     transaction.execute("DELETE FROM dm_identities WHERE account_id = ?1", [account])?;
+    transaction.execute("DELETE FROM dm_retired_identities WHERE account_id = ?1", [account])?;
     transaction.execute("DELETE FROM dm_key_packages WHERE account_id = ?1", [account])?;
     transaction.execute("DELETE FROM dm_claims WHERE account_id = ?1", [account])?;
     transaction.execute("DELETE FROM dm_limits WHERE key = ?1", [format!("rotate:{account}")])?;

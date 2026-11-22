@@ -6,6 +6,9 @@ pub mod db;
 mod devices;
 pub mod geo;
 pub mod mail;
+mod pipes;
+mod reports;
+pub mod review;
 pub mod secrets;
 pub mod statement;
 pub mod stats;
@@ -54,8 +57,16 @@ const IP_PER_MINUTE: u32 = 30;
 fn signed(method: &Method, path: &str) -> bool {
     matches!(
         (method, path),
-        (&Method::POST, "/v1/share" | "/v1/check-in" | "/v1/move" | "/v1/devices/sign-out" | "/v1/devices/assertion")
-            | (&Method::PUT, "/v1/endpoints")
+        (
+            &Method::POST,
+            "/v1/share"
+                | "/v1/check-in"
+                | "/v1/move"
+                | "/v1/devices/sign-out"
+                | "/v1/devices/remove"
+                | "/v1/devices/assertion"
+                | "/v1/pipe-identity"
+        ) | (&Method::PUT, "/v1/endpoints")
             | (&Method::GET, "/v1/devices/me" | "/v1/claktories")
     ) || path.starts_with("/v1/apps/")
 }
@@ -89,6 +100,13 @@ pub struct Config {
     /// (`--user-apps-uid`), which whatever listens there must run as.
     /// Without one, app routes answer 503.
     pub user_apps: Option<UserApps>,
+    /// The claktory.com addresses `POST /v1/pipe-identity` may vouch for
+    /// (`--vouch-claktory-email`); none by default, since "Verified" with
+    /// one reads as Claktory's staff and a shared inbox (QA's) can sign in.
+    pub vouched_claktory_emails: Vec<String>,
+    /// The store reviewers' account (`--review-account`): its email signs
+    /// in with a fixed code, and is sent nothing. Off by default.
+    pub review_account: Option<review::ReviewAccount>,
 }
 
 impl Default for Config {
@@ -104,6 +122,8 @@ impl Default for Config {
             relays: Vec::new(),
             service_key_statement: None,
             user_apps: None,
+            vouched_claktory_emails: Vec::new(),
+            review_account: None,
         }
     }
 }
@@ -159,6 +179,11 @@ impl Service {
     /// admin once 80% of it is used. `capped` mail (sign-in codes) isn't
     /// sent at the cap.
     async fn send(&self, mail: &Mail, capped: bool) -> Result<(), MailError> {
+        if self.review(&mail.to).is_some() {
+            // No mailbox: nothing goes to it, and its email is never logged.
+            tracing::info!("review account: an email to it isn't sent");
+            return Ok(());
+        }
         let now = self.now();
         let cap = self.config.email_daily_cap;
         let sent = {
@@ -240,6 +265,11 @@ impl Service {
         apps::retry_purges(self).await
     }
 
+    /// The review account, when `email` (normalized) is its.
+    fn review(&self, email: &str) -> Option<&review::ReviewAccount> {
+        self.config.review_account.as_ref().filter(|review| review.is(email))
+    }
+
     /// Where a request came from, when the service has a GeoIP file and
     /// the IP is a public one.
     fn locate(&self, ip: &str) -> Option<geo::Location> {
@@ -311,7 +341,10 @@ impl Service {
         // refuses the rest before checking them, except those naming a
         // Claktory or device it knows: someone else's bad requests on the
         // address mustn't lock a person's phone out.
-        let signed = signed(&call.method, &call.path);
+        // A report of an AI reply is signed when its Claktory is signed in,
+        // and unsigned when it isn't.
+        let report = call.method == Method::POST && call.path == protocol::AI_REPORT_PATH;
+        let signed = signed(&call.method, &call.path) || (report && call.header("authorization").is_some());
         let unverified = format!("ip-unverified:{}", call.ip);
         if signed {
             let spent = db::spent(&self.db(), &[(&unverified, 60, IP_PER_MINUTE)], self.now())?;
@@ -345,8 +378,11 @@ impl Service {
             (&Method::POST, "/v1/devices/sign-in/verify") => devices::sign_in_verify(self, call),
             (&Method::GET, "/v1/devices/me") => devices::me(self, call),
             (&Method::POST, "/v1/devices/sign-out") => devices::sign_out(self, call),
+            (&Method::POST, "/v1/devices/remove") => devices::remove(self, call),
             (&Method::GET, "/v1/claktories") => devices::claktories(self, call),
             (&Method::POST, "/v1/devices/assertion") => devices::assertion(self, call),
+            (&Method::POST, "/v1/pipe-identity") => pipes::identity(self, call),
+            (&Method::POST, protocol::AI_REPORT_PATH) => reports::report(self, call),
             (&Method::GET, "/v1/relay/allowlist") => api::allowlist(self, call),
             (&Method::GET, "/v1/stats/public") => api::public_stats(self),
             (_, path) if path.starts_with("/v1/apps/") => apps::call(self, call).await,

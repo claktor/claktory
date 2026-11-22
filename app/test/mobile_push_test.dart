@@ -369,4 +369,49 @@ void main() {
     await connect(tester, studio());
     expect(registrar.failures.value, {studio(): PushStep.registration});
   });
+
+  test("a dev build never registers with Claktory's own relay: only with "
+      'FACTORY_PUSH_RELAY, or a relay the Claktory names', () {
+    // A release build: the Claktory's, else Claktory's own.
+    expect(pushRelayFor('', dev: false), defaultPushRelay);
+    expect(
+      pushRelayFor('https://push.example.org', dev: false),
+      'https://push.example.org',
+    );
+    expect(
+      pushRelayFor('', dev: false, devRelay: 'http://127.0.0.1:9'),
+      defaultPushRelay,
+    );
+    // A dev build.
+    expect(pushRelayFor('', dev: true), '');
+    expect(pushRelayFor(defaultPushRelay, dev: true), '');
+    expect(pushRelayFor('https://push.claktory.com/', dev: true), '');
+    expect(
+      pushRelayFor('https://push.example.org', dev: true),
+      'https://push.example.org',
+    );
+    expect(
+      pushRelayFor(defaultPushRelay, dev: true, devRelay: 'http://127.0.0.1:9'),
+      'http://127.0.0.1:9',
+    );
+  });
+
+  test('plain http only for a dev build on this computer', () {
+    expect(
+      loopbackDevRelay(Uri.parse('http://127.0.0.1:8090'), dev: true),
+      isTrue,
+    );
+    expect(
+      loopbackDevRelay(Uri.parse('http://localhost:8090'), dev: true),
+      isTrue,
+    );
+    expect(
+      loopbackDevRelay(Uri.parse('http://127.0.0.1:8090'), dev: false),
+      isFalse,
+    );
+    expect(
+      loopbackDevRelay(Uri.parse('http://push.example.org'), dev: true),
+      isFalse,
+    );
+  });
 }

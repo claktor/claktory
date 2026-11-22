@@ -239,7 +239,17 @@ class _AppZoomState extends State<AppZoom> {
           listenable: zoom,
           builder: (context, child) {
             if (zoomsHere) _placeBand(zoom.level);
-            return Zoomed(zoom: zoom.level, child: child!);
+            // A selecting drag doesn't run off scrolling at any zoom.
+            return Zoomed(
+              zoom: zoom.level,
+              child: ScrollConfiguration(
+                behavior: ZoomedSelectionScrollBehavior(
+                  ScrollConfiguration.of(context),
+                  zoomed: (zoom.level - 1).abs() > 0.001,
+                ),
+                child: child!,
+              ),
+            );
           },
           child: widget.child,
         ),

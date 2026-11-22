@@ -159,6 +159,17 @@ fn field_aad(field: Field<'_>, key_id: &[u8]) -> Vec<u8> {
     .concat()
 }
 
+/// Whether `path` is a systemd credential of this service: a regular file
+/// directly in its credentials directory (symlinks resolved, so nothing
+/// outside it passes for one), a directory no one but its owner may change.
+fn credential(path: &Path, credentials: Option<&Path>) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Some(dir) = credentials.filter(|dir| dir.is_absolute()) else { return false };
+    let (Ok(file), Ok(dir)) = (std::fs::canonicalize(path), std::fs::canonicalize(dir)) else { return false };
+    let private = std::fs::metadata(&dir).is_ok_and(|metadata| metadata.is_dir() && metadata.permissions().mode() & 0o022 == 0);
+    private && file.parent() == Some(dir.as_path()) && std::fs::metadata(&file).is_ok_and(|metadata| metadata.is_file())
+}
+
 impl Keys {
     pub fn from_bytes(wrapping: [u8; 32]) -> Keys {
         let wrapping = Zeroizing::new(wrapping);
@@ -167,11 +178,25 @@ impl Keys {
     }
 
     /// Reads the wrapping key: 64 hex digits, from a file only its owner
-    /// may read.
+    /// may read, or a systemd credential of this service's
+    /// (`LoadCredentialEncrypted`): a file directly in
+    /// `$CREDENTIALS_DIRECTORY`, which systemd sets only for the service and
+    /// makes private to it, the file root's and readable to the service
+    /// through an ACL, so its mode bits say 0440: its group may read it there,
+    /// never change it, and no one else may touch it.
     pub fn load(path: &Path) -> Result<Keys, Refused> {
+        let credentials = std::env::var_os("CREDENTIALS_DIRECTORY").map(std::path::PathBuf::from);
+        Keys::load_from(path, credentials.as_deref())
+    }
+
+    /// [`Keys::load`], with the service's credentials directory if it has one.
+    fn load_from(path: &Path, credentials: Option<&Path>) -> Result<Keys, Refused> {
         use std::os::unix::fs::PermissionsExt as _;
         let metadata = std::fs::metadata(path).map_err(|error| Refused::KeyFile(format!("can't read {}: {error}", path.display())))?;
-        if metadata.permissions().mode() & 0o077 != 0 {
+        // A credential may be its group's to read (systemd's 0440), never
+        // its group's to change, nor anyone else's to touch.
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 && !(mode & 0o027 == 0 && credential(path, credentials)) {
             return Err(Refused::KeyFile(format!("{} can be read by others: make it 0600 (or 0400)", path.display())));
         }
         let text = Zeroizing::new(
@@ -486,5 +511,53 @@ mod tests {
         std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o600)).expect("chmod");
         let refused = Keys::load(&bad).expect_err("not a key");
         assert!(!refused.to_string().contains("not a key\n"), "{refused}");
+    }
+
+    /// A systemd credential (`LoadCredentialEncrypted`): the file root's,
+    /// read through an ACL, so 0440. Taken directly in the service's
+    /// credentials directory, and only there.
+    #[test]
+    fn a_systemd_credential_is_read_though_its_mode_says_0440() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("a folder");
+        let credentials = dir.path().join("credentials");
+        std::fs::create_dir(&credentials).expect("made");
+        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        let made = Keys::create(&dir.path().join("made.key")).expect("made");
+        let text = std::fs::read(dir.path().join("made.key")).expect("read");
+        let key = credentials.join("dm.key");
+        std::fs::write(&key, &text).expect("written");
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o440)).expect("chmod");
+        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+
+        assert_eq!(Keys::load_from(&key, Some(&credentials)).expect("a credential").id(), made.id());
+        // Without the directory, or another one: the usual rule.
+        assert!(matches!(Keys::load_from(&key, None), Err(Refused::KeyFile(_))));
+        assert!(matches!(Keys::load_from(&key, Some(dir.path())), Err(Refused::KeyFile(_))), "not directly in it");
+        assert!(matches!(Keys::load_from(&key, Some(Path::new("credentials"))), Err(Refused::KeyFile(_))), "a relative one");
+        // A file elsewhere, reached through a link in the directory, or a
+        // path out of it and back: only a file directly in it counts.
+        let outside = dir.path().join("outside.key");
+        std::fs::write(&outside, &text).expect("written");
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        let link = credentials.join("link.key");
+        std::os::unix::fs::symlink(&outside, &link).expect("linked");
+        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+        assert!(matches!(Keys::load_from(&link, Some(&credentials)), Err(Refused::KeyFile(_))), "a link out");
+        assert!(matches!(Keys::load_from(&outside, Some(&credentials)), Err(Refused::KeyFile(_))), "outside");
+        // Readable by others, or its group's to change: refused there too.
+        for mode in [0o444, 0o660] {
+            std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(mode)).expect("chmod");
+            std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+            assert!(matches!(Keys::load_from(&key, Some(&credentials)), Err(Refused::KeyFile(_))), "{mode:o}");
+        }
+        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o440)).expect("chmod");
+        // A directory others may change isn't private to the service.
+        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o770)).expect("chmod");
+        assert!(matches!(Keys::load_from(&key, Some(&credentials)), Err(Refused::KeyFile(_))), "group-writable");
+        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700)).expect("chmod");
     }
 }

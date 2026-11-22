@@ -826,7 +826,7 @@ impl Factory {
     /// The person's comment reaches the agent told, as theirs.
     pub(crate) fn decide_suggestion(self: &Arc<Self>, request: &v1::DecideSuggestion) -> Result<(), RequestError> {
         let comment = crate::decisions::comment(&request.comment)?;
-        let person = self.lock().config.person_capitalized().to_owned();
+        let person = self.person_capitalized();
         let tell = {
             let _work = self.comments_lock();
             let db = self.store.db();

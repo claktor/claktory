@@ -256,7 +256,10 @@ impl Worker {
                 let Ok(put) = serde_json::from_slice::<grants::Put>(body) else {
                     return error(400, "invalid_request", "The request isn't what this endpoint takes.");
                 };
-                match grants::put(&mut self.db(), caller, put, now_ms) {
+                let _ = crate::dms::sync::touched();
+                let put = grants::put(&mut self.db(), caller, put, now_ms);
+                self.wake(&crate::dms::sync::touched());
+                match put {
                     Ok(grant) => json(200, &grant),
                     Err(refused) => refused_answer(&refused),
                 }
@@ -267,7 +270,10 @@ impl Worker {
             },
             ("DELETE", route) if route.starts_with("grants/") => {
                 let id = &route["grants/".len()..];
-                match grants::revoke(&mut self.db(), caller, id) {
+                let _ = crate::dms::sync::touched();
+                let revoked = grants::revoke(&mut self.db(), caller, id, now_ms);
+                self.wake(&crate::dms::sync::touched());
+                match revoked {
                     Ok(()) => (204, Vec::new()),
                     Err(refused) => refused_answer(&refused),
                 }

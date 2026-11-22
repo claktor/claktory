@@ -111,6 +111,10 @@ class QrCodesTest {
         assertEquals(1280 to 720, QrCodes.largest(sizes, 1280, 720, like = 1920 to 1080))
         assertEquals(640 to 480, QrCodes.largest(listOf(640 to 480), 1280, 720, like = 1920 to 1080))
         assertNull(QrCodes.largest(listOf(4000 to 3000), 1280, 720))
+        // The scanner's limit: a 16:9 camera reads 1280×720, a 4:3 one 1280×960, not 640×480.
+        val camera = listOf(1920 to 1080, 1280 to 960, 1280 to 720, 640 to 480)
+        assertEquals(1280 to 720, QrCodes.largest(camera, 1280, 960, like = 1920 to 1080))
+        assertEquals(1280 to 960, QrCodes.largest(camera, 1280, 960, like = 1280 to 960))
     }
 
     @Test
@@ -121,5 +125,32 @@ class QrCodesTest {
         val read = QrCodes.read(luma, width, width, height)
         assertTrue(read == null || read == pairing)
         assertArrayEquals(code["modules"] as ByteArray, QrCodes.modules(pairing)!!["modules"] as ByteArray)
+    }
+
+    @Test
+    fun aSmallTiltedCodeReads() {
+        // A Mac's pairing code (version 9, 53 modules) two pixels a module,
+        // turned 10°, as a phone held well back sees it.
+        val text = "factory://?t=" + "Ab3_".repeat(11) + "&name=Matt%27s%20MacBook%20Pro&e=" +
+            "0123456789abcdef".repeat(4) + "&color=blue"
+        val code = QrCodes.modules(text)!!
+        val size = code["size"] as Int
+        val modules = code["modules"] as ByteArray
+        val (w, h) = 1280 to 720
+        val module = 2.0
+        val turn = Math.toRadians(10.0)
+        val side = (size + 8) * module
+        val luma = ByteArray(w * h) { i ->
+            val dx = i % w - w / 2.0
+            val dy = i / w - h / 2.0
+            val u = Math.cos(turn) * dx + Math.sin(turn) * dy + side / 2
+            val v = -Math.sin(turn) * dx + Math.cos(turn) * dy + side / 2
+            val mx = Math.floor(u / module).toInt() - 4
+            val my = Math.floor(v / module).toInt() - 4
+            val paper = u >= 0 && v >= 0 && u < side && v < side
+            val dark = paper && mx in 0 until size && my in 0 until size && modules[my * size + mx].toInt() == 1
+            (if (!paper) 120 else if (dark) 70 else 170).toByte()
+        }
+        assertEquals(text, QrCodes.read(luma, w, w, h))
     }
 }

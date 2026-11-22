@@ -10,6 +10,11 @@
 #   scripts/qa.sh up --speech ~/.factory-dev/models/speech/parakeet-tdt-0.6b-v3-Q8_0.gguf
 #                                       speech recognition ready (claktory-speech
 #                                       built once per commit, the model copied in)
+#   scripts/qa.sh up --version v0.1.17  a sandbox whose factoryd says it's v0.1.17,
+#                                       as a release's does (built once per commit
+#                                       and version), so apps of other versions
+#                                       meet the checks they meet on a real one;
+#                                       a sandbox otherwise says "dev"
 #
 # --container runs the same commands inside a Linux container instead
 # (podman): claktory-qa, its sandboxes and their agents' tools all run in
@@ -47,6 +52,28 @@ while [[ "${1:-}" == "--rev" || "${1:-}" == "--container" ]]; do
   esac
 done
 
+# `up --version vX.Y.Z`: the version stamped into this sandbox's binaries
+# (only that number: no update channel, nothing else of a release). Taken
+# out of the arguments here; claktory-qa never sees it.
+VERSION=""
+if [[ "${1:-}" == "up" ]]; then
+  rest=()
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--version" ]]; then
+      VERSION="${2:-}"
+      if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo '{"ok":false,"error":"usage","message":"--version takes a release version, such as v0.1.17."}'
+        exit 2
+      fi
+      shift 2
+    else
+      rest+=("$1")
+      shift
+    fi
+  done
+  set -- "${rest[@]}"
+fi
+
 mkdir -p "$ROOT"
 ROOT="$(cd "$ROOT" && pwd -P)"
 for real in "$HOME/.factory" "$HOME/.factory-dev"; do
@@ -62,6 +89,11 @@ for real in "$HOME/.factory" "$HOME/.factory-dev"; do
 done
 
 COMMIT="$(git -C "$REPO" rev-parse --short=10 "$REV^{commit}")"
+
+if [[ -n "$CONTAINER" && -n "$VERSION" ]]; then
+  echo '{"ok":false,"error":"usage","message":"--version runs only outside the container for now."}'
+  exit 2
+fi
 
 if [[ -n "$CONTAINER" ]]; then
   ENGINE="${FACTORY_CONTAINER:-podman}"
@@ -159,34 +191,46 @@ fi
 # $BIN/commit names the commit, written once every crate of its source was
 # compiled in that build (below). Folders without it, such as those built
 # before this check, are built again.
-BIN="$ROOT/bin/$COMMIT"
+# With --version, a folder of their own: the same commit, that number.
+STAMP="$COMMIT${VERSION:+-$VERSION}"
+BIN="$ROOT/bin/$STAMP"
 # The cache prunes itself as it grows (the shared disk once filled up):
 # before each new commit's build, it drops other commits' binaries older
-# than CLAKTORY_QA_KEEP_HOURS (4) that no running process uses, and when
-# the shared target is over CLAKTORY_QA_TARGET_GB (25), its incremental
+# than CLAKTORY_QA_KEEP_HOURS (4) that no running process uses, then the
+# oldest of the rest beyond CLAKTORY_QA_KEEP_BUILDS (6), and when the
+# shared target is over CLAKTORY_QA_TARGET_GB (15), its incremental
 # state, then all of it (the next build is a cold one). Called holding the
 # build lock.
 prune_cache() {
   local running dir commit kb
-  running="$(ps -axo command= 2>/dev/null | grep -oE "$ROOT/bin/[0-9a-f]+/" | sort -u || true)"
+  running="$(ps -axo command= 2>/dev/null | grep -oE "$ROOT/bin/[0-9a-f]+(-v[0-9.]+)?/" | sort -u || true)"
   while IFS= read -r dir; do
     commit="$(basename "$dir")"
-    [[ "$commit" != "$COMMIT" ]] || continue
+    [[ "$commit" != "$STAMP" ]] || continue
     grep -qF "$ROOT/bin/$commit/" <<<"$running" && continue
     rm -rf "$dir"
   done < <(find "$ROOT/bin" -mindepth 1 -maxdepth 1 -type d -mmin +$((${CLAKTORY_QA_KEEP_HOURS:-4} * 60)) 2>/dev/null)
+  # At most CLAKTORY_QA_KEEP_BUILDS, newest first; this build's slot counts.
+  local kept=1
+  while IFS= read -r dir; do
+    commit="$(basename "$dir")"
+    [[ "$commit" != "$STAMP" ]] || continue
+    grep -qF "$ROOT/bin/$commit/" <<<"$running" && continue
+    if ((kept < ${CLAKTORY_QA_KEEP_BUILDS:-6})); then kept=$((kept + 1)); continue; fi
+    rm -rf "$dir"
+  done < <(ls -1dt "$ROOT"/bin/*/ 2>/dev/null | sed 's:/$::')
   [[ -d "$ROOT/target" ]] || return 0
   kb="$(du -sk "$ROOT/target" 2>/dev/null | cut -f1)"
-  if ((kb > ${CLAKTORY_QA_TARGET_GB:-25} * 1024 * 1024)); then
+  if ((kb > ${CLAKTORY_QA_TARGET_GB:-15} * 1024 * 1024)); then
     rm -rf "$ROOT/target/debug/incremental"
     kb="$(du -sk "$ROOT/target" 2>/dev/null | cut -f1)"
-    if ((kb > ${CLAKTORY_QA_TARGET_GB:-25} * 1024 * 1024)); then
-      echo "claktory-qa: the shared build cache is over ${CLAKTORY_QA_TARGET_GB:-25} GB; starting it afresh" >&2
+    if ((kb > ${CLAKTORY_QA_TARGET_GB:-15} * 1024 * 1024)); then
+      echo "claktory-qa: the shared build cache is over ${CLAKTORY_QA_TARGET_GB:-15} GB; starting it afresh" >&2
       rm -rf "$ROOT/target"
     fi
   fi
 }
-built() { [[ -x "$BIN/claktory-qa" && "$(cat "$BIN/commit" 2>/dev/null)" == "$COMMIT" ]]; }
+built() { [[ -x "$BIN/claktory-qa" && "$(cat "$BIN/commit" 2>/dev/null)" == "$STAMP" ]]; }
 if ! built; then
   # One build at a time in the shared target, from cargo to the copy out
   # of it: another commit's build in between would leave its binaries
@@ -207,7 +251,7 @@ if ! built; then
   trap 'rm -rf "$LOCK"' EXIT
   if ! built; then
     prune_cache
-    SRC="$ROOT/src/$COMMIT"
+    SRC="$ROOT/src/$STAMP"
     rm -rf "$SRC" "$BIN"
     mkdir -p "$SRC"
     # -m: the files are new now. git archive stamps them with the commit's
@@ -217,10 +261,10 @@ if ! built; then
     # binaries, or a mix of two.
     git -C "$REPO" archive "$COMMIT" | tar -xm -C "$SRC"
     echo "claktory-qa: building $COMMIT (once per commit; the first takes a few minutes)" >&2
-    MESSAGES="$ROOT/src/$COMMIT.json"
-    # No update channel or version stamped in: a sandbox never looks for
-    # releases.
-    (cd "$SRC" && env -u FACTORY_UPDATE_URL -u FACTORY_VERSION CARGO_TARGET_DIR="$ROOT/target" \
+    MESSAGES="$ROOT/src/$STAMP.json"
+    # No update channel stamped in: a sandbox never looks for releases. No
+    # version either, but the one --version asks for.
+    (cd "$SRC" && env -u FACTORY_UPDATE_URL -u FACTORY_VERSION ${VERSION:+FACTORY_VERSION="$VERSION"} CARGO_TARGET_DIR="$ROOT/target" \
       cargo build --quiet --message-format=json-render-diagnostics \
       -p factoryd -p claktory-account -p claktory-qa) >"$MESSAGES"
     # The proof: every crate of this source compiled in this build, none
@@ -239,7 +283,7 @@ if ! built; then
     rm -rf "$BIN.tmp"
     mkdir -p "$BIN.tmp"
     cp "$ROOT/target/debug/factoryd" "$ROOT/target/debug/claktory-account" "$ROOT/target/debug/claktory-qa" "$BIN.tmp/"
-    echo "$COMMIT" >"$BIN.tmp/commit"
+    echo "$STAMP" >"$BIN.tmp/commit"
     mv "$BIN.tmp" "$BIN"
     rm -rf "$SRC" "$MESSAGES"
   fi

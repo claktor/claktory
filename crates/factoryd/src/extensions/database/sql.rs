@@ -416,6 +416,15 @@ mod tests {
         assert!(
             exec(&mut db, &own, "BEGIN; INSERT INTO leads (name) VALUES ('c'); COMMIT;", None).unwrap_err().contains("leave out BEGIN")
         );
+
+        // No copy of it anywhere (a curator's escape route into a liaison's
+        // outbox, pipes-automation.md §3): SQLite asks VACUUM INTO as an
+        // ATTACH, which is denied, on the bare connection too, outside the
+        // transaction db_exec wraps everything in.
+        let copy = _dir.join("copy.sqlite");
+        let vacuum = db.execute_batch(&format!("VACUUM INTO '{}'", copy.display())).unwrap_err();
+        assert!(vacuum.to_string().contains("authoriz"), "{vacuum}");
+        assert!(!copy.exists());
     }
 
     #[test]

@@ -289,7 +289,13 @@ async fn an_app_is_reviewed_installed_set_up_given_to_agents_and_heard_from() {
     let wasm = b"\0asm\x01\0\0\0 stand-in".to_vec();
     let bundle = clapp(MANIFEST, &wasm, &key);
     let install = |approve: bool, sha256: &str, content: &[u8]| {
-        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: content.to_vec() })
+        Request::InstallLocalApp(v1::InstallLocalApp {
+            path: String::new(),
+            approve,
+            sha256: sha256.into(),
+            content: content.to_vec(),
+            ..Default::default()
+        })
     };
     let reviewed = apply_request(&mut client, &mut view, install(false, "", &bundle)).await;
     let Body::AppPermissions(permissions) = reviewed else { panic!("expected permissions, got {reviewed:?}") };
@@ -521,9 +527,10 @@ async fn an_app_that_keeps_crashing_is_paused_and_rivet_hears_why() {
 
 #[tokio::test]
 async fn apps_leave_no_trace_where_they_are_not_offered() {
-    // Like the person's Claktory until apps ship: not the dev one, no host set.
+    // Like a Claktory where apps don't ship: not the dev one, no host set.
     let dir = temp_dir();
-    let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (addr, factory) = start_with(&dir, Scripted::signed_in()).await;
+    factory.set_apps_unavailable_for_test();
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
     assert!(!view.workspace.apps_available && view.workspace.apps.is_empty());
@@ -626,4 +633,74 @@ async fn an_installed_app_keeps_updating_with_its_own_key_and_no_other() {
         "This Telegram comes from a different publisher than the one installed. To install it, uninstall that one first."
     );
     assert_eq!(app(&view).expect("app").version, "0.2.0");
+}
+
+/// Claktory's own apps ship with the release (#201): the real signed
+/// Charts in its folder is offered, reviewed and installed like any file;
+/// a file that isn't signed by Claktory, or was changed, isn't offered or
+/// installed, even swapped in after it was listed.
+#[tokio::test]
+async fn claktorys_own_apps_are_offered_checked_and_installed_from_the_release() {
+    let dir = temp_dir();
+    let (addr, factory) = start_with(&dir, Scripted::signed_in()).await;
+    let shipped = dir.join("release-apps");
+    std::fs::create_dir_all(&shipped).expect("folder");
+    let charts = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../apps/dist/charts.clapp")).expect("Charts, signed");
+    std::fs::write(shipped.join("charts.clapp"), &charts).expect("written");
+    // Signed, but not by Claktory; and Charts with a byte changed.
+    let local = clapp(MANIFEST, b"\0asm\x01\0\0\0", &SigningKey::from_bytes(&[7; 32]));
+    std::fs::write(shipped.join("telegram.clapp"), &local).expect("written");
+    let mut changed = charts.clone();
+    let middle = changed.len() / 2;
+    changed[middle] ^= 1;
+    std::fs::write(shipped.join("changed.clapp"), &changed).expect("written");
+    factoryd::apps::bundled::set_folder_for_test(&factory, shipped.clone());
+
+    // Not offered where apps aren't.
+    factory.set_apps_unavailable_for_test();
+    let (client, workspace, _) = Client::connect(addr).await;
+    assert!(workspace.bundled_apps.is_empty());
+    drop(client);
+
+    let stand = Stand::new();
+    factory.set_apps_host(stand.launcher());
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let offered: Vec<_> =
+        view.workspace.bundled_apps.iter().map(|app| (app.id.as_str(), app.version.as_str(), app.installed_version.as_str())).collect();
+    assert_eq!(offered, [("charts", "0.2.1", "")]);
+    let listed = view.workspace.bundled_apps[0].clone();
+    assert_eq!((listed.name.as_str(), listed.publisher.as_str(), listed.icon.as_str()), ("Charts", "claktory", "chart-column"));
+
+    // Only what's offered installs this way.
+    let telegram = v1::InstallLocalApp { bundled: "telegram".into(), ..Default::default() };
+    let refused = apply_request(&mut client, &mut view, Request::InstallLocalApp(telegram)).await;
+    assert_eq!(failure(&refused), "Claktory doesn't come with an app called telegram.");
+
+    // Reviewed like a file, as Claktory's.
+    let review = v1::InstallLocalApp { bundled: "charts".into(), ..Default::default() };
+    let Body::AppPermissions(permissions) = apply_request(&mut client, &mut view, Request::InstallLocalApp(review)).await else {
+        panic!("expected its permissions")
+    };
+    assert_eq!((permissions.id.as_str(), permissions.tier(), permissions.path.as_str()), ("charts", v1::AppTier::Claktory, ""));
+    let sha256 = Sha256::digest(&charts).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    assert_eq!(permissions.sha256, sha256);
+
+    // Swapped after it was listed: what's read now is checked again.
+    std::fs::write(shipped.join("charts.clapp"), &local).expect("swapped");
+    let approve = v1::InstallLocalApp { bundled: "charts".into(), approve: true, sha256: sha256.clone(), ..Default::default() };
+    let refused = apply_request(&mut client, &mut view, Request::InstallLocalApp(approve.clone())).await;
+    assert!(failure(&refused).contains("isn't signed by Claktory"), "{}", failure(&refused));
+    std::fs::write(shipped.join("charts.clapp"), &changed).expect("swapped");
+    let refused = apply_request(&mut client, &mut view, Request::InstallLocalApp(approve.clone())).await;
+    assert!(failure(&refused).contains("changed after it was signed"), "{}", failure(&refused));
+
+    // The real one installs, as Claktory's, and isn't offered any more.
+    std::fs::write(shipped.join("charts.clapp"), &charts).expect("put back");
+    let reply = apply_request(&mut client, &mut view, Request::InstallLocalApp(approve)).await;
+    assert!(matches!(reply, Body::Ack(_)), "{reply:?}");
+    view.follow(&mut client, |view| view.workspace.apps.iter().any(|app| app.id == "charts")).await;
+    let installed = view.workspace.apps.iter().find(|app| app.id == "charts").expect("installed").clone();
+    assert_eq!((installed.version.as_str(), installed.tier()), ("0.2.1", v1::AppTier::Claktory));
+    view.follow(&mut client, |view| view.workspace.bundled_apps.is_empty()).await;
 }

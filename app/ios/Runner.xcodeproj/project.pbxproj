@@ -32,6 +32,8 @@
 		7884E8752EC3CC0700C636F9 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8762EC3CC0400C636FA /* AudioPlayer.swift */; };
 		7884E8752EC3CC0700C63721 /* ConnectionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8762EC3CC0400C63722 /* ConnectionStore.swift */; };
 		7884E8752EC3CC0700C63701 /* NetworkPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8762EC3CC0400C63702 /* NetworkPath.swift */; };
+		7884E8772EC3CC0700C63721 /* SecretClipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8782EC3CC0400C63722 /* SecretClipboard.swift */; };
+		7884E8792EC3CC0700C63731 /* DmKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E87A2EC3CC0400C63732 /* DmKeys.swift */; };
 		7884E8732EC3CC0700C636F7 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8742EC3CC0400C636F8 /* Recorder.swift */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
@@ -112,6 +114,8 @@
 		7884E8762EC3CC0400C636FA /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AudioPlayer.swift; path = ../../macos/Runner/AudioPlayer.swift; sourceTree = "<group>"; };
 		7884E8762EC3CC0400C63722 /* ConnectionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ConnectionStore.swift; path = ../../macos/Runner/ConnectionStore.swift; sourceTree = "<group>"; };
 		7884E8762EC3CC0400C63702 /* NetworkPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NetworkPath.swift; path = ../../macos/Runner/NetworkPath.swift; sourceTree = "<group>"; };
+		7884E8782EC3CC0400C63722 /* SecretClipboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SecretClipboard.swift; path = ../../macos/Runner/SecretClipboard.swift; sourceTree = "<group>"; };
+		7884E87A2EC3CC0400C63732 /* DmKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DmKeys.swift; path = ../../macos/Runner/DmKeys.swift; sourceTree = "<group>"; };
 		7884E8742EC3CC0400C636F8 /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = Recorder.swift; path = ../../macos/Runner/Recorder.swift; sourceTree = "<group>"; };
 		78E0A7A72DC9AD7400C4905E /* FlutterGeneratedPluginSwiftPackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = FlutterGeneratedPluginSwiftPackage; path = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage; sourceTree = "<group>"; };
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
@@ -222,6 +226,8 @@
 				7884E8762EC3CC0400C636FA /* AudioPlayer.swift */,
 				7884E8762EC3CC0400C63722 /* ConnectionStore.swift */,
 				7884E8762EC3CC0400C63702 /* NetworkPath.swift */,
+				7884E8782EC3CC0400C63722 /* SecretClipboard.swift */,
+				7884E87A2EC3CC0400C63732 /* DmKeys.swift */,
 				7884E8742EC3CC0400C636F8 /* Recorder.swift */,
 				D3B700000000000000000001 /* Push.swift */,
 				D3B70000000000000000001A /* Notifications.swift */,
@@ -442,6 +448,8 @@
 				7884E8752EC3CC0700C636F9 /* AudioPlayer.swift in Sources */,
 				7884E8752EC3CC0700C63721 /* ConnectionStore.swift in Sources */,
 				7884E8752EC3CC0700C63701 /* NetworkPath.swift in Sources */,
+				7884E8772EC3CC0700C63721 /* SecretClipboard.swift in Sources */,
+				7884E8792EC3CC0700C63731 /* DmKeys.swift in Sources */,
 				7884E8732EC3CC0700C636F7 /* Recorder.swift in Sources */,
 				D3B700000000000000000008 /* Push.swift in Sources */,
 				D3B70000000000000000001B /* Notifications.swift in Sources */,
@@ -606,7 +614,7 @@
 				SDKROOT = iphoneos;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = iphoneos;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 				VALIDATE_PRODUCT = YES;
 			};
 			name = Profile;
@@ -735,7 +743,7 @@
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
 		};
@@ -789,7 +797,7 @@
 				SUPPORTED_PLATFORMS = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 				VALIDATE_PRODUCT = YES;
 			};
 			name = Release;

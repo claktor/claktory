@@ -241,7 +241,7 @@ async fn a_view_is_one_surface_for_every_device_kept_in_step() {
 
     let bundle = clapp(MANIFEST, b"\0asm\x01\0\0\0 views", &SigningKey::from_bytes(&[9; 32]));
     let install = |approve: bool, sha256: &str| {
-        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: bundle.clone() })
+        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: bundle.clone(), ..Default::default() })
     };
     let Body::AppPermissions(permissions) = mac.request(install(false, "")).await.body else { panic!("permissions") };
     mac.ok(install(true, &permissions.sha256)).await;
@@ -402,7 +402,7 @@ async fn the_real_host_runs_a_real_apps_views() {
     let wasm = std::fs::read(guest).expect("the guest");
     let bundle = clapp(manifest, &wasm, &SigningKey::from_bytes(&[5; 32]));
     let install = |approve: bool, sha256: &str| {
-        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: bundle.clone() })
+        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: bundle.clone(), ..Default::default() })
     };
     let Body::AppPermissions(permissions) = client.request(install(false, "")).await.body else { panic!("permissions") };
     client.ok(install(true, &permissions.sha256)).await;

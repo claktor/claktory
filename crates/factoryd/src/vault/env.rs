@@ -70,7 +70,7 @@ pub(crate) fn parse(text: &str) -> Parsed {
             warnings.push(format!("{key} is set twice; the last one is kept."));
             earlier.value = value;
         } else {
-            values.push(Value { variable: key.to_owned(), value, file: false });
+            values.push(Value { variable: key.to_owned(), value, file: false, binary: false });
         }
     }
     Parsed { values, warnings }

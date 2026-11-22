@@ -923,19 +923,22 @@ mod tests {
         let (app, new) = (dir.join("Applications/Fake.app"), dir.join("release/Fake.app"));
         bundle(&app, "old");
         bundle(&new, "new");
-        // `open` stands in, so nothing is launched.
+        // `open` stands in, so nothing is launched. It's the swap's last
+        // step, and what it says appears all at once (written aside, then
+        // renamed), so its file there means the swap is done, whatever the
+        // machine's load.
         std::fs::create_dir_all(dir.join("stub")).expect("stub");
         let opened = dir.join("opened");
-        std::fs::write(dir.join("stub/open"), format!("#!/bin/sh\necho \"$@\" > \"{}\"\n", opened.display())).expect("open");
+        let stub = format!("#!/bin/sh\necho \"$@\" > \"{0}.part\" && mv \"{0}.part\" \"{0}\"\n", opened.display());
+        std::fs::write(dir.join("stub/open"), stub).expect("open");
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir.join("stub/open"), std::fs::Permissions::from_mode(0o755)).expect("chmod");
         let path = format!("{}:{}", dir.join("stub").display(), std::env::var("PATH").unwrap_or_default());
         let status = std::process::Command::new("/bin/sh").args(["-c", SWAP_APP, "sh"]).arg(&app).arg(&new).env("PATH", path).status();
         assert!(status.expect("sh").success());
-        for _ in 0..200 {
-            if opened.exists() {
-                break;
-            }
+        // A failsafe only, so a broken swap fails rather than hangs.
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while !opened.exists() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert_eq!(std::fs::read_to_string(&opened).expect("reopened"), format!("-g {}\n", app.display()));

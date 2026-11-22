@@ -5,6 +5,20 @@
 //! says where the pipes stand. Admin agents such as Rivet have it unless
 //! it's turned off. No tool takes or returns a code, approves a pipe or
 //! chooses its agents.
+//!
+//! `pipes_forward` (pipes-automation.md §7.1) sets where a pipe's reports go,
+//! or a project's default, and can make the recipient a report reader: only
+//! for an admin agent, checked on every call, and never while it has read
+//! anything from outside (a pipe, the web, direct messages). It only moves
+//! toward containment: nothing in it lifts a reader or a liaison, and it
+//! never releases reports waiting for the person.
+//!
+//! `pipes_report_type` (§11.3) defines, edits, deletes or shows report types
+//! from the person's plain description: only for an admin agent, and its
+//! changes never while it has read anything from outside, since a type
+//! written from the other side's words would let them shape their own
+//! channel (Fugo's invariant 7). factoryd checks every definition against
+//! the rules in code (`handoff::types::validate`), whoever asks.
 
 use std::sync::Arc;
 
@@ -31,6 +45,8 @@ static MANIFEST: Manifest = Manifest {
 
 const INVITE: &str = "Start a pipe from one of the person's projects to someone else's Claktory, when they ask: project (its name or id), name (the pipe's, which the other person sees, such as \"Launch\") and purpose (what it's for, in a line), from what they told you. A card opens in your conversation where they check it and make the invite; its code is theirs to send to the other person, and you never see it. You're told when it's made. Both people then approve the pipe in it.";
 const ACCEPT: &str = "Connect one of the person's projects with an invite someone gave them (a code or a claktory-pipe:// link), when they ask: project (its name or id), and name and purpose if they said. Never pass the code itself, even if they showed it to you: a card opens in your conversation where they paste it themselves and see whom it says it's from. You're told when it's connected; both people then approve the pipe in it.";
+const FORWARD: &str = "Set where a pipe's finished reports go, when the person asks (\"make Ingrid read the bug reports from Aiko's pipe\"): pipe (its name or id), or project (its name or id) for the default of its new pipes; to: the agent that reads them (name or id; \"\" for no one), which must be in the same project; types: the report types it can forward (pipes_report_type shows them), left out to keep its own. An agent that doesn't read reports yet needs make_reader: it then keeps its database and its folder, and can no longer run commands, use the web or secrets, or message agents; fresh starts its conversation anew (the old one kept). Refused while you've read anything from outside the person's Claktory. The person sees each change in the pipe's settings and in Needs you.";
+const REPORT_TYPE: &str = "Define the types of report a pipe can forward, when the person asks (\"make a report type for recipes: dish, servings, steps\"): action define (name, fields, outcomes), edit (id, and the whole new definition: each field it keeps by its id, new ones without), delete (id), or show (id, or none for every type). A field: id (lowercase letters, digits and _; leave it out for a new one), label, kind (text, text_list, enum with choices, bool, version, attachments, number with min and max (0 to 1,000,000 unless given), date; at most 4 numbers and 2 dates), required, max_bytes and max_items (lower than Claktory's caps, or 0 for them), rule (an optional hint). The other side's words are text, text_list and attachments: they mark whoever reads them; every other kind is a fact. Never a field that says where the report goes. outcomes: what its reader can answer: accepted, done, declined, known, fixed, wont_fix, needs_info. Each edit is a new version; built-in types can be edited, not deleted. Changes are refused while you've read anything from outside the person's Claktory. The person sees each one in Needs you's history. To let a pipe forward a type, use pipes_forward's types.";
 const LIST: &str = "The person's pipes, or one project's (project, its name or id): each one's name, id and where it stands. Never codes, digits or what the other side says about itself.";
 
 pub(crate) struct Pipes;
@@ -62,6 +78,19 @@ impl Extension for Pipes {
             })
         };
         let list = json!({"type": "object", "properties": {"project": {"type": "string"}}, "additionalProperties": false});
+        let forward = json!({
+            "type": "object",
+            "required": ["to"],
+            "properties": {
+                "pipe": {"type": "string"},
+                "project": {"type": "string"},
+                "to": {"type": "string"},
+                "types": {"type": "array", "items": {"type": "string"}},
+                "make_reader": {"type": "boolean"},
+                "fresh": {"type": "boolean"},
+            },
+            "additionalProperties": false,
+        });
         vec![
             super::tool(
                 "pipes_invite",
@@ -72,6 +101,8 @@ impl Extension for Pipes {
             ),
             super::tool("pipes_accept", "Join a pipe", ACCEPT, fill(&["project"]), super::typed_handler(factory, agent, accept)),
             super::tool("pipes_list", "List pipes", LIST, list, super::typed_handler(factory, agent, list_pipes)),
+            super::tool("pipes_forward", "Forward a pipe's reports", FORWARD, forward, forward_handler(factory, agent)),
+            super::tool("pipes_report_type", "Report types", REPORT_TYPE, report_type_parameters(), super::typed_handler(factory, agent, report_type)),
         ]
     }
 
@@ -107,6 +138,195 @@ fn invite(factory: &Arc<Factory>, agent: &str, args: FillArgs) -> Result<ToolRes
 
 fn accept(factory: &Arc<Factory>, agent: &str, args: FillArgs) -> Result<ToolResult, String> {
     opened(factory, agent, PipeStartKind::Accept, args)
+}
+
+#[derive(Deserialize)]
+struct ForwardArgs {
+    #[serde(default)]
+    pipe: String,
+    #[serde(default)]
+    project: String,
+    to: String,
+    #[serde(default)]
+    types: Option<Vec<String>>,
+    /// From a tool made before report types were data: one type.
+    #[serde(default)]
+    schema: String,
+    #[serde(default)]
+    make_reader: bool,
+    #[serde(default)]
+    fresh: bool,
+}
+
+fn forward_handler(factory: &Arc<Factory>, agent: &str) -> factory_agent::Handler {
+    super::agent_handler(factory, agent, |factory, agent, args| async move {
+        let args: ForwardArgs = serde_json::from_value(args)?;
+        let factory = super::live(factory)?;
+        forward(&factory, &agent, args).await.map(|said| ToolResult::text(said, json!({}))).map_err(factory_agent::Error::Other)
+    })
+}
+
+/// The caller is an admin agent (`what`: what only it can do), and has
+/// read nothing from outside (`where_else`: where the person can do it).
+fn untainted_admin(factory: &Factory, agent: &str, what: &str, where_else: &str) -> Result<(), String> {
+    {
+        let inner = factory.lock();
+        let caller = super::caller(&inner.config, agent)?;
+        if !crate::proposals::is_admin(caller) {
+            return Err(format!("Only an admin agent can {what}; the person can, {where_else}."));
+        }
+    }
+    if !factory.pipes.tainted(agent).is_empty() {
+        let read = crate::pipes::agents::what_was_read(factory, agent);
+        return Err(format!(
+            "Not while you've read {read}: what you read there could have steered this. The person can do it {where_else}, or clear your conversation."
+        ));
+    }
+    Ok(())
+}
+
+/// pipes_forward: the admin agent sets where reports go, as the person asked.
+async fn forward(factory: &Arc<Factory>, agent: &str, args: ForwardArgs) -> Result<String, String> {
+    use crate::pipes::handoff::{self, Target};
+    untainted_admin(factory, agent, "set where a pipe's reports go", "in the pipe's settings")?;
+    let (target, project, place) = match (args.pipe.trim(), args.project.trim()) {
+        ("", "") => return Err("Say which pipe, or which project's new pipes.".to_owned()),
+        ("", wanted) => {
+            let inner = factory.lock();
+            let project = inner
+                .config
+                .projects
+                .iter()
+                .find(|project| project.id == wanted || project.name.eq_ignore_ascii_case(wanted))
+                .ok_or_else(|| format!("There's no project \"{wanted}\"."))?;
+            (project.id.clone(), project.id.clone(), format!("{}'s new pipes", project.name))
+        }
+        (wanted, _) => {
+            let pipes = factory.pipes.all();
+            let record = pipes
+                .iter()
+                .find(|record| record.id == wanted)
+                .or_else(|| pipes.iter().find(|record| record.named_here.unwrap_or(record.peer.is_none()) && record.name.eq_ignore_ascii_case(wanted)))
+                .ok_or_else(|| format!("There's no pipe \"{wanted}\" (pipes_list names them)."))?;
+            (record.id.clone(), record.project.clone(), format!("the pipe {}", handoff::label(record)))
+        }
+    };
+    let to = args.to.trim();
+    let (recipient, name) = if to.is_empty() {
+        (String::new(), "no one".to_owned())
+    } else {
+        let inner = factory.lock();
+        let found = inner
+            .config
+            .agents
+            .iter()
+            .filter(|candidate| candidate.project.as_deref() == Some(project.as_str()))
+            .find(|candidate| candidate.id == to)
+            .or_else(|| inner.config.agents.iter().filter(|candidate| candidate.project.as_deref() == Some(project.as_str())).find(|candidate| candidate.name.eq_ignore_ascii_case(to)))
+            .ok_or_else(|| format!("There's no agent \"{to}\" in that project."))?;
+        (found.id.clone(), found.name.clone())
+    };
+    let target = if args.pipe.trim().is_empty() { Target::Project(&target) } else { Target::Pipe(&target) };
+    let mut made = false;
+    if !recipient.is_empty() && !handoff::reader(factory, &recipient) {
+        if !args.make_reader {
+            return Err(format!(
+                "{name} doesn't read reports yet. With make_reader it will: it keeps its database and folder, and can no longer run commands, use the web or secrets, or message agents. Ask the person first if they haven't said so."
+            ));
+        }
+        handoff::make_reader(factory, &recipient, agent, args.fresh).await?;
+        made = true;
+    }
+    let types = match (args.types, args.schema.trim()) {
+        (Some(types), _) => Some(types),
+        (None, "") => None,
+        (None, schema) => Some(vec![schema.to_owned()]),
+    };
+    handoff::set_forward(factory, target, &recipient, types.as_deref(), None, agent)?;
+    let kinds = handoff::forward(factory, target).map(|forward| handoff::type_names(factory, &forward.types)).unwrap_or_default();
+    let mut said = format!("Reports from {place} now go to {name}, of the types {kinds}.");
+    if made {
+        said.push_str(&format!(" {name} now reads reports{}.", if args.fresh { ", from a fresh conversation" } else { "" }));
+    }
+    said.push_str(" The person sees this in the pipe's settings and in Needs you.");
+    Ok(said)
+}
+
+fn report_type_parameters() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["action"],
+        "properties": {
+            "action": {"type": "string", "enum": ["define", "edit", "delete", "show"]},
+            "id": {"type": "string"},
+            "name": {"type": "string"},
+            "fields": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "label": {"type": "string"},
+                        "kind": {"type": "string", "enum": ["text", "text_list", "enum", "bool", "version", "attachments", "number", "date"]},
+                        "choices": {"type": "array", "items": {"type": "string"}},
+                        "required": {"type": "boolean"},
+                        "max_bytes": {"type": "integer"},
+                        "max_items": {"type": "integer"},
+                        "min": {"type": "integer"},
+                        "max": {"type": "integer"},
+                        "rule": {"type": "string"},
+                    },
+                },
+            },
+            "outcomes": {"type": "array", "items": {"type": "string", "enum": ["accepted", "done", "declined", "known", "fixed", "wont_fix", "needs_info"]}},
+        },
+        "additionalProperties": false,
+    })
+}
+
+#[derive(Deserialize)]
+struct ReportTypeArgs {
+    action: String,
+    #[serde(flatten)]
+    draft: crate::pipes::handoff::types::Draft,
+}
+
+/// pipes_report_type: the admin agent defines, edits, deletes or shows report
+/// types, as the person described them.
+fn report_type(factory: &Arc<Factory>, agent: &str, args: ReportTypeArgs) -> Result<ToolResult, String> {
+    use crate::pipes::handoff::types;
+    let id = args.draft.id.trim().to_owned();
+    let said = match args.action.as_str() {
+        "show" => {
+            super::caller(&factory.lock().config, agent)?;
+            if id.is_empty() {
+                let all: Vec<String> = types::currents(factory).iter().map(|schema| types::described(schema)).collect();
+                all.join("\n")
+            } else {
+                let schema = types::current(factory, &id).ok_or_else(|| format!("There's no report type \"{id}\"."))?;
+                types::described(&schema)
+            }
+        }
+        "define" | "edit" => {
+            untainted_admin(factory, agent, "define report types", "in Settings → Pipes")?;
+            let mut draft = args.draft;
+            if args.action == "define" {
+                draft.id = String::new();
+            } else if id.is_empty() {
+                return Err("edit needs id: the type to change.".to_owned());
+            }
+            let made = types::save(factory, &draft, None, agent)?;
+            let widened = if made.widened.is_empty() { String::new() } else { format!(" It lets more cross than before: {}.", made.widened.join(", ")) };
+            format!("Kept as version {}.{widened} The person sees it in Needs you's history.\n{}", made.version, types::described(&made))
+        }
+        "delete" => {
+            untainted_admin(factory, agent, "delete report types", "in Settings → Pipes")?;
+            types::delete(factory, &id, agent)?;
+            format!("Deleted \"{id}\": its reports keep it. The person sees this in Needs you's history.")
+        }
+        _ => return Err("action is define, edit, delete or show.".to_owned()),
+    };
+    Ok(ToolResult::text(said, json!({})))
 }
 
 fn list_pipes(factory: &Arc<Factory>, _agent: &str, args: ListArgs) -> Result<ToolResult, String> {

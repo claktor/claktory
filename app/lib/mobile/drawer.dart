@@ -191,13 +191,11 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
       back.update();
     }
 
-    // Told from a build below: after the frame.
-    if (SchedulerBinding.instance.schedulerPhase ==
-        SchedulerPhase.persistentCallbacks) {
-      SchedulerBinding.instance.addPostFrameCallback((_) => apply());
-    } else {
-      apply();
-    }
+    // Told from a build below, which can run outside a frame too (at
+    // launch, while the phase reads idle): always after the frame.
+    SchedulerBinding.instance
+      ..addPostFrameCallback((_) => apply())
+      ..ensureVisualUpdate();
   }
 
   void _syncFront() {

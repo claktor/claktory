@@ -19,6 +19,7 @@ import 'mobile/navigation.dart';
 import 'mobile/input.dart' show InputKind;
 import 'mobile/presentation.dart' show showPanel;
 import 'pane_chrome.dart';
+import 'pipe_reports.dart' show mapReportsText;
 import 'pipes.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -556,6 +557,17 @@ class _Board extends StatelessWidget {
             ),
           ),
         ),
+        // A strip along each report line, to hover for its counts,
+        // under the pads and chips it runs between.
+        for (final arrow in reportArrows(layout, pads))
+          for (var i = 0; i + 1 < arrow.points.length; i++)
+            Positioned.fromRect(
+              rect: Rect.fromPoints(
+                arrow.points[i],
+                arrow.points[i + 1],
+              ).inflate(_reportReach),
+              child: _ReportLine(pipe: arrow.pad.pipe),
+            ),
         for (final pad in pads)
           Positioned.fromRect(
             // A finger's height on a phone, the pad drawn in its middle.
@@ -876,6 +888,22 @@ class _BoardPainter extends CustomPainter {
         ..drawCircle(end, 2.5, paint);
     }
 
+    // A pipe's reports going to the agent that reads them: a line from its
+    // pad down to that agent, in the pipe's color, an arrowhead midway.
+    for (final arrow in reportArrows(layout, pads)) {
+      final lit = focus == null || focus == arrow.to;
+      final paint = _stroke(
+        lit ? pipeColor : pipeColor.withValues(alpha: 0.3),
+        1.25,
+      );
+      final path = Path()..moveTo(arrow.points.first.dx, arrow.points.first.dy);
+      for (final point in arrow.points.skip(1)) {
+        path.lineTo(point.dx, point.dy);
+      }
+      canvas.drawPath(path, paint);
+      _chevron(canvas, arrow.arrow, paint.color);
+    }
+
     // Lines: the dimmed first, so the lit ones run over them.
     bool shown(MapLayer layer) => !hidden.contains(layer);
     bool lit(Set<String> ends) => focus == null || ends.contains(focus);
@@ -974,7 +1002,8 @@ bool _samePads(List<PortalPad> a, List<PortalPad> b) {
   for (var i = 0; i < a.length; i++) {
     if (a[i].rect != b[i].rect ||
         a[i].closed != b[i].closed ||
-        a[i].pipe.name != b[i].pipe.name) {
+        a[i].pipe.name != b[i].pipe.name ||
+        a[i].pipe.forward.recipientId != b[i].pipe.forward.recipientId) {
       return false;
     }
   }
@@ -1194,6 +1223,109 @@ class _PortalPadView extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// A pipe whose reports go to an agent on the board: the line from its
+/// pad to that agent's chip, and the arrowhead on its longer stretch.
+class ReportArrow {
+  const ReportArrow({
+    required this.pad,
+    required this.to,
+    required this.points,
+    required this.arrow,
+  });
+
+  final PortalPad pad;
+
+  /// The reader's chip ("agent:…").
+  final String to;
+  final List<Offset> points;
+  final MapArrow arrow;
+}
+
+/// The report lines on the board, from each open pipe's pad that forwards
+/// its reports to the reader's chip. Like the Map's other lines they run
+/// between the chips, half a cell off the grid so they never lie on
+/// another: just under the pad, right to the box's inner edge, down it to
+/// the gap above the reader's row, along it to above the reader, and down
+/// into its top; the arrowhead on that last stretch along the gap. None
+/// for a reader that isn't on the board.
+@visibleForTesting
+List<ReportArrow> reportArrows(MapLayout layout, List<PortalPad> pads) {
+  final arrows = <ReportArrow>[];
+  for (final pad in pads) {
+    if (pad.closed || !pad.pipe.hasForward()) continue;
+    final to = 'agent:${pad.pipe.forward.recipientId}';
+    if (to == 'agent:') continue;
+    final chip = layout.chips.where((chip) => chip.id == to).firstOrNull;
+    final box = layout.boxes.where((box) => box.id == pad.boxId).firstOrNull;
+    if (chip == null || box == null) continue;
+    final rect = chip.rect;
+    final x = pad.rect.center.dx;
+    final under = pad.rect.bottom + mapCell / 2;
+    final gutter = box.rect.right - mapCell * 1.5;
+    final gap = rect.top - mapCell * 1.5;
+    final above = math.max(rect.left + mapCell * 2, rect.right - mapCell * 3);
+    if (gap <= under || above >= gutter) continue;
+    final points = [
+      Offset(x, pad.rect.bottom),
+      Offset(x, under),
+      Offset(gutter, under),
+      Offset(gutter, gap),
+      Offset(above, gap),
+      Offset(above, rect.top),
+    ];
+    arrows.add(
+      ReportArrow(
+        pad: pad,
+        to: to,
+        points: points,
+        arrow: MapArrow(Offset((gutter + above) / 2, gap), const Offset(-1, 0)),
+      ),
+    );
+  }
+  return arrows;
+}
+
+/// How far either side of a report line a pointer finds it.
+const _reportReach = 4.0;
+
+/// A report line's hover area: "Reports from Kai to Ingrid: 3 today, room
+/// for 27 more", and how many weren't forwarded today, in red.
+class _ReportLine extends StatelessWidget {
+  const _ReportLine({required this.pipe});
+
+  final Pipe pipe;
+
+  @override
+  Widget build(BuildContext context) {
+    return HoverCard(
+      card: (context) {
+        final palette = Palette.of(context);
+        final (text, refused) = mapReportsText(
+          AppScope.of(context).workspace.workspace,
+          pipe,
+        );
+        return Text.rich(
+          TextSpan(
+            text: text,
+            children: [
+              if (refused > 0)
+                TextSpan(
+                  text: ' · $refused not forwarded',
+                  style: TextStyle(color: palette.danger),
+                ),
+            ],
+          ),
+        );
+      },
+      // Transparent, but there to the pointer.
+      child: const ColoredBox(
+        color: Color(0x00000000),
+        child: SizedBox.expand(),
       ),
     );
   }

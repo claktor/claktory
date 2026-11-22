@@ -39,6 +39,7 @@ import 'mobile/metrics.dart';
 import 'mobile/navigation.dart' show PhoneRoute, PhoneRoutes;
 import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'mobile/platform_policy.dart';
+import 'people/people_view.dart' show peopleAvailable, showPeople;
 import 'phone.dart' show PhoneProjects;
 import 'pipe_timeline.dart' show pipeLiaison;
 import 'pipes.dart';
@@ -3069,13 +3070,14 @@ class _PhoneFooter extends StatelessWidget {
     final scope = AppScope.scope(context);
     final type = TypeScale.of(context);
     Widget place(
-      AppPage page,
+      AppPage? page,
       String label,
       Widget Function(Color color) glyph, {
       String? glow,
+      VoidCallback? onTap,
     }) {
       final row = _Row(
-        onTap: () => AppScope.openPage(context, page),
+        onTap: onTap ?? () => AppScope.openPage(context, page!),
         builder: (context, hovered) => Row(
           children: [
             SizedBox(
@@ -3121,6 +3123,15 @@ class _PhoneFooter extends StatelessWidget {
             (color) =>
                 ExtensionGlyph(icon: 'chart-column', name: '', color: color),
           ),
+          // People, only where the backend offers direct messages (its
+          // preview, FACTORY_DMS_PREVIEW) until it ships.
+          if (peopleAvailable(workspace))
+            place(
+              null,
+              'People',
+              (color) => ExtensionGlyph(icon: 'users', name: '', color: color),
+              onTap: () => showPeople(context),
+            ),
           place(
             AppPage.marketplace,
             'Marketplace',
@@ -3338,6 +3349,19 @@ class _Footer extends StatelessWidget {
                   color: color,
                 ),
               ),
+              // People, only where the backend offers direct messages (its
+              // preview) until it ships.
+              if (peopleAvailable(workspace))
+                GlyphButton(
+                  label: 'People',
+                  active: false,
+                  onTap: () => showPeople(context),
+                  glyph: (color) => ExtensionGlyph(
+                    icon: 'users',
+                    name: 'People',
+                    color: color,
+                  ),
+                ),
             ],
             // The person, at the end: their profile is at the top of
             // Settings.

@@ -23,7 +23,7 @@ fn manifest(id: &str, views: bool) -> String {
 async fn install(client: &mut Client, addr: std::net::SocketAddr, id: &str, views: bool, dock: &[&str]) {
     let bundle = clapp(&manifest(id, views), b"\0asm\x01\0\0\0 pins", &SigningKey::from_bytes(&[12; 32]));
     let install = |approve: bool, sha256: &str| {
-        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: bundle.clone() })
+        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: bundle.clone(), ..Default::default() })
     };
     let Body::AppPermissions(permissions) = client.request(install(false, "")).await.body else { panic!("permissions") };
     client.ok(install(true, &permissions.sha256)).await;

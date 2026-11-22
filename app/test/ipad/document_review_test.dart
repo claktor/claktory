@@ -1,20 +1,34 @@
 // A review an agent asks of a PDF, on an iPad (ipad/document_review.dart):
 // the document pane's foot says who asks and what, and how many pages are
-// drawn on; Approve and Dismiss send each drawn page, whole with its ink,
-// as an upload to the agent, named in the answer, with the comment, if
-// one was added.
+// drawn on, with the answer field always open; Return, Approve or Send,
+// and Dismiss send each drawn page, whole with its ink, as an upload to
+// the agent, named in the answer, with what's typed. Answered, the pane
+// closes.
 import 'dart:async';
 
 import 'package:factory_app/controls.dart' show Pressable;
+import 'package:factory_app/dictation.dart';
 import 'package:factory_app/ipad/document_review.dart';
 import 'package:factory_app/ipad/ink_surface.dart';
+import 'package:factory_app/protocol/factory/v1/factory.pb.dart'
+    show SetLayout, SpeechModel, SpeechModelState;
+import 'package:factory_app/recorder.dart';
+import 'package:factory_app/voice.dart' show voiceMessagesOn;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../harness.dart' show Harness;
+import '../voice_test.dart' show FakeRecorder, io;
 import 'as_ipad.dart';
 import 'document_native.dart';
+
+/// The review's answer field.
+final _field = find.descendant(
+  of: find.byKey(const ValueKey('review-answer')),
+  matching: find.byType(EditableText),
+);
 
 void main() {
   testWidgets('the pane says who asks and what; Approve sends each drawn '
@@ -24,6 +38,7 @@ void main() {
     final harness = await showDocument(tester);
     expect(find.text('Builder asks you to review this'), findsOneWidget);
     expect(find.text('Check the figures on page 3'), findsOneWidget);
+    expect(find.text('The totals look off.'), findsOneWidget);
     // Nothing drawn: nothing said about drawings.
     expect(find.textContaining('go with your answer'), findsNothing);
 
@@ -36,11 +51,10 @@ void main() {
       findsOneWidget,
     );
 
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
     expect(find.text('Builder gets it with your answer.'), findsOneWidget);
-    await tester.enterText(find.byType(EditableText).last, 'Looks right');
-    await tester.tap(find.text('Approve'));
+    await tester.enterText(_field, 'Looks right');
+    await tester.pump();
+    await tester.tap(find.text('Send'));
     await settle(tester);
 
     // The pages in order, whole (no region), with their ink.
@@ -89,9 +103,7 @@ void main() {
       find.text('Your drawing on 1 page goes with your answer.'),
       findsOneWidget,
     );
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
-    await tester.enterText(find.byType(EditableText).last, 'Not this week');
+    await tester.enterText(_field, 'Not this week');
     await tester.tap(find.text('Dismiss'));
     await settle(tester);
     final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
@@ -184,13 +196,13 @@ void main() {
     expect(find.text('Dismiss'), findsOneWidget);
   });
 
-  group('handwriting into the comment', () {
+  group('handwriting into the answer', () {
     Finder offer(String text) => find.descendant(
       of: find.byKey(const ValueKey('document-review')),
       matching: find.text(text),
     );
-    const all = 'Turn handwriting into a comment';
-    const selected = 'Turn selected handwriting into a comment';
+    const all = 'Turn handwriting into your answer';
+    const selected = 'Turn selected handwriting into your answer';
 
     List<Map<String, Object?>> reads(DocumentNative native) => [
       for (final call in native.calls)
@@ -198,10 +210,8 @@ void main() {
           (call.arguments as Map).cast<String, Object?>(),
     ];
 
-    String comment(WidgetTester tester) => tester
-        .widget<EditableText>(find.byType(EditableText).last)
-        .controller
-        .text;
+    String comment(WidgetTester tester) =>
+        tester.widget<EditableText>(_field).controller.text;
 
     testWidgets('below iPadOS 27, or from a native that doesn\'t say: '
         'nothing at all', (tester) async {
@@ -262,17 +272,15 @@ void main() {
       // Offered again, for more.
       expect(offer(all), findsOneWidget);
 
-      await tester.enterText(
-        find.byType(EditableText).last,
-        '${comment(tester)} and the axis',
-      );
-      await tester.tap(find.text('Approve'));
+      await tester.enterText(_field, '${comment(tester)} and the axis');
+      await tester.pump();
+      await tester.tap(find.text('Send'));
       await settle(tester);
       final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
       expect(answer.text, 'why page 1?\nwhy page 3? and the axis');
     });
 
-    testWidgets('"Add a comment" and the offer are each a 44 pt target, '
+    testWidgets('the answer field and the offer are each a 44 pt target, '
         'apart', (tester) async {
       asIPad();
       final native = DocumentNative();
@@ -283,14 +291,14 @@ void main() {
       Rect target(String text) => tester.getRect(
         find.ancestor(of: offer(text), matching: find.byType(Pressable)).first,
       );
-      final add = target('Add a comment');
+      final add = tester.getRect(find.byKey(const ValueKey('review-answer')));
       final read = target(all);
       expect(add.height, greaterThanOrEqualTo(44));
       expect(read.height, greaterThanOrEqualTo(44));
       expect(add.overlaps(read), isFalse);
       expect(read.top, greaterThanOrEqualTo(add.bottom));
       // A tap at the offer's top edge (clear of the divider's grab zone)
-      // is the offer's, not the comment's.
+      // is the offer's, not the field's.
       await tester.tapAt(Offset(read.left + 24, read.top + 1));
       await settle(tester);
       expect(find.text('Builder gets it with your answer.'), findsOneWidget);
@@ -310,9 +318,7 @@ void main() {
       expect(offer(selected), findsOneWidget);
       expect(offer(all), findsNothing);
 
-      await tester.tap(find.text('Add a comment'));
-      await settle(tester);
-      await tester.enterText(find.byType(EditableText).last, 'Two things:');
+      await tester.enterText(_field, 'Two things:');
       await tester.tap(offer(selected));
       await settle(tester);
       expect(reads(native), [
@@ -345,7 +351,7 @@ void main() {
       };
       await tester.tap(offer(all));
       await settle(tester);
-      expect(find.text('Add a comment'), findsOneWidget);
+      expect(comment(tester), isEmpty);
       expect(find.textContaining('read your handwriting'), findsNothing);
       expect(find.text('No handwriting to read.'), findsNothing);
 
@@ -360,7 +366,7 @@ void main() {
       await native.drew(2, 2);
       reading.complete();
       await settle(tester);
-      expect(find.text('Add a comment'), findsOneWidget);
+      expect(comment(tester), isEmpty);
       expect(find.textContaining('old words'), findsNothing);
       expect(offer(all), findsOneWidget);
     });
@@ -383,7 +389,7 @@ void main() {
       await tester.tap(offer(all));
       await settle(tester);
       expect(offer('No handwriting to read.'), findsOneWidget);
-      expect(find.text('Add a comment'), findsOneWidget);
+      expect(comment(tester), isEmpty);
       // Gone once the drawing changes.
       await native.drew(1, 4);
       await settle(tester);
@@ -416,6 +422,231 @@ void main() {
       await tester.tap(offer(all));
       await settle(tester);
       expect(find.textContaining('handwriting'), findsNothing);
+    });
+  });
+
+  testWidgets('another agent shown and back: the answer typed and the page '
+      'are as they were (Prosciutto\'s S5)', (tester) async {
+    asIPad();
+    final native = DocumentNative();
+    final harness = await showDocument(tester);
+    await native.ready();
+    await native.turned(3);
+    await tester.enterText(_field, 'Page 3 adds up');
+    await tester.pump();
+    final first = native.views.last;
+
+    // Rivet shown: Builder's pane goes from the window, still in its layout.
+    final asked = harness.backend.workspace.workspace.clone();
+    harness.backend.workspace.apply(asked.clone()..selectedAgentId = 'rivet');
+    await settle(tester);
+    expect(_field, findsNothing);
+
+    // Builder again: a new view, which goes back to page 3, and the answer.
+    harness.backend.workspace.apply(asked);
+    await settle(tester);
+    expect(native.views.last, isNot(first));
+    await native.ready();
+    await settle(tester);
+    final turns = [
+      for (final call in native.calls)
+        if (call.method == 'goToPage') (call.arguments as Map)['page_1based'],
+    ];
+    expect(turns, [3]);
+    expect(find.text('Page 3 adds up'), findsOneWidget);
+    expect(find.text('Send'), findsOneWidget);
+
+    // Answered: nothing is kept for it.
+    await tester.tap(find.text('Send'));
+    await settle(tester);
+    expect(
+      sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk.text,
+      'Page 3 adds up',
+    );
+  });
+
+  testWidgets('a pane shown again on page 1 isn\'t turned', (tester) async {
+    asIPad();
+    final native = DocumentNative();
+    final harness = await showDocument(tester);
+    await native.ready();
+    final asked = harness.backend.workspace.workspace.clone();
+    harness.backend.workspace.apply(asked.clone()..selectedAgentId = 'rivet');
+    await settle(tester);
+    harness.backend.workspace.apply(asked);
+    await settle(tester);
+    await native.ready();
+    await settle(tester);
+    expect(native.calls.where((c) => c.method == 'goToPage'), isEmpty);
+    expect(find.text('Approve'), findsOneWidget);
+  });
+
+  group('answering in the pane', () {
+    SetLayout? closed(Harness harness) =>
+        sentOf(harness, (m) => m.hasSetLayout()).lastOrNull?.setLayout;
+
+    testWidgets('typed, Return sends it as the answer, and the pane closes '
+        'back to the conversation', (tester) async {
+      asIPad();
+      DocumentNative();
+      final harness = await showDocument(tester);
+      harness.backend.appliesLayouts = true;
+      // Always open, named for VoiceOver, with how to send it.
+      expect(_field, findsOneWidget);
+      expect(find.text('Your answer to Builder'), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (w) =>
+              w is Semantics &&
+              w.properties.hint == 'Return sends it to Builder.',
+        ),
+        findsOneWidget,
+      );
+      // Empty: Return does nothing, so a stray one never approves.
+      await tester.tap(_field);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await settle(tester);
+      expect(sentOf(harness, (m) => m.hasAnswerAsk()), isEmpty);
+      expect(find.text('Approve'), findsOneWidget);
+
+      await tester.enterText(_field, 'I like the second one better');
+      await tester.pump();
+      expect(find.text('Send'), findsOneWidget);
+      expect(find.text('Approve'), findsNothing);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await settle(tester);
+      final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
+      expect(answer.text, 'I like the second one better');
+      expect(answer.dismiss, isFalse);
+      // The paper's pane is gone: only the conversation is left.
+      final layout = closed(harness)!;
+      expect(layout.agentId, 'a1');
+      expect(layout.hasRoot(), isFalse);
+    });
+
+    testWidgets('the on-screen keyboard\'s Send key sends too', (tester) async {
+      asIPad();
+      DocumentNative();
+      final harness = await showDocument(tester);
+      await tester.enterText(_field, 'Second');
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await settle(tester);
+      expect(
+        sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk.text,
+        'Second',
+      );
+    });
+
+    testWidgets('empty, Approve approves with no words', (tester) async {
+      asIPad();
+      DocumentNative();
+      final harness = await showDocument(tester);
+      await tester.tap(find.text('Approve'));
+      await settle(tester);
+      final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
+      expect(answer.text, isEmpty);
+      expect(answer.dismiss, isFalse);
+    });
+
+    testWidgets('an agent that wants words: Send waits for them', (
+      tester,
+    ) async {
+      asIPad();
+      DocumentNative();
+      final harness = await showDocument(
+        tester,
+        ask: (ask) => ask.wantsText = true,
+      );
+      expect(find.text('Approve'), findsNothing);
+      await tester.tap(find.text('Send'));
+      await settle(tester);
+      expect(sentOf(harness, (m) => m.hasAnswerAsk()), isEmpty);
+      await tester.enterText(_field, 'The second');
+      await tester.pump();
+      await tester.tap(find.text('Send'));
+      await settle(tester);
+      expect(
+        sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk.text,
+        'The second',
+      );
+    });
+
+    testWidgets('an answer that fails keeps its words and the pane', (
+      tester,
+    ) async {
+      asIPad();
+      DocumentNative();
+      final harness = await showDocument(tester);
+      harness.backend.refuse = 'Not connected to the backend.';
+      await tester.enterText(_field, 'The second');
+      await tester.pump();
+      await tester.tap(find.text('Send'));
+      await settle(tester);
+      expect(
+        find.text("Couldn't send your answer. Try again."),
+        findsOneWidget,
+      );
+      expect(tester.widget<EditableText>(_field).controller.text, 'The second');
+      expect(sentOf(harness, (m) => m.hasSetLayout()), isEmpty);
+    });
+  });
+
+  group('answering by voice', () {
+    late FakeRecorder recorder;
+    late VoiceRecorder was;
+    late Transcribe wasTranscribe;
+    setUp(() {
+      voiceMessagesOn = true;
+      was = deviceRecorder;
+      recorder = FakeRecorder();
+      deviceRecorder = recorder;
+      wasTranscribe = transcribeRecording;
+    });
+    tearDown(() {
+      deviceRecorder = was;
+      transcribeRecording = wasTranscribe;
+    });
+
+    testWidgets('the mic at the answer records; Done puts the words in at '
+        'the caret, nothing sent until Send', (tester) async {
+      transcribeRecording = (backend, recording) async => 'except page 3';
+      asIPad();
+      DocumentNative();
+      final harness = await showDocument(tester);
+      await harness.apply(
+        tester,
+        harness.backend.workspace.workspace.clone()
+          ..speechModel = SpeechModel(
+            state: SpeechModelState.SPEECH_MODEL_STATE_READY,
+          ),
+      );
+      await settle(tester);
+      await tester.enterText(_field, 'Fine');
+      await tester.pump();
+      final dictate = find.bySemanticsLabel('Dictate').last;
+      expect(tester.getSize(dictate).height, greaterThanOrEqualTo(44));
+      await tester.tap(dictate);
+      await io(tester);
+      expect(recorder.recordingInto, isNotNull);
+      expect(find.text('Done'), findsOneWidget);
+      await tester.tap(find.text('Done'));
+      await io(tester);
+      await settle(tester);
+      expect(find.text('Fine except page 3'), findsOneWidget);
+      expect(sentOf(harness, (m) => m.hasAnswerAsk()), isEmpty);
+      await tester.tap(find.text('Send'));
+      await settle(tester);
+      expect(
+        sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk.text,
+        'Fine except page 3',
+      );
+    });
+
+    testWidgets('a Claktory that can\'t take voice: no mic', (tester) async {
+      asIPad();
+      DocumentNative();
+      await showDocument(tester);
+      expect(find.bySemanticsLabel('Dictate'), findsNothing);
     });
   });
 }

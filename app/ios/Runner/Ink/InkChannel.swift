@@ -249,6 +249,67 @@ final class InkCanvas: PKCanvasView {
     drawingGestureRecognizer.isEnabled = false
     drawingGestureRecognizer.isEnabled = draws
   }
+
+  /// A find's matches on this page, in the canvas's own space, washed in
+  /// the find yellow under the ink. Drawn here rather than by PDFKit's
+  /// highlightedSelections, which on an iPhone drew them solid red and
+  /// left them on the page once cleared (Zucchero's row 75).
+  var found: [CGRect] = [] {
+    didSet {
+      guard found != oldValue else { return }
+      if found.isEmpty {
+        foundLayer?.removeFromSuperlayer()
+        foundLayer = nil
+        return
+      }
+      let layer = foundLayer ?? CAShapeLayer()
+      if foundLayer == nil {
+        layer.fillColor = Self.findYellow.cgColor
+        layer.zPosition = -1
+        self.layer.insertSublayer(layer, at: 0)
+        foundLayer = layer
+      }
+      let path = CGMutablePath()
+      for rect in found {
+        path.addPath(
+          UIBezierPath(roundedRect: rect.insetBy(dx: -1, dy: -1), cornerRadius: 2).cgPath)
+      }
+      layer.frame = CGRect(origin: .zero, size: bounds.size)
+      layer.path = path
+    }
+  }
+  private(set) var foundLayer: CAShapeLayer?
+
+  /// The match a find has gone to, marked apart from the rest: deeper, and
+  /// outlined.
+  var current: CGRect? {
+    didSet {
+      guard current != oldValue else { return }
+      guard let current else {
+        currentLayer?.removeFromSuperlayer()
+        currentLayer = nil
+        return
+      }
+      let layer = currentLayer ?? CAShapeLayer()
+      if currentLayer == nil {
+        layer.fillColor = Self.currentYellow.cgColor
+        layer.strokeColor = Self.currentEdge.cgColor
+        layer.lineWidth = 1.5
+        layer.zPosition = -1
+        self.layer.insertSublayer(layer, at: 0)
+        currentLayer = layer
+      }
+      layer.frame = CGRect(origin: .zero, size: bounds.size)
+      layer.path = UIBezierPath(roundedRect: current.insetBy(dx: -2, dy: -2), cornerRadius: 3).cgPath
+    }
+  }
+  private(set) var currentLayer: CAShapeLayer?
+
+  static let currentYellow = UIColor(red: 1, green: 0xB8 / 255, blue: 0, alpha: 0.55)
+  static let currentEdge = UIColor(red: 0xE5 / 255, green: 0x8E / 255, blue: 0, alpha: 1)
+
+  /// The app's find yellow (find.dart), part way through.
+  static let findYellow = UIColor(red: 1, green: 0xD6 / 255, blue: 0x0A / 255, alpha: 0.45)
 }
 
 /// The view a surface hands Flutter: reports size changes, so a stroke in

@@ -83,6 +83,9 @@ object QrCodes {
                 BinaryBitmap(HybridBinarizer(source)),
                 mapOf(
                     DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+                    // A few reads a second leave time to look harder: a
+                    // small or tilted code on a screen reads sooner.
+                    DecodeHintType.TRY_HARDER to true,
                     DecodeHintType.CHARACTER_SET to StandardCharsets.UTF_8.name(),
                 ),
             ).text
@@ -311,8 +314,11 @@ class ScannerView(
         sensorDegrees = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
         fun pairs(all: Array<Size>?) = all.orEmpty().map { it.width to it.height }
         val (shownWidth, shownHeight) = QrCodes.largest(pairs(sizes.getOutputSizes(SurfaceTexture::class.java)), 1920, 1080) ?: return
+        // Read at up to 1280 wide in the preview's shape: 1280×720 for a
+        // 16:9 camera, 1280×960 for a 4:3 one (720 high would leave a
+        // 4:3 camera 640×480, too few pixels for a code held back).
         val (readWidth, readHeight) =
-            QrCodes.largest(pairs(sizes.getOutputSizes(ImageFormat.YUV_420_888)), 1280, 720, like = shownWidth to shownHeight) ?: return
+            QrCodes.largest(pairs(sizes.getOutputSizes(ImageFormat.YUV_420_888)), 1280, 960, like = shownWidth to shownHeight) ?: return
         val shown = Size(shownWidth, shownHeight)
         val read = Size(readWidth, readHeight)
         bufferSize = shown

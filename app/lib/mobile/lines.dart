@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
@@ -5,11 +7,12 @@ import '../identity.dart';
 import 'drawer.dart' show largeText;
 
 /// Something that takes the room left (words, a field) and an action at
-/// its end, in a line: `Row([Expanded(lead), gap, action])`. On a phone,
-/// where both can't fit side by side (the largest text sizes, or an action
-/// wider than the line leaves it), the action goes under it, still at its
-/// end (under the thumb, and on the same side whatever the text size), its
-/// controls together on one line while the whole width holds them.
+/// its end, in a line: `Row([Expanded(lead), gap, action])`. Where both
+/// can't fit side by side (an action wider than the line leaves it, as in a
+/// narrow pane on a Mac, or a phone's largest text sizes), the action goes
+/// under it, still at its end (under the thumb on a phone, and on the same
+/// side whatever the text size), its controls together on one line while
+/// the whole width holds them.
 class ActionLine extends StatelessWidget {
   const ActionLine({
     super.key,
@@ -34,19 +37,12 @@ class ActionLine extends StatelessWidget {
         ],
       );
     }
-    if (isPhoneLayout(context)) {
-      return _FittedLine(
-        gap: gap,
-        textDirection: Directionality.of(context),
-        children: [lead, action],
-      );
-    }
-    return Row(
-      children: [
-        Expanded(child: lead),
-        SizedBox(width: gap),
-        action,
-      ],
+    // A Mac's narrow pane too (four panes open): the lead kept a few words
+    // wide rather than squeezed to one per line, the action under it.
+    return _FittedLine(
+      gap: gap,
+      textDirection: Directionality.of(context),
+      children: [lead, action],
     );
   }
 }
@@ -55,9 +51,9 @@ class ActionLine extends StatelessWidget {
 /// it: a few words.
 const _leastLead = 96.0;
 
-/// [ActionLine] on a phone: lead and action in a line when the action at
-/// its own width, the gap and [_leastLead] fit, else the action under the
-/// lead at its end.
+/// [ActionLine]'s line, but at a phone's largest text: lead and action in
+/// a line when the action at its own width, the gap and [_leastLead] fit,
+/// else the action under the lead at its end.
 class _FittedLine extends MultiChildRenderObjectWidget {
   const _FittedLine({
     required this.gap,
@@ -162,9 +158,11 @@ class _RenderFittedLine extends RenderBox
     final width = constraints.maxWidth;
     final rtl = _textDirection == TextDirection.rtl;
     if (_fits(width)) {
+      // At its own width: a Mac's ControlsLine, a Row, would fill
+      // whatever it's given and leave the lead only [_leastLead].
       final action = layoutChild(
         _action,
-        BoxConstraints(maxWidth: width - _gap - _leastLead),
+        BoxConstraints(maxWidth: _actionWidth),
       );
       final leadWidth = width - _gap - action.width;
       final lead = layoutChild(
@@ -185,7 +183,10 @@ class _RenderFittedLine extends RenderBox
       return constraints.constrain(Size(width, height));
     }
     final lead = layoutChild(_lead, BoxConstraints.tightFor(width: width));
-    final action = layoutChild(_action, BoxConstraints(maxWidth: width));
+    final action = layoutChild(
+      _action,
+      BoxConstraints(maxWidth: math.min(_actionWidth, width)),
+    );
     if (place) {
       (_lead.parentData! as _LineData).offset = Offset.zero;
       (_action.parentData! as _LineData).offset = Offset(
@@ -207,10 +208,11 @@ class _RenderFittedLine extends RenderBox
       defaultPaint(context, offset);
 }
 
-/// Controls side by side, as a Mac shows them (each [gap] apart). On a
-/// phone, when they don't all fit on one line, each takes the whole width,
-/// one under another in their order (the primary, last, at the bottom), as
-/// iOS stacks an alert's buttons at large text sizes.
+/// Controls side by side, as a Mac shows them (each [gap] apart). When they
+/// don't all fit on one line (a phone's large text, a Mac's narrow pane),
+/// each takes the whole width, one under another in their order (the
+/// primary, last, at the bottom), as iOS stacks an alert's buttons at large
+/// text sizes.
 class ControlsLine extends StatelessWidget {
   const ControlsLine({super.key, required this.children, this.gap = Space.s});
 
@@ -218,27 +220,15 @@ class ControlsLine extends StatelessWidget {
   final double gap;
 
   @override
-  Widget build(BuildContext context) {
-    if (isPhoneLayout(context)) {
-      return _StackingLine(
-        gap: gap,
-        runGap: Space.s,
-        textDirection: Directionality.of(context),
-        children: children,
-      );
-    }
-    return Row(
-      children: [
-        for (final (i, child) in children.indexed) ...[
-          if (i > 0) SizedBox(width: gap),
-          child,
-        ],
-      ],
-    );
-  }
+  Widget build(BuildContext context) => _StackingLine(
+    gap: gap,
+    runGap: Space.s,
+    textDirection: Directionality.of(context),
+    children: children,
+  );
 }
 
-/// [ControlsLine] on a phone: its controls in a line, [gap] apart, while
+/// [ControlsLine]'s layout: its controls in a line, [gap] apart, while
 /// the line holds them at their own widths, else stacked [runGap] apart,
 /// each the whole width.
 class _StackingLine extends MultiChildRenderObjectWidget {

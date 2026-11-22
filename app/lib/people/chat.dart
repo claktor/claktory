@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -230,14 +231,18 @@ class ChatApi {
       DmProposal.fromJson(item),
   ];
 
-  /// Sends [proposal] as its agent's message: approved with this device's
-  /// own [reviewHash] of what it showed, and its revision. `409 changed`
-  /// ([UserAppProblem.stale]) when it changed since; `410 unsendable`
-  /// ([UserAppProblem.gone]) when it can't be sent any more.
-  Future<void> approve(DmProposal proposal) => session.post(
-    '$_dms/proposals/${proposal.id}/approve',
-    {'revision': proposal.revision, 'content_hash': reviewHash(proposal)},
-  );
+  /// Sends [proposal] as its agent's message: [envelope], what this device
+  /// opened sealed again in the conversation's group, with the revision and
+  /// the digest of exactly what it opened. `409 changed`
+  /// ([UserAppProblem.stale]) when it changed since; `409 epoch` when the
+  /// group moved on; `410 unsendable` ([UserAppProblem.gone]) when it can't
+  /// be sent any more.
+  Future<void> approve(DmProposal proposal, String envelope) =>
+      session.post('$_dms/proposals/${proposal.id}/approve', {
+        'revision': proposal.revision,
+        'proposal_digest': proposal.digest,
+        'envelope': jsonDecode(envelope),
+      });
 
   /// Declines [proposal]: it's never sent.
   Future<void> decline(DmProposal proposal) =>
@@ -391,6 +396,16 @@ class ChatThread extends ChangeNotifier {
   /// nothing is sent to them until they have (Fugo 2b).
   bool get keyChanged => e2ee.pin(friend)?.changedUnseen ?? false;
 
+  /// The feed waits at a commit under a security key this device doesn't
+  /// have yet: nothing after it is read until it does.
+  bool get held => group.isNotEmpty && e2ee.held.containsKey(group);
+
+  /// Held a day or more: Join again is offered (Fugo).
+  bool get heldLong => held && e2ee.heldLong(group);
+
+  /// Joins the conversation again, past what it waits at.
+  Future<void> rejoin() => e2ee.rejoinHeld(group);
+
   /// The person compared safety numbers with the friend, for this key.
   bool get verified => e2ee.pin(friend)?.verified ?? false;
 
@@ -409,9 +424,11 @@ class ChatThread extends ChangeNotifier {
           .where((each) => each.id == conversation.id)
           .firstOrNull;
       if (here != null) conversation = here;
-      _proposals(snapshot.proposals);
-      unawaited(_readAgentDrafts());
       await _findGroup();
+      // Opened from their Claktories' channels, which the engine knows by
+      // now.
+      unawaited(_proposals(snapshot.proposals));
+      unawaited(_readAgentDrafts());
       _fresh = true;
       await _refresh();
       loaded = true;
@@ -588,21 +605,27 @@ class ChatThread extends ChangeNotifier {
     _changed();
   }
 
-  /// The pending ones of [all] that are this conversation's.
-  void _proposals(List<DmProposal> all) {
+  /// The pending ones of [all] that are this conversation's, each as
+  /// this device opened it; one that doesn't open (or names another
+  /// conversation inside) isn't shown.
+  Future<void> _proposals(List<DmProposal> all) async {
+    final opened = <DmProposal>[];
+    for (final proposal in all) {
+      if (!proposal.pending || proposal.conversationId != conversation.id) {
+        continue;
+      }
+      if (await e2ee.openProposal(proposal) case final open?) opened.add(open);
+    }
     proposals
       ..clear()
-      ..addAll([
-        for (final proposal in all)
-          if (proposal.pending && proposal.conversationId == conversation.id)
-            proposal,
-      ])
+      ..addAll(opened)
       ..sort((a, b) => a.createdMs.compareTo(b.createdMs));
+    _changed();
   }
 
   Future<void> _readProposals() async {
     try {
-      _proposals(await api.proposals());
+      await _proposals(await api.proposals());
     } on UserAppError {
       // The next change reads them again.
     }
@@ -611,9 +634,13 @@ class ChatThread extends ChangeNotifier {
   Future<void> _readAgentDrafts() async {
     try {
       final drafts = await api.agentDrafts(conversation.id);
+      final opened = [
+        for (final draft in drafts)
+          ?await e2ee.openAgentDraft(draft, conversation.id),
+      ];
       agentDrafts
         ..clear()
-        ..addAll(drafts);
+        ..addAll(opened);
       _changed();
     } on UserAppError {
       // The next change reads them again.
@@ -628,8 +655,17 @@ class ChatThread extends ChangeNotifier {
     reviewProblem = null;
     reviewAgent = proposal.agentName;
     _changed();
+    final group = this.group;
     try {
-      await api.approve(proposal);
+      // Sealed once; sealed again only when the group moved on first.
+      var envelope = await e2ee.sealApproved(group, proposal);
+      try {
+        await api.approve(proposal, envelope);
+      } on UserAppError catch (error) {
+        if (error.problem != UserAppProblem.epoch) rethrow;
+        envelope = await e2ee.sealApproved(group, proposal, again: true);
+        await api.approve(proposal, envelope);
+      }
       proposals.removeWhere((each) => each.id == proposal.id);
     } on UserAppError catch (error) {
       reviewProblem = switch (error.problem) {
@@ -637,10 +673,18 @@ class ChatThread extends ChangeNotifier {
         UserAppProblem.gone => 'unsendable',
         _ => error.problem.name,
       };
+      // Known not sent: what was sealed for it goes.
+      if (error.problem != UserAppProblem.unreachable &&
+          error.problem != UserAppProblem.unavailable) {
+        await e2ee.dropApproved(group, proposal);
+      }
       if (error.problem == UserAppProblem.gone) {
         proposals.removeWhere((each) => each.id == proposal.id);
       }
       await _readProposals();
+    } catch (error) {
+      // It can't be sealed (the friend's key changed and isn't seen yet).
+      reviewProblem = 'unencryptable';
     } finally {
       deciding.remove(proposal.id);
     }

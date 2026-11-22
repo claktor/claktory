@@ -35,6 +35,19 @@ paths = ['''^app/test/map_fixture\.dart$''']
 regexTarget = "match"
 regexes = ['''^/Users/matt$''']
 
+[[rules.allowlists]]
+description = "The vault import card's test fixtures as first committed (e66975c8): a made-up /Users/matt home in app/test/secrets_test.dart's sample files (release.p12, key.properties, a right-to-left-override .ssh name), not this machine's home, nothing real behind it. That commit only: they were fixed to /Users/me in c3f3577f"
+condition = "AND"
+commits = ["e66975c869821b1f651e500c8262227aaea3e5c2"]
+paths = ['''^app/test/secrets_test\.dart$''']
+regexTarget = "match"
+regexes = ['''^/Users/matt$''']
+
+[[rules.allowlists]]
+description = "c3f3577f's commit message names the made-up home its fix replaced in those fixtures: that one subject line, exactly"
+regexTarget = "line"
+regexes = ['''secrets_test: import-card fixtures use the placeholder home /Users/me, not /Users/matt \(check-secrets home-path rule\)''']
+
 # The MLS working group's public interoperability vectors for RFC 9420
 # (github.com/mlswg/mls-implementations, test-vectors/), suite 1 only, which
 # claktory-dm-crypto's tests run (Fugo's condition for E1): their private keys
@@ -64,11 +77,19 @@ regexTarget = "secret"
 regexes = ['''^claktory\.dm\.v1$''']
 
 [[rules.allowlists]]
-description = "Web search's page fixtures (#257, real result pages Fugo reviewed, scrubbed of this Mac's address and sessions): the public client-side identifiers Ecosia and Yahoo put in every visitor's page (Ecosia's DataDome client key, Braze SDK key and Tag Manager environment; Yahoo's asset names and hash), not credentials of ours; those exact values in those two files only"
+description = "Web search's fixtures as first committed (a11d340e, before Giorno's scrub 9ad0b811): Ecosia's and Yahoo's public page identifiers (DataDome client key, Braze SDK key, Tag Manager environment, Yahoo's hashKey), never credentials of ours. That commit only: the fixtures as they are now are zeroed, and their guard test refuses new ones"
 condition = "AND"
+commits = ["a11d340e08ed655643f277fdba1677a62a0805e8"]
 paths = ['''^crates/factoryd/tests/fixtures/web/(?:ecosia|yahoo)-results\.html$''']
 regexTarget = "secret"
-regexes = ['''^(?:32FD9D46AF889F2B9903ED03CE0B3C|ce0dc535-dc9e-42a0-afe7-a88335a378d4|yQLXq56VlYmlCpsDKUq5-Q|stickyHeaderV2|b8de5b4c1b8afc8e080b5914d595c6da)$''']
+regexes = ['''^(?:32FD9D46AF889F2B9903ED03CE0B3C|ce0dc535-dc9e-42a0-afe7-a88335a378d4|yQLXq56VlYmlCpsDKUq5-Q|b8de5b4c1b8afc8e080b5914d595c6da)$''']
+
+[[rules.allowlists]]
+description = "Yahoo's result page names a page module, assetKey \"stickyHeaderV2\", which the generic rule reads as a key: a module name, in web search's Yahoo fixture only (#257)"
+condition = "AND"
+paths = ['''^crates/factoryd/tests/fixtures/web/yahoo-results\.html$''']
+regexTarget = "secret"
+regexes = ['''^stickyHeaderV2$''']
 
 # Exceptions. One here, at the top level, names exact values only: given
 # paths, gitleaks (8.30) skips those files whole, whatever its condition. One

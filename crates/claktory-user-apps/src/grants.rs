@@ -288,8 +288,19 @@ pub fn put(db: &mut Connection, caller: &Caller, put: Put, now_ms: i64) -> Resul
             grant.expires_ms,
         ],
     )?;
+    regroup(&transaction, &grant.app, account_id, now_ms)?;
     transaction.commit()?;
     Ok(grant)
+}
+
+/// A DM grant made or ended changes which conversations the account's
+/// Claktories reach: their feed says so at once (`groups`), so a Claktory
+/// joins, or leaves, without waiting for its next round.
+fn regroup(transaction: &Transaction<'_>, app: &str, account_id: &str, now_ms: i64) -> rusqlite::Result<()> {
+    if app == "dms" {
+        crate::dms::sync::emit(transaction, account_id, crate::dms::sync::Kind::Groups, "", "", 0, now_ms)?;
+    }
+    Ok(())
 }
 
 /// The grants a caller may see, live ones only: a backend its own, at its
@@ -358,20 +369,21 @@ fn forget(transaction: &Transaction<'_>, id: &str) -> rusqlite::Result<()> {
 
 /// Revokes a grant: a device or the account page any of its account's, a
 /// backend any of its own Claktory's.
-pub fn revoke(db: &mut Connection, caller: &Caller, id: &str) -> Result<(), Refused> {
+pub fn revoke(db: &mut Connection, caller: &Caller, id: &str, now_ms: i64) -> Result<(), Refused> {
     let transaction = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let owner: Option<(String, String)> = transaction
-        .query_row("SELECT account_id, claktory_id FROM grants WHERE id = ?1", [id], |row| Ok((row.get(0)?, row.get(1)?)))
+    let owner: Option<(String, String, String)> = transaction
+        .query_row("SELECT account_id, claktory_id, app FROM grants WHERE id = ?1", [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .optional()?;
-    let theirs = match (owner, caller) {
-        (Some((account, _)), Caller::Device { account_id, .. } | Caller::Account { account_id, .. }) => account == *account_id,
-        (Some((account, claktory)), Caller::Backend { account_id, claktory_id, .. }) => account == *account_id && claktory == *claktory_id,
+    let theirs = match (&owner, caller) {
+        (Some((account, _, _)), Caller::Device { account_id, .. } | Caller::Account { account_id, .. }) => account == account_id,
+        (Some((account, claktory, _)), Caller::Backend { account_id, claktory_id, .. }) => account == account_id && claktory == claktory_id,
         (None, _) => false,
     };
-    if !theirs {
+    let Some((account, _, app)) = owner.filter(|_| theirs) else {
         return Err(Refused::NotFound);
-    }
+    };
     forget(&transaction, id)?;
+    regroup(&transaction, &app, &account, now_ms)?;
     transaction.commit()?;
     Ok(())
 }
@@ -518,6 +530,9 @@ mod tests {
     fn db() -> Connection {
         let db = Connection::open_in_memory().expect("db");
         db.execute_batch(SCHEMA).expect("schema");
+        // The DM outbox, where a DM grant's change is told (`regroup`).
+        db.execute_batch(crate::dms::messages::SCHEMA).expect("schema");
+        db.execute_batch(crate::dms::sync::SCHEMA).expect("schema");
         db
     }
 
@@ -630,9 +645,9 @@ mod tests {
         assert!(allowed(&mut db, &as_june, "dm.read", Some(&c1), minute + 60_000).is_ok(), "a new minute");
         // Revoked by a device of the account; another account's can't.
         let stranger = Caller::Device { account_id: "other".into(), device_key: "k".into(), registrations: Vec::new() };
-        assert_eq!(revoke(&mut db, &stranger, &again.id), Err(Refused::NotFound));
+        assert_eq!(revoke(&mut db, &stranger, &again.id, 0), Err(Refused::NotFound));
         let device = Caller::Device { account_id: "acct".into(), device_key: "k".into(), registrations: Vec::new() };
-        revoke(&mut db, &device, &again.id).expect("revoked");
+        revoke(&mut db, &device, &again.id, 0).expect("revoked");
         assert_eq!(allowed(&mut db, &as_june, "dm.read", Some(&c1), NOW), Err(Refused::NotGranted));
         let uses: i64 = db.query_row("SELECT COUNT(*) FROM grant_uses", [], |row| row.get(0)).expect("count");
         assert_eq!(uses, 0, "its uses go with it");

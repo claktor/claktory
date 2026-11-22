@@ -138,6 +138,11 @@ final _socketAddress = RegExp(
   r'^(\d{1,3}(\.\d{1,3}){3}|\[[0-9a-fA-F:.]+\]):\d{1,5}$',
 );
 
+/// The schemes a pairing code may have: `factory://`, which every
+/// Claktory writes today, and `claktory://` in the same shapes, read
+/// ahead of the backend writing it so the apps out by then follow it.
+const pairingSchemes = {'factory', 'claktory'};
+
 /// The Factory a pairing code points at; null if [text] isn't one. A
 /// code this app made for a Claktory found through the account is one
 /// only when [fromAccount] (as kept on this device), never as pasted.
@@ -168,7 +173,8 @@ RemoteFactory? parsePairingCode(String text, {bool fromAccount = false}) {
   ];
   final accountId = fromAccount ? query['account'] ?? '' : '';
   if (accountId.isNotEmpty) {
-    if (uri.scheme != 'factory' || !_endpointId.hasMatch(endpointId)) {
+    if (!pairingSchemes.contains(uri.scheme) ||
+        !_endpointId.hasMatch(endpointId)) {
       return null;
     }
     return RemoteFactory(
@@ -189,7 +195,7 @@ RemoteFactory? parsePairingCode(String text, {bool fromAccount = false}) {
       uri.hasPort &&
       uri.port > 0 &&
       _hex64.hasMatch(fingerprint);
-  if (uri.scheme != 'factory' ||
+  if (!pairingSchemes.contains(uri.scheme) ||
       !_hex64.hasMatch(token) ||
       (endpointId.isNotEmpty && !_endpointId.hasMatch(endpointId)) ||
       // Through the tunnel it needs only its endpoint id; directly, its

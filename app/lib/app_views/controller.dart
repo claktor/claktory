@@ -50,13 +50,41 @@ class AppViewController extends ChangeNotifier {
   var _wasConnected = false;
   var _disposed = false;
 
+  /// While the app isn't on screen (a phone's in the background): its
+  /// surface is closed, so the app's queries for it stop, and what it
+  /// last showed stays until it's back.
+  bool get suspended => _suspended;
+  var _suspended = false;
+
+  /// The surface closed when it went out of sight, not to close again.
+  String? _closed;
+
+  /// The app went out of sight: closes its surface, as closing the view
+  /// does, keeping what it shows.
+  void suspend() {
+    if (_disposed || _suspended) return;
+    _suspended = true;
+    final surface = _surface;
+    if (surface != null && surface.surfaceId != _closed) {
+      _closed = surface.surfaceId;
+      unawaited(_close(surface.surfaceId));
+    }
+  }
+
+  /// Back in sight: opens it again, for a fresh snapshot in place.
+  void resume() {
+    if (_disposed || !_suspended) return;
+    _suspended = false;
+    if (transport.viewsConnected.value) unawaited(open());
+  }
+
   /// What came for a surface before its OpenAppView was answered, applied
   /// once it is.
   final _early = <AppViewEvent>[];
 
   /// Opens it, or again: a fresh snapshot in place of what's held.
   Future<void> open() async {
-    if (_disposed) return;
+    if (_disposed || _suspended) return;
     _opening = true;
     _failure = null;
     notifyListeners();
@@ -75,8 +103,13 @@ class AppViewController extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    if (_disposed) {
+    if (_disposed || _suspended) {
+      // Gone, or out of sight, while it opened.
       unawaited(_close(answer.surfaceId));
+      if (_suspended && !_disposed) {
+        _opening = false;
+        notifyListeners();
+      }
       return;
     }
     _opening = false;
@@ -86,11 +119,14 @@ class AppViewController extends ChangeNotifier {
     } else {
       if (old != null) {
         old.dispose();
-        // A new surface in its place: the old one isn't shown any more.
-        unawaited(_close(old.surfaceId));
+        // A new surface in its place: the old one isn't shown any more
+        // (closed already, if it went out of sight).
+        if (old.surfaceId != _closed) unawaited(_close(old.surfaceId));
       }
       _surface = AppSurfaceModel(answer);
     }
+    // What's shown now is open, whatever closed before.
+    _closed = null;
     final early = [
       for (final event in _early)
         if (event.surfaceId == answer.surfaceId) event,
@@ -103,6 +139,8 @@ class AppViewController extends ChangeNotifier {
   }
 
   void _event(AppViewEvent event) {
+    // Closed while out of sight: what comes is for a surface that's gone.
+    if (_suspended) return;
     final surface = _surface;
     if (surface == null || surface.surfaceId != event.surfaceId) {
       if (_opening) _early.add(event);
@@ -119,7 +157,7 @@ class AppViewController extends ChangeNotifier {
   void _connectionChanged() {
     final connected = transport.viewsConnected.value;
     // Back after a drop: surfaces live only in the backend's memory.
-    if (connected && !_wasConnected) unawaited(open());
+    if (connected && !_wasConnected && !_suspended) unawaited(open());
     _wasConnected = connected;
   }
 
@@ -178,7 +216,7 @@ class AppViewController extends ChangeNotifier {
     transport.viewsConnected.removeListener(_connectionChanged);
     final surface = _surface;
     if (surface != null) {
-      unawaited(_close(surface.surfaceId));
+      if (surface.surfaceId != _closed) unawaited(_close(surface.surfaceId));
       surface.dispose();
     }
     super.dispose();

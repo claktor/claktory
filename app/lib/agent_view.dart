@@ -12,16 +12,20 @@ import 'browser/browser_view.dart' show BrowserSessionStrip;
 import 'characters/character.dart';
 import 'connection.dart';
 import 'controls.dart';
+import 'find.dart' show ClearOfFindBar, FindSessions, findShortcut;
 import 'forms.dart';
 import 'identity.dart';
 import 'inbox.dart' show NeedsYouChip, NeedsYouList;
 import 'message_box.dart';
+import 'mobile/agent_marks.dart';
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
+import 'mobile/needs_you_button.dart';
 import 'mobile/presentation.dart' show showPanel;
 import 'model_step.dart' show showConnectModel;
 import 'panes.dart';
+import 'pipe_reports.dart' show ReadsReportsMark;
 import 'pipes.dart' show PipeLimitMark;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'quiet_copies.dart'
@@ -193,18 +197,9 @@ class _AgentViewState extends State<AgentView> {
         // conversation without moving it. On a phone the same chip, under
         // the header's "…" and clear of the drawer's edge on the left,
         // opens them in a sheet, in reach of the thumb.
-        if (widget._phone)
-          Positioned(
-            top: Space.s,
-            right: Space.s,
-            // A control over the content, like a bar's: it grows with
-            // the text to half again its size, not across the screen.
-            child: MediaQuery.withClampedTextScaling(
-              maxScaleFactor: 1.5,
-              child: NeedsYouChip(onOpen: () => _showNeedsYou(context)),
-            ),
-          )
-        else
+        // A phone keeps it in the header instead (PhoneNeedsYouButton).
+        // It steps aside while the conversation's find bar is open there.
+        if (!widget._phone)
           Positioned(
             top: Space.s,
             left: Space.m,
@@ -212,7 +207,7 @@ class _AgentViewState extends State<AgentView> {
             bottom: Space.m,
             child: const Align(
               alignment: Alignment.topRight,
-              child: NeedsYouChip(),
+              child: ClearOfFindBar(child: NeedsYouChip()),
             ),
           ),
       ],
@@ -229,7 +224,11 @@ class _AgentViewState extends State<AgentView> {
                   onMenu: widget.onMenu,
                   onMore: widget.onMore,
                 )
-              : _Header(agent: agent),
+              : _Header(
+                  agent: agent,
+                  // The conversation's find, below the header.
+                  onFind: () => FindSessions.instance.within(context)?.open(),
+                ),
           // A phone shows one pane at a time: the conversation is the
           // screen, and its viewers open from "…".
           Expanded(
@@ -252,9 +251,12 @@ class _AgentViewState extends State<AgentView> {
 /// context use. Opens the agent's settings. It's the top of the window, so
 /// it also drags it.
 class _Header extends StatelessWidget {
-  const _Header({required this.agent});
+  const _Header({required this.agent, required this.onFind});
 
   final Agent agent;
+
+  /// Opens the find bar of the conversation (as ⌘F does).
+  final VoidCallback onFind;
 
   @override
   Widget build(BuildContext context) {
@@ -329,6 +331,11 @@ class _Header extends StatelessWidget {
                         const SizedBox(width: Space.s),
                         Flexible(child: PipeLimitMark(agent: agent)),
                       ],
+                      // Reads pipes' reports: from how many, to open them.
+                      if (agent.readsReports) ...[
+                        const SizedBox(width: Space.s),
+                        Flexible(child: ReadsReportsMark(agent: agent)),
+                      ],
                       if (!agent.modelAvailable) ...[
                         const SizedBox(width: Space.s),
                         // No model at all: connect one, as the first
@@ -359,6 +366,23 @@ class _Header extends StatelessWidget {
                   Flexible(child: QuietWaitingChip(agent: agent)),
                 ],
                 const SizedBox(width: Space.l),
+                // Find in the conversation: what ⌘F does, for those who
+                // don't know it.
+                HoverCard(
+                  end: true,
+                  card: (context) => Text('Find ($findShortcut)'),
+                  child: GlyphButton(
+                    label: 'Find',
+                    active: false,
+                    onTap: onFind,
+                    glyph: (color) => ExtensionGlyph(
+                      icon: 'search',
+                      name: 'Find',
+                      color: color,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: Space.s),
                 _ContextMeter(
                   used: agent.contextTokens.toInt(),
                   limit: agent.compactAtTokens.toInt(),
@@ -463,9 +487,15 @@ class _PhoneHeader extends StatelessWidget {
         context,
         (context, close) => AgentSettingsForm(agent: agent, close: close),
       ),
+      // Limited to a pipe, Reads reports, quiet copies and waiting: under
+      // its name.
+      marks: PhoneAgentMarks.shows(agent)
+          ? PhoneAgentMarks(agent: agent)
+          : null,
+      // How many things need the person, and "…". The quiet copies and
+      // waiting messages show under the name, with the pipe marks.
       trailing: [
-        if (showsNewCopies(agent)) QuietCopiesChip(agent: agent, phone: true),
-        if (agent.quietWaiting > 0) QuietWaitingChip(agent: agent, phone: true),
+        PhoneNeedsYouButton(onOpen: () => _showNeedsYou(context)),
         if (onMore != null)
           HeaderButton.more(label: 'Extensions', onTap: onMore!),
       ],

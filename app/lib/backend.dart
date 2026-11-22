@@ -432,6 +432,47 @@ class Backend implements AppViewTransport {
   Future<void> setDiagnostics(SetDiagnostics ask) =>
       _request(ClientMessage(setDiagnostics: ask));
 
+  /// Where a pipe's reports go, or a project's default for new pipes
+  /// (SetPipeForward); with make_reader, makes the recipient a reader too.
+  Future<void> setPipeForward(SetPipeForward ask) =>
+      _request(ClientMessage(setPipeForward: ask));
+
+  /// Makes a kind of report, or a new version of one (SaveReportType).
+  Future<void> saveReportType(SaveReportType ask) =>
+      _request(ClientMessage(saveReportType: ask));
+
+  /// Deletes a kind of report; its versions stay for the reports that
+  /// use them (DeleteReportType).
+  Future<void> deleteReportType(String id) =>
+      _request(ClientMessage(deleteReportType: DeleteReportType(id: id)));
+
+  /// A pipe agent's daily spending caps (SetSpendCap); 0 for a default.
+  Future<void> setSpendCap(SetSpendCap ask) =>
+      _request(ClientMessage(setSpendCap: ask));
+
+  /// Makes an agent read reports, or lets it go back (SetReportReader).
+  Future<void> setReportReader(SetReportReader ask) =>
+      _request(ClientMessage(setReportReader: ask));
+
+  /// Sends a pipe's waiting reports to where they go now, or discards
+  /// them (DecidePipeReports).
+  Future<void> decidePipeReports(String pipeId, {required bool send}) =>
+      _request(
+        ClientMessage(
+          decidePipeReports: DecidePipeReports(pipeId: pipeId, send: send),
+        ),
+      );
+
+  /// A page of a pipe's reports, or a reader's across its pipes
+  /// (ListPipeReports), newest first.
+  Future<PipeReportPage> listPipeReports(ListPipeReports ask) async {
+    final reply = await _call(ClientMessage(listPipeReports: ask));
+    if (!reply.hasPipeReportPage()) {
+      throw const RequestFailure('Claktory sent no reports.');
+    }
+    return reply.pipeReportPage;
+  }
+
   /// Whether the person is using this Claktory here now (SetActive): said
   /// to the backend as it changes and on every new connection, since a
   /// connection counts as inactive until it says otherwise. While any of
@@ -797,6 +838,9 @@ class Backend implements AppViewTransport {
   var _nextId = 1;
   var _retryDelay = _minRetryDelay;
   final _pending = <int, Completer<ServerMessage>>{};
+
+  /// transcribeAudio's requests waiting for what was heard, by request id.
+  final _dictations = <String, Completer<AudioTranscribed>>{};
 
   /// The Factory on another machine this connects to; null for this Mac's.
   RemoteFactory? get target => _target;
@@ -1604,13 +1648,17 @@ class Backend implements AppViewTransport {
       _request(ClientMessage(selectAgent: SelectAgent(agentId: agentId)));
 
   /// Sends the person's message; [clientId] comes back on the queued
-  /// message and the entry it becomes (see [outbox]).
+  /// message and the entry it becomes (see [outbox]). A reply on a
+  /// checklist item names it: [checklistItem], on [checklistAgentId]'s
+  /// checklist (the receiver's own when empty).
   Future<void> sendMessage(
     String agentId,
     String text, {
     String clientId = '',
     List<Attachment> attachments = const [],
     bool voice = false,
+    int checklistItem = 0,
+    String checklistAgentId = '',
   }) => _request(
     ClientMessage(
       sendMessage: SendMessage(
@@ -1619,9 +1667,68 @@ class Backend implements AppViewTransport {
         clientId: clientId,
         attachments: attachments,
         voice: voice,
+        checklistItem: checklistItem,
+        checklistAgentId: checklistAgentId,
       ),
     ),
   );
+
+  /// Finds [query] in agent [agentId]'s whole conversation (or chat
+  /// [chatId]'s, or pipe [pipeId]'s messages): the entries it's in, newest
+  /// first, [limit] at a time, older than [beforeSeq] when given.
+  Future<ConversationMatches> searchConversation({
+    String agentId = '',
+    String chatId = '',
+    String pipeId = '',
+    required String query,
+    int? beforeSeq,
+    int limit = 100,
+  }) async {
+    final reply = await _call(
+      ClientMessage(
+        searchConversation: SearchConversation(
+          agentId: agentId,
+          chatId: chatId,
+          pipeId: pipeId,
+          query: query,
+          beforeSeq: beforeSeq == null ? null : Int64(beforeSeq),
+          limit: limit,
+        ),
+      ),
+    );
+    if (!reply.hasConversationMatches()) {
+      throw const RequestFailure('Claktory sent no matches.');
+    }
+    return reply.conversationMatches;
+  }
+
+  /// Reports reply [seq] of agent [agentId]'s conversation (or chat
+  /// [chatId]'s) to Claktory's team. Without [send] nothing leaves this
+  /// computer: it answers what would be sent, for the person to see; with
+  /// it, it answers once claktory.com has it.
+  Future<ReplyReport> reportReply({
+    String agentId = '',
+    String chatId = '',
+    required int seq,
+    String note = '',
+    bool send = false,
+  }) async {
+    final reply = await _call(
+      ClientMessage(
+        reportReply: ReportReply(
+          agentId: agentId,
+          chatId: chatId,
+          seq: Int64(seq),
+          note: note,
+          send: send,
+        ),
+      ),
+    );
+    if (!reply.hasReplyReport()) {
+      throw const RequestFailure('Claktory sent no report.');
+    }
+    return reply.replyReport;
+  }
 
   /// Starts (or picks up) downloading the speech model voice messages
   /// need; its progress comes in `Workspace.speech_model`.
@@ -1802,6 +1909,77 @@ class Backend implements AppViewTransport {
   Future<void> cancelUpload(String uploadId) =>
       _request(ClientMessage(cancelUpload: CancelUpload(uploadId: uploadId)));
 
+  /// Starts uploading a dictation as [uploadId] (UPLOAD_PURPOSE_DICTATION: a
+  /// recording for no agent, AAC in .m4a, at most 10 minutes and 16 MiB),
+  /// or picks it up where it stopped: answers how many of its bytes the
+  /// backend has. Its chunks go as any upload's (uploadChunk);
+  /// finishDictationUpload ends it, and transcribeAudio hears it.
+  Future<int> startDictationUpload(
+    String uploadId, {
+    required int size,
+    String name = 'dictation.m4a',
+    String mime = 'audio/mp4',
+  }) async {
+    final reply = await _call(
+      ClientMessage(
+        startUpload: StartUpload(
+          uploadId: uploadId,
+          name: name,
+          size: Int64(size),
+          mime: mime,
+          purpose: UploadPurpose.UPLOAD_PURPOSE_DICTATION,
+        ),
+      ),
+    );
+    return reply.uploadProgress.received.toInt();
+  }
+
+  /// A dictation's upload is all there (checked against [sha256], hex, when
+  /// given): the backend keeps it, privately, for transcribeAudio.
+  Future<void> finishDictationUpload(
+    String uploadId, {
+    String sha256 = '',
+  }) async {
+    final reply = await _call(
+      ClientMessage(
+        finishUpload: FinishUpload(uploadId: uploadId, sha256: sha256),
+      ),
+    );
+    if (!reply.hasUploadedFile()) {
+      throw const RequestFailure(
+        'Claktory sent nothing back for the recording.',
+      );
+    }
+  }
+
+  /// Transcribes the dictation uploaded as [uploadId], for the person to
+  /// edit: completes with what was heard (AudioTranscribed: `text`, or
+  /// `error` no_model, unsupported, too_long or failed). Nothing goes to an
+  /// agent, and the backend deletes the recording either way. Throws
+  /// [RequestFailure] when the request is refused, or the connection drops
+  /// before the answer (upload it again: it's gone).
+  Future<AudioTranscribed> transcribeAudio({
+    required String requestId,
+    required String uploadId,
+  }) async {
+    final heard = Completer<AudioTranscribed>();
+    _dictations[requestId] = heard;
+    try {
+      await _request(
+        ClientMessage(
+          transcribeAudio: TranscribeAudio(
+            requestId: requestId,
+            uploadId: uploadId,
+          ),
+        ),
+      );
+    } catch (_) {
+      _dictations.remove(requestId);
+      rethrow;
+    }
+    return heard.future;
+  }
+
   /// Loads the entries before the first one [transcript] holds, when it's
   /// [agentId]'s: the backend sends only the latest at first. Throws
   /// [RequestFailure] when it can't.
@@ -1868,6 +2046,7 @@ class Backend implements AppViewTransport {
     String text = '',
     bool dismiss = false,
     List<Attachment> attachments = const [],
+    int? step,
   }) => _request(
     ClientMessage(
       answerAsk: AnswerAsk(
@@ -1876,6 +2055,9 @@ class Backend implements AppViewTransport {
         text: text,
         dismiss: dismiss,
         attachments: attachments,
+        // A procedure's step (0-based): Done, or with [dismiss], Can't do
+        // this.
+        step: step,
       ),
     ),
   );
@@ -2130,6 +2312,9 @@ class Backend implements AppViewTransport {
     bool asIs = false,
     bool approveOnly = false,
     bool? askEachTime,
+    int passwordLength = 0,
+    bool deleteOriginals = false,
+    bool grantToAsker = false,
   }) => _request(
     ClientMessage(
       decideSecretRequest: DecideSecretRequest(
@@ -2145,6 +2330,9 @@ class Backend implements AppViewTransport {
         asIs: asIs,
         approveOnly: approveOnly,
         askEachTime: askEachTime,
+        passwordLength: passwordLength,
+        deleteOriginals: deleteOriginals,
+        grantToAsker: grantToAsker,
       ),
     ),
   );
@@ -2288,19 +2476,22 @@ class Backend implements AppViewTransport {
     return reply.quietCopies;
   }
 
-  /// Installs an app from a .clapp's [content]: without [approve], what it
-  /// can reach, for the person to review; approved, with that review's
-  /// [sha256], installed (and null).
+  /// Installs an app from a .clapp's [content], or Claktory's own app
+  /// [bundled] with this release: without [approve], what it can reach,
+  /// for the person to review; approved, with that review's [sha256],
+  /// installed (and null).
   Future<AppPermissions?> installLocalApp(
     List<int> content, {
     bool approve = false,
     String sha256 = '',
+    String bundled = '',
   }) async {
     final message = ClientMessage(
       installLocalApp: InstallLocalApp(
         content: content,
         approve: approve,
         sha256: sha256,
+        bundled: bundled,
       ),
     );
     if (approve) {
@@ -2716,6 +2907,12 @@ class Backend implements AppViewTransport {
   Future<void> updatePipe(UpdatePipe update) =>
       _request(ClientMessage(updatePipe: update));
 
+  /// Accepts who [pipeId]'s other side is now, after a change
+  /// (PipePeer.identity_change): pins it, and lets through what was held.
+  Future<void> acceptPipeIdentity(String pipeId) => _request(
+    ClientMessage(acceptPipeIdentity: AcceptPipeIdentity(pipeId: pipeId)),
+  );
+
   Future<void> setPipeState(String pipeId, PipeAction action) => _request(
     ClientMessage(
       setPipeState: SetPipeState(pipeId: pipeId, action: action),
@@ -2872,6 +3069,25 @@ class Backend implements AppViewTransport {
     final reply = await _call(
       ClientMessage(
         loadPipeMessages: LoadPipeMessages(pipeId: pipeId, beforeSeq: first),
+      ),
+    );
+    if (reply.hasPipeMessagePage()) chat.prepend(reply.pipeMessagePage);
+  }
+
+  /// Loads pipe [pipeId]'s messages from [seq] up to the first one held, to
+  /// go to an older one (a find's match).
+  Future<void> loadPipeFrom(String pipeId, int seq) async {
+    final chat = pipeChat;
+    if (chat.pipeId != pipeId || chat.messages.isEmpty) return;
+    final first = chat.messages.first.seq;
+    if (seq >= first.toInt()) return;
+    final reply = await _call(
+      ClientMessage(
+        loadPipeMessages: LoadPipeMessages(
+          pipeId: pipeId,
+          beforeSeq: first,
+          fromSeq: Int64(seq),
+        ),
       ),
     );
     if (reply.hasPipeMessagePage()) chat.prepend(reply.pipeMessagePage);
@@ -3128,7 +3344,14 @@ class Backend implements AppViewTransport {
     message.id = Int64(id);
     final completer = Completer<ServerMessage>();
     _pending[id] = completer;
-    _send(message);
+    try {
+      _send(message);
+    } on StateError {
+      // The socket closed before Claktory noticed (a timer's request, say):
+      // as lost as one it hadn't answered.
+      _pending.remove(id);
+      return Future.error(const RequestFailure('Connection lost.'));
+    }
     return completer.future;
   }
 
@@ -3284,7 +3507,14 @@ class Backend implements AppViewTransport {
       case ServerMessage_Body.presentation:
       case ServerMessage_Body.sketchCreated:
       case ServerMessage_Body.dmLeafOffer:
+      case ServerMessage_Body.pipeReportPage:
+      case ServerMessage_Body.replyReport:
+      case ServerMessage_Body.conversationMatches:
         _pending.remove(message.replyTo.toInt())?.complete(message);
+      case ServerMessage_Body.audioTranscribed:
+        // To this connection alone, for its transcribeAudio.
+        final heard = message.audioTranscribed;
+        _dictations.remove(heard.requestId)?.complete(heard);
       case ServerMessage_Body.inkLayerList:
         // Asked for, or sent to every client when a layer on its path is
         // saved or deleted (reply_to 0).
@@ -3466,6 +3696,12 @@ class Backend implements AppViewTransport {
     final pending = _pending.values.toList();
     _pending.clear();
     for (final completer in pending) {
+      completer.completeError(const RequestFailure('Connection lost.'));
+    }
+    // Their answers went with the connection.
+    final dictations = _dictations.values.toList();
+    _dictations.clear();
+    for (final completer in dictations) {
       completer.completeError(const RequestFailure('Connection lost.'));
     }
   }

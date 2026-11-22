@@ -139,6 +139,24 @@ pub struct UserMessage {
     /// the text what was heard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<Voice>,
+    /// The person's: a reply on an item of a checklist, which the model
+    /// reads named in the message's tag, so they needn't say which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checklist_item: Option<ChecklistItemRef>,
+}
+
+/// An item of an agent's checklist, as the person's message names it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecklistItemRef {
+    /// Whose checklist it's on, by id.
+    pub agent: String,
+    pub id: u32,
+    /// How the receiving agent refers to it: "#297" on its own checklist,
+    /// "Ana#12" on another's.
+    pub label: String,
+    /// Its text when the person sent the message.
+    pub text: String,
 }
 
 /// A voice message, transcribed on the computer Claktory runs on.
@@ -240,8 +258,9 @@ pub struct SentFrom {
 }
 
 /// `<sent from="Matt's iPhone" device="phone">`, with `voice="42s"` when
-/// they said it: how the model reads who sent the person's message.
-fn sent_tag(sent_from: Option<&SentFrom>, voice: Option<&Voice>) -> String {
+/// they said it and `about="checklist item #12: …"` when it replies on an
+/// item: how the model reads who sent the person's message.
+fn sent_tag(sent_from: Option<&SentFrom>, voice: Option<&Voice>, item: Option<&ChecklistItemRef>) -> String {
     let mut tag = String::from("<sent");
     if let Some(sent_from) = sent_from {
         tag.push_str(&format!(" from=\"{}\"", attribute(&sent_from.device)));
@@ -252,15 +271,22 @@ fn sent_tag(sent_from: Option<&SentFrom>, voice: Option<&Voice>) -> String {
     if let Some(voice) = voice {
         tag.push_str(&format!(" voice=\"{}\"", voice.length()));
     }
+    if let Some(item) = item {
+        let text: String = item.text.chars().take(160).collect();
+        tag.push_str(&format!(" about=\"checklist item {}: {}\"", attribute(&item.label), attribute(&text)));
+    }
     tag.push_str(">\n");
     tag
 }
 
 /// A value as it goes between an attribute's quotes in a tag the model
 /// reads: a double quote becomes a single one and a line break a space, so it
-/// can't end the attribute, and `<` becomes `&lt;`, so it can't start a tag.
+/// can't end the attribute, and `<` and `>` become `&lt;` and `&gt;` (`&`
+/// first, `&amp;`), so it can't start a tag or seem to end this one, even to
+/// a model that reads loosely. An `&` in an old message's attribute reads
+/// differently from this version on: a one-time cache miss, accepted.
 fn attribute(value: &str) -> String {
-    value.replace('"', "'").replace(['\n', '\r'], " ").replace('<', "&lt;")
+    value.replace('&', "&amp;").replace('"', "'").replace(['\n', '\r'], " ").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 /// The tags Claktory wraps a message in, which text inside one must not
@@ -307,6 +333,7 @@ impl UserMessage {
             client_id: String::new(),
             attachments: Vec::new(),
             voice: None,
+            checklist_item: None,
         }
     }
 
@@ -342,8 +369,8 @@ impl UserMessage {
                 }
                 (format!("{before}<event source=\"{}\" from=\"{}\"{id}>\n", event.source.name(), attribute(&event.from)), "\n</event>")
             }
-            (None, sent_from) if sent_from.is_some() || self.voice.is_some() => {
-                (sent_tag(sent_from.as_ref(), self.voice.as_ref()), "\n</sent>")
+            (None, sent_from) if sent_from.is_some() || self.voice.is_some() || self.checklist_item.is_some() => {
+                (sent_tag(sent_from.as_ref(), self.voice.as_ref(), self.checklist_item.as_ref()), "\n</sent>")
             }
             (None, _) if attachments.is_empty() => return self.clone(),
             (None, _) => (String::new(), ""),

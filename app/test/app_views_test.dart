@@ -579,6 +579,58 @@ void main() {
       // A lone field says it under it: the dashboard's, above.
     });
 
+    testWidgets('in the background its surface closes, so the app stops its '
+        'queries for it, and it opens again on return', (tester) async {
+      var seq = 0;
+      transport.answer = (_) {
+        final base = _surface(snapshot: _dashboard);
+        return AppSurfaceData(
+          surfaceId: 'charts-${++seq}',
+          appId: base.appId,
+          title: base.title,
+          state: base.state,
+          snapshot: base.snapshot,
+        );
+      };
+      await show(tester);
+      await tester.pump();
+      expect(transport.opens, hasLength(1));
+      expect(transport.closes, isEmpty);
+
+      final binding = tester.binding;
+      for (final state in [
+        AppLifecycleState.inactive,
+        AppLifecycleState.hidden,
+        AppLifecycleState.paused,
+      ]) {
+        binding.handleAppLifecycleStateChanged(state);
+      }
+      await tester.pump();
+      expect(transport.closes, ['charts-1'], reason: 'closed once');
+      expect(find.text('Runs today'), findsOneWidget, reason: 'still shown');
+      // What comes for it meanwhile changes nothing.
+      transport.update(1, {
+        'updateDataModel': {'path': '/title', 'value': 'Changed'},
+      });
+      await tester.pump();
+      expect(find.text('Changed'), findsNothing);
+
+      for (final state in [
+        AppLifecycleState.hidden,
+        AppLifecycleState.inactive,
+        AppLifecycleState.resumed,
+      ]) {
+        binding.handleAppLifecycleStateChanged(state);
+      }
+      await tester.pump();
+      expect(transport.opens, hasLength(2), reason: 'opened once again');
+      expect(transport.closes, ['charts-1'], reason: 'not closed twice');
+
+      // Going away for good closes the new one.
+      await tester.pumpWidget(const SizedBox());
+      expect(transport.closes, ['charts-1', 'charts-2']);
+    });
+
     testWidgets("without the app's name, it's \"This app\", never a title the "
         'app chose', (tester) async {
       transport.answer = (_) => AppSurfaceData(

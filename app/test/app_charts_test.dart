@@ -11,6 +11,8 @@ import 'package:factory_app/identity.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart' as pb;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -290,7 +292,19 @@ void main() {
     );
     await tester.pump();
     expect(find.text('Rivet · 12'), findsOneWidget);
-    expect(find.text('Runs by agent'), findsNothing);
+    // In its place: the label keeps its room, unseen.
+    expect(find.text('Runs by agent').hitTestable(), findsNothing);
+    expect(
+      tester
+          .widget<Visibility>(
+            find.ancestor(
+              of: find.text('Runs by agent'),
+              matching: find.byType(Visibility),
+            ),
+          )
+          .visible,
+      isFalse,
+    );
     // The other bar dims.
     final bars = tester.widget<BarChart>(find.byType(BarChart));
     expect(
@@ -599,6 +613,140 @@ void main() {
         tester.getTopLeft(find.byWidget(element.widget)).dy,
     };
     expect(wide, hasLength(1), reason: 'side by side');
+  });
+
+  testWidgets('at the largest text on a phone, half-width charts stack, '
+      "and their axes' words stay whole and under their labels", (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.platformDispatcher.textScaleFactorTestValue = 3.1;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final components = [
+      _root(['pair']),
+      {
+        'id': 'pair',
+        'component': 'Row',
+        'children': ['tokens', 'runs'],
+      },
+      {
+        'id': 'tokens',
+        'component': 'Chart',
+        'kind': 'timeseries',
+        'data': {'@path': '/tokens'},
+        'x': 'day',
+        'seriesBy': 'agent_id',
+        'label': 'Tokens by agent',
+        'weight': 6,
+      },
+      {
+        'id': 'runs',
+        'component': 'Chart',
+        'kind': 'bars',
+        'data': {'@path': '/runs'},
+        'label': 'Runs by agent',
+        'weight': 6,
+      },
+    ];
+    await _show(tester, components, {
+      'tokens': _tokens,
+      'runs': _table(
+        ['agent', 'runs'],
+        [
+          for (var day = 16; day <= 22; day++) ['2026-11-$day', day],
+        ],
+      ),
+    }, size: const Size(393, 852));
+    expect(tester.takeException(), isNull);
+    final tokens = tester.getRect(find.text('Tokens by agent'));
+    final runs = tester.getRect(find.text('Runs by agent'));
+    expect(runs.top, greaterThan(tokens.bottom), reason: 'stacked');
+    // Every axis word on one line, below its chart's label.
+    for (final label in [tokens, runs]) {
+      for (final element in find.byType(Text).evaluate()) {
+        final text = element.widget as Text;
+        if (text.maxLines != 1 || text.softWrap != false) continue;
+        final rect = tester.getRect(find.byWidget(text));
+        expect(
+          rect.overlaps(label),
+          isFalse,
+          reason: '"${text.data}" over a label',
+        );
+      }
+    }
+    final axis = find.byWidgetPredicate(
+      (w) => w is Text && w.data == '20K' && w.softWrap == false,
+    );
+    expect(axis, findsWidgets);
+    expect(
+      tester.getSize(axis.first).height,
+      lessThan(40),
+      reason: 'one line, not a character a line',
+    );
+  });
+
+  testWidgets("at the largest text on a phone, a chart's long label takes "
+      "two lines, and a table's headings wrap between words to fit", (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final components = [
+      _root(['tokens', 'tasks']),
+      {
+        'id': 'tokens',
+        'component': 'Chart',
+        'kind': 'timeseries',
+        'data': {'@path': '/tokens'},
+        'x': 'day',
+        'seriesBy': 'agent_id',
+        'label': 'Tokens by agent this week',
+      },
+      {
+        'id': 'tasks',
+        'component': 'Table',
+        'data': {'@path': '/tasks'},
+      },
+    ];
+    await _show(tester, components, {
+      'tokens': _tokens,
+      'tasks': _table(['Agent', 'Task', 'Command started'], []),
+    }, size: const Size(500, 1400));
+    expect(tester.takeException(), isNull);
+    RenderParagraph paragraph(String text) =>
+        tester.renderObject<RenderParagraph>(
+          find.descendant(of: find.text(text), matching: find.byType(RichText)),
+        );
+    // (The test font's letters are each as wide as they're tall: at 2x on
+    // 500 it takes two lines, as the largest does on a phone.)
+    final label = paragraph('Tokens by agent this week');
+    expect(label.didExceedMaxLines, isFalse, reason: 'not cut');
+    expect(
+      tester.getSize(find.text('Tokens by agent this week')).height,
+      greaterThan(tester.getSize(find.text('Agent')).height * 1.5),
+    );
+    // Every heading whole on screen, the long one over two lines; the
+    // table no wider than its place.
+    for (final heading in ['Agent', 'Task', 'Command started']) {
+      expect(paragraph(heading).didExceedMaxLines, isFalse);
+      expect(tester.getRect(find.text(heading)).right, lessThanOrEqualTo(500));
+    }
+    expect(
+      tester.getSize(find.text('Command started')).height,
+      greaterThan(tester.getSize(find.text('Agent')).height * 1.5),
+    );
+    final scroll = tester
+        .state<ScrollableState>(
+          find.descendant(
+            of: find.byType(AppTableView),
+            matching: find.byType(Scrollable),
+          ),
+        )
+        .position;
+    expect(scroll.maxScrollExtent, 0);
   });
 
   testWidgets('chips are as wide as their words, several to a line', (

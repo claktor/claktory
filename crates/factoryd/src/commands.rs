@@ -56,7 +56,7 @@ impl Factory {
     /// /clear: stops the agent as Stop does, moves its conversation to
     /// `archive/<ms>/` in its folder, and starts it on an empty one. Its
     /// extensions' data (checklist, memory) is the agent's, so it stays.
-    async fn clear_conversation(&self, id: &str) -> Result<(), RequestError> {
+    pub(crate) async fn clear_conversation(&self, id: &str) -> Result<(), RequestError> {
         let writes = self.lock().agents.entry(id.to_owned()).or_default().writes.clone();
         // No write of the old conversation can land after this.
         let _writing = writes.lock().await;
@@ -88,6 +88,9 @@ impl Factory {
             }
             self.broadcast_workspace(&inner);
         }
+        // And the add-secret cards it opened, and what it was finding for
+        // the person: the requests it held are theirs again.
+        crate::vault::requests::forget_admin(self, id);
         // Its browser sessions were the old conversation's.
         self.browser_forget(id, "agent_changed");
         let dir = self.home.agent_dir(id);

@@ -248,6 +248,10 @@ async fn the_account_page_lists_devices_and_removes_one() {
     assert_eq!(instance.device_signed(&phone, "GET", "/v1/devices/me", None, None).await.status, 200, "not without its CSRF token");
     let confirm = post_form(&instance, "/account/remove-device", &cookie, &format!("csrf={csrf}&device={device}")).await.text();
     assert!(confirm.contains("Remove Matt&#39;s iPhone?"), "{confirm}");
+    assert!(confirm.contains("If you sign in on it again, it starts over as a new device."), "{confirm}");
+    // A code it asked for before the removal.
+    let started: SignInStarted = instance.start_device_sign_in(&phone, "matt@example.com", "iPhone").await.json();
+    let verify = json!({"request_id": started.request_id, "code": instance.last_code("matt@example.com")});
     let done = post_form(&instance, "/account/remove-device", &cookie, &format!("csrf={csrf}&device={device}&confirm=yes")).await;
     assert_eq!(done.status, 303);
     instance.advance(1);
@@ -255,7 +259,18 @@ async fn the_account_page_lists_devices_and_removes_one() {
     assert!(instance.relay_allowlist(None, &instance.relay_bearer).await.json::<Allowlist>().endpoints.is_empty());
     assert!(!get(&instance, "/account", &cookie).await.text().contains("Devices signed in"));
 
-    // Deleting the account takes its devices with it.
+    // Removed there, it never signs in to the account again either: not
+    // with the code it had, nor a new one.
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/sign-in/verify", Some(&verify), None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "device_removed"), "{}", answer.text());
+    let answer = instance.start_device_sign_in(&phone, "matt@example.com", "iPhone").await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "device_removed"));
+
+    // Deleting the account takes its devices with it. (An hour on: an
+    // email gets 5 codes an hour.)
+    instance.advance(3600);
+    let cookie = web_sign_in(&instance, "matt@example.com", "192.0.2.88").await;
+    let phone = Device::new("192.0.2.87");
     instance.sign_in_device(&phone, "matt@example.com", "iPhone").await;
     let mut claktory = Claktory::new("192.0.2.89");
     instance.sign_in(&mut claktory, "matt@example.com", "Mac mini").await;
@@ -263,10 +278,130 @@ async fn the_account_page_lists_devices_and_removes_one() {
     let csrf = field(&page, "csrf");
     post_form(&instance, "/account/delete", &cookie, &format!("csrf={csrf}&confirm=yes")).await;
     let conn = rusqlite::Connection::open(&instance.db).unwrap();
-    for table in ["devices", "device_keys", "accounts"] {
+    for table in ["devices", "device_keys", "removed_devices", "accounts"] {
         let count: i64 = conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).unwrap();
         assert_eq!(count, 0, "{table}");
     }
+}
+
+/// A device signs another of the account's out (lost or stolen), as the
+/// account page does: that one is answered 401 from then on, and its
+/// assertions' keys leave the allowlist. Never another account's device,
+/// nor itself.
+#[tokio::test]
+async fn a_device_removes_another_of_the_account_s_devices() {
+    let instance = start().await;
+    let phone = Device::new("192.0.2.90");
+    instance.sign_in_device(&phone, "matt@example.com", "iPhone").await;
+    let stolen = Device::new("192.0.2.91");
+    instance.sign_in_device(&stolen, "matt@example.com", "iPad").await;
+    let theirs = Device::new("192.0.2.92");
+    instance.sign_in_device(&theirs, "ana@example.com", "Ana's iPhone").await;
+    instance.device_signed(&stolen, "POST", "/v1/devices/assertion", Some(&json!({"device_key": "a".repeat(64)})), None).await;
+    let list: Allowlist = instance.relay_allowlist(None, &instance.relay_bearer).await.json();
+    assert_eq!(list.endpoints, vec!["a".repeat(64)]);
+    let remove = |device: &Device| json!({"account_key": device.account_key()});
+
+    // Not another account's device, not itself, not a key that isn't one,
+    // not unsigned.
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&remove(&theirs)), None).await;
+    assert_eq!((answer.status, answer.json::<DeviceRemoved>()), (200, DeviceRemoved { removed: false }));
+    instance.advance(1);
+    assert_eq!(instance.device_signed(&theirs, "GET", "/v1/devices/me", None, None).await.status, 200, "still signed in");
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&remove(&phone)), None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (400, "invalid_request"));
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&json!({"account_key": "nope"})), None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (400, "invalid_request"));
+    let outsider = Device::new("192.0.2.93");
+    let answer = instance.device_signed(&outsider, "POST", "/v1/devices/remove", Some(&remove(&stolen)), None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (401, "unauthorized"));
+
+    // The phone removes the stolen iPad.
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&remove(&stolen)), None).await;
+    assert_eq!((answer.status, answer.json::<DeviceRemoved>()), (200, DeviceRemoved { removed: true }), "{}", answer.text());
+    instance.advance(1);
+    for (method, path, body) in [
+        ("GET", "/v1/devices/me", None),
+        ("GET", "/v1/claktories", None),
+        ("POST", "/v1/devices/assertion", Some(json!({"device_key": "b".repeat(64)}))),
+        ("POST", "/v1/devices/remove", Some(remove(&phone))),
+    ] {
+        let answer = instance.device_signed(&stolen, method, path, body.as_ref(), None).await;
+        assert_eq!((answer.status, answer.error().as_str()), (401, "unauthorized"), "{path}");
+    }
+    assert!(instance.relay_allowlist(None, &instance.relay_bearer).await.json::<Allowlist>().endpoints.is_empty());
+    assert_eq!(instance.device_signed(&phone, "GET", "/v1/devices/me", None, None).await.status, 200, "the phone stays");
+    // Again (a lost answer): done already, no error.
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&remove(&stolen)), None).await;
+    assert_eq!((answer.status, answer.json::<DeviceRemoved>()), (200, DeviceRemoved { removed: false }));
+
+    // 10 an hour.
+    instance.advance(3600 - instance.now().rem_euclid(3600));
+    for number in 0..10 {
+        let other = Device::new(&format!("192.0.2.{}", 100 + number));
+        let answer = instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&remove(&other)), None).await;
+        assert_eq!(answer.status, 200, "{number}");
+    }
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&remove(&theirs)), None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (429, "rate_limited"));
+}
+
+/// A key another device removed never signs in to that account again, not
+/// even with the right code (a thief with the device and the mail): the app
+/// starts over with a new key, a new device. Signing itself out leaves it
+/// free to sign in again.
+#[tokio::test]
+async fn a_removed_device_never_signs_in_to_the_account_again() {
+    let instance = start().await;
+    let phone = Device::new("192.0.2.120");
+    instance.sign_in_device(&phone, "matt@example.com", "iPhone").await;
+    let stolen = Device::new("192.0.2.121");
+    instance.sign_in_device(&stolen, "matt@example.com", "Mac").await;
+    let quitter = Device::new("192.0.2.122");
+    instance.sign_in_device(&quitter, "matt@example.com", "iPad").await;
+    let remove = |device: &Device| json!({"account_key": device.account_key()});
+
+    // A code it asked for before it was removed no longer works, and is spent.
+    let started: SignInStarted = instance.start_device_sign_in(&stolen, "matt@example.com", "Mac").await.json();
+    let verify = json!({"request_id": started.request_id, "code": instance.last_code("matt@example.com")});
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&remove(&stolen)), None).await;
+    assert_eq!(answer.json::<DeviceRemoved>(), DeviceRemoved { removed: true });
+    let answer = instance.device_signed(&stolen, "POST", "/v1/devices/sign-in/verify", Some(&verify), None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "device_removed"), "{}", answer.text());
+    assert_eq!(answer.value()["message"], "This device was removed from your account. Sign in again to start over as a new device.");
+    instance.advance(1);
+    let answer = instance.device_signed(&stolen, "POST", "/v1/devices/sign-in/verify", Some(&verify), None).await;
+    assert_eq!(answer.error(), "code_expired");
+    assert_eq!(instance.device_signed(&stolen, "GET", "/v1/devices/me", None, None).await.error(), "unauthorized");
+
+    // Asking for a new code is refused, and no mail goes out.
+    let mails = instance.mail.sent().len();
+    let answer = instance.start_device_sign_in(&stolen, "Matt@Example.com", "Mac").await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "device_removed"));
+    assert_eq!(instance.mail.sent().len(), mails);
+
+    // Another account is another matter.
+    instance.sign_in_device(&stolen, "ana@example.com", "Ana's Mac").await;
+
+    // Removed after signing itself out: still never again. (An hour on:
+    // refused starts count towards an email's 5 an hour.)
+    instance.advance(3600);
+    instance.device_signed(&quitter, "POST", "/v1/devices/sign-out", Some(&json!({})), None).await;
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&remove(&quitter)), None).await;
+    assert_eq!(answer.json::<DeviceRemoved>(), DeviceRemoved { removed: false });
+    let answer = instance.start_device_sign_in(&quitter, "matt@example.com", "iPad").await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "device_removed"));
+
+    // Download My Data lists them; deleting the account forgets them.
+    let cookie = web_sign_in(&instance, "matt@example.com", "192.0.2.123").await;
+    let data = get(&instance, "/account/data", &cookie).await.value();
+    let removed: Vec<&str> = data["removed_devices"].as_array().unwrap().iter().map(|key| key["account_key"].as_str().unwrap()).collect();
+    assert_eq!(removed, [stolen.account_key().as_str(), quitter.account_key().as_str()]);
+    let csrf = field(&get(&instance, "/account", &cookie).await.text(), "csrf");
+    post_form(&instance, "/account/delete", &cookie, &format!("csrf={csrf}&confirm=yes")).await;
+    let conn = rusqlite::Connection::open(&instance.db).unwrap();
+    let count: i64 = conn.query_row("SELECT count(*) FROM removed_devices", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 0);
 }
 
 #[test]

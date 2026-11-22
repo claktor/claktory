@@ -160,9 +160,7 @@ fn ago(ms: i64) -> String {
 }
 
 fn clock(ms: i64) -> String {
-    jiff::Timestamp::from_millisecond(ms)
-        .map(|time| time.to_zoned_datetime(jiff::tz::TimeZone::system()).strftime("%H:%M").to_string())
-        .unwrap_or_default()
+    crate::transcript::local_time(ms, "%H:%M")
 }
 
 /// What a process is, with whose it is.

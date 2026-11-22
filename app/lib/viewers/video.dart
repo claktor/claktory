@@ -15,6 +15,7 @@ import '../mobile/metrics.dart';
 import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
+import '../review_answer.dart' show ReviewAnswering;
 import '../scope.dart';
 import '../selection.dart';
 import 'registry.dart';
@@ -208,6 +209,10 @@ class _VideoViewerState extends State<VideoViewer>
   Offset? _dragFrom;
   Offset? _dragTo;
 
+  /// The viewer's keys (Space, Escape): a click on the frame, the
+  /// timeline or the player's buttons takes them.
+  final _focus = FocusNode(debugLabel: 'video');
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -224,6 +229,7 @@ class _VideoViewerState extends State<VideoViewer>
   void dispose() {
     _wired?.removeListener(_commentsChanged);
     _close();
+    _focus.dispose();
     super.dispose();
   }
 
@@ -442,7 +448,12 @@ class _VideoViewerState extends State<VideoViewer>
     final palette = Palette.of(context);
     final file = this.file;
     final state = _state;
-    final comments = file != null && file.sha256.isNotEmpty && state.ready
+    // Answering a review, nothing but the answer: no comments meanwhile.
+    final comments =
+        file != null &&
+            file.sha256.isNotEmpty &&
+            state.ready &&
+            !ReviewAnswering.of(context)
         ? this.comments
         : null;
     final details = this.details(
@@ -489,6 +500,12 @@ class _VideoViewerState extends State<VideoViewer>
         ],
       );
     }
+    // A click on the player itself takes the keys; one in a comment's card
+    // leaves them to its field.
+    final player = Listener(
+      onPointerDown: (_) => _focus.requestFocus(),
+      child: body,
+    );
     return PaneScaffold(
       details: details,
       controls: controls,
@@ -512,7 +529,8 @@ class _VideoViewerState extends State<VideoViewer>
                 onAction: picked is Moment ? comments.comment : null,
               ),
             ),
-      body: CallbackShortcuts(
+      // Not while a comment or an answer is being typed (Matt).
+      body: ViewerKeys(
         bindings: {
           const SingleActivator(LogicalKeyboardKey.space): _togglePlaying,
           const SingleActivator(LogicalKeyboardKey.escape): () {
@@ -520,13 +538,13 @@ class _VideoViewerState extends State<VideoViewer>
           },
         },
         child: Focus(
-          autofocus: false,
+          focusNode: _focus,
           child: ClipRect(
             child: ColoredBox(
               color: palette.canvas,
               child: comments == null
-                  ? body
-                  : Commented(controller: comments, child: body),
+                  ? player
+                  : Commented(controller: comments, child: player),
             ),
           ),
         ),

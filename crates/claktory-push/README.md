@@ -40,6 +40,23 @@ claktory-push --db /var/lib/claktory-push/push.db --listen 127.0.0.1:8090 --trus
 
 The keys are read once, at start. Under systemd, give them as encrypted credentials (`LoadCredentialEncrypted=apns.p8:…`, `fcm.json:…`). With no `--apns-key` or `--fcm-service-account`, the relay reads `apns.p8` and `fcm.json` from `$CREDENTIALS_DIRECTORY`, so they never sit on disk in the clear.
 
+## Running it on this computer, for tests
+
+`--local FILE` runs a relay that needs no keys and never calls Apple or Google. It takes registrations and pushes as the real one does, for every platform, with the same checks and limits. Each push it would have sent is logged and appended to FILE as one JSON line: `at`, `platform`, `token`, `urgency`, `collapse`, `thread`, `ttl`, and `payload`, which is what Apple (or Google) would have been sent.
+
+```sh
+cargo run -p claktory-push -- --db /tmp/push.db --listen 127.0.0.1:8090 --local /tmp/pushes.jsonl
+```
+
+Point a Claktory at it with its notifications setting `relay` (http is allowed only on this computer), for example in a `scripts/qa.sh` sandbox:
+
+```sh
+scripts/qa.sh send qa1 UpdateSettings '{"notification_change":{"relay":"http://127.0.0.1:8090"}}'
+scripts/qa.sh send qa1 SendTestNotification '{}'   # one line per registered device in /tmp/pushes.jsonl
+```
+
+A phone registers with the relay its Claktory names. The iPhone app takes only an https relay today (`HttpPushRelay` in `app/lib/mobile/push.dart`), so a dev build on a Simulator needs `http://127.0.0.1` allowed there first. A held push reaches a Simulator as Apple would deliver it: `tail -1 /tmp/pushes.jsonl | jq .payload | xcrun simctl push booted com.claktory.app.dev -`.
+
 Its handling is the crown jewel's (Fugo's required change A):
 
 - It runs as a Unix user of its own, apart from `iroh-relay`, or on a box of its own.

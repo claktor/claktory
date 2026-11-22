@@ -2,6 +2,8 @@ import 'package:flutter/widgets.dart';
 
 import 'agent_name.dart';
 import 'characters/character.dart';
+import 'controls.dart' show ScrolledSelection;
+import 'find.dart' show RenderedFindScope;
 import 'identity.dart';
 import 'mobile/metrics.dart';
 import 'protocol/factory/v1/factory.pb.dart';
@@ -23,8 +25,12 @@ class MessagingView extends StatelessWidget {
   final Messaging messaging;
   final String agentId;
 
+  /// Searchable with ⌘F, by the words it shows (find.dart).
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      RenderedFindScope(placeholder: 'Search Messaging', child: _view(context));
+
+  Widget _view(BuildContext context) {
     final store = AppScope.of(context).workspace;
     return ListenableBuilder(
       listenable: store,
@@ -33,6 +39,8 @@ class MessagingView extends StatelessWidget {
         final reachable =
             agent == null || _option(agent, 'agents', 'reachable') != false;
         return ListView(
+          // All of it laid out, for find.
+          scrollCacheExtent: RenderedFindScope.everything,
           padding: const EdgeInsets.fromLTRB(
             Space.s,
             Space.s,
@@ -40,27 +48,34 @@ class MessagingView extends StatelessWidget {
             Space.l,
           ),
           children: [
-            // What its team handed each other, copied to it quietly;
-            // nothing while it has none.
-            QuietCopiesSection(agentId: agentId),
-            const _Heading('Can message'),
-            if (messaging.reaches.isEmpty)
-              const _Empty("It can't message any agent.")
-            else
-              for (final id in messaging.reaches)
-                _AgentLine(id: id, store: store, home: agent?.projectId),
-            const _Heading('Can be messaged by'),
-            if (messaging.reachedBy.isEmpty)
-              _Empty(
-                reachable
-                    ? 'No agent can message it.'
-                    : 'No agent can message it: '
-                          '"Other agents can message it" is off in its '
-                          'settings.',
-              )
-            else
-              for (final id in messaging.reachedBy)
-                _AgentLine(id: id, store: store, home: agent?.projectId),
+            // Each selectable where the pointer is at any zoom.
+            for (final child in <Widget>[
+              // What its team handed each other, copied to it quietly;
+              // nothing while it has none.
+              QuietCopiesSection(agentId: agentId),
+              const _Heading('Can message'),
+              if (messaging.reaches.isEmpty)
+                const _Empty("It can't message any agent.")
+              else
+                for (final id in messaging.reaches)
+                  _AgentLine(id: id, store: store, home: agent?.projectId),
+              const _Heading('Can be messaged by'),
+              if (messaging.reachedBy.isEmpty)
+                _Empty(
+                  reachable
+                      ? 'No agent can message it.'
+                      : 'No agent can message it: '
+                            '"Other agents can message it" is off in its '
+                            'settings.',
+                )
+              else
+                for (final id in messaging.reachedBy)
+                  _AgentLine(id: id, store: store, home: agent?.projectId),
+            ])
+              ScrolledSelection(
+                key: child.key == null ? null : ValueKey(child.key),
+                child: child,
+              ),
           ],
         );
       },

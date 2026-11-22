@@ -147,6 +147,75 @@ void main() {
     expect(service.requests, hasLength(2));
   });
 
+  test('a device removed by another of the person\'s: a new key, signed '
+      'out, so signing in again starts over as a new device', () async {
+    service.answer = (request, body) => (
+      403,
+      {
+        'error': 'device_removed',
+        'message': 'This device was removed from your account.',
+      },
+    );
+    var made = 0;
+    final device = DeviceAccount(
+      key: 'ab' * 32,
+      service: service.url,
+      email: 'matt@example.com',
+      open: (key, url) => DeviceAccountService(
+        accountKey: key,
+        service: url,
+        keys: FakeKeys(),
+        now: () => now,
+      ),
+      makeKey: () => '${++made}' * 64,
+    );
+    var kept = 0;
+    device.onKept = () => kept++;
+    await expectLater(
+      device.start(
+        email: 'matt@example.com',
+        name: 'Mac',
+        platform: 'macos',
+        version: '1',
+      ),
+      throwsA(
+        isA<AccountServiceError>().having(
+          (error) => error.code,
+          'code',
+          'device_removed',
+        ),
+      ),
+    );
+    expect(device.key, '1' * 64, reason: 'never the removed key again');
+    expect(device.signedIn, isFalse);
+    expect(kept, greaterThan(0), reason: 'the new key is kept');
+    // A code asked for before the removal: refused the same way.
+    service.answer = (request, body) => request.uri.path.endsWith('/start')
+        ? (200, {'request_id': 'r1', 'expires_in': 900})
+        : (403, {'error': 'device_removed', 'message': ''});
+    await device.start(
+      email: 'matt@example.com',
+      service: service.url,
+      name: 'Mac',
+      platform: 'macos',
+      version: '1',
+    );
+    expect(device.awaitingCode, isNotNull);
+    await expectLater(
+      device.verify('123456'),
+      throwsA(
+        isA<AccountServiceError>().having(
+          (error) => error.code,
+          'code',
+          'device_removed',
+        ),
+      ),
+    );
+    expect(device.key, '2' * 64);
+    expect(device.signedIn, isFalse);
+    expect(device.awaitingCode, isNull);
+  });
+
   test("a device that isn't signed in has no account", () async {
     service.answer = (request, body) => (401, {'error': 'unauthorized'});
     expect(await account.me(), isNull);

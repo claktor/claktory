@@ -78,6 +78,8 @@ void main() {
       ),
     );
     await harness.show(tester);
+    // Its text joins the selection a frame or two after it shows.
+    await pumpFrames(tester);
     final at = tester.getCenter(find.text('Hello'));
     await rightClick(tester, find.text('Hello'), at: at);
     expect(menuRect(tester).width, lessThan(200));
@@ -136,6 +138,8 @@ void main() {
         ),
       );
       await harness.show(tester);
+      // Its text joins the selection a frame or two after it shows.
+      await pumpFrames(tester);
       await rightClick(tester, find.text('Hello'));
       expect(find.byType(CopyMenu), findsOneWidget);
       expect(find.text('⌘C'), findsOneWidget);
@@ -189,6 +193,8 @@ void main() {
       ),
     );
     await harness.show(tester);
+    // Its text joins the selection a frame or two after it shows.
+    await pumpFrames(tester);
     await rightClick(tester, find.text('Hello'));
     expect(find.byType(CopyMenu), findsOneWidget);
     await tester.tapAt(const Offset(600, 880));

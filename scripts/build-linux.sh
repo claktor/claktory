@@ -11,7 +11,8 @@
 #   scripts/build-linux.sh ARCH OUT [PACKAGE]
 #       ARCH: x86_64 or aarch64; OUT: the binary to write; PACKAGE: factoryd
 #       (the default), claktory-apps (the apps host), claktory-account,
-#       claktory-speech, claktory-qa or claktory-push (the push relay)
+#       claktory-speech, claktory-qa, claktory-push (the push relay) or
+#       claktory-user-apps (the account service's apps worker)
 #
 #   FACTORY_LINUX_SRC=DIR      build this source tree instead of the checkout
 #       (scripts/qa.sh --container builds a commit's `git archive` this way)
@@ -25,14 +26,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCH="${1:-}" OUT="${2:-}" PACKAGE="${3:-factoryd}"
-usage() { echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT [factoryd|claktory-apps|claktory-account|claktory-speech|claktory-qa|claktory-push]" >&2; exit 2; }
+usage() { echo "usage: scripts/build-linux.sh x86_64|aarch64 OUT [factoryd|claktory-apps|claktory-account|claktory-speech|claktory-qa|claktory-push|claktory-user-apps]" >&2; exit 2; }
 case "$ARCH" in
   x86_64 | aarch64) ;;
   *) usage ;;
 esac
 [[ -n "$OUT" ]] || usage
 case "$PACKAGE" in
-  factoryd | claktory-apps | claktory-account | claktory-speech | claktory-qa | claktory-push) ;;
+  factoryd | claktory-apps | claktory-account | claktory-speech | claktory-qa | claktory-push | claktory-user-apps) ;;
   *) usage ;;
 esac
 SRC_ROOT="${FACTORY_LINUX_SRC:-$ROOT}"
@@ -103,6 +104,7 @@ IMAGE="docker.io/library/rust:1-alpine"
         claktory-apps) "$file" </dev/null >/dev/null 2>&1 ;;
         claktory-speech) "$file" help 2>&1 | grep -q usage && "$file" check | grep -q supported ;;
         claktory-qa) "$file" help 2>&1 | grep -q claktory-qa ;;
+        claktory-user-apps) "$file" help 2>&1 | grep -q "the worker for" ;;
         *) "$file" help 2>&1 | grep -q Usage: ;;
       esac
     fi

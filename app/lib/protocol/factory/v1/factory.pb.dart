@@ -191,6 +191,17 @@ enum ClientMessage_Body {
   dmEnrollLeaf,
   setDiagnostics,
   sendDiagnostics,
+  acceptPipeIdentity,
+  setPipeForward,
+  setReportReader,
+  decidePipeReports,
+  listPipeReports,
+  setSpendCap,
+  reportReply,
+  saveReportType,
+  deleteReportType,
+  searchConversation,
+  transcribeAudio,
   notSet
 }
 
@@ -366,6 +377,17 @@ class ClientMessage extends $pb.GeneratedMessage {
     DmEnrollLeaf? dmEnrollLeaf,
     SetDiagnostics? setDiagnostics,
     SendDiagnostics? sendDiagnostics,
+    AcceptPipeIdentity? acceptPipeIdentity,
+    SetPipeForward? setPipeForward,
+    SetReportReader? setReportReader,
+    DecidePipeReports? decidePipeReports,
+    ListPipeReports? listPipeReports,
+    SetSpendCap? setSpendCap,
+    ReportReply? reportReply,
+    SaveReportType? saveReportType,
+    DeleteReportType? deleteReportType,
+    SearchConversation? searchConversation,
+    TranscribeAudio? transcribeAudio,
   }) {
     final result = ClientMessage._();
     if (id != null) result.id = id;
@@ -551,6 +573,19 @@ class ClientMessage extends $pb.GeneratedMessage {
     if (dmEnrollLeaf != null) result.dmEnrollLeaf = dmEnrollLeaf;
     if (setDiagnostics != null) result.setDiagnostics = setDiagnostics;
     if (sendDiagnostics != null) result.sendDiagnostics = sendDiagnostics;
+    if (acceptPipeIdentity != null)
+      result.acceptPipeIdentity = acceptPipeIdentity;
+    if (setPipeForward != null) result.setPipeForward = setPipeForward;
+    if (setReportReader != null) result.setReportReader = setReportReader;
+    if (decidePipeReports != null) result.decidePipeReports = decidePipeReports;
+    if (listPipeReports != null) result.listPipeReports = listPipeReports;
+    if (setSpendCap != null) result.setSpendCap = setSpendCap;
+    if (reportReply != null) result.reportReply = reportReply;
+    if (saveReportType != null) result.saveReportType = saveReportType;
+    if (deleteReportType != null) result.deleteReportType = deleteReportType;
+    if (searchConversation != null)
+      result.searchConversation = searchConversation;
+    if (transcribeAudio != null) result.transcribeAudio = transcribeAudio;
     return result;
   }
 
@@ -734,6 +769,17 @@ class ClientMessage extends $pb.GeneratedMessage {
     173: ClientMessage_Body.dmEnrollLeaf,
     174: ClientMessage_Body.setDiagnostics,
     175: ClientMessage_Body.sendDiagnostics,
+    176: ClientMessage_Body.acceptPipeIdentity,
+    177: ClientMessage_Body.setPipeForward,
+    178: ClientMessage_Body.setReportReader,
+    179: ClientMessage_Body.decidePipeReports,
+    180: ClientMessage_Body.listPipeReports,
+    181: ClientMessage_Body.setSpendCap,
+    183: ClientMessage_Body.reportReply,
+    184: ClientMessage_Body.saveReportType,
+    185: ClientMessage_Body.deleteReportType,
+    186: ClientMessage_Body.searchConversation,
+    187: ClientMessage_Body.transcribeAudio,
     0: ClientMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -909,7 +955,18 @@ class ClientMessage extends $pb.GeneratedMessage {
       172,
       173,
       174,
-      175
+      175,
+      176,
+      177,
+      178,
+      179,
+      180,
+      181,
+      183,
+      184,
+      185,
+      186,
+      187
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -1258,6 +1315,28 @@ class ClientMessage extends $pb.GeneratedMessage {
         subBuilder: SetDiagnostics.$_createMessage)
     ..aOM<SendDiagnostics>(175, _omitFieldNames ? '' : 'sendDiagnostics',
         subBuilder: SendDiagnostics.$_createMessage)
+    ..aOM<AcceptPipeIdentity>(176, _omitFieldNames ? '' : 'acceptPipeIdentity',
+        subBuilder: AcceptPipeIdentity.$_createMessage)
+    ..aOM<SetPipeForward>(177, _omitFieldNames ? '' : 'setPipeForward',
+        subBuilder: SetPipeForward.$_createMessage)
+    ..aOM<SetReportReader>(178, _omitFieldNames ? '' : 'setReportReader',
+        subBuilder: SetReportReader.$_createMessage)
+    ..aOM<DecidePipeReports>(179, _omitFieldNames ? '' : 'decidePipeReports',
+        subBuilder: DecidePipeReports.$_createMessage)
+    ..aOM<ListPipeReports>(180, _omitFieldNames ? '' : 'listPipeReports',
+        subBuilder: ListPipeReports.$_createMessage)
+    ..aOM<SetSpendCap>(181, _omitFieldNames ? '' : 'setSpendCap',
+        subBuilder: SetSpendCap.$_createMessage)
+    ..aOM<ReportReply>(183, _omitFieldNames ? '' : 'reportReply',
+        subBuilder: ReportReply.$_createMessage)
+    ..aOM<SaveReportType>(184, _omitFieldNames ? '' : 'saveReportType',
+        subBuilder: SaveReportType.$_createMessage)
+    ..aOM<DeleteReportType>(185, _omitFieldNames ? '' : 'deleteReportType',
+        subBuilder: DeleteReportType.$_createMessage)
+    ..aOM<SearchConversation>(186, _omitFieldNames ? '' : 'searchConversation',
+        subBuilder: SearchConversation.$_createMessage)
+    ..aOM<TranscribeAudio>(187, _omitFieldNames ? '' : 'transcribeAudio',
+        subBuilder: TranscribeAudio.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1451,6 +1530,17 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(173)
   @$pb.TagNumber(174)
   @$pb.TagNumber(175)
+  @$pb.TagNumber(176)
+  @$pb.TagNumber(177)
+  @$pb.TagNumber(178)
+  @$pb.TagNumber(179)
+  @$pb.TagNumber(180)
+  @$pb.TagNumber(181)
+  @$pb.TagNumber(183)
+  @$pb.TagNumber(184)
+  @$pb.TagNumber(185)
+  @$pb.TagNumber(186)
+  @$pb.TagNumber(187)
   ClientMessage_Body whichBody() => _ClientMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -1621,6 +1711,17 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(173)
   @$pb.TagNumber(174)
   @$pb.TagNumber(175)
+  @$pb.TagNumber(176)
+  @$pb.TagNumber(177)
+  @$pb.TagNumber(178)
+  @$pb.TagNumber(179)
+  @$pb.TagNumber(180)
+  @$pb.TagNumber(181)
+  @$pb.TagNumber(183)
+  @$pb.TagNumber(184)
+  @$pb.TagNumber(185)
+  @$pb.TagNumber(186)
+  @$pb.TagNumber(187)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -3568,6 +3669,160 @@ class ClientMessage extends $pb.GeneratedMessage {
   void clearSendDiagnostics() => $_clearField(175);
   @$pb.TagNumber(175)
   SendDiagnostics ensureSendDiagnostics() => $_ensure(169);
+
+  /// The person accepts who the other side of a pipe now is
+  /// (PipePeer.identity_change): what it presents now is pinned (with
+  /// nothing presented, the pin stays); the change clears and what
+  /// ACCOUNT_CHANGED held goes on. For LAPSED it dismisses the notice
+  /// (the pipe shows as not verified, the pin kept) until it's vouched
+  /// for again. Answered with Ack.
+  @$pb.TagNumber(176)
+  AcceptPipeIdentity get acceptPipeIdentity => $_getN(170);
+  @$pb.TagNumber(176)
+  set acceptPipeIdentity(AcceptPipeIdentity value) => $_setField(176, value);
+  @$pb.TagNumber(176)
+  $core.bool hasAcceptPipeIdentity() => $_has(170);
+  @$pb.TagNumber(176)
+  void clearAcceptPipeIdentity() => $_clearField(176);
+  @$pb.TagNumber(176)
+  AcceptPipeIdentity ensureAcceptPipeIdentity() => $_ensure(170);
+
+  /// Where a pipe's reports go, or a project's default for new pipes
+  /// (pipes-automation.md). Answered with Ack.
+  @$pb.TagNumber(177)
+  SetPipeForward get setPipeForward => $_getN(171);
+  @$pb.TagNumber(177)
+  set setPipeForward(SetPipeForward value) => $_setField(177, value);
+  @$pb.TagNumber(177)
+  $core.bool hasSetPipeForward() => $_has(171);
+  @$pb.TagNumber(177)
+  void clearSetPipeForward() => $_clearField(177);
+  @$pb.TagNumber(177)
+  SetPipeForward ensureSetPipeForward() => $_ensure(171);
+
+  /// Makes an agent a report reader, or lets it go back to its usual
+  /// tools. The person's only. Answered with Ack.
+  @$pb.TagNumber(178)
+  SetReportReader get setReportReader => $_getN(172);
+  @$pb.TagNumber(178)
+  set setReportReader(SetReportReader value) => $_setField(178, value);
+  @$pb.TagNumber(178)
+  $core.bool hasSetReportReader() => $_has(172);
+  @$pb.TagNumber(178)
+  void clearSetReportReader() => $_clearField(178);
+  @$pb.TagNumber(178)
+  SetReportReader ensureSetReportReader() => $_ensure(172);
+
+  /// The reports waiting because where they go changed: send or discard
+  /// them. The person's only. Answered with Ack.
+  @$pb.TagNumber(179)
+  DecidePipeReports get decidePipeReports => $_getN(173);
+  @$pb.TagNumber(179)
+  set decidePipeReports(DecidePipeReports value) => $_setField(179, value);
+  @$pb.TagNumber(179)
+  $core.bool hasDecidePipeReports() => $_has(173);
+  @$pb.TagNumber(179)
+  void clearDecidePipeReports() => $_clearField(179);
+  @$pb.TagNumber(179)
+  DecidePipeReports ensureDecidePipeReports() => $_ensure(173);
+
+  /// A page of a pipe's reports, or a reader's. Answered with
+  /// PipeReportPage.
+  @$pb.TagNumber(180)
+  ListPipeReports get listPipeReports => $_getN(174);
+  @$pb.TagNumber(180)
+  set listPipeReports(ListPipeReports value) => $_setField(180, value);
+  @$pb.TagNumber(180)
+  $core.bool hasListPipeReports() => $_has(174);
+  @$pb.TagNumber(180)
+  void clearListPipeReports() => $_clearField(180);
+  @$pb.TagNumber(180)
+  ListPipeReports ensureListPipeReports() => $_ensure(174);
+
+  /// A liaison's daily spending cap (Agent.spend). The person's only.
+  /// Answered with Ack.
+  @$pb.TagNumber(181)
+  SetSpendCap get setSpendCap => $_getN(175);
+  @$pb.TagNumber(181)
+  set setSpendCap(SetSpendCap value) => $_setField(181, value);
+  @$pb.TagNumber(181)
+  $core.bool hasSetSpendCap() => $_has(175);
+  @$pb.TagNumber(181)
+  void clearSetSpendCap() => $_clearField(181);
+  @$pb.TagNumber(181)
+  SetSpendCap ensureSetSpendCap() => $_ensure(175);
+
+  /// Report this reply: one of an agent's or a chat's replies, with the
+  /// person's note, for Claktory's team at claktory.com (the account
+  /// service), which keeps it 30 days. send false: a preview, nothing
+  /// leaves this computer; send true: sent. Either way answered with
+  /// ReplyReport, exactly what is (or would be) sent; send true only once
+  /// the service has it. Refused: NOT_FOUND (no such agent, chat or
+  /// entry), INVALID_REQUEST (not a finished assistant reply, a note over
+  /// 1000 characters, or this Claktory set not to contact the service),
+  /// RATE_LIMITED and UNREACHABLE, each with words to show.
+  @$pb.TagNumber(183)
+  ReportReply get reportReply => $_getN(176);
+  @$pb.TagNumber(183)
+  set reportReply(ReportReply value) => $_setField(183, value);
+  @$pb.TagNumber(183)
+  $core.bool hasReportReply() => $_has(176);
+  @$pb.TagNumber(183)
+  void clearReportReply() => $_clearField(183);
+  @$pb.TagNumber(183)
+  ReportReply ensureReportReply() => $_ensure(176);
+
+  /// Defines a report type, or edits one (a new version). Answered with
+  /// Ack, or an error naming the rule it broke.
+  @$pb.TagNumber(184)
+  SaveReportType get saveReportType => $_getN(177);
+  @$pb.TagNumber(184)
+  set saveReportType(SaveReportType value) => $_setField(184, value);
+  @$pb.TagNumber(184)
+  $core.bool hasSaveReportType() => $_has(177);
+  @$pb.TagNumber(184)
+  void clearSaveReportType() => $_clearField(184);
+  @$pb.TagNumber(184)
+  SaveReportType ensureSaveReportType() => $_ensure(177);
+
+  /// Deletes a report type. Answered with Ack, or an error.
+  @$pb.TagNumber(185)
+  DeleteReportType get deleteReportType => $_getN(178);
+  @$pb.TagNumber(185)
+  set deleteReportType(DeleteReportType value) => $_setField(185, value);
+  @$pb.TagNumber(185)
+  $core.bool hasDeleteReportType() => $_has(178);
+  @$pb.TagNumber(185)
+  void clearDeleteReportType() => $_clearField(185);
+  @$pb.TagNumber(185)
+  DeleteReportType ensureDeleteReportType() => $_ensure(178);
+
+  /// Finds text in an agent's or a chat's conversation, or in a pipe's
+  /// timeline. Answered with ConversationMatches, to the asker only.
+  @$pb.TagNumber(186)
+  SearchConversation get searchConversation => $_getN(179);
+  @$pb.TagNumber(186)
+  set searchConversation(SearchConversation value) => $_setField(186, value);
+  @$pb.TagNumber(186)
+  $core.bool hasSearchConversation() => $_has(179);
+  @$pb.TagNumber(186)
+  void clearSearchConversation() => $_clearField(186);
+  @$pb.TagNumber(186)
+  SearchConversation ensureSearchConversation() => $_ensure(179);
+
+  /// Transcribes a recording for the person to edit (a dictation), without
+  /// sending it anywhere. Answered with Ack; the words come later in
+  /// AudioTranscribed, to the asker only.
+  @$pb.TagNumber(187)
+  TranscribeAudio get transcribeAudio => $_getN(180);
+  @$pb.TagNumber(187)
+  set transcribeAudio(TranscribeAudio value) => $_setField(187, value);
+  @$pb.TagNumber(187)
+  $core.bool hasTranscribeAudio() => $_has(180);
+  @$pb.TagNumber(187)
+  void clearTranscribeAudio() => $_clearField(187);
+  @$pb.TagNumber(187)
+  TranscribeAudio ensureTranscribeAudio() => $_ensure(180);
 }
 
 enum ServerMessage_Body {
@@ -3630,6 +3885,10 @@ enum ServerMessage_Body {
   presentation,
   sketchCreated,
   dmLeafOffer,
+  pipeReportPage,
+  replyReport,
+  conversationMatches,
+  audioTranscribed,
   notSet
 }
 
@@ -3695,6 +3954,10 @@ class ServerMessage extends $pb.GeneratedMessage {
     Presentation? presentation,
     SketchCreated? sketchCreated,
     DmLeafOffer? dmLeafOffer,
+    PipeReportPage? pipeReportPage,
+    ReplyReport? replyReport,
+    ConversationMatches? conversationMatches,
+    AudioTranscribed? audioTranscribed,
   }) {
     final result = ServerMessage._();
     if (replyTo != null) result.replyTo = replyTo;
@@ -3758,6 +4021,11 @@ class ServerMessage extends $pb.GeneratedMessage {
     if (presentation != null) result.presentation = presentation;
     if (sketchCreated != null) result.sketchCreated = sketchCreated;
     if (dmLeafOffer != null) result.dmLeafOffer = dmLeafOffer;
+    if (pipeReportPage != null) result.pipeReportPage = pipeReportPage;
+    if (replyReport != null) result.replyReport = replyReport;
+    if (conversationMatches != null)
+      result.conversationMatches = conversationMatches;
+    if (audioTranscribed != null) result.audioTranscribed = audioTranscribed;
     return result;
   }
 
@@ -3831,6 +4099,10 @@ class ServerMessage extends $pb.GeneratedMessage {
     62: ServerMessage_Body.presentation,
     63: ServerMessage_Body.sketchCreated,
     64: ServerMessage_Body.dmLeafOffer,
+    65: ServerMessage_Body.pipeReportPage,
+    66: ServerMessage_Body.replyReport,
+    67: ServerMessage_Body.conversationMatches,
+    68: ServerMessage_Body.audioTranscribed,
     0: ServerMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -3896,7 +4168,11 @@ class ServerMessage extends $pb.GeneratedMessage {
       61,
       62,
       63,
-      64
+      64,
+      65,
+      66,
+      67,
+      68
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'replyTo', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -4017,6 +4293,14 @@ class ServerMessage extends $pb.GeneratedMessage {
         subBuilder: SketchCreated.$_createMessage)
     ..aOM<DmLeafOffer>(64, _omitFieldNames ? '' : 'dmLeafOffer',
         subBuilder: DmLeafOffer.$_createMessage)
+    ..aOM<PipeReportPage>(65, _omitFieldNames ? '' : 'pipeReportPage',
+        subBuilder: PipeReportPage.$_createMessage)
+    ..aOM<ReplyReport>(66, _omitFieldNames ? '' : 'replyReport',
+        subBuilder: ReplyReport.$_createMessage)
+    ..aOM<ConversationMatches>(67, _omitFieldNames ? '' : 'conversationMatches',
+        subBuilder: ConversationMatches.$_createMessage)
+    ..aOM<AudioTranscribed>(68, _omitFieldNames ? '' : 'audioTranscribed',
+        subBuilder: AudioTranscribed.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -4100,6 +4384,10 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(62)
   @$pb.TagNumber(63)
   @$pb.TagNumber(64)
+  @$pb.TagNumber(65)
+  @$pb.TagNumber(66)
+  @$pb.TagNumber(67)
+  @$pb.TagNumber(68)
   ServerMessage_Body whichBody() => _ServerMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -4160,6 +4448,10 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(62)
   @$pb.TagNumber(63)
   @$pb.TagNumber(64)
+  @$pb.TagNumber(65)
+  @$pb.TagNumber(66)
+  @$pb.TagNumber(67)
+  @$pb.TagNumber(68)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -4873,6 +5165,54 @@ class ServerMessage extends $pb.GeneratedMessage {
   void clearDmLeafOffer() => $_clearField(64);
   @$pb.TagNumber(64)
   DmLeafOffer ensureDmLeafOffer() => $_ensure(59);
+
+  /// The answer to ListPipeReports, to the asker only.
+  @$pb.TagNumber(65)
+  PipeReportPage get pipeReportPage => $_getN(60);
+  @$pb.TagNumber(65)
+  set pipeReportPage(PipeReportPage value) => $_setField(65, value);
+  @$pb.TagNumber(65)
+  $core.bool hasPipeReportPage() => $_has(60);
+  @$pb.TagNumber(65)
+  void clearPipeReportPage() => $_clearField(65);
+  @$pb.TagNumber(65)
+  PipeReportPage ensurePipeReportPage() => $_ensure(60);
+
+  /// The answer to ReportReply, to the asker only.
+  @$pb.TagNumber(66)
+  ReplyReport get replyReport => $_getN(61);
+  @$pb.TagNumber(66)
+  set replyReport(ReplyReport value) => $_setField(66, value);
+  @$pb.TagNumber(66)
+  $core.bool hasReplyReport() => $_has(61);
+  @$pb.TagNumber(66)
+  void clearReplyReport() => $_clearField(66);
+  @$pb.TagNumber(66)
+  ReplyReport ensureReplyReport() => $_ensure(61);
+
+  /// The answer to SearchConversation, to the asker only.
+  @$pb.TagNumber(67)
+  ConversationMatches get conversationMatches => $_getN(62);
+  @$pb.TagNumber(67)
+  set conversationMatches(ConversationMatches value) => $_setField(67, value);
+  @$pb.TagNumber(67)
+  $core.bool hasConversationMatches() => $_has(62);
+  @$pb.TagNumber(67)
+  void clearConversationMatches() => $_clearField(67);
+  @$pb.TagNumber(67)
+  ConversationMatches ensureConversationMatches() => $_ensure(62);
+
+  /// What a TranscribeAudio heard, to the connection that asked only.
+  @$pb.TagNumber(68)
+  AudioTranscribed get audioTranscribed => $_getN(63);
+  @$pb.TagNumber(68)
+  set audioTranscribed(AudioTranscribed value) => $_setField(68, value);
+  @$pb.TagNumber(68)
+  $core.bool hasAudioTranscribed() => $_has(63);
+  @$pb.TagNumber(68)
+  void clearAudioTranscribed() => $_clearField(68);
+  @$pb.TagNumber(68)
+  AudioTranscribed ensureAudioTranscribed() => $_ensure(63);
 }
 
 class Hello extends $pb.GeneratedMessage {
@@ -7198,6 +7538,8 @@ class SendMessage extends $pb.GeneratedMessage {
     $core.String? clientId,
     $core.Iterable<Attachment>? attachments,
     $core.bool? voice,
+    $core.int? checklistItem,
+    $core.String? checklistAgentId,
   }) {
     final result = SendMessage._();
     if (agentId != null) result.agentId = agentId;
@@ -7205,6 +7547,8 @@ class SendMessage extends $pb.GeneratedMessage {
     if (clientId != null) result.clientId = clientId;
     if (attachments != null) result.attachments.addAll(attachments);
     if (voice != null) result.voice = voice;
+    if (checklistItem != null) result.checklistItem = checklistItem;
+    if (checklistAgentId != null) result.checklistAgentId = checklistAgentId;
     return result;
   }
 
@@ -7227,6 +7571,9 @@ class SendMessage extends $pb.GeneratedMessage {
     ..pPM<Attachment>(4, _omitFieldNames ? '' : 'attachments',
         subBuilder: Attachment.$_createMessage)
     ..aOB(5, _omitFieldNames ? '' : 'voice')
+    ..aI(6, _omitFieldNames ? '' : 'checklistItem',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aOS(7, _omitFieldNames ? '' : 'checklistAgentId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -7302,6 +7649,120 @@ class SendMessage extends $pb.GeneratedMessage {
   $core.bool hasVoice() => $_has(4);
   @$pb.TagNumber(5)
   void clearVoice() => $_clearField(5);
+
+  /// A reply on a checklist item (ChecklistItem.id), from Needs you or the
+  /// Checklist panel; 0 for none. The agent reads which item it's about, and
+  /// the item's history keeps the text as the person's (author empty); the
+  /// item's status doesn't change. `text` is required, and `voice` is false.
+  /// Refused, with the reason, for an item that isn't there, or when
+  /// `agent_id` is neither the checklist's agent nor the item's owner.
+  @$pb.TagNumber(6)
+  $core.int get checklistItem => $_getIZ(5);
+  @$pb.TagNumber(6)
+  set checklistItem($core.int value) => $_setUnsignedInt32(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasChecklistItem() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearChecklistItem() => $_clearField(6);
+
+  /// Whose checklist `checklist_item` is on: an agent's id; empty for
+  /// `agent_id`'s own. Set it to WaitingItem's agent when sending to the
+  /// item's owner.
+  @$pb.TagNumber(7)
+  $core.String get checklistAgentId => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set checklistAgentId($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasChecklistAgentId() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearChecklistAgentId() => $_clearField(7);
+}
+
+/// An item of an agent's checklist that a message of the person's replies
+/// on (SendMessage.checklist_item).
+class ChecklistItemRef extends $pb.GeneratedMessage {
+  factory ChecklistItemRef({
+    $core.String? agentId,
+    $core.int? id,
+    $core.String? text,
+  }) {
+    final result = ChecklistItemRef._();
+    if (agentId != null) result.agentId = agentId;
+    if (id != null) result.id = id;
+    if (text != null) result.text = text;
+    return result;
+  }
+
+  ChecklistItemRef._();
+
+  factory ChecklistItemRef.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ChecklistItemRef()..mergeFromBuffer(data, registry);
+  factory ChecklistItemRef.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ChecklistItemRef()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ChecklistItemRef',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ChecklistItemRef.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..aI(2, _omitFieldNames ? '' : 'id', fieldType: $pb.PbFieldType.OU3)
+    ..aOS(3, _omitFieldNames ? '' : 'text')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ChecklistItemRef clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ChecklistItemRef copyWith(void Function(ChecklistItemRef) updates) =>
+      super.copyWith((message) => updates(message as ChecklistItemRef))
+          as ChecklistItemRef;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ChecklistItemRef() / ChecklistItemRef.new instead')
+  static ChecklistItemRef create() => ChecklistItemRef._();
+  static $pb.GeneratedMessage $_createMessage() => ChecklistItemRef._();
+  @$core.override
+  ChecklistItemRef createEmptyInstance() => ChecklistItemRef._();
+  @$core.pragma('dart2js:noInline')
+  static ChecklistItemRef getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ChecklistItemRef>(
+          ChecklistItemRef.$_createMessage);
+  static ChecklistItemRef? _defaultInstance;
+
+  /// Whose checklist it's on; never empty.
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  /// ChecklistItem.id on that checklist.
+  @$pb.TagNumber(2)
+  $core.int get id => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set id($core.int value) => $_setUnsignedInt32(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearId() => $_clearField(2);
+
+  /// Its text when the message was sent: the reference still reads after
+  /// the item changes or is gone.
+  @$pb.TagNumber(3)
+  $core.String get text => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set text($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasText() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearText() => $_clearField(3);
 }
 
 /// A file the person attached to a message: uploaded to the agent's uploads
@@ -14217,6 +14678,9 @@ class Workspace extends $pb.GeneratedMessage {
     $core.Iterable<DmSendWaiting>? dmSends,
     UpdateCheck? updateCheck,
     Diagnostics? diagnostics,
+    $core.Iterable<ReportSchema>? reportSchemas,
+    $core.Iterable<BundledApp>? bundledApps,
+    ReportTypeRules? reportTypeRules,
   }) {
     final result = Workspace._();
     if (projects != null) result.projects.addAll(projects);
@@ -14258,6 +14722,9 @@ class Workspace extends $pb.GeneratedMessage {
     if (dmSends != null) result.dmSends.addAll(dmSends);
     if (updateCheck != null) result.updateCheck = updateCheck;
     if (diagnostics != null) result.diagnostics = diagnostics;
+    if (reportSchemas != null) result.reportSchemas.addAll(reportSchemas);
+    if (bundledApps != null) result.bundledApps.addAll(bundledApps);
+    if (reportTypeRules != null) result.reportTypeRules = reportTypeRules;
     return result;
   }
 
@@ -14335,6 +14802,12 @@ class Workspace extends $pb.GeneratedMessage {
         subBuilder: UpdateCheck.$_createMessage)
     ..aOM<Diagnostics>(39, _omitFieldNames ? '' : 'diagnostics',
         subBuilder: Diagnostics.$_createMessage)
+    ..pPM<ReportSchema>(40, _omitFieldNames ? '' : 'reportSchemas',
+        subBuilder: ReportSchema.$_createMessage)
+    ..pPM<BundledApp>(41, _omitFieldNames ? '' : 'bundledApps',
+        subBuilder: BundledApp.$_createMessage)
+    ..aOM<ReportTypeRules>(42, _omitFieldNames ? '' : 'reportTypeRules',
+        subBuilder: ReportTypeRules.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -14727,6 +15200,165 @@ class Workspace extends $pb.GeneratedMessage {
   void clearDiagnostics() => $_clearField(39);
   @$pb.TagNumber(39)
   Diagnostics ensureDiagnostics() => $_ensure(38);
+
+  /// The kinds of report a pipe can forward (PipeForward.type_ids): the
+  /// current version of each one that isn't deleted, built-in ones first
+  /// ("Bug report" and the starters), then the rest by name.
+  @$pb.TagNumber(40)
+  $pb.PbList<ReportSchema> get reportSchemas => $_getList(39);
+
+  /// Claktory's own apps this release ships, signed with Claktory's pinned
+  /// publisher key and checked before they're listed (one that fails isn't),
+  /// that aren't installed or are newer than the version installed. Install
+  /// with InstallLocalApp.bundled. Empty while `apps_available` is false.
+  @$pb.TagNumber(41)
+  $pb.PbList<BundledApp> get bundledApps => $_getList(40);
+
+  /// The ceilings a report type must stay within (SaveReportType), so the
+  /// editor clamps to them.
+  @$pb.TagNumber(42)
+  ReportTypeRules get reportTypeRules => $_getN(41);
+  @$pb.TagNumber(42)
+  set reportTypeRules(ReportTypeRules value) => $_setField(42, value);
+  @$pb.TagNumber(42)
+  $core.bool hasReportTypeRules() => $_has(41);
+  @$pb.TagNumber(42)
+  void clearReportTypeRules() => $_clearField(42);
+  @$pb.TagNumber(42)
+  ReportTypeRules ensureReportTypeRules() => $_ensure(41);
+}
+
+/// An app Claktory ships with this release (Workspace.bundled_apps).
+class BundledApp extends $pb.GeneratedMessage {
+  factory BundledApp({
+    $core.String? id,
+    $core.String? name,
+    $core.String? description,
+    $core.String? icon,
+    $core.String? version,
+    $core.String? publisher,
+    $core.String? installedVersion,
+  }) {
+    final result = BundledApp._();
+    if (id != null) result.id = id;
+    if (name != null) result.name = name;
+    if (description != null) result.description = description;
+    if (icon != null) result.icon = icon;
+    if (version != null) result.version = version;
+    if (publisher != null) result.publisher = publisher;
+    if (installedVersion != null) result.installedVersion = installedVersion;
+    return result;
+  }
+
+  BundledApp._();
+
+  factory BundledApp.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      BundledApp()..mergeFromBuffer(data, registry);
+  factory BundledApp.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      BundledApp()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'BundledApp',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: BundledApp.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..aOS(3, _omitFieldNames ? '' : 'description')
+    ..aOS(4, _omitFieldNames ? '' : 'icon')
+    ..aOS(5, _omitFieldNames ? '' : 'version')
+    ..aOS(6, _omitFieldNames ? '' : 'publisher')
+    ..aOS(7, _omitFieldNames ? '' : 'installedVersion')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  BundledApp clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  BundledApp copyWith(void Function(BundledApp) updates) =>
+      super.copyWith((message) => updates(message as BundledApp)) as BundledApp;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use BundledApp() / BundledApp.new instead')
+  static BundledApp create() => BundledApp._();
+  static $pb.GeneratedMessage $_createMessage() => BundledApp._();
+  @$core.override
+  BundledApp createEmptyInstance() => BundledApp._();
+  @$core.pragma('dart2js:noInline')
+  static BundledApp getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<BundledApp>(BundledApp.$_createMessage);
+  static BundledApp? _defaultInstance;
+
+  /// As its manifest says: "charts".
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get name => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set name($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearName() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get description => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set description($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasDescription() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearDescription() => $_clearField(3);
+
+  /// A Lucide icon name.
+  @$pb.TagNumber(4)
+  $core.String get icon => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set icon($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasIcon() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearIcon() => $_clearField(4);
+
+  /// The bundled file's version.
+  @$pb.TagNumber(5)
+  $core.String get version => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set version($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasVersion() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearVersion() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.String get publisher => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set publisher($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasPublisher() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearPublisher() => $_clearField(6);
+
+  /// The version installed, when an older one is: then it's an update.
+  /// Empty when it isn't installed.
+  @$pb.TagNumber(7)
+  $core.String get installedVersion => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set installedVersion($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasInstalledVersion() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearInstalledVersion() => $_clearField(7);
 }
 
 /// Checks for a newer release now, as Claktory does on its own every half
@@ -21692,6 +22324,7 @@ class Project extends $pb.GeneratedMessage {
     $core.String? path,
     $core.Iterable<ProjectFolder>? folders,
     $core.bool? archived,
+    PipeForward? reportForward,
   }) {
     final result = Project._();
     if (id != null) result.id = id;
@@ -21699,6 +22332,7 @@ class Project extends $pb.GeneratedMessage {
     if (path != null) result.path = path;
     if (folders != null) result.folders.addAll(folders);
     if (archived != null) result.archived = archived;
+    if (reportForward != null) result.reportForward = reportForward;
     return result;
   }
 
@@ -21721,6 +22355,8 @@ class Project extends $pb.GeneratedMessage {
     ..pPM<ProjectFolder>(4, _omitFieldNames ? '' : 'folders',
         subBuilder: ProjectFolder.$_createMessage)
     ..aOB(5, _omitFieldNames ? '' : 'archived')
+    ..aOM<PipeForward>(6, _omitFieldNames ? '' : 'reportForward',
+        subBuilder: PipeForward.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -21790,6 +22426,20 @@ class Project extends $pb.GeneratedMessage {
   $core.bool hasArchived() => $_has(4);
   @$pb.TagNumber(5)
   void clearArchived() => $_clearField(5);
+
+  /// Where its new pipes forward their reports, from the start: each new
+  /// pipe takes it as its own PipeForward (revision 1). Unset or an empty
+  /// recipient: no one. Its revision is 0.
+  @$pb.TagNumber(6)
+  PipeForward get reportForward => $_getN(5);
+  @$pb.TagNumber(6)
+  set reportForward(PipeForward value) => $_setField(6, value);
+  @$pb.TagNumber(6)
+  $core.bool hasReportForward() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearReportForward() => $_clearField(6);
+  @$pb.TagNumber(6)
+  PipeForward ensureReportForward() => $_ensure(5);
 }
 
 /// A folder that some of a project's agents work in. It only scopes where they
@@ -21936,6 +22586,9 @@ class Agent extends $pb.GeneratedMessage {
     $core.Iterable<WaitingItem>? waitingItems,
     $core.int? unreadCopies,
     $core.int? quietWaiting,
+    $core.bool? readsReports,
+    ContainedSpend? spend,
+    $core.int? heldAsks,
   }) {
     final result = Agent._();
     if (id != null) result.id = id;
@@ -21985,6 +22638,9 @@ class Agent extends $pb.GeneratedMessage {
     if (waitingItems != null) result.waitingItems.addAll(waitingItems);
     if (unreadCopies != null) result.unreadCopies = unreadCopies;
     if (quietWaiting != null) result.quietWaiting = quietWaiting;
+    if (readsReports != null) result.readsReports = readsReports;
+    if (spend != null) result.spend = spend;
+    if (heldAsks != null) result.heldAsks = heldAsks;
     return result;
   }
 
@@ -22061,6 +22717,10 @@ class Agent extends $pb.GeneratedMessage {
         fieldType: $pb.PbFieldType.OU3)
     ..aI(44, _omitFieldNames ? '' : 'quietWaiting',
         fieldType: $pb.PbFieldType.OU3)
+    ..aOB(45, _omitFieldNames ? '' : 'readsReports')
+    ..aOM<ContainedSpend>(46, _omitFieldNames ? '' : 'spend',
+        subBuilder: ContainedSpend.$_createMessage)
+    ..aI(47, _omitFieldNames ? '' : 'heldAsks', fieldType: $pb.PbFieldType.OU3)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -22537,8 +23197,14 @@ class Agent extends $pb.GeneratedMessage {
   void clearNotify() => $_clearField(41);
 
   /// Its checklist's items blocked on the person (BLOCKED_KIND_PERSON_DECISION
-  /// or _ACTION, #279), oldest first: Needs you lists those not covered by a
-  /// pending question (has_pending_ask false) without a card.
+  /// or _ACTION, #279) that a question waiting for the person names
+  /// (ask_person's item), oldest first: one for each such question, with
+  /// where its card is (card_agent_id, card_seq). Needs you shows each item
+  /// only as that card, with the item for context. An item blocked on the
+  /// person with no question naming it (never asked, dismissed, or to be
+  /// asked again later) isn't here: it's the agent's to settle, and shows
+  /// only on its checklist (ChecklistItem). Before this, every such item
+  /// was here, and has_pending_ask told which had a card.
   @$pb.TagNumber(42)
   $pb.PbList<WaitingItem> get waitingItems => $_getList(41);
 
@@ -22563,6 +23229,44 @@ class Agent extends $pb.GeneratedMessage {
   $core.bool hasQuietWaiting() => $_has(43);
   @$pb.TagNumber(44)
   void clearQuietWaiting() => $_clearField(44);
+
+  /// It reads reports (a curator, pipes-automation.md §3): it keeps its own
+  /// database, Ask and its folder, and has no commands, web, secrets or
+  /// messaging. Only the person lifts it (SetReportReader). The pipes that
+  /// feed it are those whose forward names it (Pipe.forward.recipient_id).
+  @$pb.TagNumber(45)
+  $core.bool get readsReports => $_getBF(44);
+  @$pb.TagNumber(45)
+  set readsReports($core.bool value) => $_setBool(44, value);
+  @$pb.TagNumber(45)
+  $core.bool hasReadsReports() => $_has(44);
+  @$pb.TagNumber(45)
+  void clearReadsReports() => $_clearField(45);
+
+  /// A liaison's model spending today (set only for an agent quarantined by
+  /// a pipe).
+  @$pb.TagNumber(46)
+  ContainedSpend get spend => $_getN(45);
+  @$pb.TagNumber(46)
+  set spend(ContainedSpend value) => $_setField(46, value);
+  @$pb.TagNumber(46)
+  $core.bool hasSpend() => $_has(45);
+  @$pb.TagNumber(46)
+  void clearSpend() => $_clearField(46);
+  @$pb.TagNumber(46)
+  ContainedSpend ensureSpend() => $_ensure(45);
+
+  /// ask_person questions Claktory refused today because this contained
+  /// agent (a liaison or a report reader) already asked 3 in the past hour:
+  /// the quiet count, with no card for each.
+  @$pb.TagNumber(47)
+  $core.int get heldAsks => $_getIZ(46);
+  @$pb.TagNumber(47)
+  set heldAsks($core.int value) => $_setUnsignedInt32(46, value);
+  @$pb.TagNumber(47)
+  $core.bool hasHeldAsks() => $_has(46);
+  @$pb.TagNumber(47)
+  void clearHeldAsks() => $_clearField(47);
 }
 
 /// A checklist item that waits on the person (Agent.waiting_items).
@@ -22576,6 +23280,8 @@ class WaitingItem extends $pb.GeneratedMessage {
     $core.bool? hasPendingAsk,
     $core.String? owner,
     $fixnum.Int64? dismissedMs,
+    $core.String? cardAgentId,
+    $fixnum.Int64? cardSeq,
   }) {
     final result = WaitingItem._();
     if (item != null) result.item = item;
@@ -22586,6 +23292,8 @@ class WaitingItem extends $pb.GeneratedMessage {
     if (hasPendingAsk != null) result.hasPendingAsk = hasPendingAsk;
     if (owner != null) result.owner = owner;
     if (dismissedMs != null) result.dismissedMs = dismissedMs;
+    if (cardAgentId != null) result.cardAgentId = cardAgentId;
+    if (cardSeq != null) result.cardSeq = cardSeq;
     return result;
   }
 
@@ -22611,6 +23319,10 @@ class WaitingItem extends $pb.GeneratedMessage {
     ..aOB(6, _omitFieldNames ? '' : 'hasPendingAsk')
     ..aOS(7, _omitFieldNames ? '' : 'owner')
     ..aInt64(8, _omitFieldNames ? '' : 'dismissedMs')
+    ..aOS(9, _omitFieldNames ? '' : 'cardAgentId')
+    ..a<$fixnum.Int64>(
+        10, _omitFieldNames ? '' : 'cardSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -22684,7 +23396,8 @@ class WaitingItem extends $pb.GeneratedMessage {
   @$pb.TagNumber(5)
   void clearReaskAtMs() => $_clearField(5);
 
-  /// A question about it is waiting for the person (its card shows instead).
+  /// A question about it is waiting for the person (its card shows
+  /// instead). Always true now: only such items are listed.
   @$pb.TagNumber(6)
   $core.bool get hasPendingAsk => $_getBF(5);
   @$pb.TagNumber(6)
@@ -22713,6 +23426,29 @@ class WaitingItem extends $pb.GeneratedMessage {
   $core.bool hasDismissedMs() => $_has(7);
   @$pb.TagNumber(8)
   void clearDismissedMs() => $_clearField(8);
+
+  /// Where the question about it is: the agent whose conversation has its
+  /// card (the item's owner, which asks about it), empty for the agent this
+  /// item is listed on; and the card's entry seq there, one of that agent's
+  /// waiting_seqs. 0 when that conversation isn't loaded: show no item on
+  /// any card then.
+  @$pb.TagNumber(9)
+  $core.String get cardAgentId => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set cardAgentId($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasCardAgentId() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearCardAgentId() => $_clearField(9);
+
+  @$pb.TagNumber(10)
+  $fixnum.Int64 get cardSeq => $_getI64(9);
+  @$pb.TagNumber(10)
+  set cardSeq($fixnum.Int64 value) => $_setInt64(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasCardSeq() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearCardSeq() => $_clearField(10);
 }
 
 class SlashCommand extends $pb.GeneratedMessage {
@@ -23163,6 +23899,417 @@ class EntryPage extends $pb.GeneratedMessage {
   void clearHasEarlier() => $_clearField(3);
 }
 
+/// Finds text in a conversation: an agent's or a chat's, since its last
+/// /clear and not only what the app holds, or a pipe's timeline. Answered
+/// with ConversationMatches, to the asker only; NOT_FOUND for an unknown
+/// agent, chat or pipe, INVALID_REQUEST unless exactly one of them is set.
+///
+/// Searched: the person's messages, the agent's replies, events (an agent's
+/// message's text; another event's summary, or its text without one) and the
+/// string values of tool calls' input (the command, path, query…), never
+/// their keys or name, then their output (the snippet is from the first of
+/// these the query occurs in). Not thinking, compaction summaries, notices or
+/// cards. In a pipe: each message's text and note.
+class SearchConversation extends $pb.GeneratedMessage {
+  factory SearchConversation({
+    $core.String? agentId,
+    $core.String? chatId,
+    $core.String? query,
+    $fixnum.Int64? beforeSeq,
+    $core.int? limit,
+    $core.String? pipeId,
+  }) {
+    final result = SearchConversation._();
+    if (agentId != null) result.agentId = agentId;
+    if (chatId != null) result.chatId = chatId;
+    if (query != null) result.query = query;
+    if (beforeSeq != null) result.beforeSeq = beforeSeq;
+    if (limit != null) result.limit = limit;
+    if (pipeId != null) result.pipeId = pipeId;
+    return result;
+  }
+
+  SearchConversation._();
+
+  factory SearchConversation.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SearchConversation()..mergeFromBuffer(data, registry);
+  factory SearchConversation.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SearchConversation()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SearchConversation',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SearchConversation.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..aOS(2, _omitFieldNames ? '' : 'chatId')
+    ..aOS(3, _omitFieldNames ? '' : 'query')
+    ..a<$fixnum.Int64>(
+        4, _omitFieldNames ? '' : 'beforeSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aI(5, _omitFieldNames ? '' : 'limit', fieldType: $pb.PbFieldType.OU3)
+    ..aOS(6, _omitFieldNames ? '' : 'pipeId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SearchConversation clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SearchConversation copyWith(void Function(SearchConversation) updates) =>
+      super.copyWith((message) => updates(message as SearchConversation))
+          as SearchConversation;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SearchConversation() / SearchConversation.new instead')
+  static SearchConversation create() => SearchConversation._();
+  static $pb.GeneratedMessage $_createMessage() => SearchConversation._();
+  @$core.override
+  SearchConversation createEmptyInstance() => SearchConversation._();
+  @$core.pragma('dart2js:noInline')
+  static SearchConversation getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SearchConversation>(
+          SearchConversation.$_createMessage);
+  static SearchConversation? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get chatId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set chatId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasChatId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearChatId() => $_clearField(2);
+
+  /// As typed: a plain substring, not a pattern, matched case-insensitively
+  /// with Unicode case folding. Empty or blank finds nothing; 500 characters
+  /// at most.
+  @$pb.TagNumber(3)
+  $core.String get query => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set query($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasQuery() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearQuery() => $_clearField(3);
+
+  /// Matches in entries before this seq (exclusive), to page back; unset for
+  /// the newest.
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get beforeSeq => $_getI64(3);
+  @$pb.TagNumber(4)
+  set beforeSeq($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasBeforeSeq() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearBeforeSeq() => $_clearField(4);
+
+  /// Matching entries per page: 0 for 100, 500 at most.
+  @$pb.TagNumber(5)
+  $core.int get limit => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set limit($core.int value) => $_setUnsignedInt32(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasLimit() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearLimit() => $_clearField(5);
+
+  /// A pipe: its own messages (PipeMessage seqs), not its liaison's
+  /// conversation.
+  @$pb.TagNumber(6)
+  $core.String get pipeId => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set pipeId($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasPipeId() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearPipeId() => $_clearField(6);
+}
+
+class ConversationMatches extends $pb.GeneratedMessage {
+  factory ConversationMatches({
+    $core.String? query,
+    $core.Iterable<ConversationMatch>? matches,
+    $core.bool? more,
+    $core.int? total,
+    $core.bool? totalCapped,
+    $core.String? agentId,
+    $core.String? chatId,
+    $core.String? pipeId,
+    $fixnum.Int64? beforeSeq,
+  }) {
+    final result = ConversationMatches._();
+    if (query != null) result.query = query;
+    if (matches != null) result.matches.addAll(matches);
+    if (more != null) result.more = more;
+    if (total != null) result.total = total;
+    if (totalCapped != null) result.totalCapped = totalCapped;
+    if (agentId != null) result.agentId = agentId;
+    if (chatId != null) result.chatId = chatId;
+    if (pipeId != null) result.pipeId = pipeId;
+    if (beforeSeq != null) result.beforeSeq = beforeSeq;
+    return result;
+  }
+
+  ConversationMatches._();
+
+  factory ConversationMatches.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ConversationMatches()..mergeFromBuffer(data, registry);
+  factory ConversationMatches.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ConversationMatches()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ConversationMatches',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ConversationMatches.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'query')
+    ..pPM<ConversationMatch>(2, _omitFieldNames ? '' : 'matches',
+        subBuilder: ConversationMatch.$_createMessage)
+    ..aOB(3, _omitFieldNames ? '' : 'more')
+    ..aI(4, _omitFieldNames ? '' : 'total', fieldType: $pb.PbFieldType.OU3)
+    ..aOB(5, _omitFieldNames ? '' : 'totalCapped')
+    ..aOS(6, _omitFieldNames ? '' : 'agentId')
+    ..aOS(7, _omitFieldNames ? '' : 'chatId')
+    ..aOS(8, _omitFieldNames ? '' : 'pipeId')
+    ..a<$fixnum.Int64>(
+        9, _omitFieldNames ? '' : 'beforeSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ConversationMatches clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ConversationMatches copyWith(void Function(ConversationMatches) updates) =>
+      super.copyWith((message) => updates(message as ConversationMatches))
+          as ConversationMatches;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core
+      .Deprecated('Use ConversationMatches() / ConversationMatches.new instead')
+  static ConversationMatches create() => ConversationMatches._();
+  static $pb.GeneratedMessage $_createMessage() => ConversationMatches._();
+  @$core.override
+  ConversationMatches createEmptyInstance() => ConversationMatches._();
+  @$core.pragma('dart2js:noInline')
+  static ConversationMatches getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ConversationMatches>(
+          ConversationMatches.$_createMessage);
+  static ConversationMatches? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get query => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set query($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasQuery() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearQuery() => $_clearField(1);
+
+  /// Newest first, at most the request's limit.
+  @$pb.TagNumber(2)
+  $pb.PbList<ConversationMatch> get matches => $_getList(1);
+
+  /// Older matches remain: ask again with before_seq set to the last
+  /// match's seq.
+  @$pb.TagNumber(3)
+  $core.bool get more => $_getBF(2);
+  @$pb.TagNumber(3)
+  set more($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasMore() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearMore() => $_clearField(3);
+
+  /// Occurrences of the query in the whole conversation, on the first page
+  /// only (before_seq unset), else 0; at most 1000, with total_capped set
+  /// when there are more.
+  @$pb.TagNumber(4)
+  $core.int get total => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set total($core.int value) => $_setUnsignedInt32(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasTotal() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearTotal() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.bool get totalCapped => $_getBF(4);
+  @$pb.TagNumber(5)
+  set totalCapped($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasTotalCapped() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearTotalCapped() => $_clearField(5);
+
+  /// The request's, so an answer to an earlier search can be told apart.
+  @$pb.TagNumber(6)
+  $core.String get agentId => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set agentId($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasAgentId() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearAgentId() => $_clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.String get chatId => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set chatId($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasChatId() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearChatId() => $_clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.String get pipeId => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set pipeId($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasPipeId() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearPipeId() => $_clearField(8);
+
+  @$pb.TagNumber(9)
+  $fixnum.Int64 get beforeSeq => $_getI64(8);
+  @$pb.TagNumber(9)
+  set beforeSeq($fixnum.Int64 value) => $_setInt64(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasBeforeSeq() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearBeforeSeq() => $_clearField(9);
+}
+
+/// An entry (or a pipe message) the query occurs in.
+class ConversationMatch extends $pb.GeneratedMessage {
+  factory ConversationMatch({
+    $fixnum.Int64? seq,
+    $core.String? snippet,
+    $core.Iterable<$core.int>? starts,
+    $core.Iterable<$core.int>? lengths,
+    $core.int? hits,
+    $fixnum.Int64? timestampMs,
+  }) {
+    final result = ConversationMatch._();
+    if (seq != null) result.seq = seq;
+    if (snippet != null) result.snippet = snippet;
+    if (starts != null) result.starts.addAll(starts);
+    if (lengths != null) result.lengths.addAll(lengths);
+    if (hits != null) result.hits = hits;
+    if (timestampMs != null) result.timestampMs = timestampMs;
+    return result;
+  }
+
+  ConversationMatch._();
+
+  factory ConversationMatch.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ConversationMatch()..mergeFromBuffer(data, registry);
+  factory ConversationMatch.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ConversationMatch()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ConversationMatch',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ConversationMatch.$_createMessage)
+    ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'seq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOS(2, _omitFieldNames ? '' : 'snippet')
+    ..p<$core.int>(3, _omitFieldNames ? '' : 'starts', $pb.PbFieldType.KU3)
+    ..p<$core.int>(4, _omitFieldNames ? '' : 'lengths', $pb.PbFieldType.KU3)
+    ..aI(5, _omitFieldNames ? '' : 'hits', fieldType: $pb.PbFieldType.OU3)
+    ..aInt64(6, _omitFieldNames ? '' : 'timestampMs')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ConversationMatch clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ConversationMatch copyWith(void Function(ConversationMatch) updates) =>
+      super.copyWith((message) => updates(message as ConversationMatch))
+          as ConversationMatch;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ConversationMatch() / ConversationMatch.new instead')
+  static ConversationMatch create() => ConversationMatch._();
+  static $pb.GeneratedMessage $_createMessage() => ConversationMatch._();
+  @$core.override
+  ConversationMatch createEmptyInstance() => ConversationMatch._();
+  @$core.pragma('dart2js:noInline')
+  static ConversationMatch getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ConversationMatch>(
+          ConversationMatch.$_createMessage);
+  static ConversationMatch? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get seq => $_getI64(0);
+  @$pb.TagNumber(1)
+  set seq($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasSeq() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearSeq() => $_clearField(1);
+
+  /// About 80 characters of its text on one line, around its first
+  /// occurrence (about 25 characters in): runs of whitespace are one space,
+  /// and "…" marks where it's cut.
+  @$pb.TagNumber(2)
+  $core.String get snippet => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set snippet($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSnippet() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSnippet() => $_clearField(2);
+
+  /// Each occurrence inside `snippet`: where it starts and how long it is, in
+  /// UTF-16 code units.
+  @$pb.TagNumber(3)
+  $pb.PbList<$core.int> get starts => $_getList(2);
+
+  @$pb.TagNumber(4)
+  $pb.PbList<$core.int> get lengths => $_getList(3);
+
+  /// Occurrences in the whole entry.
+  @$pb.TagNumber(5)
+  $core.int get hits => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set hits($core.int value) => $_setUnsignedInt32(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasHits() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearHits() => $_clearField(5);
+
+  /// The entry's (or the pipe message's) time, ms since 1970: to merge a
+  /// pipe's matches with its liaison's.
+  @$pb.TagNumber(6)
+  $fixnum.Int64 get timestampMs => $_getI64(5);
+  @$pb.TagNumber(6)
+  set timestampMs($fixnum.Int64 value) => $_setInt64(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasTimestampMs() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearTimestampMs() => $_clearField(6);
+}
+
 /// What waits for the selected agent, not yet taken by it. Sent on connect,
 /// when an agent is selected, and whenever its queue changes; empty when
 /// nothing waits. A message the agent takes leaves the list and arrives in
@@ -23246,6 +24393,7 @@ class QueuedMessage extends $pb.GeneratedMessage {
     $core.Iterable<Attachment>? attachments,
     Transcription? transcription,
     $core.bool? quiet,
+    ChecklistItemRef? checklistItem,
   }) {
     final result = QueuedMessage._();
     if (id != null) result.id = id;
@@ -23260,6 +24408,7 @@ class QueuedMessage extends $pb.GeneratedMessage {
     if (attachments != null) result.attachments.addAll(attachments);
     if (transcription != null) result.transcription = transcription;
     if (quiet != null) result.quiet = quiet;
+    if (checklistItem != null) result.checklistItem = checklistItem;
     return result;
   }
 
@@ -23291,6 +24440,8 @@ class QueuedMessage extends $pb.GeneratedMessage {
     ..aOM<Transcription>(11, _omitFieldNames ? '' : 'transcription',
         subBuilder: Transcription.$_createMessage)
     ..aOB(12, _omitFieldNames ? '' : 'quiet')
+    ..aOM<ChecklistItemRef>(13, _omitFieldNames ? '' : 'checklistItem',
+        subBuilder: ChecklistItemRef.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -23437,6 +24588,18 @@ class QueuedMessage extends $pb.GeneratedMessage {
   $core.bool hasQuiet() => $_has(11);
   @$pb.TagNumber(12)
   void clearQuiet() => $_clearField(12);
+
+  /// The person's reply on a checklist item (see UserText.checklist_item).
+  @$pb.TagNumber(13)
+  ChecklistItemRef get checklistItem => $_getN(12);
+  @$pb.TagNumber(13)
+  set checklistItem(ChecklistItemRef value) => $_setField(13, value);
+  @$pb.TagNumber(13)
+  $core.bool hasChecklistItem() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearChecklistItem() => $_clearField(13);
+  @$pb.TagNumber(13)
+  ChecklistItemRef ensureChecklistItem() => $_ensure(12);
 }
 
 /// Adds an entry or replaces the one with the same `seq`.
@@ -25553,6 +26716,7 @@ class UserText extends $pb.GeneratedMessage {
     $core.String? clientId,
     $core.Iterable<Attachment>? attachments,
     Transcription? voice,
+    ChecklistItemRef? checklistItem,
   }) {
     final result = UserText._();
     if (text != null) result.text = text;
@@ -25560,6 +26724,7 @@ class UserText extends $pb.GeneratedMessage {
     if (clientId != null) result.clientId = clientId;
     if (attachments != null) result.attachments.addAll(attachments);
     if (voice != null) result.voice = voice;
+    if (checklistItem != null) result.checklistItem = checklistItem;
     return result;
   }
 
@@ -25584,6 +26749,8 @@ class UserText extends $pb.GeneratedMessage {
         subBuilder: Attachment.$_createMessage)
     ..aOM<Transcription>(5, _omitFieldNames ? '' : 'voice',
         subBuilder: Transcription.$_createMessage)
+    ..aOM<ChecklistItemRef>(6, _omitFieldNames ? '' : 'checklistItem',
+        subBuilder: ChecklistItemRef.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -25656,6 +26823,19 @@ class UserText extends $pb.GeneratedMessage {
   void clearVoice() => $_clearField(5);
   @$pb.TagNumber(5)
   Transcription ensureVoice() => $_ensure(4);
+
+  /// A reply on a checklist item (SendMessage.checklist_item); unset for any
+  /// other message.
+  @$pb.TagNumber(6)
+  ChecklistItemRef get checklistItem => $_getN(5);
+  @$pb.TagNumber(6)
+  set checklistItem(ChecklistItemRef value) => $_setField(6, value);
+  @$pb.TagNumber(6)
+  $core.bool hasChecklistItem() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearChecklistItem() => $_clearField(6);
+  @$pb.TagNumber(6)
+  ChecklistItemRef ensureChecklistItem() => $_ensure(5);
 }
 
 /// A voice message's transcription.
@@ -26129,6 +27309,194 @@ class DiscardVoiceMessage extends $pb.GeneratedMessage {
   $core.bool hasMessageId() => $_has(1);
   @$pb.TagNumber(2)
   void clearMessageId() => $_clearField(2);
+}
+
+/// Transcribes a dictation (an UPLOAD_PURPOSE_DICTATION upload, finished) for
+/// the person to edit and send as text: nothing is delivered to any agent,
+/// and neither the recording nor its words are kept. Answered with Ack at
+/// once (an Error only without `request_id` or `upload_id`); every outcome,
+/// refusals too, comes as AudioTranscribed. Ahead of voice messages waiting
+/// to be transcribed. Never starts the model's download: the app asks the
+/// person and sends InstallSpeechModel first, as for voice messages.
+class TranscribeAudio extends $pb.GeneratedMessage {
+  factory TranscribeAudio({
+    $core.String? requestId,
+    $core.String? uploadId,
+  }) {
+    final result = TranscribeAudio._();
+    if (requestId != null) result.requestId = requestId;
+    if (uploadId != null) result.uploadId = uploadId;
+    return result;
+  }
+
+  TranscribeAudio._();
+
+  factory TranscribeAudio.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      TranscribeAudio()..mergeFromBuffer(data, registry);
+  factory TranscribeAudio.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      TranscribeAudio()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'TranscribeAudio',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: TranscribeAudio.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'requestId')
+    ..aOS(2, _omitFieldNames ? '' : 'uploadId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  TranscribeAudio clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  TranscribeAudio copyWith(void Function(TranscribeAudio) updates) =>
+      super.copyWith((message) => updates(message as TranscribeAudio))
+          as TranscribeAudio;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use TranscribeAudio() / TranscribeAudio.new instead')
+  static TranscribeAudio create() => TranscribeAudio._();
+  static $pb.GeneratedMessage $_createMessage() => TranscribeAudio._();
+  @$core.override
+  TranscribeAudio createEmptyInstance() => TranscribeAudio._();
+  @$core.pragma('dart2js:noInline')
+  static TranscribeAudio getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<TranscribeAudio>(
+          TranscribeAudio.$_createMessage);
+  static TranscribeAudio? _defaultInstance;
+
+  /// Made up by the app; AudioTranscribed carries it.
+  @$pb.TagNumber(1)
+  $core.String get requestId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set requestId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasRequestId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearRequestId() => $_clearField(1);
+
+  /// The dictation's StartUpload.upload_id. The upload is deleted once it's
+  /// transcribed or refused.
+  @$pb.TagNumber(2)
+  $core.String get uploadId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set uploadId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasUploadId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearUploadId() => $_clearField(2);
+}
+
+/// What a TranscribeAudio heard, sent only to the connection that asked. A
+/// connection that dropped meanwhile never gets it (the recording is gone:
+/// upload it again).
+class AudioTranscribed extends $pb.GeneratedMessage {
+  factory AudioTranscribed({
+    $core.String? requestId,
+    $core.String? text,
+    $core.String? error,
+    $fixnum.Int64? durationMs,
+  }) {
+    final result = AudioTranscribed._();
+    if (requestId != null) result.requestId = requestId;
+    if (text != null) result.text = text;
+    if (error != null) result.error = error;
+    if (durationMs != null) result.durationMs = durationMs;
+    return result;
+  }
+
+  AudioTranscribed._();
+
+  factory AudioTranscribed.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AudioTranscribed()..mergeFromBuffer(data, registry);
+  factory AudioTranscribed.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AudioTranscribed()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AudioTranscribed',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AudioTranscribed.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'requestId')
+    ..aOS(2, _omitFieldNames ? '' : 'text')
+    ..aOS(3, _omitFieldNames ? '' : 'error')
+    ..a<$fixnum.Int64>(
+        4, _omitFieldNames ? '' : 'durationMs', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AudioTranscribed clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AudioTranscribed copyWith(void Function(AudioTranscribed) updates) =>
+      super.copyWith((message) => updates(message as AudioTranscribed))
+          as AudioTranscribed;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AudioTranscribed() / AudioTranscribed.new instead')
+  static AudioTranscribed create() => AudioTranscribed._();
+  static $pb.GeneratedMessage $_createMessage() => AudioTranscribed._();
+  @$core.override
+  AudioTranscribed createEmptyInstance() => AudioTranscribed._();
+  @$core.pragma('dart2js:noInline')
+  static AudioTranscribed getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AudioTranscribed>(
+          AudioTranscribed.$_createMessage);
+  static AudioTranscribed? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get requestId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set requestId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasRequestId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearRequestId() => $_clearField(1);
+
+  /// The words heard; empty when `error` is set (and possibly when it isn't).
+  @$pb.TagNumber(2)
+  $core.String get text => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set text($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasText() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearText() => $_clearField(2);
+
+  /// Empty when it worked; otherwise why not:
+  ///   no_model: the speech model is ABSENT or FAILED (Workspace.speech_model),
+  ///     or was removed while it waited;
+  ///   unsupported: it's UNSUPPORTED;
+  ///   too_long: the recording is over 10 minutes;
+  ///   no_speech: no speech was heard in it (silence); an app that doesn't
+  ///     know this code shows it as failed;
+  ///   failed: anything else (an upload that isn't there or expired, a
+  ///     recording that can't be read, recognition failing).
+  @$pb.TagNumber(3)
+  $core.String get error => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set error($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasError() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearError() => $_clearField(3);
+
+  /// How long the recording is, once it was read; 0 otherwise.
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get durationMs => $_getI64(3);
+  @$pb.TagNumber(4)
+  set durationMs($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasDurationMs() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearDurationMs() => $_clearField(4);
 }
 
 /// How much of an upload the backend has, in bytes: where the next
@@ -29044,6 +30412,9 @@ class DecideSecretRequest extends $pb.GeneratedMessage {
     $core.bool? asIs,
     $core.bool? approveOnly,
     $core.bool? askEachTime,
+    $core.int? passwordLength,
+    $core.bool? deleteOriginals,
+    $core.bool? grantToAsker,
   }) {
     final result = DecideSecretRequest._();
     if (agentId != null) result.agentId = agentId;
@@ -29059,6 +30430,9 @@ class DecideSecretRequest extends $pb.GeneratedMessage {
     if (asIs != null) result.asIs = asIs;
     if (approveOnly != null) result.approveOnly = approveOnly;
     if (askEachTime != null) result.askEachTime = askEachTime;
+    if (passwordLength != null) result.passwordLength = passwordLength;
+    if (deleteOriginals != null) result.deleteOriginals = deleteOriginals;
+    if (grantToAsker != null) result.grantToAsker = grantToAsker;
     return result;
   }
 
@@ -29094,6 +30468,10 @@ class DecideSecretRequest extends $pb.GeneratedMessage {
     ..aOB(11, _omitFieldNames ? '' : 'asIs')
     ..aOB(12, _omitFieldNames ? '' : 'approveOnly')
     ..aOB(13, _omitFieldNames ? '' : 'askEachTime')
+    ..aI(14, _omitFieldNames ? '' : 'passwordLength',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aOB(15, _omitFieldNames ? '' : 'deleteOriginals')
+    ..aOB(16, _omitFieldNames ? '' : 'grantToAsker')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -29248,6 +30626,40 @@ class DecideSecretRequest extends $pb.GeneratedMessage {
   $core.bool hasAskEachTime() => $_has(12);
   @$pb.TagNumber(13)
   void clearAskEachTime() => $_clearField(13);
+
+  /// A password to generate: the length the person chose, between its
+  /// PasswordSpec's shortest and longest; 0 for the length asked.
+  @$pb.TagNumber(14)
+  $core.int get passwordLength => $_getIZ(13);
+  @$pb.TagNumber(14)
+  set passwordLength($core.int value) => $_setUnsignedInt32(13, value);
+  @$pb.TagNumber(14)
+  $core.bool hasPasswordLength() => $_has(13);
+  @$pb.TagNumber(14)
+  void clearPasswordLength() => $_clearField(14);
+
+  /// An import (SecretRequest.imports): delete each original file once it's
+  /// in the vault, if it's still the same file. A plain delete, not a
+  /// secure erase. Off unless the person turns it on.
+  @$pb.TagNumber(15)
+  $core.bool get deleteOriginals => $_getBF(14);
+  @$pb.TagNumber(15)
+  set deleteOriginals($core.bool value) => $_setBool(14, value);
+  @$pb.TagNumber(15)
+  $core.bool hasDeleteOriginals() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearDeleteOriginals() => $_clearField(15);
+
+  /// An import: give the new secret to the agent that asked. Off (the
+  /// default) gives it to no one.
+  @$pb.TagNumber(16)
+  $core.bool get grantToAsker => $_getBF(15);
+  @$pb.TagNumber(16)
+  set grantToAsker($core.bool value) => $_setBool(15, value);
+  @$pb.TagNumber(16)
+  $core.bool hasGrantToAsker() => $_has(15);
+  @$pb.TagNumber(16)
+  void clearGrantToAsker() => $_clearField(16);
 }
 
 /// Who used a secret and when, newest first; `id` empty for every secret.
@@ -29937,7 +31349,9 @@ class SecretUse extends $pb.GeneratedMessage {
   void clearTimeMs() => $_clearField(3);
 
   /// "use" (an agent's command got it), "reveal" (the person saw it in the
-  /// app), "grant", "revoke".
+  /// app), "grant", "revoke", "import" (the vault read it from files on this
+  /// computer: detail says which, their sizes and fingerprints, whom it was
+  /// given to and whether the originals were deleted; agent is who asked).
   @$pb.TagNumber(4)
   $core.String get kind => $_getSZ(3);
   @$pb.TagNumber(4)
@@ -30007,6 +31421,9 @@ class SecretRequest extends $pb.GeneratedMessage {
     $core.String? generate,
     $core.bool? grantToNobody,
     $core.String? publicKey,
+    PasswordSpec? password,
+    $core.Iterable<SecretImport>? imports,
+    $core.bool? askerReadPipes,
   }) {
     final result = SecretRequest._();
     if (id != null) result.id = id;
@@ -30027,6 +31444,9 @@ class SecretRequest extends $pb.GeneratedMessage {
     if (generate != null) result.generate = generate;
     if (grantToNobody != null) result.grantToNobody = grantToNobody;
     if (publicKey != null) result.publicKey = publicKey;
+    if (password != null) result.password = password;
+    if (imports != null) result.imports.addAll(imports);
+    if (askerReadPipes != null) result.askerReadPipes = askerReadPipes;
     return result;
   }
 
@@ -30063,6 +31483,11 @@ class SecretRequest extends $pb.GeneratedMessage {
     ..aOS(16, _omitFieldNames ? '' : 'generate')
     ..aOB(17, _omitFieldNames ? '' : 'grantToNobody')
     ..aOS(18, _omitFieldNames ? '' : 'publicKey')
+    ..aOM<PasswordSpec>(19, _omitFieldNames ? '' : 'password',
+        subBuilder: PasswordSpec.$_createMessage)
+    ..pPM<SecretImport>(20, _omitFieldNames ? '' : 'imports',
+        subBuilder: SecretImport.$_createMessage)
+    ..aOB(21, _omitFieldNames ? '' : 'askerReadPipes')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -30250,7 +31675,8 @@ class SecretRequest extends $pb.GeneratedMessage {
   void clearCollecting() => $_clearField(15);
 
   /// A key the agent asks the vault to generate (#252), by type:
-  /// "ssh-ed25519". Empty for a request for a secret someone has. The card
+  /// "ssh-ed25519", or "password" (what it's made of in `password`; its one
+  /// variable holds the password itself, not a file unless asked). Empty for a request for a secret someone has. The card
   /// offers Generate, never a values form or the admin agent; the vault
   /// makes the keypair itself and seals the private half as the secret's
   /// one file variable (new_secret.variables), so it never exists anywhere
@@ -30287,6 +31713,416 @@ class SecretRequest extends $pb.GeneratedMessage {
   $core.bool hasPublicKey() => $_has(17);
   @$pb.TagNumber(18)
   void clearPublicKey() => $_clearField(18);
+
+  /// generate "password": what the vault will make (or made), as Claktory
+  /// read and checked it; never the password itself.
+  @$pb.TagNumber(19)
+  PasswordSpec get password => $_getN(18);
+  @$pb.TagNumber(19)
+  set password(PasswordSpec value) => $_setField(19, value);
+  @$pb.TagNumber(19)
+  $core.bool hasPassword() => $_has(18);
+  @$pb.TagNumber(19)
+  void clearPassword() => $_clearField(19);
+  @$pb.TagNumber(19)
+  PasswordSpec ensurePassword() => $_ensure(18);
+
+  /// Files on this computer the agent asks the vault to import, each into
+  /// one file variable of a new secret: what Claktory read of each when
+  /// asked, never its contents. On approval factoryd reads each file
+  /// itself, checks it's the same file, unchanged, and seals its bytes
+  /// straight into the vault (binary files too). Empty for other requests.
+  @$pb.TagNumber(20)
+  $pb.PbList<SecretImport> get imports => $_getList(19);
+
+  /// The asking agent had read a pipe, a direct message or a web page when
+  /// it asked (as AppGrantProposal.grantee_read_pipes): what it asks for may
+  /// come from someone else.
+  @$pb.TagNumber(21)
+  $core.bool get askerReadPipes => $_getBF(20);
+  @$pb.TagNumber(21)
+  set askerReadPipes($core.bool value) => $_setBool(20, value);
+  @$pb.TagNumber(21)
+  $core.bool hasAskerReadPipes() => $_has(20);
+  @$pb.TagNumber(21)
+  void clearAskerReadPipes() => $_clearField(21);
+}
+
+/// A file an agent asks the vault to import (SecretRequest.imports). Holds
+/// no contents.
+class SecretImport extends $pb.GeneratedMessage {
+  factory SecretImport({
+    $core.String? variable,
+    $core.String? path,
+    $fixnum.Int64? size,
+    $fixnum.Int64? modifiedMs,
+    $core.String? fingerprint,
+    $core.String? sensitive,
+    $core.String? problem,
+  }) {
+    final result = SecretImport._();
+    if (variable != null) result.variable = variable;
+    if (path != null) result.path = path;
+    if (size != null) result.size = size;
+    if (modifiedMs != null) result.modifiedMs = modifiedMs;
+    if (fingerprint != null) result.fingerprint = fingerprint;
+    if (sensitive != null) result.sensitive = sensitive;
+    if (problem != null) result.problem = problem;
+    return result;
+  }
+
+  SecretImport._();
+
+  factory SecretImport.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretImport()..mergeFromBuffer(data, registry);
+  factory SecretImport.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SecretImport()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SecretImport',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SecretImport.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'variable')
+    ..aOS(2, _omitFieldNames ? '' : 'path')
+    ..aInt64(3, _omitFieldNames ? '' : 'size')
+    ..aInt64(4, _omitFieldNames ? '' : 'modifiedMs')
+    ..aOS(5, _omitFieldNames ? '' : 'fingerprint')
+    ..aOS(6, _omitFieldNames ? '' : 'sensitive')
+    ..aOS(7, _omitFieldNames ? '' : 'problem')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretImport clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SecretImport copyWith(void Function(SecretImport) updates) =>
+      super.copyWith((message) => updates(message as SecretImport))
+          as SecretImport;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SecretImport() / SecretImport.new instead')
+  static SecretImport create() => SecretImport._();
+  static $pb.GeneratedMessage $_createMessage() => SecretImport._();
+  @$core.override
+  SecretImport createEmptyInstance() => SecretImport._();
+  @$core.pragma('dart2js:noInline')
+  static SecretImport getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SecretImport>(
+          SecretImport.$_createMessage);
+  static SecretImport? _defaultInstance;
+
+  /// The file variable it goes in.
+  @$pb.TagNumber(1)
+  $core.String get variable => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set variable($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasVariable() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearVariable() => $_clearField(1);
+
+  /// Its canonical absolute path, exactly as Claktory resolved it, not
+  /// escaped: the card shows the home folder as ~/ and control, bidi and
+  /// zero-width characters as visible \u{…}. Claktory refuses a path
+  /// through a symbolic link, so this is the file itself.
+  @$pb.TagNumber(2)
+  $core.String get path => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set path($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasPath() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearPath() => $_clearField(2);
+
+  /// In bytes.
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get size => $_getI64(2);
+  @$pb.TagNumber(3)
+  set size($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasSize() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSize() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get modifiedMs => $_getI64(3);
+  @$pb.TagNumber(4)
+  set modifiedMs($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasModifiedMs() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearModifiedMs() => $_clearField(4);
+
+  /// A short fingerprint of its contents, keyed with the vault's own key (so
+  /// it can't be used to guess them): "3f9a 21c0 7d44".
+  @$pb.TagNumber(5)
+  $core.String get fingerprint => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set fingerprint($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasFingerprint() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearFingerprint() => $_clearField(5);
+
+  /// Where it is, when that's somewhere sensitive: "ssh", "gnupg", "aws",
+  /// "gcloud", "kube", "docker", "keychains", "browser"; empty otherwise.
+  @$pb.TagNumber(6)
+  $core.String get sensitive => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set sensitive($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasSensitive() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearSensitive() => $_clearField(6);
+
+  /// Why it can't be imported now (gone, or changed since it was asked
+  /// for), in Claktory's words; empty when it can.
+  @$pb.TagNumber(7)
+  $core.String get problem => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set problem($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasProblem() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearProblem() => $_clearField(7);
+}
+
+/// A password the vault generates (SecretRequest.generate "password"): what
+/// it's drawn from and how long it is. Holds no secret. The vault draws each
+/// character uniformly from the alphabet with the system's random numbers;
+/// with require_each, it draws whole passwords again until every class is
+/// in. Claktory refuses anything weaker at request time: at least 16
+/// characters and 80 bits, or, when the service's maximum is lower, at least
+/// 12 characters and 72 bits; at most 256 characters.
+class PasswordSpec extends $pb.GeneratedMessage {
+  factory PasswordSpec({
+    $core.int? length,
+    $core.bool? lowercase,
+    $core.bool? uppercase,
+    $core.bool? digits,
+    $core.bool? symbols,
+    $core.String? allowed,
+    $core.bool? avoidSimilar,
+    $core.bool? requireEach,
+    $core.int? maxLength,
+    $core.int? alphabetSize,
+    $core.double? bits,
+    $core.int? shortest,
+    $core.int? longest,
+    $core.double? bitsPerCharacter,
+  }) {
+    final result = PasswordSpec._();
+    if (length != null) result.length = length;
+    if (lowercase != null) result.lowercase = lowercase;
+    if (uppercase != null) result.uppercase = uppercase;
+    if (digits != null) result.digits = digits;
+    if (symbols != null) result.symbols = symbols;
+    if (allowed != null) result.allowed = allowed;
+    if (avoidSimilar != null) result.avoidSimilar = avoidSimilar;
+    if (requireEach != null) result.requireEach = requireEach;
+    if (maxLength != null) result.maxLength = maxLength;
+    if (alphabetSize != null) result.alphabetSize = alphabetSize;
+    if (bits != null) result.bits = bits;
+    if (shortest != null) result.shortest = shortest;
+    if (longest != null) result.longest = longest;
+    if (bitsPerCharacter != null) result.bitsPerCharacter = bitsPerCharacter;
+    return result;
+  }
+
+  PasswordSpec._();
+
+  factory PasswordSpec.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PasswordSpec()..mergeFromBuffer(data, registry);
+  factory PasswordSpec.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PasswordSpec()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PasswordSpec',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PasswordSpec.$_createMessage)
+    ..aI(1, _omitFieldNames ? '' : 'length', fieldType: $pb.PbFieldType.OU3)
+    ..aOB(2, _omitFieldNames ? '' : 'lowercase')
+    ..aOB(3, _omitFieldNames ? '' : 'uppercase')
+    ..aOB(4, _omitFieldNames ? '' : 'digits')
+    ..aOB(5, _omitFieldNames ? '' : 'symbols')
+    ..aOS(6, _omitFieldNames ? '' : 'allowed')
+    ..aOB(7, _omitFieldNames ? '' : 'avoidSimilar')
+    ..aOB(8, _omitFieldNames ? '' : 'requireEach')
+    ..aI(9, _omitFieldNames ? '' : 'maxLength', fieldType: $pb.PbFieldType.OU3)
+    ..aI(10, _omitFieldNames ? '' : 'alphabetSize',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aD(11, _omitFieldNames ? '' : 'bits')
+    ..aI(12, _omitFieldNames ? '' : 'shortest', fieldType: $pb.PbFieldType.OU3)
+    ..aI(13, _omitFieldNames ? '' : 'longest', fieldType: $pb.PbFieldType.OU3)
+    ..aD(14, _omitFieldNames ? '' : 'bitsPerCharacter')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PasswordSpec clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PasswordSpec copyWith(void Function(PasswordSpec) updates) =>
+      super.copyWith((message) => updates(message as PasswordSpec))
+          as PasswordSpec;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use PasswordSpec() / PasswordSpec.new instead')
+  static PasswordSpec create() => PasswordSpec._();
+  static $pb.GeneratedMessage $_createMessage() => PasswordSpec._();
+  @$core.override
+  PasswordSpec createEmptyInstance() => PasswordSpec._();
+  @$core.pragma('dart2js:noInline')
+  static PasswordSpec getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PasswordSpec>(
+          PasswordSpec.$_createMessage);
+  static PasswordSpec? _defaultInstance;
+
+  /// Characters, as the request asked or the person chose (DecideSecretRequest.password_length).
+  @$pb.TagNumber(1)
+  $core.int get length => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set length($core.int value) => $_setUnsignedInt32(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasLength() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearLength() => $_clearField(1);
+
+  /// The classes it's drawn from, when `allowed` is empty: lowercase and
+  /// uppercase letters, digits, and symbols (!#$%&()*+,-./:;<=>?@[]^_{|}~:
+  /// printable ASCII without quotes, the backquote, the backslash or space).
+  @$pb.TagNumber(2)
+  $core.bool get lowercase => $_getBF(1);
+  @$pb.TagNumber(2)
+  set lowercase($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasLowercase() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearLowercase() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.bool get uppercase => $_getBF(2);
+  @$pb.TagNumber(3)
+  set uppercase($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasUppercase() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearUppercase() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.bool get digits => $_getBF(3);
+  @$pb.TagNumber(4)
+  set digits($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasDigits() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearDigits() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.bool get symbols => $_getBF(4);
+  @$pb.TagNumber(5)
+  set symbols($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasSymbols() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearSymbols() => $_clearField(5);
+
+  /// An explicit set to draw from instead (printable ASCII, no space), for a
+  /// service that refuses some characters.
+  @$pb.TagNumber(6)
+  $core.String get allowed => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set allowed($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasAllowed() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearAllowed() => $_clearField(6);
+
+  /// Leaves out characters that look alike: 0 O o 1 l I |.
+  @$pb.TagNumber(7)
+  $core.bool get avoidSimilar => $_getBF(6);
+  @$pb.TagNumber(7)
+  set avoidSimilar($core.bool value) => $_setBool(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasAvoidSimilar() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearAvoidSimilar() => $_clearField(7);
+
+  /// At least one character of each class asked for (or of each class
+  /// `allowed` holds).
+  @$pb.TagNumber(8)
+  $core.bool get requireEach => $_getBF(7);
+  @$pb.TagNumber(8)
+  set requireEach($core.bool value) => $_setBool(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasRequireEach() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearRequireEach() => $_clearField(8);
+
+  /// The most characters the service accepts; 0 when it didn't say.
+  @$pb.TagNumber(9)
+  $core.int get maxLength => $_getIZ(8);
+  @$pb.TagNumber(9)
+  set maxLength($core.int value) => $_setUnsignedInt32(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasMaxLength() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearMaxLength() => $_clearField(9);
+
+  /// Computed by Claktory: how many characters it's drawn from, its
+  /// strength (length × log2 alphabet_size), the lengths the person may
+  /// choose (shortest–longest), and the bits each character adds.
+  @$pb.TagNumber(10)
+  $core.int get alphabetSize => $_getIZ(9);
+  @$pb.TagNumber(10)
+  set alphabetSize($core.int value) => $_setUnsignedInt32(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasAlphabetSize() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearAlphabetSize() => $_clearField(10);
+
+  @$pb.TagNumber(11)
+  $core.double get bits => $_getN(10);
+  @$pb.TagNumber(11)
+  set bits($core.double value) => $_setDouble(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasBits() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearBits() => $_clearField(11);
+
+  @$pb.TagNumber(12)
+  $core.int get shortest => $_getIZ(11);
+  @$pb.TagNumber(12)
+  set shortest($core.int value) => $_setUnsignedInt32(11, value);
+  @$pb.TagNumber(12)
+  $core.bool hasShortest() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearShortest() => $_clearField(12);
+
+  @$pb.TagNumber(13)
+  $core.int get longest => $_getIZ(12);
+  @$pb.TagNumber(13)
+  set longest($core.int value) => $_setUnsignedInt32(12, value);
+  @$pb.TagNumber(13)
+  $core.bool hasLongest() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearLongest() => $_clearField(13);
+
+  @$pb.TagNumber(14)
+  $core.double get bitsPerCharacter => $_getN(13);
+  @$pb.TagNumber(14)
+  set bitsPerCharacter($core.double value) => $_setDouble(13, value);
+  @$pb.TagNumber(14)
+  $core.bool hasBitsPerCharacter() => $_has(13);
+  @$pb.TagNumber(14)
+  void clearBitsPerCharacter() => $_clearField(14);
 }
 
 class NewSecret extends $pb.GeneratedMessage {
@@ -35841,12 +37677,14 @@ class InstallLocalApp extends $pb.GeneratedMessage {
     $core.bool? approve,
     $core.String? sha256,
     $core.List<$core.int>? content,
+    $core.String? bundled,
   }) {
     final result = InstallLocalApp._();
     if (path != null) result.path = path;
     if (approve != null) result.approve = approve;
     if (sha256 != null) result.sha256 = sha256;
     if (content != null) result.content = content;
+    if (bundled != null) result.bundled = bundled;
     return result;
   }
 
@@ -35868,6 +37706,7 @@ class InstallLocalApp extends $pb.GeneratedMessage {
     ..aOS(3, _omitFieldNames ? '' : 'sha256')
     ..a<$core.List<$core.int>>(
         4, _omitFieldNames ? '' : 'content', $pb.PbFieldType.OY)
+    ..aOS(5, _omitFieldNames ? '' : 'bundled')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -35929,6 +37768,20 @@ class InstallLocalApp extends $pb.GeneratedMessage {
   $core.bool hasContent() => $_has(3);
   @$pb.TagNumber(4)
   void clearContent() => $_clearField(4);
+
+  /// A bundled app's id (BundledApp.id): installs the file this release
+  /// ships, through the same checks as any file; path and content are
+  /// ignored. Without `approve`, answered with AppPermissions as usual (its
+  /// `added` saying what's new for an update); then again with `approve`
+  /// and its sha256.
+  @$pb.TagNumber(5)
+  $core.String get bundled => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set bundled($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasBundled() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearBundled() => $_clearField(5);
 }
 
 /// What an app can reach, for the person to approve before it's installed.
@@ -36584,6 +38437,9 @@ class Pipe extends $pb.GeneratedMessage {
     $core.bool? reviewIncoming,
     $core.String? suggestedLiaisonName,
     $core.String? folder,
+    PipeForward? forward,
+    PipeReportCounts? reports,
+    $core.Iterable<$fixnum.Int64>? unansweredSeqs,
   }) {
     final result = Pipe._();
     if (id != null) result.id = id;
@@ -36615,6 +38471,9 @@ class Pipe extends $pb.GeneratedMessage {
     if (suggestedLiaisonName != null)
       result.suggestedLiaisonName = suggestedLiaisonName;
     if (folder != null) result.folder = folder;
+    if (forward != null) result.forward = forward;
+    if (reports != null) result.reports = reports;
+    if (unansweredSeqs != null) result.unansweredSeqs.addAll(unansweredSeqs);
     return result;
   }
 
@@ -36663,6 +38522,12 @@ class Pipe extends $pb.GeneratedMessage {
     ..aOB(25, _omitFieldNames ? '' : 'reviewIncoming')
     ..aOS(26, _omitFieldNames ? '' : 'suggestedLiaisonName')
     ..aOS(27, _omitFieldNames ? '' : 'folder')
+    ..aOM<PipeForward>(28, _omitFieldNames ? '' : 'forward',
+        subBuilder: PipeForward.$_createMessage)
+    ..aOM<PipeReportCounts>(29, _omitFieldNames ? '' : 'reports',
+        subBuilder: PipeReportCounts.$_createMessage)
+    ..p<$fixnum.Int64>(
+        30, _omitFieldNames ? '' : 'unansweredSeqs', $pb.PbFieldType.KU6)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -36782,7 +38647,8 @@ class Pipe extends $pb.GeneratedMessage {
   @$pb.TagNumber(10)
   $pb.PbList<$core.String> get memberIds => $_getList(9);
 
-  /// The member woken by each incoming message; empty when none is.
+  /// The member woken by each incoming message; empty when none is, which
+  /// Claktory allows only while the pipe has no agents (unanswered_seqs).
   @$pb.TagNumber(11)
   $core.String get leadId => $_getSZ(10);
   @$pb.TagNumber(11)
@@ -36956,6 +38822,38 @@ class Pipe extends $pb.GeneratedMessage {
   $core.bool hasFolder() => $_has(26);
   @$pb.TagNumber(27)
   void clearFolder() => $_clearField(27);
+
+  /// Where its liaison forwards finished reports. Unset or an empty
+  /// recipient: no one.
+  @$pb.TagNumber(28)
+  PipeForward get forward => $_getN(27);
+  @$pb.TagNumber(28)
+  set forward(PipeForward value) => $_setField(28, value);
+  @$pb.TagNumber(28)
+  $core.bool hasForward() => $_has(27);
+  @$pb.TagNumber(28)
+  void clearForward() => $_clearField(28);
+  @$pb.TagNumber(28)
+  PipeForward ensureForward() => $_ensure(27);
+
+  /// Its reports' counts, for its settings and the Map.
+  @$pb.TagNumber(29)
+  PipeReportCounts get reports => $_getN(28);
+  @$pb.TagNumber(29)
+  set reports(PipeReportCounts value) => $_setField(29, value);
+  @$pb.TagNumber(29)
+  $core.bool hasReports() => $_has(28);
+  @$pb.TagNumber(29)
+  void clearReports() => $_clearField(29);
+  @$pb.TagNumber(29)
+  PipeReportCounts ensureReports() => $_ensure(28);
+
+  /// Messages from the other side that no agent of this side was told of,
+  /// because the pipe has no lead (it has no agents: a pipe with agents
+  /// always has one, lead_id). They're the person's to read and answer,
+  /// counted in Needs you until an agent leads the pipe and is told of them.
+  @$pb.TagNumber(30)
+  $pb.PbList<$fixnum.Int64> get unansweredSeqs => $_getList(29);
 }
 
 /// The other side of a pipe, as it describes itself.
@@ -36967,6 +38865,9 @@ class PipePeer extends $pb.GeneratedMessage {
     $core.bool? verified,
     $core.String? projectName,
     $core.String? purpose,
+    $core.String? verifiedEmail,
+    PipeIdentityChange? identityChange,
+    $core.String? previousEmail,
   }) {
     final result = PipePeer._();
     if (claktoryName != null) result.claktoryName = claktoryName;
@@ -36975,6 +38876,9 @@ class PipePeer extends $pb.GeneratedMessage {
     if (verified != null) result.verified = verified;
     if (projectName != null) result.projectName = projectName;
     if (purpose != null) result.purpose = purpose;
+    if (verifiedEmail != null) result.verifiedEmail = verifiedEmail;
+    if (identityChange != null) result.identityChange = identityChange;
+    if (previousEmail != null) result.previousEmail = previousEmail;
     return result;
   }
 
@@ -36997,6 +38901,10 @@ class PipePeer extends $pb.GeneratedMessage {
     ..aOB(4, _omitFieldNames ? '' : 'verified')
     ..aOS(5, _omitFieldNames ? '' : 'projectName')
     ..aOS(6, _omitFieldNames ? '' : 'purpose')
+    ..aOS(7, _omitFieldNames ? '' : 'verifiedEmail')
+    ..aE<PipeIdentityChange>(8, _omitFieldNames ? '' : 'identityChange',
+        enumValues: PipeIdentityChange.values)
+    ..aOS(9, _omitFieldNames ? '' : 'previousEmail')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -37049,8 +38957,11 @@ class PipePeer extends $pb.GeneratedMessage {
   @$pb.TagNumber(3)
   void clearOwnerEmail() => $_clearField(3);
 
-  /// Whether an account service vouched for whose Claktory it is. Always
-  /// false for now: show "not verified".
+  /// Claktory's account service (claktory.com) vouches, now, that this
+  /// pipe's Claktory belongs to the account with `verified_email`: both
+  /// sides are signed in to it, and the statement checked here. It says
+  /// whose Claktory it is, not who the person is. False: show "Not
+  /// verified" (or what identity_change says).
   @$pb.TagNumber(4)
   $core.bool get verified => $_getBF(3);
   @$pb.TagNumber(4)
@@ -37078,6 +38989,95 @@ class PipePeer extends $pb.GeneratedMessage {
   $core.bool hasPurpose() => $_has(5);
   @$pb.TagNumber(6)
   void clearPurpose() => $_clearField(6);
+
+  /// The email the account service vouches for now: with `verified`, or
+  /// the new one an identity change names; empty when there's none.
+  @$pb.TagNumber(7)
+  $core.String get verifiedEmail => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set verifiedEmail($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasVerifiedEmail() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearVerifiedEmail() => $_clearField(7);
+
+  /// How who it is changed since the person last accepted it (or since it
+  /// was first verified); NONE when it didn't.
+  @$pb.TagNumber(8)
+  PipeIdentityChange get identityChange => $_getN(7);
+  @$pb.TagNumber(8)
+  set identityChange(PipeIdentityChange value) => $_setField(8, value);
+  @$pb.TagNumber(8)
+  $core.bool hasIdentityChange() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearIdentityChange() => $_clearField(8);
+
+  /// The email it was verified as before the change, for its warning.
+  @$pb.TagNumber(9)
+  $core.String get previousEmail => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set previousEmail($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasPreviousEmail() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearPreviousEmail() => $_clearField(9);
+}
+
+class AcceptPipeIdentity extends $pb.GeneratedMessage {
+  factory AcceptPipeIdentity({
+    $core.String? pipeId,
+  }) {
+    final result = AcceptPipeIdentity._();
+    if (pipeId != null) result.pipeId = pipeId;
+    return result;
+  }
+
+  AcceptPipeIdentity._();
+
+  factory AcceptPipeIdentity.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AcceptPipeIdentity()..mergeFromBuffer(data, registry);
+  factory AcceptPipeIdentity.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AcceptPipeIdentity()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AcceptPipeIdentity',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AcceptPipeIdentity.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'pipeId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AcceptPipeIdentity clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AcceptPipeIdentity copyWith(void Function(AcceptPipeIdentity) updates) =>
+      super.copyWith((message) => updates(message as AcceptPipeIdentity))
+          as AcceptPipeIdentity;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AcceptPipeIdentity() / AcceptPipeIdentity.new instead')
+  static AcceptPipeIdentity create() => AcceptPipeIdentity._();
+  static $pb.GeneratedMessage $_createMessage() => AcceptPipeIdentity._();
+  @$core.override
+  AcceptPipeIdentity createEmptyInstance() => AcceptPipeIdentity._();
+  @$core.pragma('dart2js:noInline')
+  static AcceptPipeIdentity getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<AcceptPipeIdentity>(
+          AcceptPipeIdentity.$_createMessage);
+  static AcceptPipeIdentity? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get pipeId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set pipeId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPipeId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPipeId() => $_clearField(1);
 }
 
 class PipeLimits extends $pb.GeneratedMessage {
@@ -38787,11 +40787,13 @@ class LoadPipeMessages extends $pb.GeneratedMessage {
     $core.String? pipeId,
     $fixnum.Int64? beforeSeq,
     $core.int? limit,
+    $fixnum.Int64? fromSeq,
   }) {
     final result = LoadPipeMessages._();
     if (pipeId != null) result.pipeId = pipeId;
     if (beforeSeq != null) result.beforeSeq = beforeSeq;
     if (limit != null) result.limit = limit;
+    if (fromSeq != null) result.fromSeq = fromSeq;
     return result;
   }
 
@@ -38813,6 +40815,8 @@ class LoadPipeMessages extends $pb.GeneratedMessage {
         2, _omitFieldNames ? '' : 'beforeSeq', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
     ..aI(3, _omitFieldNames ? '' : 'limit', fieldType: $pb.PbFieldType.OU3)
+    ..a<$fixnum.Int64>(4, _omitFieldNames ? '' : 'fromSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -38865,6 +40869,18 @@ class LoadPipeMessages extends $pb.GeneratedMessage {
   $core.bool hasLimit() => $_has(2);
   @$pb.TagNumber(3)
   void clearLimit() => $_clearField(3);
+
+  /// Every message from this seq up to `before_seq`, ignoring `limit`: to
+  /// jump to an older message (a find's match) and keep what the app holds
+  /// one run with no gaps.
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get fromSeq => $_getI64(3);
+  @$pb.TagNumber(4)
+  set fromSeq($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasFromSeq() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearFromSeq() => $_clearField(4);
 }
 
 class PipeMessagePage extends $pb.GeneratedMessage {
@@ -39390,6 +41406,7 @@ class AskPerson extends $pb.GeneratedMessage {
     $core.Iterable<PipeTaint>? taint,
     $core.String? reviewPath,
     $core.Iterable<Attachment>? answerAttachments,
+    $core.Iterable<AskStep>? steps,
   }) {
     final result = AskPerson._();
     if (id != null) result.id = id;
@@ -39403,6 +41420,7 @@ class AskPerson extends $pb.GeneratedMessage {
     if (reviewPath != null) result.reviewPath = reviewPath;
     if (answerAttachments != null)
       result.answerAttachments.addAll(answerAttachments);
+    if (steps != null) result.steps.addAll(steps);
     return result;
   }
 
@@ -39432,6 +41450,8 @@ class AskPerson extends $pb.GeneratedMessage {
     ..aOS(9, _omitFieldNames ? '' : 'reviewPath')
     ..pPM<Attachment>(10, _omitFieldNames ? '' : 'answerAttachments',
         subBuilder: Attachment.$_createMessage)
+    ..pPM<AskStep>(11, _omitFieldNames ? '' : 'steps',
+        subBuilder: AskStep.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -39554,6 +41574,115 @@ class AskPerson extends $pb.GeneratedMessage {
   /// Empty while pending.
   @$pb.TagNumber(10)
   $pb.PbList<Attachment> get answerAttachments => $_getList(9);
+
+  /// A procedure, step by step (ask_person's steps): the steps in order;
+  /// empty for an ordinary ask. `title` says what the whole procedure is
+  /// for and `body` introduces it; wants_text and review_path are never set
+  /// with steps. The current step is the first PENDING one: the person
+  /// answers it (AnswerAsk.step), the agent is told of each step in an
+  /// event, and the next one becomes current. The last one done makes the
+  /// ask ANSWERED; a step marked CANT stops it, DISMISSED, and the steps
+  /// after it stay PENDING (not reached). Pending, it counts once toward
+  /// the agent's questions waiting.
+  @$pb.TagNumber(11)
+  $pb.PbList<AskStep> get steps => $_getList(10);
+}
+
+/// One step of a procedure (AskPerson.steps).
+class AskStep extends $pb.GeneratedMessage {
+  factory AskStep({
+    $core.String? text,
+    AskStepState? state,
+    $core.String? comment,
+    $fixnum.Int64? decidedMs,
+  }) {
+    final result = AskStep._();
+    if (text != null) result.text = text;
+    if (state != null) result.state = state;
+    if (comment != null) result.comment = comment;
+    if (decidedMs != null) result.decidedMs = decidedMs;
+    return result;
+  }
+
+  AskStep._();
+
+  factory AskStep.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AskStep()..mergeFromBuffer(data, registry);
+  factory AskStep.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AskStep()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AskStep',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AskStep.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'text')
+    ..aE<AskStepState>(2, _omitFieldNames ? '' : 'state',
+        enumValues: AskStepState.values)
+    ..aOS(3, _omitFieldNames ? '' : 'comment')
+    ..aInt64(4, _omitFieldNames ? '' : 'decidedMs')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AskStep clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AskStep copyWith(void Function(AskStep) updates) =>
+      super.copyWith((message) => updates(message as AskStep)) as AskStep;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AskStep() / AskStep.new instead')
+  static AskStep create() => AskStep._();
+  static $pb.GeneratedMessage $_createMessage() => AskStep._();
+  @$core.override
+  AskStep createEmptyInstance() => AskStep._();
+  @$core.pragma('dart2js:noInline')
+  static AskStep getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<AskStep>(AskStep.$_createMessage);
+  static AskStep? _defaultInstance;
+
+  /// What to do, in the agent's words (Markdown, short; may hold a fenced
+  /// command, which the card gives a Copy button).
+  @$pb.TagNumber(1)
+  $core.String get text => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set text($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasText() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearText() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  AskStepState get state => $_getN(1);
+  @$pb.TagNumber(2)
+  set state(AskStepState value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasState() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearState() => $_clearField(2);
+
+  /// The person's comment on Done or Can't do this; may be empty.
+  @$pb.TagNumber(3)
+  $core.String get comment => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set comment($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasComment() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearComment() => $_clearField(3);
+
+  /// When it was done or marked CANT, ms since 1970; 0 while pending.
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get decidedMs => $_getI64(3);
+  @$pb.TagNumber(4)
+  set decidedMs($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasDecidedMs() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearDecidedMs() => $_clearField(4);
 }
 
 /// The person's answer to an AskPerson entry in an agent's conversation, or
@@ -39566,6 +41695,7 @@ class AnswerAsk extends $pb.GeneratedMessage {
     $core.bool? dismiss,
     $core.String? text,
     $core.Iterable<Attachment>? attachments,
+    $core.int? step,
   }) {
     final result = AnswerAsk._();
     if (agentId != null) result.agentId = agentId;
@@ -39573,6 +41703,7 @@ class AnswerAsk extends $pb.GeneratedMessage {
     if (dismiss != null) result.dismiss = dismiss;
     if (text != null) result.text = text;
     if (attachments != null) result.attachments.addAll(attachments);
+    if (step != null) result.step = step;
     return result;
   }
 
@@ -39596,6 +41727,7 @@ class AnswerAsk extends $pb.GeneratedMessage {
     ..aOS(4, _omitFieldNames ? '' : 'text')
     ..pPM<Attachment>(5, _omitFieldNames ? '' : 'attachments',
         subBuilder: Attachment.$_createMessage)
+    ..aI(6, _omitFieldNames ? '' : 'step', fieldType: $pb.PbFieldType.OU3)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -39667,6 +41799,20 @@ class AnswerAsk extends $pb.GeneratedMessage {
   /// answer is refused. The agent's event names each by path, with its page.
   @$pb.TagNumber(5)
   $pb.PbList<Attachment> get attachments => $_getList(4);
+
+  /// A procedure (AskPerson.steps): the step answered, 0-based; it must be
+  /// the current one, so a second tap can't answer the next. dismiss false
+  /// is Done, dismiss true is Can't do this (which stops the procedure);
+  /// `text` is the person's optional comment. Needed for an ask with steps,
+  /// refused for one without.
+  @$pb.TagNumber(6)
+  $core.int get step => $_getIZ(5);
+  @$pb.TagNumber(6)
+  set step($core.int value) => $_setUnsignedInt32(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasStep() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearStep() => $_clearField(6);
 }
 
 /// A chat: a one-off conversation of the person's, beside their agents but
@@ -42448,6 +44594,10 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     $fixnum.Int64? askedMs,
     $fixnum.Int64? decidedMs,
     $core.Iterable<PipeTaint>? taint,
+    ReportSchema? reportType,
+    ReportSchema? reportTypeBefore,
+    $core.bool? widens,
+    $core.Iterable<ReportSchema>? reportTypes,
   }) {
     final result = NeedsYouRecord._();
     if (kind != null) result.kind = kind;
@@ -42463,6 +44613,10 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     if (askedMs != null) result.askedMs = askedMs;
     if (decidedMs != null) result.decidedMs = decidedMs;
     if (taint != null) result.taint.addAll(taint);
+    if (reportType != null) result.reportType = reportType;
+    if (reportTypeBefore != null) result.reportTypeBefore = reportTypeBefore;
+    if (widens != null) result.widens = widens;
+    if (reportTypes != null) result.reportTypes.addAll(reportTypes);
     return result;
   }
 
@@ -42496,6 +44650,13 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     ..aInt64(12, _omitFieldNames ? '' : 'decidedMs')
     ..pPM<PipeTaint>(13, _omitFieldNames ? '' : 'taint',
         subBuilder: PipeTaint.$_createMessage)
+    ..aOM<ReportSchema>(14, _omitFieldNames ? '' : 'reportType',
+        subBuilder: ReportSchema.$_createMessage)
+    ..aOM<ReportSchema>(15, _omitFieldNames ? '' : 'reportTypeBefore',
+        subBuilder: ReportSchema.$_createMessage)
+    ..aOB(16, _omitFieldNames ? '' : 'widens')
+    ..pPM<ReportSchema>(17, _omitFieldNames ? '' : 'reportTypes',
+        subBuilder: ReportSchema.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -42650,6 +44811,46 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
   /// As on the card: the pipes the agent had read when it asked.
   @$pb.TagNumber(13)
   $pb.PbList<PipeTaint> get taint => $_getList(12);
+
+  /// REPORT_TYPE: the version made (for a deletion, its last), and the one
+  /// it replaced (unset for a new type).
+  @$pb.TagNumber(14)
+  ReportSchema get reportType => $_getN(13);
+  @$pb.TagNumber(14)
+  set reportType(ReportSchema value) => $_setField(14, value);
+  @$pb.TagNumber(14)
+  $core.bool hasReportType() => $_has(13);
+  @$pb.TagNumber(14)
+  void clearReportType() => $_clearField(14);
+  @$pb.TagNumber(14)
+  ReportSchema ensureReportType() => $_ensure(13);
+
+  @$pb.TagNumber(15)
+  ReportSchema get reportTypeBefore => $_getN(14);
+  @$pb.TagNumber(15)
+  set reportTypeBefore(ReportSchema value) => $_setField(15, value);
+  @$pb.TagNumber(15)
+  $core.bool hasReportTypeBefore() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearReportTypeBefore() => $_clearField(15);
+  @$pb.TagNumber(15)
+  ReportSchema ensureReportTypeBefore() => $_ensure(14);
+
+  /// REPORT_TYPE: the edit widened what crosses (report_type's
+  /// widened_fields says where).
+  @$pb.TagNumber(16)
+  $core.bool get widens => $_getBF(15);
+  @$pb.TagNumber(16)
+  set widens($core.bool value) => $_setBool(15, value);
+  @$pb.TagNumber(16)
+  $core.bool hasWidens() => $_has(15);
+  @$pb.TagNumber(16)
+  void clearWidens() => $_clearField(16);
+
+  /// PIPE_FORWARD: the types the change turned on, at the version current
+  /// then, with every field and cap.
+  @$pb.TagNumber(17)
+  $pb.PbList<ReportSchema> get reportTypes => $_getList(16);
 }
 
 /// A Mac app can broker for its Chrome. Sent on every connection, and again
@@ -45933,6 +48134,2614 @@ class DmEnrollLeaf extends $pb.GeneratedMessage {
   $core.bool hasPins() => $_has(1);
   @$pb.TagNumber(2)
   void clearPins() => $_clearField(2);
+}
+
+/// A kind of report (a report type), one version of it. Its fields are a
+/// closed set of kinds; its text (name, labels, rules) is shown, never
+/// obeyed. A type can only narrow what crosses from a liaison to its reader:
+/// who submits, who reads and where it goes stay the pipe's settings.
+class ReportSchema extends $pb.GeneratedMessage {
+  factory ReportSchema({
+    $core.String? id,
+    $core.String? name,
+    $core.Iterable<ReportField>? fields,
+    $core.int? version,
+    $core.bool? builtin,
+    $core.String? byId,
+    $fixnum.Int64? atMs,
+    $core.Iterable<PipeReportState>? outcomes,
+    $core.Iterable<$core.String>? widenedFields,
+  }) {
+    final result = ReportSchema._();
+    if (id != null) result.id = id;
+    if (name != null) result.name = name;
+    if (fields != null) result.fields.addAll(fields);
+    if (version != null) result.version = version;
+    if (builtin != null) result.builtin = builtin;
+    if (byId != null) result.byId = byId;
+    if (atMs != null) result.atMs = atMs;
+    if (outcomes != null) result.outcomes.addAll(outcomes);
+    if (widenedFields != null) result.widenedFields.addAll(widenedFields);
+    return result;
+  }
+
+  ReportSchema._();
+
+  factory ReportSchema.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportSchema()..mergeFromBuffer(data, registry);
+  factory ReportSchema.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportSchema()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ReportSchema',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ReportSchema.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..pPM<ReportField>(3, _omitFieldNames ? '' : 'fields',
+        subBuilder: ReportField.$_createMessage)
+    ..aI(4, _omitFieldNames ? '' : 'version', fieldType: $pb.PbFieldType.OU3)
+    ..aOB(5, _omitFieldNames ? '' : 'builtin')
+    ..aOS(6, _omitFieldNames ? '' : 'byId')
+    ..aInt64(7, _omitFieldNames ? '' : 'atMs')
+    ..pc<PipeReportState>(
+        8, _omitFieldNames ? '' : 'outcomes', $pb.PbFieldType.KE,
+        valueOf: PipeReportState.valueOf,
+        enumValues: PipeReportState.values,
+        defaultEnumValue: PipeReportState.PIPE_REPORT_STATE_UNSPECIFIED)
+    ..pPS(9, _omitFieldNames ? '' : 'widenedFields')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportSchema clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportSchema copyWith(void Function(ReportSchema) updates) =>
+      super.copyWith((message) => updates(message as ReportSchema))
+          as ReportSchema;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReportSchema() / ReportSchema.new instead')
+  static ReportSchema create() => ReportSchema._();
+  static $pb.GeneratedMessage $_createMessage() => ReportSchema._();
+  @$core.override
+  ReportSchema createEmptyInstance() => ReportSchema._();
+  @$core.pragma('dart2js:noInline')
+  static ReportSchema getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReportSchema>(
+          ReportSchema.$_createMessage);
+  static ReportSchema? _defaultInstance;
+
+  /// "bug_report": lowercase letters, digits and _, at most 40. Made by
+  /// Claktory from the name for a new type (SaveReportType with id empty).
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  /// "Bug report".
+  @$pb.TagNumber(2)
+  $core.String get name => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set name($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearName() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $pb.PbList<ReportField> get fields => $_getList(2);
+
+  /// 1, 2…: each edit makes a new version; a version never changes. A
+  /// report is checked and shown against its own (PipeReport.type_version).
+  @$pb.TagNumber(4)
+  $core.int get version => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set version($core.int value) => $_setUnsignedInt32(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasVersion() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearVersion() => $_clearField(4);
+
+  /// Claktory's own: it can be edited (a new version) but not deleted.
+  @$pb.TagNumber(5)
+  $core.bool get builtin => $_getBF(4);
+  @$pb.TagNumber(5)
+  set builtin($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasBuiltin() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearBuiltin() => $_clearField(5);
+
+  /// Who made this version: empty for the person (or, for a built-in
+  /// type's first, Claktory), else the admin agent's id (Rivet).
+  @$pb.TagNumber(6)
+  $core.String get byId => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set byId($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasById() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearById() => $_clearField(6);
+
+  @$pb.TagNumber(7)
+  $fixnum.Int64 get atMs => $_getI64(6);
+  @$pb.TagNumber(7)
+  set atMs($fixnum.Int64 value) => $_setInt64(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasAtMs() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearAtMs() => $_clearField(7);
+
+  /// What the reader can tell the other side about a report of this type
+  /// (handoff_mark): a few of ACCEPTED, DONE, DECLINED, KNOWN, FIXED,
+  /// WONT_FIX and NEEDS_INFO, in that order. Their words are Claktory's.
+  @$pb.TagNumber(8)
+  $pb.PbList<PipeReportState> get outcomes => $_getList(7);
+
+  /// The fields this version added or widened, compared with the version
+  /// before it: a new field, a higher cap, more choices, a wider range, a
+  /// fact made text. Empty for version 1 and for an edit that only narrows.
+  @$pb.TagNumber(9)
+  $pb.PbList<$core.String> get widenedFields => $_getList(8);
+}
+
+/// The ceilings every report type stays within (fixed in code): a type may
+/// set lower ones. SaveReportType is refused past any of them.
+class ReportTypeRules extends $pb.GeneratedMessage {
+  factory ReportTypeRules({
+    $core.int? textBytes,
+    $core.int? listItems,
+    $core.int? itemBytes,
+    $core.int? fields,
+    $core.int? facts,
+    $core.int? choices,
+    $core.int? attachments,
+    $core.int? attachmentMb,
+    $fixnum.Int64? numberAbs,
+    $core.int? nameChars,
+    $core.int? labelChars,
+    $core.int? ruleChars,
+    $core.int? types,
+    $core.int? perPipe,
+    $core.Iterable<$core.String>? reservedIds,
+    $core.Iterable<ReportFieldType>? textKinds,
+    $core.int? numbers,
+    $core.int? dates,
+    $core.Iterable<$core.String>? routingTokens,
+  }) {
+    final result = ReportTypeRules._();
+    if (textBytes != null) result.textBytes = textBytes;
+    if (listItems != null) result.listItems = listItems;
+    if (itemBytes != null) result.itemBytes = itemBytes;
+    if (fields != null) result.fields = fields;
+    if (facts != null) result.facts = facts;
+    if (choices != null) result.choices = choices;
+    if (attachments != null) result.attachments = attachments;
+    if (attachmentMb != null) result.attachmentMb = attachmentMb;
+    if (numberAbs != null) result.numberAbs = numberAbs;
+    if (nameChars != null) result.nameChars = nameChars;
+    if (labelChars != null) result.labelChars = labelChars;
+    if (ruleChars != null) result.ruleChars = ruleChars;
+    if (types != null) result.types = types;
+    if (perPipe != null) result.perPipe = perPipe;
+    if (reservedIds != null) result.reservedIds.addAll(reservedIds);
+    if (textKinds != null) result.textKinds.addAll(textKinds);
+    if (numbers != null) result.numbers = numbers;
+    if (dates != null) result.dates = dates;
+    if (routingTokens != null) result.routingTokens.addAll(routingTokens);
+    return result;
+  }
+
+  ReportTypeRules._();
+
+  factory ReportTypeRules.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportTypeRules()..mergeFromBuffer(data, registry);
+  factory ReportTypeRules.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportTypeRules()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ReportTypeRules',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ReportTypeRules.$_createMessage)
+    ..aI(1, _omitFieldNames ? '' : 'textBytes', fieldType: $pb.PbFieldType.OU3)
+    ..aI(2, _omitFieldNames ? '' : 'listItems', fieldType: $pb.PbFieldType.OU3)
+    ..aI(3, _omitFieldNames ? '' : 'itemBytes', fieldType: $pb.PbFieldType.OU3)
+    ..aI(4, _omitFieldNames ? '' : 'fields', fieldType: $pb.PbFieldType.OU3)
+    ..aI(5, _omitFieldNames ? '' : 'facts', fieldType: $pb.PbFieldType.OU3)
+    ..aI(6, _omitFieldNames ? '' : 'choices', fieldType: $pb.PbFieldType.OU3)
+    ..aI(7, _omitFieldNames ? '' : 'attachments',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aI(8, _omitFieldNames ? '' : 'attachmentMb',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aInt64(9, _omitFieldNames ? '' : 'numberAbs')
+    ..aI(10, _omitFieldNames ? '' : 'nameChars', fieldType: $pb.PbFieldType.OU3)
+    ..aI(11, _omitFieldNames ? '' : 'labelChars',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aI(12, _omitFieldNames ? '' : 'ruleChars', fieldType: $pb.PbFieldType.OU3)
+    ..aI(13, _omitFieldNames ? '' : 'types', fieldType: $pb.PbFieldType.OU3)
+    ..aI(14, _omitFieldNames ? '' : 'perPipe', fieldType: $pb.PbFieldType.OU3)
+    ..pPS(15, _omitFieldNames ? '' : 'reservedIds')
+    ..pc<ReportFieldType>(
+        16, _omitFieldNames ? '' : 'textKinds', $pb.PbFieldType.KE,
+        valueOf: ReportFieldType.valueOf,
+        enumValues: ReportFieldType.values,
+        defaultEnumValue: ReportFieldType.REPORT_FIELD_TYPE_UNSPECIFIED)
+    ..aI(17, _omitFieldNames ? '' : 'numbers', fieldType: $pb.PbFieldType.OU3)
+    ..aI(18, _omitFieldNames ? '' : 'dates', fieldType: $pb.PbFieldType.OU3)
+    ..pPS(19, _omitFieldNames ? '' : 'routingTokens')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportTypeRules clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportTypeRules copyWith(void Function(ReportTypeRules) updates) =>
+      super.copyWith((message) => updates(message as ReportTypeRules))
+          as ReportTypeRules;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReportTypeRules() / ReportTypeRules.new instead')
+  static ReportTypeRules create() => ReportTypeRules._();
+  static $pb.GeneratedMessage $_createMessage() => ReportTypeRules._();
+  @$core.override
+  ReportTypeRules createEmptyInstance() => ReportTypeRules._();
+  @$core.pragma('dart2js:noInline')
+  static ReportTypeRules getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReportTypeRules>(
+          ReportTypeRules.$_createMessage);
+  static ReportTypeRules? _defaultInstance;
+
+  /// TEXT: bytes per field.
+  @$pb.TagNumber(1)
+  $core.int get textBytes => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set textBytes($core.int value) => $_setUnsignedInt32(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasTextBytes() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearTextBytes() => $_clearField(1);
+
+  /// TEXT_LIST: items, and bytes per item.
+  @$pb.TagNumber(2)
+  $core.int get listItems => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set listItems($core.int value) => $_setUnsignedInt32(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasListItems() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearListItems() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.int get itemBytes => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set itemBytes($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasItemBytes() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearItemBytes() => $_clearField(3);
+
+  /// Fields in a type, and of them facts (ENUM, BOOL, VERSION, NUMBER,
+  /// DATE).
+  @$pb.TagNumber(4)
+  $core.int get fields => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set fields($core.int value) => $_setUnsignedInt32(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasFields() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearFields() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.int get facts => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set facts($core.int value) => $_setUnsignedInt32(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasFacts() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearFacts() => $_clearField(5);
+
+  /// ENUM: choices, each lowercase letters, digits and _ (at most 40).
+  @$pb.TagNumber(6)
+  $core.int get choices => $_getIZ(5);
+  @$pb.TagNumber(6)
+  set choices($core.int value) => $_setUnsignedInt32(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasChoices() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearChoices() => $_clearField(6);
+
+  /// ATTACHMENTS: files in a report (at most one such field in a type), and
+  /// MB each.
+  @$pb.TagNumber(7)
+  $core.int get attachments => $_getIZ(6);
+  @$pb.TagNumber(7)
+  set attachments($core.int value) => $_setUnsignedInt32(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasAttachments() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearAttachments() => $_clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.int get attachmentMb => $_getIZ(7);
+  @$pb.TagNumber(8)
+  set attachmentMb($core.int value) => $_setUnsignedInt32(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasAttachmentMb() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearAttachmentMb() => $_clearField(8);
+
+  /// NUMBER: its range stays within -number_abs..number_abs.
+  @$pb.TagNumber(9)
+  $fixnum.Int64 get numberAbs => $_getI64(8);
+  @$pb.TagNumber(9)
+  set numberAbs($fixnum.Int64 value) => $_setInt64(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasNumberAbs() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearNumberAbs() => $_clearField(9);
+
+  /// Characters in a type's name, a field's label, a field's rule.
+  @$pb.TagNumber(10)
+  $core.int get nameChars => $_getIZ(9);
+  @$pb.TagNumber(10)
+  set nameChars($core.int value) => $_setUnsignedInt32(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasNameChars() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearNameChars() => $_clearField(10);
+
+  @$pb.TagNumber(11)
+  $core.int get labelChars => $_getIZ(10);
+  @$pb.TagNumber(11)
+  set labelChars($core.int value) => $_setUnsignedInt32(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasLabelChars() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearLabelChars() => $_clearField(11);
+
+  @$pb.TagNumber(12)
+  $core.int get ruleChars => $_getIZ(11);
+  @$pb.TagNumber(12)
+  set ruleChars($core.int value) => $_setUnsignedInt32(11, value);
+  @$pb.TagNumber(12)
+  $core.bool hasRuleChars() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearRuleChars() => $_clearField(12);
+
+  /// Types in this Claktory (not deleted), and enabled on one pipe.
+  @$pb.TagNumber(13)
+  $core.int get types => $_getIZ(12);
+  @$pb.TagNumber(13)
+  set types($core.int value) => $_setUnsignedInt32(12, value);
+  @$pb.TagNumber(13)
+  $core.bool hasTypes() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearTypes() => $_clearField(13);
+
+  @$pb.TagNumber(14)
+  $core.int get perPipe => $_getIZ(13);
+  @$pb.TagNumber(14)
+  set perPipe($core.int value) => $_setUnsignedInt32(13, value);
+  @$pb.TagNumber(14)
+  $core.bool hasPerPipe() => $_has(13);
+  @$pb.TagNumber(14)
+  void clearPerPipe() => $_clearField(14);
+
+  /// Field ids that would read as routing ("to", "recipient", "path"…),
+  /// refused; so is an id with one of routing_tokens between its _s
+  /// ("forward_note"), or one ending "_to" ("send_to"). A new field's id made
+  /// from its label is checked the same way, before any _2 is added.
+  @$pb.TagNumber(15)
+  $pb.PbList<$core.String> get reservedIds => $_getList(14);
+
+  /// The kinds whose values are the other side's words: reading them marks
+  /// the reader. Every other kind is a fact.
+  @$pb.TagNumber(16)
+  $pb.PbList<ReportFieldType> get textKinds => $_getList(15);
+
+  /// NUMBER and DATE fields in a type: facts are read without marking
+  /// anyone, so their total width is kept small.
+  @$pb.TagNumber(17)
+  $core.int get numbers => $_getIZ(16);
+  @$pb.TagNumber(17)
+  set numbers($core.int value) => $_setUnsignedInt32(16, value);
+  @$pb.TagNumber(17)
+  $core.bool hasNumbers() => $_has(16);
+  @$pb.TagNumber(17)
+  void clearNumbers() => $_clearField(17);
+
+  @$pb.TagNumber(18)
+  $core.int get dates => $_getIZ(17);
+  @$pb.TagNumber(18)
+  set dates($core.int value) => $_setUnsignedInt32(17, value);
+  @$pb.TagNumber(18)
+  $core.bool hasDates() => $_has(17);
+  @$pb.TagNumber(18)
+  void clearDates() => $_clearField(18);
+
+  /// Words that make any field id read as routing (see reserved_ids), alone
+  /// or with an s ("urls").
+  @$pb.TagNumber(19)
+  $pb.PbList<$core.String> get routingTokens => $_getList(18);
+}
+
+/// Defines a report type, or edits one. Refused, with the rule in Claktory's
+/// words, past any ReportTypeRules ceiling, with a reserved or repeated id,
+/// or an ENUM choice that isn't an id.
+class SaveReportType extends $pb.GeneratedMessage {
+  factory SaveReportType({
+    ReportSchema? type,
+    $core.int? baseVersion,
+  }) {
+    final result = SaveReportType._();
+    if (type != null) result.type = type;
+    if (baseVersion != null) result.baseVersion = baseVersion;
+    return result;
+  }
+
+  SaveReportType._();
+
+  factory SaveReportType.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SaveReportType()..mergeFromBuffer(data, registry);
+  factory SaveReportType.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SaveReportType()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SaveReportType',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SaveReportType.$_createMessage)
+    ..aOM<ReportSchema>(1, _omitFieldNames ? '' : 'type',
+        subBuilder: ReportSchema.$_createMessage)
+    ..aI(2, _omitFieldNames ? '' : 'baseVersion',
+        fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SaveReportType clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SaveReportType copyWith(void Function(SaveReportType) updates) =>
+      super.copyWith((message) => updates(message as SaveReportType))
+          as SaveReportType;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SaveReportType() / SaveReportType.new instead')
+  static SaveReportType create() => SaveReportType._();
+  static $pb.GeneratedMessage $_createMessage() => SaveReportType._();
+  @$core.override
+  SaveReportType createEmptyInstance() => SaveReportType._();
+  @$core.pragma('dart2js:noInline')
+  static SaveReportType getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SaveReportType>(
+          SaveReportType.$_createMessage);
+  static SaveReportType? _defaultInstance;
+
+  /// id empty: a new type. Otherwise a new version of that type. Each
+  /// field's name is kept; a field with name empty is new, and gets an id
+  /// made from its label. `fact` is ignored (it follows the kind), and so
+  /// are caps a kind doesn't use; 0 for a cap is its ceiling. An empty rule
+  /// gets Claktory's own. version, builtin, by_id, at_ms and widened_fields
+  /// are ignored.
+  @$pb.TagNumber(1)
+  ReportSchema get type => $_getN(0);
+  @$pb.TagNumber(1)
+  set type(ReportSchema value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasType() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearType() => $_clearField(1);
+  @$pb.TagNumber(1)
+  ReportSchema ensureType() => $_ensure(0);
+
+  /// The version the editor started from; 0 for a new type. Refused when
+  /// it's no longer the current one (someone else edited it meanwhile).
+  @$pb.TagNumber(2)
+  $core.int get baseVersion => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set baseVersion($core.int value) => $_setUnsignedInt32(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasBaseVersion() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearBaseVersion() => $_clearField(2);
+}
+
+/// Deletes a report type: refused for a built-in one, and while a pipe or a
+/// project's new pipes can forward it. Its versions stay, for the reports
+/// that use them.
+class DeleteReportType extends $pb.GeneratedMessage {
+  factory DeleteReportType({
+    $core.String? id,
+  }) {
+    final result = DeleteReportType._();
+    if (id != null) result.id = id;
+    return result;
+  }
+
+  DeleteReportType._();
+
+  factory DeleteReportType.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DeleteReportType()..mergeFromBuffer(data, registry);
+  factory DeleteReportType.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DeleteReportType()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DeleteReportType',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: DeleteReportType.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeleteReportType clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeleteReportType copyWith(void Function(DeleteReportType) updates) =>
+      super.copyWith((message) => updates(message as DeleteReportType))
+          as DeleteReportType;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use DeleteReportType() / DeleteReportType.new instead')
+  static DeleteReportType create() => DeleteReportType._();
+  static $pb.GeneratedMessage $_createMessage() => DeleteReportType._();
+  @$core.override
+  DeleteReportType createEmptyInstance() => DeleteReportType._();
+  @$core.pragma('dart2js:noInline')
+  static DeleteReportType getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DeleteReportType>(
+          DeleteReportType.$_createMessage);
+  static DeleteReportType? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+}
+
+class ReportField extends $pb.GeneratedMessage {
+  factory ReportField({
+    $core.String? name,
+    $core.String? label,
+    $core.bool? fact,
+    ReportFieldType? type,
+    $core.Iterable<$core.String>? choices,
+    $core.bool? required,
+    $core.int? maxBytes,
+    $core.int? maxItems,
+    $core.String? rule,
+    $fixnum.Int64? min,
+    $fixnum.Int64? max,
+    $core.bool? ruleWritten,
+  }) {
+    final result = ReportField._();
+    if (name != null) result.name = name;
+    if (label != null) result.label = label;
+    if (fact != null) result.fact = fact;
+    if (type != null) result.type = type;
+    if (choices != null) result.choices.addAll(choices);
+    if (required != null) result.required = required;
+    if (maxBytes != null) result.maxBytes = maxBytes;
+    if (maxItems != null) result.maxItems = maxItems;
+    if (rule != null) result.rule = rule;
+    if (min != null) result.min = min;
+    if (max != null) result.max = max;
+    if (ruleWritten != null) result.ruleWritten = ruleWritten;
+    return result;
+  }
+
+  ReportField._();
+
+  factory ReportField.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportField()..mergeFromBuffer(data, registry);
+  factory ReportField.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportField()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ReportField',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ReportField.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..aOS(2, _omitFieldNames ? '' : 'label')
+    ..aOB(3, _omitFieldNames ? '' : 'fact')
+    ..aE<ReportFieldType>(4, _omitFieldNames ? '' : 'type',
+        enumValues: ReportFieldType.values)
+    ..pPS(5, _omitFieldNames ? '' : 'choices')
+    ..aOB(6, _omitFieldNames ? '' : 'required')
+    ..aI(7, _omitFieldNames ? '' : 'maxBytes', fieldType: $pb.PbFieldType.OU3)
+    ..aI(8, _omitFieldNames ? '' : 'maxItems', fieldType: $pb.PbFieldType.OU3)
+    ..aOS(9, _omitFieldNames ? '' : 'rule')
+    ..a<$fixnum.Int64>(10, _omitFieldNames ? '' : 'min', $pb.PbFieldType.OS6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(11, _omitFieldNames ? '' : 'max', $pb.PbFieldType.OS6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOB(12, _omitFieldNames ? '' : 'ruleWritten')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportField clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportField copyWith(void Function(ReportField) updates) =>
+      super.copyWith((message) => updates(message as ReportField))
+          as ReportField;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReportField() / ReportField.new instead')
+  static ReportField create() => ReportField._();
+  static $pb.GeneratedMessage $_createMessage() => ReportField._();
+  @$core.override
+  ReportField createEmptyInstance() => ReportField._();
+  @$core.pragma('dart2js:noInline')
+  static ReportField getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReportField>(
+          ReportField.$_createMessage);
+  static ReportField? _defaultInstance;
+
+  /// As agents and ReportValue name it: "what_happened".
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+
+  /// Claktory's words for it: "What happened".
+  @$pb.TagNumber(2)
+  $core.String get label => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set label($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasLabel() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearLabel() => $_clearField(2);
+
+  /// A fact (one of a list, a yes or no, a known release): reading it
+  /// affects no agent. Otherwise it's text, the other side's own words.
+  @$pb.TagNumber(3)
+  $core.bool get fact => $_getBF(2);
+  @$pb.TagNumber(3)
+  set fact($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasFact() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearFact() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  ReportFieldType get type => $_getN(3);
+  @$pb.TagNumber(4)
+  set type(ReportFieldType value) => $_setField(4, value);
+  @$pb.TagNumber(4)
+  $core.bool hasType() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearType() => $_clearField(4);
+
+  /// ENUM: its choices, as written.
+  @$pb.TagNumber(5)
+  $pb.PbList<$core.String> get choices => $_getList(4);
+
+  @$pb.TagNumber(6)
+  $core.bool get required => $_getBF(5);
+  @$pb.TagNumber(6)
+  set required($core.bool value) => $_setBool(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasRequired() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearRequired() => $_clearField(6);
+
+  /// TEXT and TEXT_LIST: the most bytes (of each item); 0 for none.
+  @$pb.TagNumber(7)
+  $core.int get maxBytes => $_getIZ(6);
+  @$pb.TagNumber(7)
+  set maxBytes($core.int value) => $_setUnsignedInt32(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasMaxBytes() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearMaxBytes() => $_clearField(7);
+
+  /// TEXT_LIST and ATTACHMENTS: the most items.
+  @$pb.TagNumber(8)
+  $core.int get maxItems => $_getIZ(7);
+  @$pb.TagNumber(8)
+  set maxItems($core.int value) => $_setUnsignedInt32(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasMaxItems() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearMaxItems() => $_clearField(8);
+
+  /// Its rule in one line: "Up to 2,000 bytes".
+  @$pb.TagNumber(9)
+  $core.String get rule => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set rule($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasRule() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearRule() => $_clearField(9);
+
+  /// NUMBER: its range, within ReportTypeRules.number_abs. Unset in
+  /// SaveReportType: 0 and 1,000,000.
+  @$pb.TagNumber(10)
+  $fixnum.Int64 get min => $_getI64(9);
+  @$pb.TagNumber(10)
+  set min($fixnum.Int64 value) => $_setInt64(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasMin() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearMin() => $_clearField(10);
+
+  @$pb.TagNumber(11)
+  $fixnum.Int64 get max => $_getI64(10);
+  @$pb.TagNumber(11)
+  set max($fixnum.Int64 value) => $_setInt64(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasMax() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearMax() => $_clearField(11);
+
+  /// The rule was written by whoever defined the type (the person, Rivet,
+  /// or Claktory for its own types); false when Claktory made it from the
+  /// kind and caps, to make again on the next save (send rule "" for it).
+  /// Ignored in SaveReportType: a non-empty rule there is written.
+  @$pb.TagNumber(12)
+  $core.bool get ruleWritten => $_getBF(11);
+  @$pb.TagNumber(12)
+  set ruleWritten($core.bool value) => $_setBool(11, value);
+  @$pb.TagNumber(12)
+  $core.bool hasRuleWritten() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearRuleWritten() => $_clearField(12);
+}
+
+/// Where a pipe's reports go (Pipe.forward), or a project's default for new
+/// pipes (Project.report_forward).
+class PipeForward extends $pb.GeneratedMessage {
+  factory PipeForward({
+    $core.String? recipientId,
+    $core.String? schemaId,
+    $core.int? revision,
+    $core.String? setById,
+    $fixnum.Int64? setMs,
+    ReportLimits? limits,
+    $core.Iterable<$core.String>? typeIds,
+  }) {
+    final result = PipeForward._();
+    if (recipientId != null) result.recipientId = recipientId;
+    if (schemaId != null) result.schemaId = schemaId;
+    if (revision != null) result.revision = revision;
+    if (setById != null) result.setById = setById;
+    if (setMs != null) result.setMs = setMs;
+    if (limits != null) result.limits = limits;
+    if (typeIds != null) result.typeIds.addAll(typeIds);
+    return result;
+  }
+
+  PipeForward._();
+
+  factory PipeForward.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeForward()..mergeFromBuffer(data, registry);
+  factory PipeForward.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeForward()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PipeForward',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PipeForward.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'recipientId')
+    ..aOS(2, _omitFieldNames ? '' : 'schemaId')
+    ..aI(3, _omitFieldNames ? '' : 'revision', fieldType: $pb.PbFieldType.OU3)
+    ..aOS(4, _omitFieldNames ? '' : 'setById')
+    ..aInt64(5, _omitFieldNames ? '' : 'setMs')
+    ..aOM<ReportLimits>(6, _omitFieldNames ? '' : 'limits',
+        subBuilder: ReportLimits.$_createMessage)
+    ..pPS(7, _omitFieldNames ? '' : 'typeIds')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeForward clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeForward copyWith(void Function(PipeForward) updates) =>
+      super.copyWith((message) => updates(message as PipeForward))
+          as PipeForward;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use PipeForward() / PipeForward.new instead')
+  static PipeForward create() => PipeForward._();
+  static $pb.GeneratedMessage $_createMessage() => PipeForward._();
+  @$core.override
+  PipeForward createEmptyInstance() => PipeForward._();
+  @$core.pragma('dart2js:noInline')
+  static PipeForward getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PipeForward>(
+          PipeForward.$_createMessage);
+  static PipeForward? _defaultInstance;
+
+  /// The agent that reads them (Agent.reads_reports); empty for no one.
+  @$pb.TagNumber(1)
+  $core.String get recipientId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set recipientId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasRecipientId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearRecipientId() => $_clearField(1);
+
+  /// The first of type_ids, for older apps.
+  @$pb.TagNumber(2)
+  $core.String get schemaId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set schemaId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSchemaId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSchemaId() => $_clearField(2);
+
+  /// Rises with each change of recipient. A report goes only to the
+  /// recipient of the revision it was taken under: after a change, those not
+  /// yet read wait for the person (PIPE_REPORT_STATE_WAITING). A change of
+  /// types leaves it, and its reports, as they are. 0 for a project's
+  /// default.
+  @$pb.TagNumber(3)
+  $core.int get revision => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set revision($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasRevision() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearRevision() => $_clearField(3);
+
+  /// Who last changed it: empty for the person, else the admin agent's id
+  /// (Rivet).
+  @$pb.TagNumber(4)
+  $core.String get setById => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set setById($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasSetById() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearSetById() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get setMs => $_getI64(4);
+  @$pb.TagNumber(5)
+  set setMs($fixnum.Int64 value) => $_setInt64(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasSetMs() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearSetMs() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  ReportLimits get limits => $_getN(5);
+  @$pb.TagNumber(6)
+  set limits(ReportLimits value) => $_setField(6, value);
+  @$pb.TagNumber(6)
+  $core.bool hasLimits() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearLimits() => $_clearField(6);
+  @$pb.TagNumber(6)
+  ReportLimits ensureLimits() => $_ensure(5);
+
+  /// The report types its liaison may forward (ReportSchema.id), 1 to
+  /// ReportTypeRules.per_pipe of them. A type turned off refuses new reports
+  /// of it; those already forwarded stay as they are.
+  @$pb.TagNumber(7)
+  $pb.PbList<$core.String> get typeIds => $_getList(6);
+}
+
+/// How much a pipe may forward, in the last 24 hours. As kept and shown,
+/// each is the one in effect; in SetPipeForward, 0 means the default.
+class ReportLimits extends $pb.GeneratedMessage {
+  factory ReportLimits({
+    $core.int? perHour,
+    $core.int? perDay,
+    $core.int? textKibPerDay,
+    $core.int? attachmentsPerReport,
+    $core.int? attachmentMb,
+    $core.int? attachmentsMbPerDay,
+  }) {
+    final result = ReportLimits._();
+    if (perHour != null) result.perHour = perHour;
+    if (perDay != null) result.perDay = perDay;
+    if (textKibPerDay != null) result.textKibPerDay = textKibPerDay;
+    if (attachmentsPerReport != null)
+      result.attachmentsPerReport = attachmentsPerReport;
+    if (attachmentMb != null) result.attachmentMb = attachmentMb;
+    if (attachmentsMbPerDay != null)
+      result.attachmentsMbPerDay = attachmentsMbPerDay;
+    return result;
+  }
+
+  ReportLimits._();
+
+  factory ReportLimits.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportLimits()..mergeFromBuffer(data, registry);
+  factory ReportLimits.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportLimits()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ReportLimits',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ReportLimits.$_createMessage)
+    ..aI(1, _omitFieldNames ? '' : 'perHour', fieldType: $pb.PbFieldType.OU3)
+    ..aI(2, _omitFieldNames ? '' : 'perDay', fieldType: $pb.PbFieldType.OU3)
+    ..aI(3, _omitFieldNames ? '' : 'textKibPerDay',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aI(4, _omitFieldNames ? '' : 'attachmentsPerReport',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aI(5, _omitFieldNames ? '' : 'attachmentMb',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aI(6, _omitFieldNames ? '' : 'attachmentsMbPerDay',
+        fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportLimits clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportLimits copyWith(void Function(ReportLimits) updates) =>
+      super.copyWith((message) => updates(message as ReportLimits))
+          as ReportLimits;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReportLimits() / ReportLimits.new instead')
+  static ReportLimits create() => ReportLimits._();
+  static $pb.GeneratedMessage $_createMessage() => ReportLimits._();
+  @$core.override
+  ReportLimits createEmptyInstance() => ReportLimits._();
+  @$core.pragma('dart2js:noInline')
+  static ReportLimits getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReportLimits>(
+          ReportLimits.$_createMessage);
+  static ReportLimits? _defaultInstance;
+
+  /// 6 and 30.
+  @$pb.TagNumber(1)
+  $core.int get perHour => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set perHour($core.int value) => $_setUnsignedInt32(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPerHour() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPerHour() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get perDay => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set perDay($core.int value) => $_setUnsignedInt32(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasPerDay() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearPerDay() => $_clearField(2);
+
+  /// Text, in KiB: 64.
+  @$pb.TagNumber(3)
+  $core.int get textKibPerDay => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set textKibPerDay($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasTextKibPerDay() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearTextKibPerDay() => $_clearField(3);
+
+  /// 3 files of at most 2 MB each, 20 MB in all.
+  @$pb.TagNumber(4)
+  $core.int get attachmentsPerReport => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set attachmentsPerReport($core.int value) => $_setUnsignedInt32(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasAttachmentsPerReport() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearAttachmentsPerReport() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.int get attachmentMb => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set attachmentMb($core.int value) => $_setUnsignedInt32(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasAttachmentMb() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearAttachmentMb() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.int get attachmentsMbPerDay => $_getIZ(5);
+  @$pb.TagNumber(6)
+  set attachmentsMbPerDay($core.int value) => $_setUnsignedInt32(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasAttachmentsMbPerDay() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearAttachmentsMbPerDay() => $_clearField(6);
+}
+
+/// A pipe's reports in the last 24 hours, for its settings and the Map.
+class PipeReportCounts extends $pb.GeneratedMessage {
+  factory PipeReportCounts({
+    $core.int? today,
+    $core.int? roomToday,
+    $core.int? refusedToday,
+    $core.int? overLimitToday,
+    $core.int? waiting,
+  }) {
+    final result = PipeReportCounts._();
+    if (today != null) result.today = today;
+    if (roomToday != null) result.roomToday = roomToday;
+    if (refusedToday != null) result.refusedToday = refusedToday;
+    if (overLimitToday != null) result.overLimitToday = overLimitToday;
+    if (waiting != null) result.waiting = waiting;
+    return result;
+  }
+
+  PipeReportCounts._();
+
+  factory PipeReportCounts.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeReportCounts()..mergeFromBuffer(data, registry);
+  factory PipeReportCounts.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeReportCounts()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PipeReportCounts',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PipeReportCounts.$_createMessage)
+    ..aI(1, _omitFieldNames ? '' : 'today', fieldType: $pb.PbFieldType.OU3)
+    ..aI(2, _omitFieldNames ? '' : 'roomToday', fieldType: $pb.PbFieldType.OU3)
+    ..aI(3, _omitFieldNames ? '' : 'refusedToday',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aI(4, _omitFieldNames ? '' : 'overLimitToday',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aI(5, _omitFieldNames ? '' : 'waiting', fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeReportCounts clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeReportCounts copyWith(void Function(PipeReportCounts) updates) =>
+      super.copyWith((message) => updates(message as PipeReportCounts))
+          as PipeReportCounts;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use PipeReportCounts() / PipeReportCounts.new instead')
+  static PipeReportCounts create() => PipeReportCounts._();
+  static $pb.GeneratedMessage $_createMessage() => PipeReportCounts._();
+  @$core.override
+  PipeReportCounts createEmptyInstance() => PipeReportCounts._();
+  @$core.pragma('dart2js:noInline')
+  static PipeReportCounts getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PipeReportCounts>(
+          PipeReportCounts.$_createMessage);
+  static PipeReportCounts? _defaultInstance;
+
+  /// Forwarded.
+  @$pb.TagNumber(1)
+  $core.int get today => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set today($core.int value) => $_setUnsignedInt32(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasToday() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearToday() => $_clearField(1);
+
+  /// How many more it can forward now (the hour's and the day's limits).
+  @$pb.TagNumber(2)
+  $core.int get roomToday => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set roomToday($core.int value) => $_setUnsignedInt32(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRoomToday() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRoomToday() => $_clearField(2);
+
+  /// Not forwarded, for any reason.
+  @$pb.TagNumber(3)
+  $core.int get refusedToday => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set refusedToday($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasRefusedToday() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearRefusedToday() => $_clearField(3);
+
+  /// Of those, over a limit: "4 reports over today's limit weren't
+  /// forwarded".
+  @$pb.TagNumber(4)
+  $core.int get overLimitToday => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set overLimitToday($core.int value) => $_setUnsignedInt32(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasOverLimitToday() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearOverLimitToday() => $_clearField(4);
+
+  /// Waiting because where they go changed (DecidePipeReports), any age.
+  @$pb.TagNumber(5)
+  $core.int get waiting => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set waiting($core.int value) => $_setUnsignedInt32(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasWaiting() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearWaiting() => $_clearField(5);
+}
+
+/// Where a pipe's reports go, or (pipe_id empty) a project's default for its
+/// new pipes. Refused when the recipient doesn't read reports, unless
+/// make_reader: then it becomes a reader first, as SetReportReader. Reports
+/// already waiting stay waiting.
+class SetPipeForward extends $pb.GeneratedMessage {
+  factory SetPipeForward({
+    $core.String? pipeId,
+    $core.String? projectId,
+    $core.String? recipientId,
+    $core.String? schemaId,
+    $core.bool? makeReader,
+    $core.bool? fresh,
+    ReportLimits? limits,
+    $core.Iterable<$core.String>? typeIds,
+  }) {
+    final result = SetPipeForward._();
+    if (pipeId != null) result.pipeId = pipeId;
+    if (projectId != null) result.projectId = projectId;
+    if (recipientId != null) result.recipientId = recipientId;
+    if (schemaId != null) result.schemaId = schemaId;
+    if (makeReader != null) result.makeReader = makeReader;
+    if (fresh != null) result.fresh = fresh;
+    if (limits != null) result.limits = limits;
+    if (typeIds != null) result.typeIds.addAll(typeIds);
+    return result;
+  }
+
+  SetPipeForward._();
+
+  factory SetPipeForward.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetPipeForward()..mergeFromBuffer(data, registry);
+  factory SetPipeForward.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetPipeForward()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SetPipeForward',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SetPipeForward.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'pipeId')
+    ..aOS(2, _omitFieldNames ? '' : 'projectId')
+    ..aOS(3, _omitFieldNames ? '' : 'recipientId')
+    ..aOS(4, _omitFieldNames ? '' : 'schemaId')
+    ..aOB(5, _omitFieldNames ? '' : 'makeReader')
+    ..aOB(6, _omitFieldNames ? '' : 'fresh')
+    ..aOM<ReportLimits>(7, _omitFieldNames ? '' : 'limits',
+        subBuilder: ReportLimits.$_createMessage)
+    ..pPS(8, _omitFieldNames ? '' : 'typeIds')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetPipeForward clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetPipeForward copyWith(void Function(SetPipeForward) updates) =>
+      super.copyWith((message) => updates(message as SetPipeForward))
+          as SetPipeForward;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SetPipeForward() / SetPipeForward.new instead')
+  static SetPipeForward create() => SetPipeForward._();
+  static $pb.GeneratedMessage $_createMessage() => SetPipeForward._();
+  @$core.override
+  SetPipeForward createEmptyInstance() => SetPipeForward._();
+  @$core.pragma('dart2js:noInline')
+  static SetPipeForward getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SetPipeForward>(
+          SetPipeForward.$_createMessage);
+  static SetPipeForward? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get pipeId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set pipeId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPipeId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPipeId() => $_clearField(1);
+
+  /// With pipe_id empty.
+  @$pb.TagNumber(2)
+  $core.String get projectId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set projectId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasProjectId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearProjectId() => $_clearField(2);
+
+  /// Empty for no one.
+  @$pb.TagNumber(3)
+  $core.String get recipientId => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set recipientId($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasRecipientId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearRecipientId() => $_clearField(3);
+
+  /// Older apps: one type. With type_ids and schema_id both empty, the
+  /// types stay as they are ("bug_report" for a new forward), and so they do
+  /// when schema_id is one of them already.
+  @$pb.TagNumber(4)
+  $core.String get schemaId => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set schemaId($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasSchemaId() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearSchemaId() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.bool get makeReader => $_getBF(4);
+  @$pb.TagNumber(5)
+  set makeReader($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasMakeReader() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearMakeReader() => $_clearField(5);
+
+  /// With make_reader: start its conversation fresh (the old one archived,
+  /// as /clear does).
+  @$pb.TagNumber(6)
+  $core.bool get fresh => $_getBF(5);
+  @$pb.TagNumber(6)
+  set fresh($core.bool value) => $_setBool(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasFresh() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearFresh() => $_clearField(6);
+
+  /// Unset keeps what it had; 0 in a field means the default.
+  @$pb.TagNumber(7)
+  ReportLimits get limits => $_getN(6);
+  @$pb.TagNumber(7)
+  set limits(ReportLimits value) => $_setField(7, value);
+  @$pb.TagNumber(7)
+  $core.bool hasLimits() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearLimits() => $_clearField(7);
+  @$pb.TagNumber(7)
+  ReportLimits ensureLimits() => $_ensure(6);
+
+  /// The types its liaison may forward: refused empty while there's a
+  /// recipient, or past ReportTypeRules.per_pipe. The same recipient keeps
+  /// the revision.
+  @$pb.TagNumber(8)
+  $pb.PbList<$core.String> get typeIds => $_getList(7);
+}
+
+/// Makes an agent a report reader, or (reads false) lets it go back to its
+/// usual tools; refused while a forward still names it.
+class SetReportReader extends $pb.GeneratedMessage {
+  factory SetReportReader({
+    $core.String? agentId,
+    $core.bool? reads,
+    $core.bool? fresh,
+  }) {
+    final result = SetReportReader._();
+    if (agentId != null) result.agentId = agentId;
+    if (reads != null) result.reads = reads;
+    if (fresh != null) result.fresh = fresh;
+    return result;
+  }
+
+  SetReportReader._();
+
+  factory SetReportReader.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetReportReader()..mergeFromBuffer(data, registry);
+  factory SetReportReader.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetReportReader()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SetReportReader',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SetReportReader.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..aOB(2, _omitFieldNames ? '' : 'reads')
+    ..aOB(3, _omitFieldNames ? '' : 'fresh')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetReportReader clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetReportReader copyWith(void Function(SetReportReader) updates) =>
+      super.copyWith((message) => updates(message as SetReportReader))
+          as SetReportReader;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SetReportReader() / SetReportReader.new instead')
+  static SetReportReader create() => SetReportReader._();
+  static $pb.GeneratedMessage $_createMessage() => SetReportReader._();
+  @$core.override
+  SetReportReader createEmptyInstance() => SetReportReader._();
+  @$core.pragma('dart2js:noInline')
+  static SetReportReader getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SetReportReader>(
+          SetReportReader.$_createMessage);
+  static SetReportReader? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.bool get reads => $_getBF(1);
+  @$pb.TagNumber(2)
+  set reads($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasReads() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearReads() => $_clearField(2);
+
+  /// Start its conversation fresh (the old one archived, as /clear does),
+  /// either way.
+  @$pb.TagNumber(3)
+  $core.bool get fresh => $_getBF(2);
+  @$pb.TagNumber(3)
+  set fresh($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasFresh() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearFresh() => $_clearField(3);
+}
+
+/// The pipe's waiting reports: send them to its current recipient, or
+/// discard them.
+class DecidePipeReports extends $pb.GeneratedMessage {
+  factory DecidePipeReports({
+    $core.String? pipeId,
+    $core.bool? send,
+  }) {
+    final result = DecidePipeReports._();
+    if (pipeId != null) result.pipeId = pipeId;
+    if (send != null) result.send = send;
+    return result;
+  }
+
+  DecidePipeReports._();
+
+  factory DecidePipeReports.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DecidePipeReports()..mergeFromBuffer(data, registry);
+  factory DecidePipeReports.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DecidePipeReports()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DecidePipeReports',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: DecidePipeReports.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'pipeId')
+    ..aOB(2, _omitFieldNames ? '' : 'send')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DecidePipeReports clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DecidePipeReports copyWith(void Function(DecidePipeReports) updates) =>
+      super.copyWith((message) => updates(message as DecidePipeReports))
+          as DecidePipeReports;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use DecidePipeReports() / DecidePipeReports.new instead')
+  static DecidePipeReports create() => DecidePipeReports._();
+  static $pb.GeneratedMessage $_createMessage() => DecidePipeReports._();
+  @$core.override
+  DecidePipeReports createEmptyInstance() => DecidePipeReports._();
+  @$core.pragma('dart2js:noInline')
+  static DecidePipeReports getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DecidePipeReports>(
+          DecidePipeReports.$_createMessage);
+  static DecidePipeReports? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get pipeId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set pipeId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPipeId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPipeId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.bool get send => $_getBF(1);
+  @$pb.TagNumber(2)
+  set send($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSend() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSend() => $_clearField(2);
+}
+
+/// A page of reports, newest first: one pipe's ("Forwarded"), or (pipe_id
+/// empty) every report forwarded to recipient_id (its "Reports" panel).
+class ListPipeReports extends $pb.GeneratedMessage {
+  factory ListPipeReports({
+    $core.String? pipeId,
+    $core.String? recipientId,
+    $fixnum.Int64? beforeId,
+    $core.int? limit,
+  }) {
+    final result = ListPipeReports._();
+    if (pipeId != null) result.pipeId = pipeId;
+    if (recipientId != null) result.recipientId = recipientId;
+    if (beforeId != null) result.beforeId = beforeId;
+    if (limit != null) result.limit = limit;
+    return result;
+  }
+
+  ListPipeReports._();
+
+  factory ListPipeReports.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ListPipeReports()..mergeFromBuffer(data, registry);
+  factory ListPipeReports.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ListPipeReports()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ListPipeReports',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ListPipeReports.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'pipeId')
+    ..aOS(2, _omitFieldNames ? '' : 'recipientId')
+    ..a<$fixnum.Int64>(
+        3, _omitFieldNames ? '' : 'beforeId', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aI(4, _omitFieldNames ? '' : 'limit', fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListPipeReports clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListPipeReports copyWith(void Function(ListPipeReports) updates) =>
+      super.copyWith((message) => updates(message as ListPipeReports))
+          as ListPipeReports;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ListPipeReports() / ListPipeReports.new instead')
+  static ListPipeReports create() => ListPipeReports._();
+  static $pb.GeneratedMessage $_createMessage() => ListPipeReports._();
+  @$core.override
+  ListPipeReports createEmptyInstance() => ListPipeReports._();
+  @$core.pragma('dart2js:noInline')
+  static ListPipeReports getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ListPipeReports>(
+          ListPipeReports.$_createMessage);
+  static ListPipeReports? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get pipeId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set pipeId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPipeId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPipeId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get recipientId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set recipientId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRecipientId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRecipientId() => $_clearField(2);
+
+  /// The last page's oldest PipeReport.id; 0 for the newest.
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get beforeId => $_getI64(2);
+  @$pb.TagNumber(3)
+  set beforeId($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasBeforeId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearBeforeId() => $_clearField(3);
+
+  /// 0 for 50; at most 200.
+  @$pb.TagNumber(4)
+  $core.int get limit => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set limit($core.int value) => $_setUnsignedInt32(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasLimit() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearLimit() => $_clearField(4);
+}
+
+class PipeReportPage extends $pb.GeneratedMessage {
+  factory PipeReportPage({
+    $core.String? pipeId,
+    $core.String? recipientId,
+    $core.Iterable<PipeReport>? reports,
+    $core.bool? more,
+    $core.Iterable<ReportSchema>? schemas,
+  }) {
+    final result = PipeReportPage._();
+    if (pipeId != null) result.pipeId = pipeId;
+    if (recipientId != null) result.recipientId = recipientId;
+    if (reports != null) result.reports.addAll(reports);
+    if (more != null) result.more = more;
+    if (schemas != null) result.schemas.addAll(schemas);
+    return result;
+  }
+
+  PipeReportPage._();
+
+  factory PipeReportPage.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeReportPage()..mergeFromBuffer(data, registry);
+  factory PipeReportPage.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeReportPage()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PipeReportPage',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PipeReportPage.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'pipeId')
+    ..aOS(2, _omitFieldNames ? '' : 'recipientId')
+    ..pPM<PipeReport>(3, _omitFieldNames ? '' : 'reports',
+        subBuilder: PipeReport.$_createMessage)
+    ..aOB(4, _omitFieldNames ? '' : 'more')
+    ..pPM<ReportSchema>(5, _omitFieldNames ? '' : 'schemas',
+        subBuilder: ReportSchema.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeReportPage clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeReportPage copyWith(void Function(PipeReportPage) updates) =>
+      super.copyWith((message) => updates(message as PipeReportPage))
+          as PipeReportPage;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use PipeReportPage() / PipeReportPage.new instead')
+  static PipeReportPage create() => PipeReportPage._();
+  static $pb.GeneratedMessage $_createMessage() => PipeReportPage._();
+  @$core.override
+  PipeReportPage createEmptyInstance() => PipeReportPage._();
+  @$core.pragma('dart2js:noInline')
+  static PipeReportPage getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PipeReportPage>(
+          PipeReportPage.$_createMessage);
+  static PipeReportPage? _defaultInstance;
+
+  /// As asked (ListPipeReports), to tell answers apart.
+  @$pb.TagNumber(1)
+  $core.String get pipeId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set pipeId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPipeId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPipeId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get recipientId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set recipientId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRecipientId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRecipientId() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $pb.PbList<PipeReport> get reports => $_getList(2);
+
+  @$pb.TagNumber(4)
+  $core.bool get more => $_getBF(3);
+  @$pb.TagNumber(4)
+  set more($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasMore() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearMore() => $_clearField(4);
+
+  /// The versions its reports use that aren't current any more (an older
+  /// version, a deleted type's): look a report's type up here by (id,
+  /// version), else in Workspace.report_schemas.
+  @$pb.TagNumber(5)
+  $pb.PbList<ReportSchema> get schemas => $_getList(4);
+}
+
+class PipeReport extends $pb.GeneratedMessage {
+  factory PipeReport({
+    $fixnum.Int64? id,
+    $core.String? pipeId,
+    $core.int? number,
+    PipeReportState? state,
+    $core.String? alias,
+    $core.String? fixedIn,
+    $core.String? needsField,
+    $core.String? refusedCode,
+    $core.String? refusedField,
+    $core.String? schemaId,
+    $core.Iterable<ReportValue>? values,
+    $core.String? liaisonId,
+    $core.String? recipientId,
+    $fixnum.Int64? receivedMs,
+    $core.bool? read,
+    $fixnum.Int64? readMs,
+    $core.Iterable<PipeTaint>? taint,
+    $core.Iterable<ReportAttachment>? attachments,
+    $core.int? typeVersion,
+  }) {
+    final result = PipeReport._();
+    if (id != null) result.id = id;
+    if (pipeId != null) result.pipeId = pipeId;
+    if (number != null) result.number = number;
+    if (state != null) result.state = state;
+    if (alias != null) result.alias = alias;
+    if (fixedIn != null) result.fixedIn = fixedIn;
+    if (needsField != null) result.needsField = needsField;
+    if (refusedCode != null) result.refusedCode = refusedCode;
+    if (refusedField != null) result.refusedField = refusedField;
+    if (schemaId != null) result.schemaId = schemaId;
+    if (values != null) result.values.addAll(values);
+    if (liaisonId != null) result.liaisonId = liaisonId;
+    if (recipientId != null) result.recipientId = recipientId;
+    if (receivedMs != null) result.receivedMs = receivedMs;
+    if (read != null) result.read = read;
+    if (readMs != null) result.readMs = readMs;
+    if (taint != null) result.taint.addAll(taint);
+    if (attachments != null) result.attachments.addAll(attachments);
+    if (typeVersion != null) result.typeVersion = typeVersion;
+    return result;
+  }
+
+  PipeReport._();
+
+  factory PipeReport.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeReport()..mergeFromBuffer(data, registry);
+  factory PipeReport.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeReport()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PipeReport',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PipeReport.$_createMessage)
+    ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOS(2, _omitFieldNames ? '' : 'pipeId')
+    ..aI(3, _omitFieldNames ? '' : 'number', fieldType: $pb.PbFieldType.OU3)
+    ..aE<PipeReportState>(4, _omitFieldNames ? '' : 'state',
+        enumValues: PipeReportState.values)
+    ..aOS(5, _omitFieldNames ? '' : 'alias')
+    ..aOS(6, _omitFieldNames ? '' : 'fixedIn')
+    ..aOS(7, _omitFieldNames ? '' : 'needsField')
+    ..aOS(8, _omitFieldNames ? '' : 'refusedCode')
+    ..aOS(9, _omitFieldNames ? '' : 'refusedField')
+    ..aOS(10, _omitFieldNames ? '' : 'schemaId')
+    ..pPM<ReportValue>(11, _omitFieldNames ? '' : 'values',
+        subBuilder: ReportValue.$_createMessage)
+    ..aOS(12, _omitFieldNames ? '' : 'liaisonId')
+    ..aOS(13, _omitFieldNames ? '' : 'recipientId')
+    ..aInt64(14, _omitFieldNames ? '' : 'receivedMs')
+    ..aOB(15, _omitFieldNames ? '' : 'read')
+    ..aInt64(16, _omitFieldNames ? '' : 'readMs')
+    ..pPM<PipeTaint>(17, _omitFieldNames ? '' : 'taint',
+        subBuilder: PipeTaint.$_createMessage)
+    ..pPM<ReportAttachment>(18, _omitFieldNames ? '' : 'attachments',
+        subBuilder: ReportAttachment.$_createMessage)
+    ..aI(19, _omitFieldNames ? '' : 'typeVersion',
+        fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeReport clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeReport copyWith(void Function(PipeReport) updates) =>
+      super.copyWith((message) => updates(message as PipeReport)) as PipeReport;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use PipeReport() / PipeReport.new instead')
+  static PipeReport create() => PipeReport._();
+  static $pb.GeneratedMessage $_createMessage() => PipeReport._();
+  @$core.override
+  PipeReport createEmptyInstance() => PipeReport._();
+  @$core.pragma('dart2js:noInline')
+  static PipeReport getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<PipeReport>(PipeReport.$_createMessage);
+  static PipeReport? _defaultInstance;
+
+  /// Claktory's id for it, across pipes.
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get id => $_getI64(0);
+  @$pb.TagNumber(1)
+  set id($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get pipeId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set pipeId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasPipeId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearPipeId() => $_clearField(2);
+
+  /// Its number in its pipe ("#4"): what the other side is told. 0 for one
+  /// not forwarded.
+  @$pb.TagNumber(3)
+  $core.int get number => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set number($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasNumber() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearNumber() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  PipeReportState get state => $_getN(3);
+  @$pb.TagNumber(4)
+  set state(PipeReportState value) => $_setField(4, value);
+  @$pb.TagNumber(4)
+  $core.bool hasState() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearState() => $_clearField(4);
+
+  /// KNOWN: the pipe's own name for the issue ("A3"), made by Claktory.
+  @$pb.TagNumber(5)
+  $core.String get alias => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set alias($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasAlias() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearAlias() => $_clearField(5);
+
+  /// FIXED: a known release.
+  @$pb.TagNumber(6)
+  $core.String get fixedIn => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set fixedIn($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasFixedIn() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearFixedIn() => $_clearField(6);
+
+  /// NEEDS_INFO: the field it needs (ReportField.name).
+  @$pb.TagNumber(7)
+  $core.String get needsField => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set needsField($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasNeedsField() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearNeedsField() => $_clearField(7);
+
+  /// REFUSED: why, in a word (missing, too_long, too_many, invalid, version,
+  /// unknown_field, secret, over_limit, type, …) and the type's field, if
+  /// one. What was refused is never kept: "type" (a type that's unknown or
+  /// not on for the pipe) leaves schema_id empty.
+  @$pb.TagNumber(8)
+  $core.String get refusedCode => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set refusedCode($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasRefusedCode() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearRefusedCode() => $_clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.String get refusedField => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set refusedField($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasRefusedField() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearRefusedField() => $_clearField(9);
+
+  @$pb.TagNumber(10)
+  $core.String get schemaId => $_getSZ(9);
+  @$pb.TagNumber(10)
+  set schemaId($core.String value) => $_setString(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasSchemaId() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearSchemaId() => $_clearField(10);
+
+  /// Its fields, as checked; empty when REFUSED.
+  @$pb.TagNumber(11)
+  $pb.PbList<ReportValue> get values => $_getList(10);
+
+  /// The liaison that wrote it.
+  @$pb.TagNumber(12)
+  $core.String get liaisonId => $_getSZ(11);
+  @$pb.TagNumber(12)
+  set liaisonId($core.String value) => $_setString(11, value);
+  @$pb.TagNumber(12)
+  $core.bool hasLiaisonId() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearLiaisonId() => $_clearField(12);
+
+  /// The recipient it was taken for.
+  @$pb.TagNumber(13)
+  $core.String get recipientId => $_getSZ(12);
+  @$pb.TagNumber(13)
+  set recipientId($core.String value) => $_setString(12, value);
+  @$pb.TagNumber(13)
+  $core.bool hasRecipientId() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearRecipientId() => $_clearField(13);
+
+  @$pb.TagNumber(14)
+  $fixnum.Int64 get receivedMs => $_getI64(13);
+  @$pb.TagNumber(14)
+  set receivedMs($fixnum.Int64 value) => $_setInt64(13, value);
+  @$pb.TagNumber(14)
+  $core.bool hasReceivedMs() => $_has(13);
+  @$pb.TagNumber(14)
+  void clearReceivedMs() => $_clearField(14);
+
+  /// Its recipient has read its words, and when.
+  @$pb.TagNumber(15)
+  $core.bool get read => $_getBF(14);
+  @$pb.TagNumber(15)
+  set read($core.bool value) => $_setBool(14, value);
+  @$pb.TagNumber(15)
+  $core.bool hasRead() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearRead() => $_clearField(15);
+
+  @$pb.TagNumber(16)
+  $fixnum.Int64 get readMs => $_getI64(15);
+  @$pb.TagNumber(16)
+  set readMs($fixnum.Int64 value) => $_setInt64(15, value);
+  @$pb.TagNumber(16)
+  $core.bool hasReadMs() => $_has(15);
+  @$pb.TagNumber(16)
+  void clearReadMs() => $_clearField(16);
+
+  /// What its liaison had read when it wrote it: its pipe, at least.
+  @$pb.TagNumber(17)
+  $pb.PbList<PipeTaint> get taint => $_getList(16);
+
+  @$pb.TagNumber(18)
+  $pb.PbList<ReportAttachment> get attachments => $_getList(17);
+
+  /// The version of its type (schema_id) it was checked against.
+  @$pb.TagNumber(19)
+  $core.int get typeVersion => $_getIZ(18);
+  @$pb.TagNumber(19)
+  set typeVersion($core.int value) => $_setUnsignedInt32(18, value);
+  @$pb.TagNumber(19)
+  $core.bool hasTypeVersion() => $_has(18);
+  @$pb.TagNumber(19)
+  void clearTypeVersion() => $_clearField(19);
+}
+
+class ReportValue extends $pb.GeneratedMessage {
+  factory ReportValue({
+    $core.String? field_1,
+    $core.String? text,
+    $core.Iterable<$core.String>? items,
+    $core.bool? flag,
+    $fixnum.Int64? number,
+  }) {
+    final result = ReportValue._();
+    if (field_1 != null) result.field_1 = field_1;
+    if (text != null) result.text = text;
+    if (items != null) result.items.addAll(items);
+    if (flag != null) result.flag = flag;
+    if (number != null) result.number = number;
+    return result;
+  }
+
+  ReportValue._();
+
+  factory ReportValue.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportValue()..mergeFromBuffer(data, registry);
+  factory ReportValue.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportValue()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ReportValue',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ReportValue.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'field')
+    ..aOS(2, _omitFieldNames ? '' : 'text')
+    ..pPS(3, _omitFieldNames ? '' : 'items')
+    ..aOB(4, _omitFieldNames ? '' : 'flag')
+    ..a<$fixnum.Int64>(5, _omitFieldNames ? '' : 'number', $pb.PbFieldType.OS6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportValue clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportValue copyWith(void Function(ReportValue) updates) =>
+      super.copyWith((message) => updates(message as ReportValue))
+          as ReportValue;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReportValue() / ReportValue.new instead')
+  static ReportValue create() => ReportValue._();
+  static $pb.GeneratedMessage $_createMessage() => ReportValue._();
+  @$core.override
+  ReportValue createEmptyInstance() => ReportValue._();
+  @$core.pragma('dart2js:noInline')
+  static ReportValue getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReportValue>(
+          ReportValue.$_createMessage);
+  static ReportValue? _defaultInstance;
+
+  /// ReportField.name.
+  @$pb.TagNumber(1)
+  $core.String get field_1 => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set field_1($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasField_1() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearField_1() => $_clearField(1);
+
+  /// TEXT (the other side's words), ENUM and VERSION.
+  @$pb.TagNumber(2)
+  $core.String get text => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set text($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasText() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearText() => $_clearField(2);
+
+  /// TEXT_LIST.
+  @$pb.TagNumber(3)
+  $pb.PbList<$core.String> get items => $_getList(2);
+
+  /// BOOL.
+  @$pb.TagNumber(4)
+  $core.bool get flag => $_getBF(3);
+  @$pb.TagNumber(4)
+  set flag($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasFlag() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearFlag() => $_clearField(4);
+
+  /// NUMBER. (DATE is in text: "2026-11-22".)
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get number => $_getI64(4);
+  @$pb.TagNumber(5)
+  set number($fixnum.Int64 value) => $_setInt64(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasNumber() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearNumber() => $_clearField(5);
+}
+
+/// A file a report carries, copied from the pipe's inbox when it was
+/// submitted.
+class ReportAttachment extends $pb.GeneratedMessage {
+  factory ReportAttachment({
+    $core.String? name,
+    $fixnum.Int64? size,
+    $core.bool? image,
+    $core.String? path,
+  }) {
+    final result = ReportAttachment._();
+    if (name != null) result.name = name;
+    if (size != null) result.size = size;
+    if (image != null) result.image = image;
+    if (path != null) result.path = path;
+    return result;
+  }
+
+  ReportAttachment._();
+
+  factory ReportAttachment.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportAttachment()..mergeFromBuffer(data, registry);
+  factory ReportAttachment.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportAttachment()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ReportAttachment',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ReportAttachment.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'size', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOB(3, _omitFieldNames ? '' : 'image')
+    ..aOS(4, _omitFieldNames ? '' : 'path')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportAttachment clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportAttachment copyWith(void Function(ReportAttachment) updates) =>
+      super.copyWith((message) => updates(message as ReportAttachment))
+          as ReportAttachment;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReportAttachment() / ReportAttachment.new instead')
+  static ReportAttachment create() => ReportAttachment._();
+  static $pb.GeneratedMessage $_createMessage() => ReportAttachment._();
+  @$core.override
+  ReportAttachment createEmptyInstance() => ReportAttachment._();
+  @$core.pragma('dart2js:noInline')
+  static ReportAttachment getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReportAttachment>(
+          ReportAttachment.$_createMessage);
+  static ReportAttachment? _defaultInstance;
+
+  /// Its name as shown, cleaned: the other side's words.
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get size => $_getI64(1);
+  @$pb.TagNumber(2)
+  set size($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSize() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSize() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.bool get image => $_getBF(2);
+  @$pb.TagNumber(3)
+  set image($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasImage() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearImage() => $_clearField(3);
+
+  /// Where Claktory keeps it: in the pipe's report store, outside every
+  /// project, named by Claktory.
+  @$pb.TagNumber(4)
+  $core.String get path => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set path($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasPath() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearPath() => $_clearField(4);
+}
+
+/// A liaison's model spending today (Agent.spend).
+class ContainedSpend extends $pb.GeneratedMessage {
+  factory ContainedSpend({
+    $core.double? spentUsd,
+    $core.double? capUsd,
+    $fixnum.Int64? spentTokens,
+    $fixnum.Int64? capTokens,
+    $core.bool? over,
+    $core.int? heldMessages,
+    $fixnum.Int64? resumesMs,
+  }) {
+    final result = ContainedSpend._();
+    if (spentUsd != null) result.spentUsd = spentUsd;
+    if (capUsd != null) result.capUsd = capUsd;
+    if (spentTokens != null) result.spentTokens = spentTokens;
+    if (capTokens != null) result.capTokens = capTokens;
+    if (over != null) result.over = over;
+    if (heldMessages != null) result.heldMessages = heldMessages;
+    if (resumesMs != null) result.resumesMs = resumesMs;
+    return result;
+  }
+
+  ContainedSpend._();
+
+  factory ContainedSpend.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ContainedSpend()..mergeFromBuffer(data, registry);
+  factory ContainedSpend.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ContainedSpend()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ContainedSpend',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ContainedSpend.$_createMessage)
+    ..aD(1, _omitFieldNames ? '' : 'spentUsd')
+    ..aD(2, _omitFieldNames ? '' : 'capUsd')
+    ..a<$fixnum.Int64>(
+        3, _omitFieldNames ? '' : 'spentTokens', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(
+        4, _omitFieldNames ? '' : 'capTokens', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOB(5, _omitFieldNames ? '' : 'over')
+    ..aI(6, _omitFieldNames ? '' : 'heldMessages',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aInt64(7, _omitFieldNames ? '' : 'resumesMs')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ContainedSpend clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ContainedSpend copyWith(void Function(ContainedSpend) updates) =>
+      super.copyWith((message) => updates(message as ContainedSpend))
+          as ContainedSpend;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ContainedSpend() / ContainedSpend.new instead')
+  static ContainedSpend create() => ContainedSpend._();
+  static $pb.GeneratedMessage $_createMessage() => ContainedSpend._();
+  @$core.override
+  ContainedSpend createEmptyInstance() => ContainedSpend._();
+  @$core.pragma('dart2js:noInline')
+  static ContainedSpend getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ContainedSpend>(
+          ContainedSpend.$_createMessage);
+  static ContainedSpend? _defaultInstance;
+
+  /// Its estimated model spend since local midnight, from agent_usage and
+  /// its models' prices.
+  @$pb.TagNumber(1)
+  $core.double get spentUsd => $_getN(0);
+  @$pb.TagNumber(1)
+  set spentUsd($core.double value) => $_setDouble(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasSpentUsd() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearSpentUsd() => $_clearField(1);
+
+  /// Its daily cap in dollars (10 unless set).
+  @$pb.TagNumber(2)
+  $core.double get capUsd => $_getN(1);
+  @$pb.TagNumber(2)
+  set capUsd($core.double value) => $_setDouble(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasCapUsd() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearCapUsd() => $_clearField(2);
+
+  /// Input, output and cache writes today on models with no price.
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get spentTokens => $_getI64(2);
+  @$pb.TagNumber(3)
+  set spentTokens($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasSpentTokens() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSpentTokens() => $_clearField(3);
+
+  /// The cap for those (1,000,000 unless set).
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get capTokens => $_getI64(3);
+  @$pb.TagNumber(4)
+  set capTokens($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasCapTokens() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearCapTokens() => $_clearField(4);
+
+  /// Past either cap: its pipes' messages wait, they don't wake it.
+  @$pb.TagNumber(5)
+  $core.bool get over => $_getBF(4);
+  @$pb.TagNumber(5)
+  set over($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasOver() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearOver() => $_clearField(5);
+
+  /// Pipe messages waiting because of that (the quiet count).
+  @$pb.TagNumber(6)
+  $core.int get heldMessages => $_getIZ(5);
+  @$pb.TagNumber(6)
+  set heldMessages($core.int value) => $_setUnsignedInt32(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasHeldMessages() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearHeldMessages() => $_clearField(6);
+
+  /// The next local midnight, when the held messages wake it.
+  @$pb.TagNumber(7)
+  $fixnum.Int64 get resumesMs => $_getI64(6);
+  @$pb.TagNumber(7)
+  set resumesMs($fixnum.Int64 value) => $_setInt64(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasResumesMs() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearResumesMs() => $_clearField(7);
+}
+
+/// A liaison's daily spending cap. 0 means the default.
+class SetSpendCap extends $pb.GeneratedMessage {
+  factory SetSpendCap({
+    $core.String? agentId,
+    $core.double? capUsd,
+    $fixnum.Int64? capTokens,
+  }) {
+    final result = SetSpendCap._();
+    if (agentId != null) result.agentId = agentId;
+    if (capUsd != null) result.capUsd = capUsd;
+    if (capTokens != null) result.capTokens = capTokens;
+    return result;
+  }
+
+  SetSpendCap._();
+
+  factory SetSpendCap.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetSpendCap()..mergeFromBuffer(data, registry);
+  factory SetSpendCap.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetSpendCap()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SetSpendCap',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SetSpendCap.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..aD(2, _omitFieldNames ? '' : 'capUsd')
+    ..a<$fixnum.Int64>(
+        3, _omitFieldNames ? '' : 'capTokens', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetSpendCap clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetSpendCap copyWith(void Function(SetSpendCap) updates) =>
+      super.copyWith((message) => updates(message as SetSpendCap))
+          as SetSpendCap;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SetSpendCap() / SetSpendCap.new instead')
+  static SetSpendCap create() => SetSpendCap._();
+  static $pb.GeneratedMessage $_createMessage() => SetSpendCap._();
+  @$core.override
+  SetSpendCap createEmptyInstance() => SetSpendCap._();
+  @$core.pragma('dart2js:noInline')
+  static SetSpendCap getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SetSpendCap>(
+          SetSpendCap.$_createMessage);
+  static SetSpendCap? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.double get capUsd => $_getN(1);
+  @$pb.TagNumber(2)
+  set capUsd($core.double value) => $_setDouble(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasCapUsd() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearCapUsd() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get capTokens => $_getI64(2);
+  @$pb.TagNumber(3)
+  set capTokens($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasCapTokens() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearCapTokens() => $_clearField(3);
+}
+
+/// One reply to report (ClientMessage.report_reply): an AssistantText entry
+/// of an agent's conversation, or of a chat's, whose response has finished.
+class ReportReply extends $pb.GeneratedMessage {
+  factory ReportReply({
+    $core.String? agentId,
+    $core.String? chatId,
+    $fixnum.Int64? seq,
+    $core.String? note,
+    $core.bool? send,
+  }) {
+    final result = ReportReply._();
+    if (agentId != null) result.agentId = agentId;
+    if (chatId != null) result.chatId = chatId;
+    if (seq != null) result.seq = seq;
+    if (note != null) result.note = note;
+    if (send != null) result.send = send;
+    return result;
+  }
+
+  ReportReply._();
+
+  factory ReportReply.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportReply()..mergeFromBuffer(data, registry);
+  factory ReportReply.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReportReply()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ReportReply',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ReportReply.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..aOS(2, _omitFieldNames ? '' : 'chatId')
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'seq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOS(4, _omitFieldNames ? '' : 'note')
+    ..aOB(5, _omitFieldNames ? '' : 'send')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportReply clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReportReply copyWith(void Function(ReportReply) updates) =>
+      super.copyWith((message) => updates(message as ReportReply))
+          as ReportReply;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReportReply() / ReportReply.new instead')
+  static ReportReply create() => ReportReply._();
+  static $pb.GeneratedMessage $_createMessage() => ReportReply._();
+  @$core.override
+  ReportReply createEmptyInstance() => ReportReply._();
+  @$core.pragma('dart2js:noInline')
+  static ReportReply getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReportReply>(
+          ReportReply.$_createMessage);
+  static ReportReply? _defaultInstance;
+
+  /// Whose conversation: an agent's id, or a chat's ("chat:3"); one of them.
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get chatId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set chatId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasChatId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearChatId() => $_clearField(2);
+
+  /// The entry (Entry.seq).
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get seq => $_getI64(2);
+  @$pb.TagNumber(3)
+  set seq($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasSeq() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSeq() => $_clearField(3);
+
+  /// The person's note, optional: at most 1000 characters.
+  @$pb.TagNumber(4)
+  $core.String get note => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set note($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasNote() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearNote() => $_clearField(4);
+
+  /// false: only show what would be sent; true: send it.
+  @$pb.TagNumber(5)
+  $core.bool get send => $_getBF(4);
+  @$pb.TagNumber(5)
+  set send($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasSend() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearSend() => $_clearField(5);
+}
+
+/// What a report sends, exactly: the app shows this, never its own copy.
+/// Nothing else goes with it but this computer's platform ("macos-arm64").
+class ReplyReport extends $pb.GeneratedMessage {
+  factory ReplyReport({
+    $core.String? text,
+    $core.String? model,
+    $core.String? version,
+    $core.String? note,
+    $core.bool? truncated,
+  }) {
+    final result = ReplyReport._();
+    if (text != null) result.text = text;
+    if (model != null) result.model = model;
+    if (version != null) result.version = version;
+    if (note != null) result.note = note;
+    if (truncated != null) result.truncated = truncated;
+    return result;
+  }
+
+  ReplyReport._();
+
+  factory ReplyReport.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReplyReport()..mergeFromBuffer(data, registry);
+  factory ReplyReport.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ReplyReport()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ReplyReport',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ReplyReport.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'text')
+    ..aOS(2, _omitFieldNames ? '' : 'model')
+    ..aOS(3, _omitFieldNames ? '' : 'version')
+    ..aOS(4, _omitFieldNames ? '' : 'note')
+    ..aOB(5, _omitFieldNames ? '' : 'truncated')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReplyReport clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReplyReport copyWith(void Function(ReplyReport) updates) =>
+      super.copyWith((message) => updates(message as ReplyReport))
+          as ReplyReport;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ReplyReport() / ReplyReport.new instead')
+  static ReplyReport create() => ReplyReport._();
+  static $pb.GeneratedMessage $_createMessage() => ReplyReport._();
+  @$core.override
+  ReplyReport createEmptyInstance() => ReplyReport._();
+  @$core.pragma('dart2js:noInline')
+  static ReplyReport getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReplyReport>(
+          ReplyReport.$_createMessage);
+  static ReplyReport? _defaultInstance;
+
+  /// The reply's text with the vault's values hidden, cut at 16 KB (on a
+  /// character's boundary).
+  @$pb.TagNumber(1)
+  $core.String get text => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set text($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasText() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearText() => $_clearField(1);
+
+  /// The name of the model that wrote it ("Claude Opus 4.5"), or its id
+  /// when that model is no longer listed.
+  @$pb.TagNumber(2)
+  $core.String get model => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set model($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasModel() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearModel() => $_clearField(2);
+
+  /// This Claktory's version.
+  @$pb.TagNumber(3)
+  $core.String get version => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set version($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasVersion() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearVersion() => $_clearField(3);
+
+  /// The note as it's sent: control characters but line breaks and tabs
+  /// removed, trimmed.
+  @$pb.TagNumber(4)
+  $core.String get note => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set note($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasNote() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearNote() => $_clearField(4);
+
+  /// The text was cut at 16 KB.
+  @$pb.TagNumber(5)
+  $core.bool get truncated => $_getBF(4);
+  @$pb.TagNumber(5)
+  set truncated($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasTruncated() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearTruncated() => $_clearField(5);
 }
 
 const $core.bool _omitFieldNames =

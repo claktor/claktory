@@ -186,6 +186,9 @@ pub enum RequestError {
     Ink(String),
     #[error("{what} is too long: {most} characters at most.")]
     TooLong { what: &'static str, most: usize },
+    /// A search that can't be made so, and why (`crate::find`).
+    #[error("{0}")]
+    Find(String),
 }
 
 impl RequestError {
@@ -238,7 +241,8 @@ impl RequestError {
             | RequestError::Pipe(_)
             | RequestError::Avatar(_)
             | RequestError::Ink(_)
-            | RequestError::TooLong { .. } => v1::ErrorCode::InvalidRequest,
+            | RequestError::TooLong { .. }
+            | RequestError::Find(_) => v1::ErrorCode::InvalidRequest,
             RequestError::Unreachable(_) => v1::ErrorCode::Unreachable,
             RequestError::Account(code, _) => *code,
             RequestError::Io(_) | RequestError::Json(_) | RequestError::Db(_) | RequestError::Transcript(_) | RequestError::Provider(_) => {
@@ -450,6 +454,8 @@ pub(crate) struct Queued {
     /// The person's voice message (`crate::speech::voice`): its
     /// transcription; `text` is empty until it's done.
     pub(crate) voice: Option<crate::speech::voice::Voice>,
+    /// The person's reply on a checklist item (`extensions::checklist::reply`).
+    pub(crate) checklist_item: Option<factory_agent::ChecklistItemRef>,
     /// An agent's message: what Claktory records of its send, with it.
     #[serde(skip)]
     pub(crate) sent: Option<crate::extensions::agents::provenance::Sent>,
@@ -483,6 +489,7 @@ impl Queued {
             client_id: String::new(),
             attachments: Vec::new(),
             voice: None,
+            checklist_item: None,
             sent: None,
             held: false,
         }
@@ -826,6 +833,7 @@ impl Factory {
         tokio::spawn(crate::speech::voice::work(Arc::downgrade(&factory)));
         tokio::spawn(crate::notify::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::browser::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::pipes::spend::monitor(Arc::downgrade(&factory)));
         // The agent the app opens on, read before an app asks for it.
         if let Some(selected) = factory.lock().state.selected_agent.clone() {
             let factory = Arc::downgrade(&factory);
@@ -885,6 +893,11 @@ impl Factory {
         // A panic while holding the lock leaves data that's still consistent
         // enough to keep serving; recover instead of poisoning every client.
         self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The person's sentence-start name, copied while the settings are locked.
+    pub(crate) fn person_capitalized(&self) -> String {
+        self.lock().config.person_capitalized().to_owned()
     }
 
     /// Subscribes to events and returns the state they apply on top of.
@@ -1110,6 +1123,7 @@ impl Factory {
         crate::extensions::viewer::forget(self, id)?;
         crate::presentation::forget_agent(self, id)?;
         crate::pipes::start::forget(&self.store, id)?;
+        crate::pipes::curator::forget(self, id)?;
         crate::extensions::agents::provenance::forget(&self.store, id)?;
         crate::user_apps::forget(self, id)?;
         self.forget_presence(id)?;
@@ -1513,15 +1527,44 @@ impl Factory {
         client_id: &str,
         attached: &[v1::Attachment],
     ) -> Result<(), RequestError> {
+        self.send_message_about(id, text, sent_from, client_id, attached, None)
+    }
+
+    /// `send_message`, as a reply on a checklist item when `item` names one
+    /// (whose checklist, "" for the agent's own, and its id): the agent
+    /// reads which, and the item's history keeps the reply.
+    pub(crate) fn send_message_about(
+        self: &Arc<Self>,
+        id: &str,
+        text: &str,
+        sent_from: Option<factory_agent::SentFrom>,
+        client_id: &str,
+        attached: &[v1::Attachment],
+        item: Option<(&str, u32)>,
+    ) -> Result<(), RequestError> {
         let text = text.trim();
+        if item.is_some() && text.is_empty() {
+            return Err(RequestError::Checklist("Write your reply first.".to_owned()));
+        }
         if text.is_empty() && attached.is_empty() {
             return Err(RequestError::Empty("message"));
         }
         self.known_agent(id)?;
+        let checklist_item = match item {
+            Some((checklist, item)) => {
+                Some(crate::extensions::checklist::reply_target(self, id, checklist, item).map_err(RequestError::Checklist)?)
+            }
+            None => None,
+        };
         let attachments = self.attachments(id, attached)?;
         let mut inner = self.lock();
-        let queued = Queued { client_id: client_id.to_owned(), attachments, ..Queued::from_person(text, sent_from) };
+        let queued =
+            Queued { client_id: client_id.to_owned(), attachments, checklist_item: checklist_item.clone(), ..Queued::from_person(text, sent_from) };
         self.enqueue(&mut inner, id, queued)?;
+        drop(inner);
+        if let Some(item) = checklist_item {
+            crate::extensions::checklist::replied(self, &item, text);
+        }
         Ok(())
     }
 
@@ -1679,6 +1722,8 @@ impl Factory {
             }
             Err(error) => tracing::error!(agent = %id, %error, "could not read the requests it collects; decided ones show as open"),
         }
+        // And those whose asker was deleted, its requests with it, close.
+        crate::vault::requests::close_missing(self, &mut transcript);
         match self.vault.proposals_of(id) {
             Ok(proposals) => {
                 for proposal in proposals.into_iter().filter(|proposal| proposal.state() != v1::ConnectProposalState::Pending) {
@@ -1721,7 +1766,6 @@ impl Factory {
             || crate::extensions::ask::pending_of(&self.store, id)
             || crate::extensions::devices::waiting_of(&self.store, id)
             || crate::pipes::start::waiting_of(&self.store, id)
-            || crate::extensions::checklist::waits_unasked(&self.store, id)
             || crate::user_apps::pending_of(&self.store, id)
     }
 
@@ -1899,10 +1943,14 @@ impl Factory {
         self.retire_checkouts(&inner.config, &config);
         // A removed agent's grants go with it, so one added later with its id
         // gets none (deleted in the app, or edited out of config.json).
-        for agent in inner.config.agents.iter().filter(|agent| config.agent(&agent.id).is_none()) {
-            if let Err(error) = self.vault.forget_agent(&agent.id) {
-                tracing::error!(%error, agent = %agent.id, "could not take a removed agent's grants");
+        let gone: Vec<String> =
+            inner.config.agents.iter().filter(|agent| config.agent(&agent.id).is_none()).map(|agent| agent.id.clone()).collect();
+        for agent in gone {
+            if let Err(error) = self.vault.forget_agent(&agent) {
+                tracing::error!(%error, agent = %agent, "could not take a removed agent's grants");
             }
+            // Its requests went too: their cards in other conversations close.
+            crate::vault::requests::close_cards_in(self, inner, &agent);
         }
         self.add_presences(&config.agents);
         // Agents whose project was archived stop, keeping what's queued for
@@ -1929,6 +1977,8 @@ impl Factory {
         }
         // Browser control just turned on turns itself off again later.
         crate::browser::activation::observe(self, &inner.config, &config);
+        // Reports for an agent deleted or moved away wait for the person.
+        self.pipes.handoff.agents_changed(&inner.config, &config);
         inner.config = config;
         if unarchived {
             self.unarchived.notify_one();
@@ -2270,13 +2320,18 @@ impl Factory {
                 path: project.path.display().to_string(),
                 folders,
                 archived: project.archived,
+                report_forward: crate::pipes::handoff::project_view(self, &project.id),
             });
         }
         let mut agents = Vec::new();
         let now = crate::transcript::now_ms();
         let unread_copies = crate::extensions::agents::provenance::unread(&self.store);
         // Checklist items waiting on the person (#279), by agent.
-        let mut waiting_items = crate::extensions::checklist::waiting_items(&self.store).unwrap_or_else(|error| {
+        let card_seq = |agent: &str, card: &crate::extensions::checklist::Card| {
+            let transcript = inner.agents.get(agent).and_then(|runtime| runtime.transcript.as_ref());
+            transcript.and_then(|transcript| crate::extensions::checklist::seq_of(transcript, card)).unwrap_or_default()
+        };
+        let mut waiting_items = crate::extensions::checklist::waiting_items(self, card_seq).unwrap_or_else(|error| {
             tracing::error!(%error, "could not read the checklist items waiting on the person");
             Default::default()
         });
@@ -2296,6 +2351,9 @@ impl Factory {
                 compact_at_tokens: inner.config.compact_at_tokens,
                 queued_messages: runtime.map_or(0, |runtime| (runtime.queue.len() - runtime.quiet_waiting()) as u32),
                 quiet_waiting: runtime.map_or(0, |runtime| runtime.quiet_waiting() as u32),
+                reads_reports: self.pipes.curator(&agent.id),
+                spend: crate::pipes::spend::proto(self, &agent.id),
+                held_asks: crate::extensions::ask::held_today(&self.store, &agent.id),
                 model_available: inner.models.iter().any(|model| model.id == agent.model),
                 color: agent.color.clone(),
                 unseen: inner.state.unseen.contains(&agent.id),
@@ -2342,7 +2400,7 @@ impl Factory {
         // Given to an agent quarantined for a pipe, a secret isn't usable by it.
         for secret in &mut vault.secrets {
             for grant in &secret.grants {
-                if self.pipes.quarantined(&grant.agent_id) {
+                if self.pipes.contained(&grant.agent_id) {
                     let name = config.agent(&grant.agent_id).map_or(grant.agent_id.as_str(), |agent| agent.name.as_str());
                     secret.warnings.push(format!("{name} can't use it while it's limited to a pipe."));
                 }
@@ -2361,6 +2419,7 @@ impl Factory {
             apps,
             apps_available: self.apps.available(),
             pinned_apps: crate::apps::pins::view(self, config),
+            bundled_apps: crate::apps::bundled::view(self, config),
             browser_sessions: self.browser.view(),
             dm_sends: crate::user_apps::dms::sends::waiting(self),
             pipes,
@@ -2386,6 +2445,8 @@ impl Factory {
             update_error: inner.update_error.clone(),
             update_check: Some(inner.update_check.clone()),
             diagnostics: Some(crate::diagnostics::view(self)),
+            report_schemas: crate::pipes::handoff::schemas(self),
+            report_type_rules: Some(crate::pipes::handoff::type_rules()),
             next_agent_color: inner.config.next_color().to_owned(),
             extensions: crate::extensions::catalog(),
             open_panel: inner.state.selected_agent.as_deref().and_then(|agent| open_panel(inner, agent)).unwrap_or_default().to_owned(),
@@ -2533,6 +2594,7 @@ pub(crate) fn queued_message(queued: &Queued) -> v1::QueuedMessage {
         client_id: queued.client_id.clone(),
         attachments: queued.attachments.iter().map(crate::transcript::attachment).collect(),
         transcription: queued.voice.as_ref().map(crate::speech::voice::Voice::view),
+        checklist_item: queued.checklist_item.as_ref().map(crate::transcript::checklist_item),
         quiet: queued.quiet(),
     }
 }

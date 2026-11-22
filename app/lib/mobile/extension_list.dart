@@ -24,9 +24,13 @@ class PhoneExtensionList extends StatefulWidget {
     required this.agent,
     required this.chosen,
     required this.viewed,
+    this.onSearch,
   });
 
   final Agent agent;
+
+  /// Opens the conversation's find: Search heads the list when it can.
+  final VoidCallback? onSearch;
 
   /// An extension was chosen: its panel opens, so the list closes.
   final VoidCallback chosen;
@@ -88,6 +92,19 @@ class _PhoneExtensionListState extends State<PhoneExtensionList> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (widget.onSearch case final search?)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.s),
+              child: _Row(
+                glyph: ExtensionGlyph(
+                  icon: 'search',
+                  name: 'Search',
+                  color: palette.textMuted,
+                ),
+                name: 'Search',
+                onTap: search,
+              ),
+            ),
           if (viewers.isNotEmpty) ...[
             const _Heading('Files'),
             for (final pane in viewers)

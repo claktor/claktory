@@ -74,6 +74,8 @@ class Adapters private constructor(private val all: List<AutoCloseable>) : AutoC
                     DeviceChannel(messenger, context, attachments, camera, webAuth, share),
                     // factory/dm-keys: the keys of end-to-end direct messages.
                     DmKeysChannel(messenger, context),
+                    // factory/secret-clipboard: Copy code's secret, cleared only if still there.
+                    SecretClipboardChannel(messenger, context),
                     webAuth,
                     share,
                     // factory/links: claktory://add?code=… opens the app.

@@ -24,6 +24,7 @@
 pub(crate) mod analytics;
 pub(crate) mod anchor;
 pub(crate) mod apps;
+pub(crate) mod reports;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -183,6 +184,8 @@ pub(crate) struct State {
     /// Wakes `monitor`: something's due now.
     wake: Notify,
     http: reqwest::Client,
+    /// Replies reported lately (`reports`).
+    reports: reports::Sent,
 }
 
 /// Why a call to the service failed.
@@ -348,7 +351,14 @@ impl State {
             .user_agent(format!("Claktory/{}", crate::update::VERSION))
             .build()
             .unwrap_or_default();
-        let state = State { dir, inner: Mutex::new(inner), busy: tokio::sync::Mutex::new(()), wake: Notify::new(), http };
+        let state = State {
+            dir,
+            inner: Mutex::new(inner),
+            busy: tokio::sync::Mutex::new(()),
+            wake: Notify::new(),
+            http,
+            reports: reports::Sent::default(),
+        };
         if first {
             state.save();
         }
@@ -600,6 +610,23 @@ impl State {
         let inner = self.lock();
         let saved = &inner.saved;
         (config.enabled && saved.signed_in() && !saved.revoked).then(|| (saved.account_id.clone(), saved.claktory_id.clone(), saved.epoch))
+    }
+
+    /// What a pipe peer's statement says, checked with the service key this
+    /// Claktory pinned when it signed in (never the key the statement
+    /// names), for the pipe's pinned peer key `endpoint_id`, at `now` (unix
+    /// seconds). None when it doesn't verify, or when this Claktory isn't
+    /// signed in and so can check nothing.
+    pub(crate) fn verify_pipe_peer(&self, statement: &str, endpoint_id: &str, now: i64) -> Option<api::PipePeerStatement> {
+        let service_key = {
+            let inner = self.lock();
+            let saved = &inner.saved;
+            if !saved.signed_in() || saved.revoked {
+                return None;
+            }
+            api::verifying_key(&saved.service_key)?
+        };
+        api::verify_pipe_peer(&service_key, statement, endpoint_id, now)
     }
 
     /// What the app shows: None while signing in is off.
@@ -1461,6 +1488,32 @@ async fn register_endpoints(factory: &Arc<Factory>) {
             account.lock().endpoints_sent = Some(now);
         }
         Err(failure) => tracing::info!(%failure, "could not register endpoints"),
+    }
+}
+
+/// This Claktory's pipe peer statement, for the Claktories it has pipes
+/// with: the account service's word that its pipe key (its tunnel key) is a
+/// Claktory of its account, with the account's email, for a week. Its
+/// endpoints are registered first, since the service vouches only for the
+/// registered one, and the tunnel key signs the request too, proving it's
+/// held. Ok(None) when it can't have one: not signed in, removed from its
+/// account, unknown to the service, or an email that can't be confirmed to
+/// others. Err when the service couldn't be asked now; try again later.
+pub(crate) async fn pipe_identity(factory: &Arc<Factory>) -> Result<Option<String>, String> {
+    let account = &factory.account;
+    let registration = account.registration(&factory.lock().config.account);
+    let Some((_, claktory_id, _)) = registration else { return Ok(None) };
+    let endpoint = crate::remote::secret_key(&factory.home).map_err(|error| error.to_string())?;
+    register_endpoints(factory).await;
+    let endpoint_id = endpoint.public().to_string();
+    let time = now_s();
+    let proof = api::b64(endpoint.sign(&api::pipe_identity_proof(&claktory_id, &endpoint_id, time)).to_bytes());
+    let request = api::PipeIdentityRequest { endpoint_id, time, proof };
+    match account.signed::<api::PipeIdentityIssued>("/v1/pipe-identity", &request).await {
+        Ok(issued) => Ok(Some(issued.statement)),
+        Err(Failure::Refused(401, _)) => Ok(None),
+        Err(Failure::Refused(403, body)) if body.error == "revoked" || body.error == "unsupported_email" => Ok(None),
+        Err(failure) => Err(failure.to_string()),
     }
 }
 

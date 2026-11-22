@@ -874,7 +874,7 @@ pub(super) mod tests {
         assert_eq!(post(&mut world, "ana", &conversation, generation, &client_id(1), "From Ana").1["seq"], 2);
         // Revoked: even a retry of what it sent is refused.
         let id: String = world.db.query_row("SELECT id FROM grants", [], |row| row.get(0)).expect("grant");
-        grants::revoke(&mut world.db, &backend, &id).expect("revoked");
+        grants::revoke(&mut world.db, &backend, &id, world.now).expect("revoked");
         assert_eq!(status(send(&mut world, 1)), Err(403));
     }
 }

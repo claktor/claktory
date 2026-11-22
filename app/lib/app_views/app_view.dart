@@ -35,8 +35,29 @@ class AppView extends StatefulWidget {
   State<AppView> createState() => _AppViewState();
 }
 
-class _AppViewState extends State<AppView> {
+class _AppViewState extends State<AppView> with WidgetsBindingObserver {
   late AppViewController _controller = _make();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  /// Out of sight (a phone's app in the background, a Mac's window
+  /// hidden), the view's surface closes, so the app stops its queries for
+  /// it, as closing the view does; back in sight, it opens again.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.hidden || AppLifecycleState.paused:
+        _controller.suspend();
+      case AppLifecycleState.inactive || AppLifecycleState.resumed:
+        _controller.resume();
+      case AppLifecycleState.detached:
+        break;
+    }
+  }
 
   AppViewController _make() => AppViewController(
     transport: widget.transport,
@@ -52,13 +73,16 @@ class _AppViewState extends State<AppView> {
         old.appId != widget.appId ||
         old.view != widget.view ||
         old.params != widget.params) {
+      final suspended = _controller.suspended;
       _controller.dispose();
       _controller = _make();
+      if (suspended) _controller.suspend();
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
     super.dispose();
   }

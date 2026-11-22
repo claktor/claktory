@@ -7,7 +7,9 @@
 //!
 //! The same chunks carry ink blobs (`UploadPurpose::Ink`, `crate::ink`): for
 //! no agent, staged in `<home>/annotations/staging/` and kept by their
-//! SHA-256, which their FinishUpload must carry.
+//! SHA-256, which their FinishUpload must carry. And dictations
+//! (`UploadPurpose::Dictation`, `crate::speech::dictation`): for no agent,
+//! kept privately only until they're transcribed.
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -36,9 +38,10 @@ pub(crate) struct Uploads {
 
 /// An upload under way.
 struct Active {
-    /// Empty for ink.
+    /// Empty for ink and dictations.
     agent: String,
     ink: bool,
+    dictation: bool,
     name: String,
     size: u64,
     mime: String,
@@ -146,9 +149,14 @@ impl Factory {
             return Err(RequestError::Empty("upload_id"));
         }
         let ink = request.purpose() == v1::UploadPurpose::Ink;
-        if ink {
+        let dictation = request.purpose() == v1::UploadPurpose::Dictation;
+        if ink || dictation {
             if !request.agent_id.is_empty() {
-                return Err(refused("Ink is uploaded for no agent: leave agent_id empty."));
+                return Err(refused(if ink {
+                    "Ink is uploaded for no agent: leave agent_id empty."
+                } else {
+                    "A dictation is uploaded for no agent: leave agent_id empty."
+                }));
             }
         } else if self.lock().config.agent(&request.agent_id).is_none() {
             return Err(RequestError::UnknownAgent(request.agent_id));
@@ -163,10 +171,14 @@ impl Factory {
                 return Err(refused(format!("{name} is {} bytes; ink of this kind is 1 byte to {}.", request.size, crate::ink::mib(limit))));
             }
         }
+        if dictation {
+            crate::speech::dictation::check_upload(&request.mime, request.size).map_err(refused)?;
+        }
         let mut active = self.uploads.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(upload) = active.get(&id)
             && upload.agent == request.agent_id
             && upload.ink == ink
+            && upload.dictation == dictation
             && upload.mime == request.mime
             && upload.name == name
             && upload.size == request.size
@@ -178,6 +190,8 @@ impl Factory {
         }
         let partials = if ink {
             crate::ink::staging(&self.home)?
+        } else if dictation {
+            crate::speech::dictation::staging(&self.home)?
         } else {
             let partials = self.uploads_dir(&request.agent_id).join(".partial");
             std::fs::create_dir_all(&partials)?;
@@ -195,11 +209,12 @@ impl Factory {
         }
         let file: String =
             id.chars().map(|character| if character.is_ascii_alphanumeric() || character == '-' { character } else { '_' }).collect();
-        let partial = partials.join(format!("{file}-{}{}", crate::transcript::now_ms(), if ink { ".partial" } else { "" }));
+        let partial = partials.join(format!("{file}-{}{}", crate::transcript::now_ms(), if ink || dictation { ".partial" } else { "" }));
         std::fs::File::create(&partial)?;
         let upload = Active {
             agent: request.agent_id,
             ink,
+            dictation,
             name,
             size: request.size,
             mime: request.mime,
@@ -265,6 +280,11 @@ impl Factory {
             crate::ink::keep(&self.home, &upload.partial, &hash, &upload.mime)?;
             tracing::info!(sha = %hash, size = upload.size, "ink blob kept");
             return Ok(v1::UploadedFile { upload_id: request.upload_id, attachment: None, blob_sha256: hash });
+        }
+        if upload.dictation {
+            self.voices.dictations.uploaded(&self.home, &request.upload_id, &upload.partial)?;
+            tracing::info!(size = upload.size, "dictation uploaded");
+            return Ok(v1::UploadedFile { upload_id: request.upload_id, attachment: None, blob_sha256: String::new() });
         }
         let folder = self.uploads_dir(&upload.agent).join(today());
         std::fs::create_dir_all(&folder)?;

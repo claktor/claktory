@@ -92,7 +92,7 @@ pub(super) async fn sweep(factory: &Arc<Factory>) {
     let rows: Vec<(String, i64, i64, bool)> = {
         let db = factory.store.db();
         let rows = db.prepare("SELECT agent, generation, activated, used FROM browser_activations").and_then(|mut statement| {
-            statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?.collect::<Result<Vec<_>, _>>()
+            statement.query_map([], crate::store::row4)?.collect::<Result<Vec<_>, _>>()
         });
         match rows {
             Ok(rows) => rows,

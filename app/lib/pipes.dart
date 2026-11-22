@@ -10,12 +10,20 @@ import 'characters/character.dart';
 import 'controls.dart';
 import 'decision.dart';
 import 'extensions.dart' show logTime;
+import 'conversation_find.dart';
+import 'find.dart' show FindHighlight, FindScope;
 import 'forms.dart';
 import 'identity.dart';
 import 'mobile/header.dart' show HeaderButton, PhoneHeader;
 import 'mobile/metrics.dart' show TypeScale;
+import 'mobile/page_find.dart' show PhonePageFind, phonePageSearch;
+import 'mobile/lines.dart' show ActionLine;
+import 'mobile/popover.dart' show presentPopover;
+import 'account.dart' show askSignIn;
 import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'pairing.dart' show PairingDigits;
+import 'pipe_reports.dart'
+    show ForwardReportsField, PipeReportsStrip, forwardApprovalLine;
 import 'pipe_timeline.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'resources.dart' show formatBytes;
@@ -24,6 +32,7 @@ import 'selection.dart';
 import 'state.dart' show PipeChat;
 import 'taint_label.dart' show TaintLabel, taintRead;
 import 'transcript.dart' show Bubble, userAvatarSize;
+import 'visible_codes.dart' show proseCodes, visibleCodes;
 import 'waiting.dart' show EntryReveal;
 
 /// A pipe's color: its portal glyph, its header's bar and its line on the
@@ -50,8 +59,9 @@ List<Pipe> pipesIn(Workspace workspace, String projectId) => [
 /// Claktory's; "the other side" before they've said.
 String pipePeerName(Pipe pipe) {
   final peer = pipe.peer;
-  if (peer.ownerName.isNotEmpty) return peer.ownerName;
-  if (peer.claktoryName.isNotEmpty) return peer.claktoryName;
+  // Their own words: what reorders text shows by its code (Fugo).
+  if (peer.ownerName.isNotEmpty) return proseCodes(peer.ownerName);
+  if (peer.claktoryName.isNotEmpty) return proseCodes(peer.claktoryName);
   return 'the other side';
 }
 
@@ -76,11 +86,26 @@ String? pipeDecisionHearer(
   return agent?.name ?? (id.isEmpty ? null : 'Your agent');
 }
 
+/// The lead Claktory gives a pipe with [members] (those in its project)
+/// when its own isn't one of them, as the backend picks it: only an agent
+/// limited to the pipe ([limited]), never one that can run commands. Its
+/// liaison ([liaisonId]) first, else the first of them; else "": no lead,
+/// for the person to choose.
+String pipeLeadFor(
+  Iterable<String> members, {
+  Set<String> limited = const {},
+  String liaisonId = '',
+}) {
+  final contained = members.where(limited.contains);
+  if (contained.contains(liaisonId)) return liaisonId;
+  return contained.firstOrNull ?? '';
+}
+
 /// The other side of [pipe] as its Claktory is called ("Ana's Claktory"),
 /// else its person's name: the words for what an agent read or is limited
 /// to.
 String pipePeerClaktory(Pipe pipe) => pipe.peer.claktoryName.isNotEmpty
-    ? pipe.peer.claktoryName
+    ? proseCodes(pipe.peer.claktoryName)
     : pipePeerName(pipe);
 
 /// The pipes [agentId] is limited to (Pipe.quarantined_ids).
@@ -108,10 +133,11 @@ List<Agent> pipeReaders(Workspace workspace, Pipe pipe) => [
     if (agent.taintedByPipes.contains(pipe.id)) agent,
 ];
 
-/// How many things in [pipe] wait for the person: messages held for them,
-/// its approval, and the loop breaker's Continue.
+/// How many things in [pipe] wait for the person: messages held for them
+/// or that no agent answers, its approval, and the loop breaker's Continue.
 int pipeWaiting(Pipe pipe) =>
     pipe.waitingSeqs.length +
+    pipe.unansweredSeqs.length +
     (pipe.state == PipeState.PIPE_STATE_APPROVAL ? 1 : 0) +
     (pipe.state == PipeState.PIPE_STATE_PAUSED &&
             pipe.paused == PipePause.PIPE_PAUSE_LOOP
@@ -124,6 +150,19 @@ int pipeWaiting(Pipe pipe) =>
 int pipeWaitingAll(Workspace workspace, Pipe pipe) =>
     pipeWaiting(pipe) + (pipeLiaison(workspace, pipe)?.waitingSeqs.length ?? 0);
 
+/// An open pipe with no lead: no agent is told of what arrives.
+const pipeUnanswered = 'No one answers this pipe';
+
+/// Under the settings' Lead while a pipe with agents has none: Claktory
+/// never makes one that can run commands its lead.
+const pipeNoLeadNote =
+    'No agent sees what arrives. Choose a lead to answer it.';
+
+/// What to do about it, under each message no agent answered.
+const pipeChooseLead =
+    'No agent has seen this message. Choose a lead in the pipe’s '
+    'settings to have it answer.';
+
 /// Where [pipe] stands, in a few words, for its sidebar row and header.
 String pipeStatus(Pipe pipe) {
   final who = pipePeerName(pipe);
@@ -132,6 +171,9 @@ String pipeStatus(Pipe pipe) {
     PipeState.PIPE_STATE_JOINING => 'Connecting…',
     PipeState.PIPE_STATE_APPROVAL => 'Waiting for your approval',
     PipeState.PIPE_STATE_WAITING_PEER => 'Waiting for $who to approve',
+    // No agent is told of what arrives: say so first.
+    PipeState.PIPE_STATE_OPEN when pipe.leadId.isEmpty =>
+      pipe.online ? pipeUnanswered : 'Offline · $pipeUnanswered',
     PipeState.PIPE_STATE_OPEN =>
       pipe.online
           ? 'Online'
@@ -286,7 +328,10 @@ class PipeView extends StatelessWidget {
             liaison: liaison,
             onMenu: onMenu,
           ),
+          PipeIdentityNotice(pipe: pipe),
           _Readers(pipe: pipe),
+          // Its reports: where they go, and what was forwarded.
+          PipeReportsStrip(pipe: pipe),
           Expanded(child: body),
           if (liaison == null) _PipeFoot(pipe: pipe),
         ],
@@ -320,7 +365,7 @@ class _PipeHeader extends StatelessWidget {
     final ends = [
       if (project != null) project!.name,
       if (peer.projectName.isNotEmpty)
-        '${peer.projectName} in ${peer.claktoryName.isEmpty ? pipePeerName(pipe) : peer.claktoryName}',
+        '${proseCodes(peer.projectName)} in ${pipePeerClaktory(pipe)}',
     ].join(' ⇄ ');
     final liaison = this.liaison;
     final header = DecoratedBox(
@@ -362,9 +407,8 @@ class _PipeHeader extends StatelessWidget {
                     roleColor: palette.textMuted,
                   ),
                 ),
-                if (pipe.state != PipeState.PIPE_STATE_INVITED &&
-                    !pipe.peer.verified) ...[
-                  _Mark(text: 'Not verified', color: palette.textMuted),
+                if (pipe.state != PipeState.PIPE_STATE_INVITED) ...[
+                  PipeVerifiedMark(pipe: pipe),
                   const SizedBox(width: Space.s),
                 ],
                 if (pipe.canRunCommandsIds.isNotEmpty) ...[
@@ -439,8 +483,7 @@ extension on _PipeHeader {
     final liaison = this.liaison;
     final status = [
       pipeStatus(pipe),
-      if (pipe.state != PipeState.PIPE_STATE_INVITED && !pipe.peer.verified)
-        'Not verified',
+      if (pipe.state != PipeState.PIPE_STATE_INVITED) verifiedLabel(pipe),
       if (pipe.canRunCommandsIds.isNotEmpty)
         canRunCommandsText(pipe.canRunCommandsIds.length),
     ].where((part) => part.isNotEmpty).join(' · ');
@@ -507,19 +550,33 @@ extension on _PipeHeader {
   }
 }
 
-/// What can be done with a pipe's liaison from the pipe's "…": its
-/// settings, and clearing its conversation.
+/// What can be done from the pipe's "…": on a phone, search the pipe;
+/// with its liaison, its settings, and clearing its conversation.
 Future<void> _liaisonActions(BuildContext context, Agent liaison) async {
+  final search = phonePageSearch(context);
   final action = await showActions<String>(
     context,
     title: liaison.name,
-    actions: const [
-      SheetAction('Liaison settings…', 'settings'),
-      SheetAction('Clear conversation…', 'clear'),
+    actions: [
+      if (search != null)
+        SheetAction(
+          'Search',
+          'search',
+          glyph: (color) => ExtensionGlyph(
+            icon: 'search',
+            name: 'Search',
+            color: color,
+            size: 16,
+          ),
+        ),
+      const SheetAction('Liaison settings…', 'settings'),
+      const SheetAction('Clear conversation…', 'clear'),
     ],
   );
   if (!context.mounted) return;
   switch (action) {
+    case 'search':
+      search?.call();
     case 'settings':
       await showModal(
         context,
@@ -716,6 +773,321 @@ String canRunCommandsWarning(String agent, Pipe pipe) =>
     '${pipePeerClaktory(pipe)} misleads it, it could reach your files, '
     'secrets and network before you see anything. Turn this off unless it '
     'needs to run commands.';
+
+/// What "Not verified" means for [pipe]: what is and isn't checked about
+/// the other side.
+/// [signedIn]: whether this Claktory is signed in to claktory.com, so
+/// only the other side's signing in is missing.
+String notVerifiedNote(Pipe pipe, {required bool signedIn}) {
+  final name = pipePeerName(pipe);
+  return 'Messages here come only from the Claktory you connected to, but '
+      "its name and email are only what it says about itself. Claktory "
+      "hasn't confirmed whose it is. "
+      '${signedIn ? 'When $name signs in' : "When you're both signed in"} '
+      'to claktory.com, Claktory confirms it and shows their email here.';
+}
+
+/// What "Verified" means for [pipe].
+String verifiedNote(Pipe pipe) =>
+    "Claktory confirmed this pipe is with ${pipe.peer.verifiedEmail}'s "
+    'Claktory.';
+
+/// Whether this Claktory is signed in to its account service, which
+/// vouches for whose Claktory is at a pipe's other end.
+bool _signedIn(BuildContext context) {
+  final workspace = AppScope.of(context).workspace.workspace;
+  return workspace.hasAccount() &&
+      workspace.account.state ==
+          ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_IN;
+}
+
+/// [pipe]'s other side in a few words: "Verified · ana@example.com", or
+/// "Not verified".
+String verifiedLabel(Pipe pipe) =>
+    pipe.peer.verified && pipe.peer.verifiedEmail.isNotEmpty
+    ? 'Verified · ${pipe.peer.verifiedEmail}'
+    : 'Not verified';
+
+/// [pipe]'s mark: "Verified · ana@example.com" or "Not verified".
+class PipeVerifiedMark extends StatelessWidget {
+  const PipeVerifiedMark({super.key, required this.pipe});
+
+  final Pipe pipe;
+
+  @override
+  Widget build(BuildContext context) =>
+      pipe.peer.verified && pipe.peer.verifiedEmail.isNotEmpty
+      ? _ExplainedMark(
+          text: verifiedLabel(pipe),
+          title: 'Verified',
+          note: (_) => verifiedNote(pipe),
+        )
+      : NotVerifiedMark(pipe: pipe);
+}
+
+/// "Not verified", in a hairline capsule that opens what it means: a
+/// popover pointing at it (Mac, iPad), a sheet on a phone. While this
+/// Claktory isn't signed in, with Sign in…
+class NotVerifiedMark extends StatelessWidget {
+  const NotVerifiedMark({super.key, required this.pipe});
+
+  final Pipe pipe;
+
+  @override
+  Widget build(BuildContext context) {
+    final signedIn = _signedIn(context);
+    return _ExplainedMark(
+      text: 'Not verified',
+      title: 'Not verified',
+      note: (_) => notVerifiedNote(pipe, signedIn: signedIn),
+      signIn: !signedIn,
+    );
+  }
+}
+
+/// [text] in a hairline capsule that opens [title] over [note].
+class _ExplainedMark extends StatelessWidget {
+  const _ExplainedMark({
+    required this.text,
+    required this.title,
+    required this.note,
+    this.signIn = false,
+  });
+
+  final String text;
+  final String title;
+  final String Function(BuildContext context) note;
+
+  /// With Sign in…, for this Claktory to sign in to claktory.com.
+  final bool signIn;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    void open() {
+      Widget explained(BuildContext context, VoidCallback close) {
+        final type = TypeScale.of(context);
+        final palette = Palette.of(context);
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          spacing: Space.xs,
+          children: [
+            Semantics(
+              header: true,
+              child: Text(
+                title,
+                style: type.emphasis.copyWith(color: palette.text),
+              ),
+            ),
+            Text(
+              note(context),
+              style: type.body.copyWith(color: palette.textMuted),
+            ),
+            if (signIn)
+              Padding(
+                padding: const EdgeInsets.only(top: Space.s),
+                child: Align(
+                  alignment: AlignmentDirectional.centerEnd,
+                  child: Button(
+                    label: 'Sign in…',
+                    onPressed: () {
+                      close();
+                      askSignIn(AppScope.of(context));
+                    },
+                  ),
+                ),
+              ),
+          ],
+        );
+      }
+
+      if (isPhoneLayout(context)) {
+        unawaited(
+          showModal(
+            context,
+            (context, close) => Padding(
+              padding: const EdgeInsets.all(Space.l),
+              child: explained(context, close),
+            ),
+          ),
+        );
+        return;
+      }
+      unawaited(
+        presentPopover<void>(
+          context,
+          builder: (context, close) => Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: Space.l,
+              vertical: Space.s,
+            ),
+            child: explained(context, close),
+          ),
+        ),
+      );
+    }
+
+    return Unselectable(
+      child: Semantics(
+        button: true,
+        label: text,
+        hint: 'Says what this means',
+        excludeSemantics: true,
+        child: Pressable(
+          onTap: open,
+          builder: (context, hovered) => _Mark(
+            text: text,
+            color: hovered ? palette.text : palette.textMuted,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Under a pipe's header while who's at its other end changed
+/// (PipePeer.identity_change): no longer vouched for, or a new email, with
+/// OK (the pin kept: "Not verified" until the same account vouches
+/// again), or for another
+/// account, a warning in `danger` with Trust this Claktory…, which asks
+/// first. Nothing otherwise.
+class PipeIdentityNotice extends StatefulWidget {
+  const PipeIdentityNotice({super.key, required this.pipe});
+
+  final Pipe pipe;
+
+  @override
+  State<PipeIdentityNotice> createState() => _PipeIdentityNoticeState();
+}
+
+class _PipeIdentityNoticeState extends State<PipeIdentityNotice> {
+  var _busy = false;
+  String? _error;
+
+  Future<void> _accept() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await AppScope.of(context).acceptPipeIdentity(widget.pipe.id);
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pipe = widget.pipe;
+    final peer = pipe.peer;
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final was = peer.previousEmail;
+    final now = peer.verifiedEmail;
+    final (
+      String title,
+      String body,
+      bool danger,
+    ) = switch (peer.identityChange) {
+      PipeIdentityChange.PIPE_IDENTITY_CHANGE_LAPSED => (
+        'No longer verified',
+        "Claktory can no longer confirm this pipe is with $was's Claktory, "
+            'perhaps because they signed out of claktory.com. Messages still '
+            'come only from the same Claktory.',
+        false,
+      ),
+      PipeIdentityChange.PIPE_IDENTITY_CHANGE_EMAIL_CHANGED => (
+        'Email changed',
+        "This pipe's Claktory is now $now, on the same account as $was. "
+            "It's still verified.",
+        false,
+      ),
+      PipeIdentityChange.PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED => (
+        now.isEmpty
+            ? "This pipe's Claktory is no longer confirmed as $was's."
+            : "This pipe's Claktory is now confirmed as $now's, not $was's.",
+        [
+          'Check with ${pipePeerName(pipe)} before you go on.',
+          'Until you check, their messages wait for you in Needs you, and '
+              "your agents can't send here.",
+        ].join(' '),
+        true,
+      ),
+      _ => ('', '', false),
+    };
+    if (title.isEmpty) return const SizedBox.shrink();
+    final Widget action = danger
+        ? Button(
+            label: 'Trust this Claktory…',
+            onPressed: _busy
+                ? null
+                : () => showModal(
+                    context,
+                    (context, close) => FormFrame(
+                      title: now.isEmpty
+                          ? 'Trust this Claktory?'
+                          : "Trust this Claktory as $now's?",
+                      body: [
+                        'Messages waiting from it go through, and your '
+                            'agents can send here again.',
+                        // Nothing vouched for it: trusting it pins nothing.
+                        if (now.isEmpty)
+                          'The pipe then shows Not verified, since nothing '
+                              'confirms whose Claktory it is now.',
+                        'Do this only if ${pipePeerName(pipe)} told you '
+                            'about the change.',
+                      ].join(' '),
+                      error: null,
+                      fields: const [],
+                      submitLabel: 'Trust',
+                      onSubmit: () {
+                        close();
+                        unawaited(_accept());
+                      },
+                      onCancel: close,
+                    ),
+                  ),
+          )
+        : Button(label: 'OK', onPressed: _busy ? null : _accept);
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: Space.xl,
+        vertical: Space.m,
+      ),
+      decoration: BoxDecoration(
+        color: danger ? palette.danger.withValues(alpha: 0.06) : null,
+        border: Border(bottom: BorderSide(color: palette.hairline)),
+      ),
+      child: ActionLine(
+        action: action,
+        lead: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          spacing: 2,
+          children: [
+            Text(
+              title,
+              style: type.body.copyWith(
+                color: danger ? palette.danger : palette.text,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            Text(
+              body,
+              style: type.body.copyWith(
+                color: danger ? palette.text : palette.textMuted,
+              ),
+            ),
+            if (_error case final error?)
+              Text(error, style: type.caption.copyWith(color: palette.danger)),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 /// A quiet mark in a hairline capsule, such as "Not verified".
 class _Mark extends StatelessWidget {
@@ -924,7 +1296,15 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
   /// Each member's "Can run commands on this computer", once the person
   /// turned it; else [_canRunByDefault].
   final _canRun = <String, bool>{};
+
+  /// The lead the person chose; kept while it's unticked, so ticking it
+  /// back brings it back. [_shownLead] is the one that counts.
   var _lead = _liaison;
+
+  /// The lead as the form has it: the one chosen while it's a member, else
+  /// the new liaison agent.
+  String get _shownLead =>
+      _lead == _liaison || _members.contains(_lead) ? _lead : _liaison;
 
   /// Prefilled with the name Claktory suggests (a first name no agent of
   /// the project has).
@@ -950,7 +1330,8 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
   }
 
   Future<void> _decide(bool approve) async {
-    final liaison = _lead == _liaison;
+    final lead = _shownLead;
+    final liaison = lead == _liaison;
     if (approve && liaison && _liaisonName.text.trim().isEmpty) {
       setState(() => _error = 'Name the liaison agent.');
       return;
@@ -965,7 +1346,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
           pipeId: widget.pipe.id,
           approve: approve,
           memberIds: approve ? _members : const <String>[],
-          leadId: approve && !liaison ? _lead : '',
+          leadId: approve && !liaison ? lead : '',
           liaisonName: approve && liaison ? _liaisonName.text.trim() : '',
           quarantined: approve
               ? PipeMembers(
@@ -1005,11 +1386,13 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
     final store = AppScope.of(context).workspace;
     final project = store.project(pipe.projectId);
     final agents = store.agentsIn(pipe.projectId);
-    if (_lead != _liaison && !_members.contains(_lead)) _lead = _liaison;
+    final lead = _shownLead;
+    // Their words, on a card to decide on: what reorders text shows by
+    // its code (proseCodes, Fugo).
     final who = [
-      if (peer.ownerName.isNotEmpty) peer.ownerName,
-      if (peer.ownerEmail.isNotEmpty) peer.ownerEmail,
-      if (peer.claktoryName.isNotEmpty) peer.claktoryName,
+      if (peer.ownerName.isNotEmpty) proseCodes(peer.ownerName),
+      if (peer.ownerEmail.isNotEmpty) proseCodes(peer.ownerEmail),
+      if (peer.claktoryName.isNotEmpty) proseCodes(peer.claktoryName),
     ];
     final caption = TextStyles.caption.copyWith(color: palette.textFaint);
     final card = Container(
@@ -1035,13 +1418,12 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
                   ),
                 ),
               ),
-              if (!peer.verified)
-                _Mark(text: 'Not verified', color: palette.textMuted),
+              PipeVerifiedMark(pipe: pipe),
             ],
           ),
           const SizedBox(height: Space.m),
           Text(
-            '${peer.projectName.isEmpty ? 'Their project' : peer.projectName} '
+            '${peer.projectName.isEmpty ? 'Their project' : proseCodes(peer.projectName)} '
             'with your ${project?.name ?? 'project'}',
             style: TextStyles.emphasis.copyWith(color: palette.text),
           ),
@@ -1055,7 +1437,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
           if (peer.purpose.isNotEmpty) ...[
             const SizedBox(height: Space.s),
             Text(
-              '“${peer.purpose}”',
+              '“${proseCodes(peer.purpose)}”',
               style: TextStyles.body.copyWith(color: palette.text),
             ),
           ],
@@ -1116,12 +1498,12 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
           const SizedBox(height: Space.m),
           Field(
             label: 'Lead',
-            note: _lead == _liaison
+            note: lead == _liaison
                 ? liaisonNote
                 : 'Told of each message that comes in. The others '
                       'read the pipe when they choose.',
             child: Select<String>(
-              value: _lead,
+              value: lead,
               options: [
                 const SelectOption(_liaison, 'A new liaison agent'),
                 for (final agent in agents)
@@ -1131,7 +1513,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
               onChanged: (lead) => setState(() => _lead = lead),
             ),
           ),
-          if (_lead == _liaison)
+          if (lead == _liaison)
             Field(
               label: "Liaison's name",
               child: TextField(controller: _liaisonName),
@@ -1144,6 +1526,20 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
             value: _reviewOutgoing,
             onChanged: (on) => setState(() => _reviewOutgoing = on),
           ),
+          // Its reports already go somewhere, from the project's default.
+          if (forwardApprovalLine(
+                store.workspace,
+                pipe,
+                liaison: lead == _liaison ? _liaisonName.text : '',
+              )
+              case final line?)
+            Padding(
+              padding: const EdgeInsets.only(bottom: Space.m),
+              child: Text(
+                line,
+                style: TextStyles.body.copyWith(color: palette.textMuted),
+              ),
+            ),
           Row(
             children: [
               Expanded(
@@ -1212,6 +1608,20 @@ class _PipeChatViewState extends State<_PipeChatView> {
   final _scroll = ScrollController();
   var _loading = false;
 
+  /// Find in the pipe's messages (⌘F; a phone's magnifier): Claktory
+  /// searches all of them.
+  late final _find = ConversationFind(
+    search: (query, {required pipe, beforeSeq}) => AppScope.of(context)
+        .searchConversation(
+          pipeId: widget.pipe.id,
+          query: query,
+          beforeSeq: beforeSeq,
+        ),
+    pipe: true,
+    conversation: false,
+    go: (at, _, _) => _findGo(at.seq),
+  );
+
   /// Each message's place, to go to one (from Needs you's History).
   final _keys = <int, GlobalKey>{};
   EntryReveal? _reveal;
@@ -1247,7 +1657,54 @@ class _PipeChatViewState extends State<_PipeChatView> {
     _reveal?.removeListener(_revealSoon);
     _chat?.removeListener(_revealSoon);
     _scroll.dispose();
+    _find.dispose();
     super.dispose();
+  }
+
+  /// Brings a find's match, message [seq], into sight: where it's built,
+  /// else loading back to it if it's older than what's held, then up the
+  /// list until it is.
+  void _findGo(int seq, [int steps = 0]) {
+    if (!mounted || !_scroll.hasClients) return;
+    final place = _keys[seq]?.currentContext;
+    if (place != null) {
+      final box = place.findRenderObject();
+      final view = Scrollable.maybeOf(place)?.context.findRenderObject();
+      if (box is RenderBox && view is RenderBox) {
+        final top = box.localToGlobal(Offset.zero, ancestor: view).dy;
+        // Clear of the find bar, with its first lines well above the foot.
+        if (top >= Space.xxl && top <= view.size.height * 0.7) return;
+      }
+      Scrollable.ensureVisible(place, alignment: 0.5);
+      return;
+    }
+    final chat = AppScope.of(context).pipeChat;
+    final held = chat.pipeId == widget.pipe.id && chat.messages.isNotEmpty;
+    if (!held || steps > 60) return;
+    if (seq < chat.messages.first.seq.toInt()) {
+      unawaited(() async {
+        try {
+          await AppScope.of(context).loadPipeFrom(widget.pipe.id, seq);
+        } on RequestFailure {
+          return;
+        }
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _findGo(seq, steps + 1),
+        );
+      }());
+      return;
+    }
+    // Held but not built: further up (reversed: towards the far end).
+    final position = _scroll.position;
+    position.jumpTo(
+      (position.pixels + position.viewportDimension * 0.8).clamp(
+        0,
+        position.maxScrollExtent,
+      ),
+    );
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _findGo(seq, steps + 1),
+    );
   }
 
   void _revealSoon() {
@@ -1326,6 +1783,10 @@ class _PipeChatViewState extends State<_PipeChatView> {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final chat = AppScope.of(context).pipeChat;
+    return FindScope(target: _find, child: _messages(palette, chat));
+  }
+
+  Widget _messages(Palette palette, PipeChat chat) {
     return ListenableBuilder(
       listenable: chat,
       builder: (context, _) {
@@ -1376,10 +1837,19 @@ class _PipeChatViewState extends State<_PipeChatView> {
                         message.seq.toInt(),
                         GlobalKey.new,
                       ),
-                      child: PipeMessageView(
-                        key: ValueKey(message.seq),
-                        pipe: widget.pipe,
-                        message: message,
+                      // A find's matches marked, the match gone to fully.
+                      child: ValueListenableBuilder(
+                        valueListenable: _find.marks,
+                        builder: (context, marks, child) => FindHighlight(
+                          query: marks.query,
+                          current: marks.at?.seq == message.seq.toInt(),
+                          child: child!,
+                        ),
+                        child: PipeMessageView(
+                          key: ValueKey(message.seq),
+                          pipe: widget.pipe,
+                          message: message,
+                        ),
                       ),
                     ),
                   ),
@@ -1453,13 +1923,18 @@ class _PipeMessageViewState extends State<PipeMessageView> {
     final palette = Palette.of(context);
     final message = widget.message;
     final author = message.author;
+    // The other side's words, and what an agent wrote: what reorders text
+    // shows by its code (proseCodes, Fugo).
+    final text = proseCodes(message.text);
+    final name = proseCodes(author.name);
+    final role = proseCodes(author.role);
     final time = logTime(
       DateTime.fromMillisecondsSinceEpoch(message.timestampMs.toInt()),
     );
     if (author.kind == PipeAuthorKind.PIPE_AUTHOR_KIND_CLAKTORY) {
       return Center(
         child: Text(
-          '${message.text} · $time',
+          '$text · $time',
           textAlign: TextAlign.center,
           style: TextStyles.caption.copyWith(color: palette.textFaint),
         ),
@@ -1494,21 +1969,21 @@ class _PipeMessageViewState extends State<PipeMessageView> {
             const SizedBox(width: Space.xs),
           ],
           Text(
-            agent?.name ?? author.name,
+            agent?.name ?? name,
             style: caption.copyWith(color: color, fontWeight: FontWeight.w600),
           ),
         ],
       ),
       PipeAuthorKind.PIPE_AUTHOR_KIND_THEIR_PERSON => Text(
-        'Says it’s from ${author.name.isEmpty ? 'their person' : author.name}',
+        'Says it’s from ${name.isEmpty ? 'their person' : name}',
         style: caption.copyWith(
           color: palette.textMuted,
           fontWeight: FontWeight.w600,
         ),
       ),
       _ => NameThenRole(
-        name: author.name.isEmpty ? 'Their agent' : author.name,
-        role: author.role,
+        name: name.isEmpty ? 'Their agent' : name,
+        role: role,
         style: caption.copyWith(
           color: palette.textMuted,
           fontWeight: FontWeight.w600,
@@ -1524,13 +1999,12 @@ class _PipeMessageViewState extends State<PipeMessageView> {
         dropped: dropped,
         who: switch (author.kind) {
           PipeAuthorKind.PIPE_AUTHOR_KIND_ME => 'You',
-          PipeAuthorKind.PIPE_AUTHOR_KIND_MY_AGENT =>
-            agent?.name ?? author.name,
+          PipeAuthorKind.PIPE_AUTHOR_KIND_MY_AGENT => agent?.name ?? name,
           PipeAuthorKind.PIPE_AUTHOR_KIND_THEIR_PERSON =>
-            'Says it’s from ${author.name.isEmpty ? 'their person' : author.name}',
+            'Says it’s from ${name.isEmpty ? 'their person' : name}',
           _ => [
-            author.name.isEmpty ? 'Their agent' : author.name,
-            if (author.role.isNotEmpty) author.role,
+            name.isEmpty ? 'Their agent' : name,
+            if (role.isNotEmpty) role,
           ].join(', '),
         },
       );
@@ -1540,12 +2014,16 @@ class _PipeMessageViewState extends State<PipeMessageView> {
       child: Bubble(
         color: color,
         outgoing: mine,
-        child: Text(
-          message.text,
-          style: TextStyles.body.copyWith(
-            color: white ? const Color(0xFFFFFFFF) : palette.text,
-            decoration: dropped ? TextDecoration.lineThrough : null,
-            decorationColor: white ? const Color(0xFFFFFFFF) : palette.text,
+        // A find's matches marked in it (a pipe with no liaison's).
+        child: Text.rich(
+          FindHighlight.markText(
+            context,
+            text,
+            TextStyles.body.copyWith(
+              color: white ? const Color(0xFFFFFFFF) : palette.text,
+              decoration: dropped ? TextDecoration.lineThrough : null,
+              decorationColor: white ? const Color(0xFFFFFFFF) : palette.text,
+            ),
           ),
         ),
       ),
@@ -1586,7 +2064,8 @@ class _PipeMessageViewState extends State<PipeMessageView> {
               children: [
                 for (final file in message.files)
                   _Mark(
-                    text: '${file.name} · ${formatBytes(file.size)}',
+                    text:
+                        '${proseCodes(file.name)} · ${formatBytes(file.size)}',
                     color: palette.textMuted,
                   ),
               ],
@@ -1609,6 +2088,7 @@ class _PipeMessageViewState extends State<PipeMessageView> {
     required String who,
   }) {
     final message = widget.message;
+    final text = proseCodes(message.text);
     final peer = pipePeerClaktory(widget.pipe);
     final caption = TextStyles.caption;
     return Container(
@@ -1653,12 +2133,16 @@ class _PipeMessageViewState extends State<PipeMessageView> {
           const SizedBox(height: Space.xs),
           Opacity(
             opacity: dropped ? 0.5 : 1,
-            child: Text(
-              message.text,
-              style: TextStyles.body.copyWith(
-                color: palette.text,
-                decoration: dropped ? TextDecoration.lineThrough : null,
-                decorationColor: palette.text,
+            // A find in the conversation marks its matches here too.
+            child: Text.rich(
+              FindHighlight.markText(
+                context,
+                text,
+                TextStyles.body.copyWith(
+                  color: palette.text,
+                  decoration: dropped ? TextDecoration.lineThrough : null,
+                  decorationColor: palette.text,
+                ),
               ),
             ),
           ),
@@ -1671,7 +2155,8 @@ class _PipeMessageViewState extends State<PipeMessageView> {
                 children: [
                   for (final file in message.files)
                     _Mark(
-                      text: '${file.name} · ${formatBytes(file.size)}',
+                      text:
+                          '${proseCodes(file.name)} · ${formatBytes(file.size)}',
                       color: palette.textMuted,
                     ),
                 ],
@@ -1779,10 +2264,19 @@ class _PipeFoot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (pipe.state == PipeState.PIPE_STATE_OPEN) {
-      return _PipeComposer(pipe: pipe);
-    }
-    return pipeStateBar(context, pipe) ?? const SizedBox.shrink();
+    final foot = pipe.state == PipeState.PIPE_STATE_OPEN
+        ? _PipeComposer(pipe: pipe)
+        : pipeStateBar(context, pipe) ?? const SizedBox.shrink();
+    // On a phone, while its find bar is open, the bar takes the foot: the
+    // composer steps aside, keeping what's typed, as a message box does.
+    final finding = PhonePageFind.finding(context);
+    return Offstage(
+      offstage: finding,
+      child: TickerMode(
+        enabled: !finding,
+        child: ExcludeFocus(excluding: finding, child: foot),
+      ),
+    );
   }
 }
 
@@ -2071,6 +2565,9 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
   /// The members limited to the pipe (Pipe.quarantined_ids), as the form
   /// has them.
   late final _limited = {..._start.quarantinedIds};
+
+  /// The lead the person chose; kept while it's unticked, so ticking it
+  /// back brings it back. [_shownLead] is the one that counts.
   late var _lead = _start.leadId;
   late var _review = _start.reviewOutgoing;
   late var _reviewIncoming = _start.reviewIncoming;
@@ -2081,6 +2578,13 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
   late final _fileMb = TextEditingController(
     text: '${_start.limits.fileMbPerDay}',
   );
+
+  /// Its liaison's daily spending limit in dollars (ContainedSpend.cap_usd),
+  /// set apart from the pipe (SetSpendCap) on Save.
+  final _cap = TextEditingController();
+
+  /// Whether [_cap] holds the limit yet: filled the first time it shows.
+  var _capFilled = false;
   var _busy = false;
   String? _error;
 
@@ -2099,6 +2603,28 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
     return null;
   }
 
+  /// The lead as the form has it: the one chosen while it's a member, else
+  /// the one Claktory gives a pipe whose lead leaves ([pipeLeadFor]); ""
+  /// when none would, for the person to choose.
+  String _shownLead(Pipe pipe) {
+    // Only those still in its project count, as for the backend.
+    final store = AppScope.of(context).workspace;
+    final members = [
+      for (final agent in store.agentsIn(pipe.projectId))
+        if (_members.contains(agent.id)) agent.id,
+    ];
+    if (members.contains(_lead)) return _lead;
+    return pipeLeadFor(
+      [
+        for (final id in _members)
+          if (members.contains(id)) id,
+      ],
+      limited: _limited,
+      liaisonId:
+          pipeLiaison(AppScope.of(context).workspace.workspace, pipe)?.id ?? '',
+    );
+  }
+
   @override
   void dispose() {
     for (final controller in [
@@ -2108,6 +2634,7 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
       _perHour,
       _burst,
       _fileMb,
+      _cap,
       _liaisonName,
     ]) {
       controller.dispose();
@@ -2151,7 +2678,8 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
     if (!_sameSet(limited, pipe.quarantinedIds)) {
       update.quarantined = PipeMembers(agentIds: limited);
     }
-    if (_lead != pipe.leadId) update.leadId = _lead;
+    final lead = _shownLead(pipe);
+    if (lead != pipe.leadId) update.leadId = lead;
     if (_review != pipe.reviewOutgoing) update.reviewOutgoing = _review;
     if (_reviewIncoming != pipe.reviewIncoming) {
       update.reviewIncoming = _reviewIncoming;
@@ -2170,7 +2698,35 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
         limits.fileMbPerDay != pipe.limits.fileMbPerDay) {
       update.limits = limits;
     }
-    _run((backend) => backend.updatePipe(update));
+    // Its liaison's daily spending limit, when it has one to change.
+    final liaison = pipeLiaison(AppScope.of(context).workspace.workspace, pipe);
+    SetSpendCap? cap;
+    if (liaison != null && liaison.hasSpend()) {
+      final typed = _cap.text.trim().replaceFirst(r'$', '');
+      final usd = typed.isEmpty ? 0.0 : double.tryParse(typed);
+      if (usd == null || usd < 0 || !usd.isFinite) {
+        setState(() => _error = 'Enter an amount in dollars, such as 10.');
+        return;
+      }
+      if (_capText(liaison.spend) != _capText(ContainedSpend(capUsd: usd))) {
+        // Its token cap as it is: 0 there would put the default back.
+        cap = SetSpendCap(
+          agentId: liaison.id,
+          capUsd: usd,
+          capTokens: liaison.spend.capTokens,
+        );
+      }
+    }
+    _run((backend) async {
+      if (cap != null) await backend.setSpendCap(cap);
+      await backend.updatePipe(update);
+    });
+  }
+
+  /// The spend of [pipe]'s liaison, when it has one.
+  ContainedSpend? _spendOf(Pipe pipe) {
+    final liaison = pipeLiaison(AppScope.of(context).workspace.workspace, pipe);
+    return liaison != null && liaison.hasSpend() ? liaison.spend : null;
   }
 
   static bool _sameSet(Set<String> a, List<String> b) =>
@@ -2191,6 +2747,13 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
       );
     }
     final who = pipePeerName(pipe);
+    // The liaison's limit as it is, in its field the first time it shows.
+    if (!_capFilled) {
+      if (_spendOf(pipe) case final spend?) {
+        _cap.text = _capText(spend);
+        _capFilled = true;
+      }
+    }
     if (_confirmingClose) {
       return FormFrame(
         title: 'Close ${pipe.name}?',
@@ -2254,7 +2817,7 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
       );
     }
     final agents = AppScope.of(context).workspace.agentsIn(pipe.projectId);
-    if (_lead.isNotEmpty && !_members.contains(_lead)) _lead = '';
+    final lead = _shownLead(pipe);
     final open =
         pipe.state == PipeState.PIPE_STATE_OPEN ||
         pipe.state == PipeState.PIPE_STATE_PAUSED;
@@ -2274,6 +2837,21 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
               }),
             ),
       fields: [
+        // Whose Claktory it is, unconfirmed: said where its settings open
+        // from the header (a phone's has no mark of its own to tap).
+        if (pipe.state != PipeState.PIPE_STATE_INVITED)
+          Field(
+            label: pipe.peer.verified && pipe.peer.verifiedEmail.isNotEmpty
+                ? verifiedLabel(pipe)
+                : 'Not verified',
+            child: Text(
+              pipe.peer.verified && pipe.peer.verifiedEmail.isNotEmpty
+                  ? verifiedNote(pipe)
+                  : notVerifiedNote(pipe, signedIn: _signedIn(context)),
+              style: TypeScale.of(context).body
+                  .copyWith(color: Palette.of(context).textMuted),
+            ),
+          ),
         Field(
           label: 'Name',
           child: TextField(controller: _name, autofocus: true),
@@ -2357,11 +2935,14 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
         ),
         Field(
           label: 'Lead',
-          note: 'Told of each message that comes in.',
+          note: lead.isEmpty && _members.isNotEmpty
+              ? pipeNoLeadNote
+              : 'Told of each message that comes in.',
           child: Select<String>(
-            value: _lead,
+            value: lead,
             options: [
-              const SelectOption('', 'No lead'),
+              // Only while none leads it: never chosen on purpose.
+              if (lead.isEmpty) const SelectOption('', 'No lead'),
               for (final agent in agents)
                 if (_members.contains(agent.id))
                   SelectOption(agent.id, agent.name),
@@ -2369,6 +2950,8 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
             onChanged: (lead) => setState(() => _lead = lead),
           ),
         ),
+        // Sent as it's chosen, apart from Save.
+        ForwardReportsField(pipe: pipe),
         _ReviewIncomingField(
           value: _reviewIncoming,
           onChanged: (on) => setState(() => _reviewIncoming = on),
@@ -2399,6 +2982,29 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
             ],
           ),
         ),
+        if (_spendOf(pipe) case final spend?)
+          Field(
+            label: 'Daily spending limit',
+            note: spendLimitNote(
+              pipeLiaison(AppScope.of(context).workspace.workspace, pipe)!,
+              spend,
+            ),
+            child: Row(
+              children: [
+                Text(
+                  r'$',
+                  style: TextStyles.body.copyWith(
+                    color: Palette.of(context).textMuted,
+                  ),
+                ),
+                const SizedBox(width: Space.xs),
+                SizedBox(
+                  width: 120,
+                  child: TextField(controller: _cap, placeholder: '10'),
+                ),
+              ],
+            ),
+          ),
         if (pipe.state == PipeState.PIPE_STATE_OPEN ||
             (pipe.state == PipeState.PIPE_STATE_PAUSED &&
                 pipe.paused == PipePause.PIPE_PAUSE_BY_ME))
@@ -2428,6 +3034,21 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
     );
   }
 }
+
+/// A liaison's daily spending limit as the field shows it: "10", "2.50".
+String _capText(ContainedSpend? spend) {
+  final usd = spend?.capUsd ?? 0;
+  if (usd <= 0) return '';
+  return usd == usd.roundToDouble() ? '${usd.round()}' : usd.toStringAsFixed(2);
+}
+
+/// Under a liaison's daily spending limit: what it used today, and what
+/// happens past it.
+String spendLimitNote(Agent liaison, ContainedSpend spend) =>
+    '${liaison.name} has used about '
+    '\$${spend.spentUsd.toStringAsFixed(2)} today. Past the limit, messages '
+    'from the other side wait until midnight; yours still reach '
+    '${liaison.name}.';
 
 /// What a new liaison agent is, beside the choice that makes one.
 const liaisonNote =
@@ -3034,8 +3655,10 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
               border: Border.all(color: palette.hairline),
               borderRadius: BorderRadius.circular(Radii.control),
             ),
+            // The command to approve, as tool calls show it: every hidden
+            // character by its code (Fugo).
             child: Text(
-              approval.command,
+              visibleCodes(approval.command),
               style: TextStyles.caption.copyWith(
                 fontFamily: TextStyles.mono,
                 color: palette.text,

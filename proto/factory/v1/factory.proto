@@ -270,6 +270,50 @@ message ClientMessage {
     // Answered with Ack once kept; refused (INVALID_REQUEST) while
     // diagnostics are off, when the app drops what it buffered.
     SendDiagnostics send_diagnostics = 175;
+    // The person accepts who the other side of a pipe now is
+    // (PipePeer.identity_change): what it presents now is pinned (with
+    // nothing presented, the pin stays); the change clears and what
+    // ACCOUNT_CHANGED held goes on. For LAPSED it dismisses the notice
+    // (the pipe shows as not verified, the pin kept) until it's vouched
+    // for again. Answered with Ack.
+    AcceptPipeIdentity accept_pipe_identity = 176;
+    // Where a pipe's reports go, or a project's default for new pipes
+    // (pipes-automation.md). Answered with Ack.
+    SetPipeForward set_pipe_forward = 177;
+    // Makes an agent a report reader, or lets it go back to its usual
+    // tools. The person's only. Answered with Ack.
+    SetReportReader set_report_reader = 178;
+    // The reports waiting because where they go changed: send or discard
+    // them. The person's only. Answered with Ack.
+    DecidePipeReports decide_pipe_reports = 179;
+    // A page of a pipe's reports, or a reader's. Answered with
+    // PipeReportPage.
+    ListPipeReports list_pipe_reports = 180;
+    // A liaison's daily spending cap (Agent.spend). The person's only.
+    // Answered with Ack.
+    SetSpendCap set_spend_cap = 181;
+    // Report this reply: one of an agent's or a chat's replies, with the
+    // person's note, for Claktory's team at claktory.com (the account
+    // service), which keeps it 30 days. send false: a preview, nothing
+    // leaves this computer; send true: sent. Either way answered with
+    // ReplyReport, exactly what is (or would be) sent; send true only once
+    // the service has it. Refused: NOT_FOUND (no such agent, chat or
+    // entry), INVALID_REQUEST (not a finished assistant reply, a note over
+    // 1000 characters, or this Claktory set not to contact the service),
+    // RATE_LIMITED and UNREACHABLE, each with words to show.
+    ReportReply report_reply = 183;
+    // Defines a report type, or edits one (a new version). Answered with
+    // Ack, or an error naming the rule it broke.
+    SaveReportType save_report_type = 184;
+    // Deletes a report type. Answered with Ack, or an error.
+    DeleteReportType delete_report_type = 185;
+    // Finds text in an agent's or a chat's conversation, or in a pipe's
+    // timeline. Answered with ConversationMatches, to the asker only.
+    SearchConversation search_conversation = 186;
+    // Transcribes a recording for the person to edit (a dictation), without
+    // sending it anywhere. Answered with Ack; the words come later in
+    // AudioTranscribed, to the asker only.
+    TranscribeAudio transcribe_audio = 187;
   }
 }
 
@@ -389,6 +433,14 @@ message ServerMessage {
     SketchCreated sketch_created = 63;
     // The answer to DmLeafOfferRequest, to the asker only.
     DmLeafOffer dm_leaf_offer = 64;
+    // The answer to ListPipeReports, to the asker only.
+    PipeReportPage pipe_report_page = 65;
+    // The answer to ReportReply, to the asker only.
+    ReplyReport reply_report = 66;
+    // The answer to SearchConversation, to the asker only.
+    ConversationMatches conversation_matches = 67;
+    // What a TranscribeAudio heard, to the connection that asked only.
+    AudioTranscribed audio_transcribed = 68;
   }
 }
 
@@ -813,6 +865,29 @@ message SendMessage {
   // speech model is ABSENT or UNSUPPORTED (Workspace.speech_model): the app
   // asks the person and sends InstallSpeechModel first.
   bool voice = 5;
+  // A reply on a checklist item (ChecklistItem.id), from Needs you or the
+  // Checklist panel; 0 for none. The agent reads which item it's about, and
+  // the item's history keeps the text as the person's (author empty); the
+  // item's status doesn't change. `text` is required, and `voice` is false.
+  // Refused, with the reason, for an item that isn't there, or when
+  // `agent_id` is neither the checklist's agent nor the item's owner.
+  uint32 checklist_item = 6;
+  // Whose checklist `checklist_item` is on: an agent's id; empty for
+  // `agent_id`'s own. Set it to WaitingItem's agent when sending to the
+  // item's owner.
+  string checklist_agent_id = 7;
+}
+
+// An item of an agent's checklist that a message of the person's replies
+// on (SendMessage.checklist_item).
+message ChecklistItemRef {
+  // Whose checklist it's on; never empty.
+  string agent_id = 1;
+  // ChecklistItem.id on that checklist.
+  uint32 id = 2;
+  // Its text when the message was sent: the reference still reads after
+  // the item changes or is gone.
+  string text = 3;
 }
 
 // A file the person attached to a message: uploaded to the agent's uploads
@@ -864,6 +939,12 @@ enum UploadPurpose {
   // tools reach, until the person sends it; FinishUpload must carry the
   // hash, and answers UploadedFile.blob_sha256.
   UPLOAD_PURPOSE_INK = 1;
+  // A recording to transcribe for the person (TranscribeAudio): AAC in .m4a
+  // ("audio/mp4"), 16 kHz mono, at most 10 minutes and 16 MiB. `agent_id`
+  // is empty. Kept privately, where no agent's tools reach, only until a
+  // TranscribeAudio takes it, or an hour; then it's deleted. FinishUpload
+  // answers UploadedFile with neither an attachment nor a blob hash.
+  UPLOAD_PURPOSE_DICTATION = 2;
 }
 
 // Part of an upload's file, from `offset`, which must be how much the backend
@@ -1957,6 +2038,34 @@ message Workspace {
   // Advanced diagnostics: whether they're on (SetDiagnostics), off by
   // default, and what's kept.
   Diagnostics diagnostics = 39;
+  // The kinds of report a pipe can forward (PipeForward.type_ids): the
+  // current version of each one that isn't deleted, built-in ones first
+  // ("Bug report" and the starters), then the rest by name.
+  repeated ReportSchema report_schemas = 40;
+  // Claktory's own apps this release ships, signed with Claktory's pinned
+  // publisher key and checked before they're listed (one that fails isn't),
+  // that aren't installed or are newer than the version installed. Install
+  // with InstallLocalApp.bundled. Empty while `apps_available` is false.
+  repeated BundledApp bundled_apps = 41;
+  // The ceilings a report type must stay within (SaveReportType), so the
+  // editor clamps to them.
+  ReportTypeRules report_type_rules = 42;
+}
+
+// An app Claktory ships with this release (Workspace.bundled_apps).
+message BundledApp {
+  // As its manifest says: "charts".
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  // A Lucide icon name.
+  string icon = 4;
+  // The bundled file's version.
+  string version = 5;
+  string publisher = 6;
+  // The version installed, when an older one is: then it's an update.
+  // Empty when it isn't installed.
+  string installed_version = 7;
 }
 
 // Checks for a newer release now, as Claktory does on its own every half
@@ -3089,6 +3198,10 @@ message Project {
   // monitors pause, other agents can't message them, and the Map leaves the
   // project out. Unarchived, all of that resumes as it was.
   bool archived = 5;
+  // Where its new pipes forward their reports, from the start: each new
+  // pipe takes it as its own PipeForward (revision 1). Unset or an empty
+  // recipient: no one. Its revision is 0.
+  PipeForward report_forward = 6;
 }
 
 // A folder that some of a project's agents work in. It only scopes where they
@@ -3257,9 +3370,27 @@ message Agent {
   // don't wake it, and nothing else does on their account. They're in
   // QueuedMessages too, with `quiet`; queued_messages doesn't count them.
   uint32 quiet_waiting = 44;
+  // It reads reports (a curator, pipes-automation.md §3): it keeps its own
+  // database, Ask and its folder, and has no commands, web, secrets or
+  // messaging. Only the person lifts it (SetReportReader). The pipes that
+  // feed it are those whose forward names it (Pipe.forward.recipient_id).
+  bool reads_reports = 45;
+  // A liaison's model spending today (set only for an agent quarantined by
+  // a pipe).
+  ContainedSpend spend = 46;
+  // ask_person questions Claktory refused today because this contained
+  // agent (a liaison or a report reader) already asked 3 in the past hour:
+  // the quiet count, with no card for each.
+  uint32 held_asks = 47;
   // Its checklist's items blocked on the person (BLOCKED_KIND_PERSON_DECISION
-  // or _ACTION, #279), oldest first: Needs you lists those not covered by a
-  // pending question (has_pending_ask false) without a card.
+  // or _ACTION, #279) that a question waiting for the person names
+  // (ask_person's item), oldest first: one for each such question, with
+  // where its card is (card_agent_id, card_seq). Needs you shows each item
+  // only as that card, with the item for context. An item blocked on the
+  // person with no question naming it (never asked, dismissed, or to be
+  // asked again later) isn't here: it's the agent's to settle, and shows
+  // only on its checklist (ChecklistItem). Before this, every such item
+  // was here, and has_pending_ask told which had a card.
   repeated WaitingItem waiting_items = 42;
 }
 
@@ -3274,12 +3405,20 @@ message WaitingItem {
   // When Claktory has it asked again after the person dismissed its
   // question; 0 while nothing was dismissed.
   int64 reask_at_ms = 5;
-  // A question about it is waiting for the person (its card shows instead).
+  // A question about it is waiting for the person (its card shows
+  // instead). Always true now: only such items are listed.
   bool has_pending_ask = 6;
   // The agent on it (ChecklistItem.owner); empty for this agent itself.
   string owner = 7;
   // When the person last dismissed a question about it, ms; 0 if never.
   int64 dismissed_ms = 8;
+  // Where the question about it is: the agent whose conversation has its
+  // card (the item's owner, which asks about it), empty for the agent this
+  // item is listed on; and the card's entry seq there, one of that agent's
+  // waiting_seqs. 0 when that conversation isn't loaded: show no item on
+  // any card then.
+  string card_agent_id = 9;
+  uint64 card_seq = 10;
 }
 
 // What an agent's character shows. The first that applies wins: working or
@@ -3371,6 +3510,71 @@ message EntryPage {
   bool has_earlier = 3;
 }
 
+// Finds text in a conversation: an agent's or a chat's, since its last
+// /clear and not only what the app holds, or a pipe's timeline. Answered
+// with ConversationMatches, to the asker only; NOT_FOUND for an unknown
+// agent, chat or pipe, INVALID_REQUEST unless exactly one of them is set.
+//
+// Searched: the person's messages, the agent's replies, events (an agent's
+// message's text; another event's summary, or its text without one) and the
+// string values of tool calls' input (the command, path, query…), never
+// their keys or name, then their output (the snippet is from the first of
+// these the query occurs in). Not thinking, compaction summaries, notices or
+// cards. In a pipe: each message's text and note.
+message SearchConversation {
+  string agent_id = 1;
+  string chat_id = 2;
+  // As typed: a plain substring, not a pattern, matched case-insensitively
+  // with Unicode case folding. Empty or blank finds nothing; 500 characters
+  // at most.
+  string query = 3;
+  // Matches in entries before this seq (exclusive), to page back; unset for
+  // the newest.
+  optional uint64 before_seq = 4;
+  // Matching entries per page: 0 for 100, 500 at most.
+  uint32 limit = 5;
+  // A pipe: its own messages (PipeMessage seqs), not its liaison's
+  // conversation.
+  string pipe_id = 6;
+}
+
+message ConversationMatches {
+  string query = 1;
+  // Newest first, at most the request's limit.
+  repeated ConversationMatch matches = 2;
+  // Older matches remain: ask again with before_seq set to the last
+  // match's seq.
+  bool more = 3;
+  // Occurrences of the query in the whole conversation, on the first page
+  // only (before_seq unset), else 0; at most 1000, with total_capped set
+  // when there are more.
+  uint32 total = 4;
+  bool total_capped = 5;
+  // The request's, so an answer to an earlier search can be told apart.
+  string agent_id = 6;
+  string chat_id = 7;
+  string pipe_id = 8;
+  optional uint64 before_seq = 9;
+}
+
+// An entry (or a pipe message) the query occurs in.
+message ConversationMatch {
+  uint64 seq = 1;
+  // About 80 characters of its text on one line, around its first
+  // occurrence (about 25 characters in): runs of whitespace are one space,
+  // and "…" marks where it's cut.
+  string snippet = 2;
+  // Each occurrence inside `snippet`: where it starts and how long it is, in
+  // UTF-16 code units.
+  repeated uint32 starts = 3;
+  repeated uint32 lengths = 4;
+  // Occurrences in the whole entry.
+  uint32 hits = 5;
+  // The entry's (or the pipe message's) time, ms since 1970: to merge a
+  // pipe's matches with its liaison's.
+  int64 timestamp_ms = 6;
+}
+
 // What waits for the selected agent, not yet taken by it. Sent on connect,
 // when an agent is selected, and whenever its queue changes; empty when
 // nothing waits. A message the agent takes leaves the list and arrives in
@@ -3411,6 +3615,8 @@ message QueuedMessage {
   // An agent's message sent quietly: it waits for the agent's next wake
   // and doesn't cause one (see Agent.quiet_waiting).
   bool quiet = 12;
+  // The person's reply on a checklist item (see UserText.checklist_item).
+  ChecklistItemRef checklist_item = 13;
 }
 
 // Adds an entry or replaces the one with the same `seq`.
@@ -3802,6 +4008,9 @@ message UserText {
   // Set when the person said it (a voice message, DONE): `text` is what was
   // heard, attachments[0] the recording, to play back.
   Transcription voice = 5;
+  // A reply on a checklist item (SendMessage.checklist_item); unset for any
+  // other message.
+  ChecklistItemRef checklist_item = 6;
 }
 
 // A voice message's transcription.
@@ -3887,6 +4096,42 @@ message DiscardVoiceMessage {
   string agent_id = 1;
   // QueuedMessage.id.
   int64 message_id = 2;
+}
+
+// Transcribes a dictation (an UPLOAD_PURPOSE_DICTATION upload, finished) for
+// the person to edit and send as text: nothing is delivered to any agent,
+// and neither the recording nor its words are kept. Answered with Ack at
+// once (an Error only without `request_id` or `upload_id`); every outcome,
+// refusals too, comes as AudioTranscribed. Ahead of voice messages waiting
+// to be transcribed. Never starts the model's download: the app asks the
+// person and sends InstallSpeechModel first, as for voice messages.
+message TranscribeAudio {
+  // Made up by the app; AudioTranscribed carries it.
+  string request_id = 1;
+  // The dictation's StartUpload.upload_id. The upload is deleted once it's
+  // transcribed or refused.
+  string upload_id = 2;
+}
+
+// What a TranscribeAudio heard, sent only to the connection that asked. A
+// connection that dropped meanwhile never gets it (the recording is gone:
+// upload it again).
+message AudioTranscribed {
+  string request_id = 1;
+  // The words heard; empty when `error` is set (and possibly when it isn't).
+  string text = 2;
+  // Empty when it worked; otherwise why not:
+  //   no_model: the speech model is ABSENT or FAILED (Workspace.speech_model),
+  //     or was removed while it waited;
+  //   unsupported: it's UNSUPPORTED;
+  //   too_long: the recording is over 10 minutes;
+  //   no_speech: no speech was heard in it (silence); an app that doesn't
+  //     know this code shows it as failed;
+  //   failed: anything else (an upload that isn't there or expired, a
+  //     recording that can't be read, recognition failing).
+  string error = 3;
+  // How long the recording is, once it was read; 0 otherwise.
+  uint64 duration_ms = 4;
 }
 
 // How much of an upload the backend has, in bytes: where the next
@@ -4321,6 +4566,16 @@ message DecideSecretRequest {
   // starts asking.
   // `name` renames it (also the key's comment); `comment` reaches the agent.
   optional bool ask_each_time = 13;
+  // A password to generate: the length the person chose, between its
+  // PasswordSpec's shortest and longest; 0 for the length asked.
+  uint32 password_length = 14;
+  // An import (SecretRequest.imports): delete each original file once it's
+  // in the vault, if it's still the same file. A plain delete, not a
+  // secure erase. Off unless the person turns it on.
+  bool delete_originals = 15;
+  // An import: give the new secret to the agent that asked. Off (the
+  // default) gives it to no one.
+  bool grant_to_asker = 16;
 }
 
 // Who used a secret and when, newest first; `id` empty for every secret.
@@ -4389,7 +4644,9 @@ message SecretUse {
   string secret_name = 2;
   int64 time_ms = 3;
   // "use" (an agent's command got it), "reveal" (the person saw it in the
-  // app), "grant", "revoke".
+  // app), "grant", "revoke", "import" (the vault read it from files on this
+  // computer: detail says which, their sizes and fingerprints, whom it was
+  // given to and whether the originals were deleted; agent is who asked).
   string kind = 4;
   // The agent; for reveal, grant and revoke, the one concerned, if any.
   string agent_id = 5;
@@ -4450,7 +4707,8 @@ message SecretRequest {
   // prefilled from the request, and the values go straight into the vault.
   bool collecting = 15;
   // A key the agent asks the vault to generate (#252), by type:
-  // "ssh-ed25519". Empty for a request for a secret someone has. The card
+  // "ssh-ed25519", or "password" (what it's made of in `password`; its one
+  // variable holds the password itself, not a file unless asked). Empty for a request for a secret someone has. The card
   // offers Generate, never a values form or the admin agent; the vault
   // makes the keypair itself and seals the private half as the secret's
   // one file variable (new_secret.variables), so it never exists anywhere
@@ -4464,6 +4722,80 @@ message SecretRequest {
   // in OpenSSH's one-line form ("ssh-ed25519 AAAA… <name>"). The private
   // half is never sent.
   string public_key = 18;
+  // generate "password": what the vault will make (or made), as Claktory
+  // read and checked it; never the password itself.
+  PasswordSpec password = 19;
+  // Files on this computer the agent asks the vault to import, each into
+  // one file variable of a new secret: what Claktory read of each when
+  // asked, never its contents. On approval factoryd reads each file
+  // itself, checks it's the same file, unchanged, and seals its bytes
+  // straight into the vault (binary files too). Empty for other requests.
+  repeated SecretImport imports = 20;
+  // The asking agent had read a pipe, a direct message or a web page when
+  // it asked (as AppGrantProposal.grantee_read_pipes): what it asks for may
+  // come from someone else.
+  bool asker_read_pipes = 21;
+}
+
+// A file an agent asks the vault to import (SecretRequest.imports). Holds
+// no contents.
+message SecretImport {
+  // The file variable it goes in.
+  string variable = 1;
+  // Its canonical absolute path, exactly as Claktory resolved it, not
+  // escaped: the card shows the home folder as ~/ and control, bidi and
+  // zero-width characters as visible \u{…}. Claktory refuses a path
+  // through a symbolic link, so this is the file itself.
+  string path = 2;
+  // In bytes.
+  int64 size = 3;
+  int64 modified_ms = 4;
+  // A short fingerprint of its contents, keyed with the vault's own key (so
+  // it can't be used to guess them): "3f9a 21c0 7d44".
+  string fingerprint = 5;
+  // Where it is, when that's somewhere sensitive: "ssh", "gnupg", "aws",
+  // "gcloud", "kube", "docker", "keychains", "browser"; empty otherwise.
+  string sensitive = 6;
+  // Why it can't be imported now (gone, or changed since it was asked
+  // for), in Claktory's words; empty when it can.
+  string problem = 7;
+}
+
+// A password the vault generates (SecretRequest.generate "password"): what
+// it's drawn from and how long it is. Holds no secret. The vault draws each
+// character uniformly from the alphabet with the system's random numbers;
+// with require_each, it draws whole passwords again until every class is
+// in. Claktory refuses anything weaker at request time: at least 16
+// characters and 80 bits, or, when the service's maximum is lower, at least
+// 12 characters and 72 bits; at most 256 characters.
+message PasswordSpec {
+  // Characters, as the request asked or the person chose (DecideSecretRequest.password_length).
+  uint32 length = 1;
+  // The classes it's drawn from, when `allowed` is empty: lowercase and
+  // uppercase letters, digits, and symbols (!#$%&()*+,-./:;<=>?@[]^_{|}~:
+  // printable ASCII without quotes, the backquote, the backslash or space).
+  bool lowercase = 2;
+  bool uppercase = 3;
+  bool digits = 4;
+  bool symbols = 5;
+  // An explicit set to draw from instead (printable ASCII, no space), for a
+  // service that refuses some characters.
+  string allowed = 6;
+  // Leaves out characters that look alike: 0 O o 1 l I |.
+  bool avoid_similar = 7;
+  // At least one character of each class asked for (or of each class
+  // `allowed` holds).
+  bool require_each = 8;
+  // The most characters the service accepts; 0 when it didn't say.
+  uint32 max_length = 9;
+  // Computed by Claktory: how many characters it's drawn from, its
+  // strength (length × log2 alphabet_size), the lengths the person may
+  // choose (shortest–longest), and the bits each character adds.
+  uint32 alphabet_size = 10;
+  double bits = 11;
+  uint32 shortest = 12;
+  uint32 longest = 13;
+  double bits_per_character = 14;
 }
 
 message NewSecret {
@@ -5438,6 +5770,12 @@ message InstallLocalApp {
   // the person reviewed.
   string sha256 = 3;
   bytes content = 4;
+  // A bundled app's id (BundledApp.id): installs the file this release
+  // ships, through the same checks as any file; path and content are
+  // ignored. Without `approve`, answered with AppPermissions as usual (its
+  // `added` saying what's new for an update); then again with `approve`
+  // and its sha256.
+  string bundled = 5;
 }
 
 // What an app can reach, for the person to approve before it's installed.
@@ -5537,7 +5875,8 @@ message Pipe {
   // The agents granted it, by id: they have its tools (the pipe:<id>
   // extension instance).
   repeated string member_ids = 10;
-  // The member woken by each incoming message; empty when none is.
+  // The member woken by each incoming message; empty when none is, which
+  // Claktory allows only while the pipe has no agents (unanswered_seqs).
   string lead_id = 11;
   PipeLimits limits = 12;
   // Every outgoing message from an agent waits for the person's Send or
@@ -5592,6 +5931,16 @@ message Pipe {
   // ("acme-launch-ab12cd"): the inbox, the outbox and a deleted liaison's
   // conversation are in it. Text to show; it may be on another computer.
   string folder = 27;
+  // Where its liaison forwards finished reports. Unset or an empty
+  // recipient: no one.
+  PipeForward forward = 28;
+  // Its reports' counts, for its settings and the Map.
+  PipeReportCounts reports = 29;
+  // Messages from the other side that no agent of this side was told of,
+  // because the pipe has no lead (it has no agents: a pipe with agents
+  // always has one, lead_id). They're the person's to read and answer,
+  // counted in Needs you until an agent leads the pipe and is told of them.
+  repeated uint64 unanswered_seqs = 30;
 }
 
 enum PipeState {
@@ -5633,12 +5982,46 @@ message PipePeer {
   // either may be empty. Claimed, not checked: see `verified`.
   string owner_name = 2;
   string owner_email = 3;
-  // Whether an account service vouched for whose Claktory it is. Always
-  // false for now: show "not verified".
+  // Claktory's account service (claktory.com) vouches, now, that this
+  // pipe's Claktory belongs to the account with `verified_email`: both
+  // sides are signed in to it, and the statement checked here. It says
+  // whose Claktory it is, not who the person is. False: show "Not
+  // verified" (or what identity_change says).
   bool verified = 4;
   // The project at its end, and what it says the pipe is for.
   string project_name = 5;
   string purpose = 6;
+  // The email the account service vouches for now: with `verified`, or
+  // the new one an identity change names; empty when there's none.
+  string verified_email = 7;
+  // How who it is changed since the person last accepted it (or since it
+  // was first verified); NONE when it didn't.
+  PipeIdentityChange identity_change = 8;
+  // The email it was verified as before the change, for its warning.
+  string previous_email = 9;
+}
+
+// How a pipe's other side changed from the identity pinned with the pipe.
+// Only a statement checked here raises one: while this Claktory can't
+// check (signed out, or another account service), nothing changes.
+enum PipeIdentityChange {
+  PIPE_IDENTITY_CHANGE_NONE = 0;
+  // It stopped being vouched for: its statement ran out (a week) or it
+  // signed out. "No longer verified"; nothing is held.
+  // AcceptPipeIdentity dismisses it.
+  PIPE_IDENTITY_CHANGE_LAPSED = 1;
+  // The same account, with another email (verified_email; previous_email
+  // the old one): a notice, nothing held. AcceptPipeIdentity dismisses it.
+  PIPE_IDENTITY_CHANGE_EMAIL_CHANGED = 2;
+  // Another account (verified_email, if it's vouched for; previous_email
+  // the old one): a warning in red. Until AcceptPipeIdentity, what comes
+  // from the other side waits for the person (HELD_INCOMING) and agents
+  // can't send to it; the person still can.
+  PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED = 3;
+}
+
+message AcceptPipeIdentity {
+  string pipe_id = 1;
 }
 
 message PipeLimits {
@@ -5880,6 +6263,10 @@ message LoadPipeMessages {
   uint64 before_seq = 2;
   // 0 for 200; 1000 at most.
   uint32 limit = 3;
+  // Every message from this seq up to `before_seq`, ignoring `limit`: to
+  // jump to an older message (a find's match) and keep what the app holds
+  // one run with no gaps.
+  optional uint64 from_seq = 4;
 }
 
 message PipeMessagePage {
@@ -6005,6 +6392,37 @@ message AskPerson {
   // (AnswerAsk.attachments): the person's drawings on the PDF's pages.
   // Empty while pending.
   repeated Attachment answer_attachments = 10;
+  // A procedure, step by step (ask_person's steps): the steps in order;
+  // empty for an ordinary ask. `title` says what the whole procedure is
+  // for and `body` introduces it; wants_text and review_path are never set
+  // with steps. The current step is the first PENDING one: the person
+  // answers it (AnswerAsk.step), the agent is told of each step in an
+  // event, and the next one becomes current. The last one done makes the
+  // ask ANSWERED; a step marked CANT stops it, DISMISSED, and the steps
+  // after it stay PENDING (not reached). Pending, it counts once toward
+  // the agent's questions waiting.
+  repeated AskStep steps = 11;
+}
+
+// One step of a procedure (AskPerson.steps).
+message AskStep {
+  // What to do, in the agent's words (Markdown, short; may hold a fenced
+  // command, which the card gives a Copy button).
+  string text = 1;
+  AskStepState state = 2;
+  // The person's comment on Done or Can't do this; may be empty.
+  string comment = 3;
+  // When it was done or marked CANT, ms since 1970; 0 while pending.
+  int64 decided_ms = 4;
+}
+
+enum AskStepState {
+  // Read as PENDING.
+  ASK_STEP_STATE_UNSPECIFIED = 0;
+  ASK_STEP_STATE_PENDING = 1;
+  ASK_STEP_STATE_DONE = 2;
+  // The person couldn't do it: the procedure stops here.
+  ASK_STEP_STATE_CANT = 3;
 }
 
 enum AskPersonState {
@@ -6034,6 +6452,12 @@ message AnswerAsk {
   // each must be in the agent's uploads folder and still there, or the
   // answer is refused. The agent's event names each by path, with its page.
   repeated Attachment attachments = 5;
+  // A procedure (AskPerson.steps): the step answered, 0-based; it must be
+  // the current one, so a second tap can't answer the next. dismiss false
+  // is Done, dismiss true is Can't do this (which stops the procedure);
+  // `text` is the person's optional comment. Needed for an ask with steps,
+  // refused for one without.
+  optional uint32 step = 6;
 }
 
 // A chat: a one-off conversation of the person's, beside their agents but
@@ -6503,6 +6927,16 @@ message NeedsYouRecord {
   int64 decided_ms = 12;
   // As on the card: the pipes the agent had read when it asked.
   repeated PipeTaint taint = 13;
+  // REPORT_TYPE: the version made (for a deletion, its last), and the one
+  // it replaced (unset for a new type).
+  ReportSchema report_type = 14;
+  ReportSchema report_type_before = 15;
+  // REPORT_TYPE: the edit widened what crosses (report_type's
+  // widened_fields says where).
+  bool widens = 16;
+  // PIPE_FORWARD: the types the change turned on, at the version current
+  // then, with every field and cap.
+  repeated ReportSchema report_types = 17;
 }
 
 enum NeedsYouRecordKind {
@@ -6532,6 +6966,19 @@ enum NeedsYouRecordKind {
   // couldn't be made. agent_id is Rivet, whose conversation shows the card;
   // the title names the agent it was for and the app, as it says now.
   NEEDS_YOU_RECORD_KIND_APP_GRANT = 10;
+  // Where reports go changed: a pipe's forward or a project's default was
+  // set, or an agent was made a report reader or let go (outcome CHANGED).
+  // agent_id is the admin agent that changed it (Rivet), empty when the
+  // person did; pipe_id is set for a pipe's forward; title is Claktory's
+  // sentence ("Rivet set this pipe's reports to go to Ingrid"). A change
+  // of the types a pipe (or a project's new pipes) can forward is one too:
+  // report_types holds those it turned on.
+  NEEDS_YOU_RECORD_KIND_PIPE_FORWARD = 11;
+  // A report type was defined, edited or deleted (outcome CHANGED):
+  // agent_id is the admin agent (Rivet), empty for the person; title is
+  // Claktory's sentence; report_type and report_type_before are the
+  // versions.
+  NEEDS_YOU_RECORD_KIND_REPORT_TYPE = 12;
 }
 
 enum NeedsYouOutcome {
@@ -6543,6 +6990,8 @@ enum NeedsYouOutcome {
   // Approved, but what it asked couldn't be done (APP_GRANT: the account
   // service refused the grant, or the agent was deleted since).
   NEEDS_YOU_OUTCOME_FAILED = 5;
+  // A setting changed, rather than a card answered (PIPE_FORWARD).
+  NEEDS_YOU_OUTCOME_CHANGED = 6;
 }
 
 // ---- Browser control ----
@@ -6958,4 +7407,420 @@ message DmEnrollLeaf {
   // The device's pins (claktory-dm-crypto's Pins, as JSON), the person's
   // own account's included: what this Claktory trusts about each account.
   bytes pins = 2;
+}
+
+// ---- Reports: what a pipe's liaison forwards (pipes-automation.md) ----
+//
+// A pipe's liaison (quarantined) collects a report from the other side and
+// submits it, in fields a schema fixes, to the one agent the person chose
+// (the pipe's forward). That agent reads reports: it's contained too. The
+// backend checks every field, keeps the report with where it came from, and
+// lets the reader read it only through a tool that marks it as having read
+// the other side's words. Reading reports in the app affects no agent.
+
+// A kind of report (a report type), one version of it. Its fields are a
+// closed set of kinds; its text (name, labels, rules) is shown, never
+// obeyed. A type can only narrow what crosses from a liaison to its reader:
+// who submits, who reads and where it goes stay the pipe's settings.
+message ReportSchema {
+  // "bug_report": lowercase letters, digits and _, at most 40. Made by
+  // Claktory from the name for a new type (SaveReportType with id empty).
+  string id = 1;
+  // "Bug report".
+  string name = 2;
+  repeated ReportField fields = 3;
+  // 1, 2…: each edit makes a new version; a version never changes. A
+  // report is checked and shown against its own (PipeReport.type_version).
+  uint32 version = 4;
+  // Claktory's own: it can be edited (a new version) but not deleted.
+  bool builtin = 5;
+  // Who made this version: empty for the person (or, for a built-in
+  // type's first, Claktory), else the admin agent's id (Rivet).
+  string by_id = 6;
+  int64 at_ms = 7;
+  // What the reader can tell the other side about a report of this type
+  // (handoff_mark): a few of ACCEPTED, DONE, DECLINED, KNOWN, FIXED,
+  // WONT_FIX and NEEDS_INFO, in that order. Their words are Claktory's.
+  repeated PipeReportState outcomes = 8;
+  // The fields this version added or widened, compared with the version
+  // before it: a new field, a higher cap, more choices, a wider range, a
+  // fact made text. Empty for version 1 and for an edit that only narrows.
+  repeated string widened_fields = 9;
+}
+
+// The ceilings every report type stays within (fixed in code): a type may
+// set lower ones. SaveReportType is refused past any of them.
+message ReportTypeRules {
+  // TEXT: bytes per field.
+  uint32 text_bytes = 1;
+  // TEXT_LIST: items, and bytes per item.
+  uint32 list_items = 2;
+  uint32 item_bytes = 3;
+  // Fields in a type, and of them facts (ENUM, BOOL, VERSION, NUMBER,
+  // DATE).
+  uint32 fields = 4;
+  uint32 facts = 5;
+  // ENUM: choices, each lowercase letters, digits and _ (at most 40).
+  uint32 choices = 6;
+  // ATTACHMENTS: files in a report (at most one such field in a type), and
+  // MB each.
+  uint32 attachments = 7;
+  uint32 attachment_mb = 8;
+  // NUMBER: its range stays within -number_abs..number_abs.
+  int64 number_abs = 9;
+  // Characters in a type's name, a field's label, a field's rule.
+  uint32 name_chars = 10;
+  uint32 label_chars = 11;
+  uint32 rule_chars = 12;
+  // Types in this Claktory (not deleted), and enabled on one pipe.
+  uint32 types = 13;
+  uint32 per_pipe = 14;
+  // Field ids that would read as routing ("to", "recipient", "path"…),
+  // refused; so is an id with one of routing_tokens between its _s
+  // ("forward_note"), or one ending "_to" ("send_to"). A new field's id made
+  // from its label is checked the same way, before any _2 is added.
+  repeated string reserved_ids = 15;
+  // The kinds whose values are the other side's words: reading them marks
+  // the reader. Every other kind is a fact.
+  repeated ReportFieldType text_kinds = 16;
+  // NUMBER and DATE fields in a type: facts are read without marking
+  // anyone, so their total width is kept small.
+  uint32 numbers = 17;
+  uint32 dates = 18;
+  // Words that make any field id read as routing (see reserved_ids), alone
+  // or with an s ("urls").
+  repeated string routing_tokens = 19;
+}
+
+// Defines a report type, or edits one. Refused, with the rule in Claktory's
+// words, past any ReportTypeRules ceiling, with a reserved or repeated id,
+// or an ENUM choice that isn't an id.
+message SaveReportType {
+  // id empty: a new type. Otherwise a new version of that type. Each
+  // field's name is kept; a field with name empty is new, and gets an id
+  // made from its label. `fact` is ignored (it follows the kind), and so
+  // are caps a kind doesn't use; 0 for a cap is its ceiling. An empty rule
+  // gets Claktory's own. version, builtin, by_id, at_ms and widened_fields
+  // are ignored.
+  ReportSchema type = 1;
+  // The version the editor started from; 0 for a new type. Refused when
+  // it's no longer the current one (someone else edited it meanwhile).
+  uint32 base_version = 2;
+}
+
+// Deletes a report type: refused for a built-in one, and while a pipe or a
+// project's new pipes can forward it. Its versions stay, for the reports
+// that use them.
+message DeleteReportType {
+  string id = 1;
+}
+
+message ReportField {
+  // As agents and ReportValue name it: "what_happened".
+  string name = 1;
+  // Claktory's words for it: "What happened".
+  string label = 2;
+  // A fact (one of a list, a yes or no, a known release): reading it
+  // affects no agent. Otherwise it's text, the other side's own words.
+  bool fact = 3;
+  ReportFieldType type = 4;
+  // ENUM: its choices, as written.
+  repeated string choices = 5;
+  bool required = 6;
+  // TEXT and TEXT_LIST: the most bytes (of each item); 0 for none.
+  uint32 max_bytes = 7;
+  // TEXT_LIST and ATTACHMENTS: the most items.
+  uint32 max_items = 8;
+  // Its rule in one line: "Up to 2,000 bytes".
+  string rule = 9;
+  // NUMBER: its range, within ReportTypeRules.number_abs. Unset in
+  // SaveReportType: 0 and 1,000,000.
+  optional sint64 min = 10;
+  optional sint64 max = 11;
+  // The rule was written by whoever defined the type (the person, Rivet,
+  // or Claktory for its own types); false when Claktory made it from the
+  // kind and caps, to make again on the next save (send rule "" for it).
+  // Ignored in SaveReportType: a non-empty rule there is written.
+  bool rule_written = 12;
+}
+
+enum ReportFieldType {
+  REPORT_FIELD_TYPE_UNSPECIFIED = 0;
+  REPORT_FIELD_TYPE_TEXT = 1;
+  REPORT_FIELD_TYPE_TEXT_LIST = 2;
+  REPORT_FIELD_TYPE_ENUM = 3;
+  REPORT_FIELD_TYPE_BOOL = 4;
+  // A known release ("v0.1.16"), or "unknown".
+  REPORT_FIELD_TYPE_VERSION = 5;
+  // Files from the pipe's inbox, copied into the report.
+  REPORT_FIELD_TYPE_ATTACHMENTS = 6;
+  // A whole number within the field's min and max.
+  REPORT_FIELD_TYPE_NUMBER = 7;
+  // A day, "2026-11-22", from 1900-01-01 to 2999-12-31.
+  REPORT_FIELD_TYPE_DATE = 8;
+}
+
+// Where a pipe's reports go (Pipe.forward), or a project's default for new
+// pipes (Project.report_forward).
+message PipeForward {
+  // The agent that reads them (Agent.reads_reports); empty for no one.
+  string recipient_id = 1;
+  // The first of type_ids, for older apps.
+  string schema_id = 2;
+  // Rises with each change of recipient. A report goes only to the
+  // recipient of the revision it was taken under: after a change, those not
+  // yet read wait for the person (PIPE_REPORT_STATE_WAITING). A change of
+  // types leaves it, and its reports, as they are. 0 for a project's
+  // default.
+  uint32 revision = 3;
+  // Who last changed it: empty for the person, else the admin agent's id
+  // (Rivet).
+  string set_by_id = 4;
+  int64 set_ms = 5;
+  ReportLimits limits = 6;
+  // The report types its liaison may forward (ReportSchema.id), 1 to
+  // ReportTypeRules.per_pipe of them. A type turned off refuses new reports
+  // of it; those already forwarded stay as they are.
+  repeated string type_ids = 7;
+}
+
+// How much a pipe may forward, in the last 24 hours. As kept and shown,
+// each is the one in effect; in SetPipeForward, 0 means the default.
+message ReportLimits {
+  // 6 and 30.
+  uint32 per_hour = 1;
+  uint32 per_day = 2;
+  // Text, in KiB: 64.
+  uint32 text_kib_per_day = 3;
+  // 3 files of at most 2 MB each, 20 MB in all.
+  uint32 attachments_per_report = 4;
+  uint32 attachment_mb = 5;
+  uint32 attachments_mb_per_day = 6;
+}
+
+// A pipe's reports in the last 24 hours, for its settings and the Map.
+message PipeReportCounts {
+  // Forwarded.
+  uint32 today = 1;
+  // How many more it can forward now (the hour's and the day's limits).
+  uint32 room_today = 2;
+  // Not forwarded, for any reason.
+  uint32 refused_today = 3;
+  // Of those, over a limit: "4 reports over today's limit weren't
+  // forwarded".
+  uint32 over_limit_today = 4;
+  // Waiting because where they go changed (DecidePipeReports), any age.
+  uint32 waiting = 5;
+}
+
+// Where a pipe's reports go, or (pipe_id empty) a project's default for its
+// new pipes. Refused when the recipient doesn't read reports, unless
+// make_reader: then it becomes a reader first, as SetReportReader. Reports
+// already waiting stay waiting.
+message SetPipeForward {
+  string pipe_id = 1;
+  // With pipe_id empty.
+  string project_id = 2;
+  // Empty for no one.
+  string recipient_id = 3;
+  // Older apps: one type. With type_ids and schema_id both empty, the
+  // types stay as they are ("bug_report" for a new forward), and so they do
+  // when schema_id is one of them already.
+  string schema_id = 4;
+  bool make_reader = 5;
+  // With make_reader: start its conversation fresh (the old one archived,
+  // as /clear does).
+  bool fresh = 6;
+  // Unset keeps what it had; 0 in a field means the default.
+  ReportLimits limits = 7;
+  // The types its liaison may forward: refused empty while there's a
+  // recipient, or past ReportTypeRules.per_pipe. The same recipient keeps
+  // the revision.
+  repeated string type_ids = 8;
+}
+
+// Makes an agent a report reader, or (reads false) lets it go back to its
+// usual tools; refused while a forward still names it.
+message SetReportReader {
+  string agent_id = 1;
+  bool reads = 2;
+  // Start its conversation fresh (the old one archived, as /clear does),
+  // either way.
+  bool fresh = 3;
+}
+
+// The pipe's waiting reports: send them to its current recipient, or
+// discard them.
+message DecidePipeReports {
+  string pipe_id = 1;
+  bool send = 2;
+}
+
+// A page of reports, newest first: one pipe's ("Forwarded"), or (pipe_id
+// empty) every report forwarded to recipient_id (its "Reports" panel).
+message ListPipeReports {
+  string pipe_id = 1;
+  string recipient_id = 2;
+  // The last page's oldest PipeReport.id; 0 for the newest.
+  uint64 before_id = 3;
+  // 0 for 50; at most 200.
+  uint32 limit = 4;
+}
+
+message PipeReportPage {
+  // As asked (ListPipeReports), to tell answers apart.
+  string pipe_id = 1;
+  string recipient_id = 2;
+  repeated PipeReport reports = 3;
+  bool more = 4;
+  // The versions its reports use that aren't current any more (an older
+  // version, a deleted type's): look a report's type up here by (id,
+  // version), else in Workspace.report_schemas.
+  repeated ReportSchema schemas = 5;
+}
+
+message PipeReport {
+  // Claktory's id for it, across pipes.
+  uint64 id = 1;
+  string pipe_id = 2;
+  // Its number in its pipe ("#4"): what the other side is told. 0 for one
+  // not forwarded.
+  uint32 number = 3;
+  PipeReportState state = 4;
+  // KNOWN: the pipe's own name for the issue ("A3"), made by Claktory.
+  string alias = 5;
+  // FIXED: a known release.
+  string fixed_in = 6;
+  // NEEDS_INFO: the field it needs (ReportField.name).
+  string needs_field = 7;
+  // REFUSED: why, in a word (missing, too_long, too_many, invalid, version,
+  // unknown_field, secret, over_limit, type, …) and the type's field, if
+  // one. What was refused is never kept: "type" (a type that's unknown or
+  // not on for the pipe) leaves schema_id empty.
+  string refused_code = 8;
+  string refused_field = 9;
+  string schema_id = 10;
+  // Its fields, as checked; empty when REFUSED.
+  repeated ReportValue values = 11;
+  // The liaison that wrote it.
+  string liaison_id = 12;
+  // The recipient it was taken for.
+  string recipient_id = 13;
+  int64 received_ms = 14;
+  // Its recipient has read its words, and when.
+  bool read = 15;
+  int64 read_ms = 16;
+  // What its liaison had read when it wrote it: its pipe, at least.
+  repeated PipeTaint taint = 17;
+  repeated ReportAttachment attachments = 18;
+  // The version of its type (schema_id) it was checked against.
+  uint32 type_version = 19;
+}
+
+enum PipeReportState {
+  PIPE_REPORT_STATE_UNSPECIFIED = 0;
+  // Forwarded; its reader hasn't marked it.
+  PIPE_REPORT_STATE_NEW = 1;
+  PIPE_REPORT_STATE_ACCEPTED = 2;
+  // "Already known as A3".
+  PIPE_REPORT_STATE_KNOWN = 3;
+  // "Fixed in v0.1.16".
+  PIPE_REPORT_STATE_FIXED = 4;
+  PIPE_REPORT_STATE_WONT_FIX = 5;
+  // "Needs more: steps".
+  PIPE_REPORT_STATE_NEEDS_INFO = 6;
+  // Not forwarded.
+  PIPE_REPORT_STATE_REFUSED = 7;
+  // Where it goes changed before it was read: the person sends or discards
+  // it (DecidePipeReports).
+  PIPE_REPORT_STATE_WAITING = 8;
+  // The person discarded it while it waited.
+  PIPE_REPORT_STATE_DISCARDED = 9;
+  // Its reader did what it asked.
+  PIPE_REPORT_STATE_DONE = 10;
+  // Its reader won't do what it asked.
+  PIPE_REPORT_STATE_DECLINED = 11;
+}
+
+message ReportValue {
+  // ReportField.name.
+  string field = 1;
+  // TEXT (the other side's words), ENUM and VERSION.
+  string text = 2;
+  // TEXT_LIST.
+  repeated string items = 3;
+  // BOOL.
+  bool flag = 4;
+  // NUMBER. (DATE is in text: "2026-11-22".)
+  sint64 number = 5;
+}
+
+// A file a report carries, copied from the pipe's inbox when it was
+// submitted.
+message ReportAttachment {
+  // Its name as shown, cleaned: the other side's words.
+  string name = 1;
+  uint64 size = 2;
+  bool image = 3;
+  // Where Claktory keeps it: in the pipe's report store, outside every
+  // project, named by Claktory.
+  string path = 4;
+}
+
+// A liaison's model spending today (Agent.spend).
+message ContainedSpend {
+  // Its estimated model spend since local midnight, from agent_usage and
+  // its models' prices.
+  double spent_usd = 1;
+  // Its daily cap in dollars (10 unless set).
+  double cap_usd = 2;
+  // Input, output and cache writes today on models with no price.
+  uint64 spent_tokens = 3;
+  // The cap for those (1,000,000 unless set).
+  uint64 cap_tokens = 4;
+  // Past either cap: its pipes' messages wait, they don't wake it.
+  bool over = 5;
+  // Pipe messages waiting because of that (the quiet count).
+  uint32 held_messages = 6;
+  // The next local midnight, when the held messages wake it.
+  int64 resumes_ms = 7;
+}
+
+// A liaison's daily spending cap. 0 means the default.
+message SetSpendCap {
+  string agent_id = 1;
+  double cap_usd = 2;
+  uint64 cap_tokens = 3;
+}
+
+// One reply to report (ClientMessage.report_reply): an AssistantText entry
+// of an agent's conversation, or of a chat's, whose response has finished.
+message ReportReply {
+  // Whose conversation: an agent's id, or a chat's ("chat:3"); one of them.
+  string agent_id = 1;
+  string chat_id = 2;
+  // The entry (Entry.seq).
+  uint64 seq = 3;
+  // The person's note, optional: at most 1000 characters.
+  string note = 4;
+  // false: only show what would be sent; true: send it.
+  bool send = 5;
+}
+
+// What a report sends, exactly: the app shows this, never its own copy.
+// Nothing else goes with it but this computer's platform ("macos-arm64").
+message ReplyReport {
+  // The reply's text with the vault's values hidden, cut at 16 KB (on a
+  // character's boundary).
+  string text = 1;
+  // The name of the model that wrote it ("Claude Opus 4.5"), or its id
+  // when that model is no longer listed.
+  string model = 2;
+  // This Claktory's version.
+  string version = 3;
+  // The note as it's sent: control characters but line breaks and tabs
+  // removed, trimmed.
+  string note = 4;
+  // The text was cut at 16 KB.
+  bool truncated = 5;
 }

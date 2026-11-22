@@ -1,4 +1,4 @@
-import 'package:factory_app/controls.dart' show Toggle;
+import 'package:factory_app/controls.dart' show Field, Toggle;
 import 'package:factory_app/decision.dart';
 import 'package:factory_app/map.dart';
 import 'package:factory_app/map_layout.dart';
@@ -124,7 +124,7 @@ void main() {
     final harness = await show(
       tester,
       _workspace([
-        _pipe(waiting: [4, 5], online: false),
+        _pipe(waiting: [4, 5], online: false, members: ['june'], lead: 'june'),
       ]),
     );
 
@@ -364,6 +364,221 @@ void main() {
     expect(menus, 1);
     // Menu isn't the header's own click, which opens the settings.
     expect(find.text('Pipe settings'), findsNothing);
+  });
+
+  group('whose Claktory is at the other end', () {
+    const unconfirmed =
+        'Messages here come only from the Claktory you connected to, but '
+        "its name and email are only what it says about itself. Claktory "
+        "hasn't confirmed whose it is. ";
+    const bothSignIn =
+        "${unconfirmed}When you're both signed in to claktory.com, Claktory "
+        'confirms it and shows their email here.';
+    const anaSignsIn =
+        '${unconfirmed}When Ana signs in to claktory.com, Claktory confirms '
+        'it and shows their email here.';
+
+    Workspace signedIn(List<Pipe> pipes) => _workspace(pipes, selected: 'pipe1')
+      ..account = ClaktoryAccount(
+        state: ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_IN,
+        email: 'matt@example.com',
+      );
+
+    Pipe verified() => _pipe()
+      ..peer.verified = true
+      ..peer.verifiedEmail = 'ana@acme.example';
+
+    testWidgets("the header's Not verified opens what it means, beside it", (
+      tester,
+    ) async {
+      await show(tester, signedIn([_pipe()]));
+      expect(find.text(anaSignsIn), findsNothing);
+      await tester.tap(find.text('Not verified'));
+      await settle(tester);
+      expect(find.text(anaSignsIn), findsOneWidget);
+      expect(find.text('Sign in…'), findsNothing, reason: 'signed in');
+      // Not the settings, as the rest of the header opens.
+      expect(find.text('Pipe settings'), findsNothing);
+      // A tap anywhere else closes it.
+      await tester.tapAt(const Offset(600, 700));
+      await settle(tester);
+      expect(find.text(anaSignsIn), findsNothing);
+    });
+
+    testWidgets('this Claktory not signed in: both, and Sign in…', (
+      tester,
+    ) async {
+      await show(tester, _workspace([_pipe()], selected: 'pipe1'));
+      await tester.tap(find.text('Not verified'));
+      await settle(tester);
+      expect(find.text(bothSignIn), findsOneWidget);
+      expect(find.text('Sign in…'), findsOneWidget);
+    });
+
+    testWidgets("the approval card's mark opens it too", (tester) async {
+      await show(
+        tester,
+        signedIn([_pipe(state: PipeState.PIPE_STATE_APPROVAL, digits: '4821')]),
+      );
+      await tester.tap(find.text('Not verified').last);
+      await settle(tester);
+      expect(find.text(anaSignsIn), findsOneWidget);
+    });
+
+    testWidgets("the pipe's settings say it first", (tester) async {
+      await show(tester, signedIn([_pipe()]));
+      await tester.tap(find.text('Acme launch').last);
+      await settle(tester);
+      expect(find.text('Pipe settings'), findsOneWidget);
+      expect(find.text(anaSignsIn), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text(anaSignsIn)).dy,
+        lessThan(tester.getTopLeft(find.text('Name')).dy),
+      );
+    });
+
+    testWidgets('verified: the email, and what that means', (tester) async {
+      await show(tester, signedIn([verified()]));
+      expect(find.text('Not verified'), findsNothing);
+      await tester.tap(find.text('Verified · ana@acme.example'));
+      await settle(tester);
+      expect(
+        find.text(
+          "Claktory confirmed this pipe is with ana@acme.example's Claktory.",
+        ),
+        findsOneWidget,
+      );
+    });
+
+    test('with no name, "the other side"', () {
+      final pipe = _pipe()..peer = PipePeer();
+      expect(
+        notVerifiedNote(pipe, signedIn: true),
+        contains('When the other side signs in'),
+      );
+    });
+
+    testWidgets('no longer vouched for: a quiet notice, and OK dismisses it', (
+      tester,
+    ) async {
+      final pipe = _pipe()
+        ..peer.identityChange = PipeIdentityChange.PIPE_IDENTITY_CHANGE_LAPSED
+        ..peer.previousEmail = 'ana@acme.example';
+      final harness = await show(tester, signedIn([pipe]));
+      expect(find.text('No longer verified'), findsOneWidget);
+      expect(
+        find.text(
+          "Claktory can no longer confirm this pipe is with ana@acme.example's "
+          'Claktory, perhaps because they signed out of claktory.com. '
+          'Messages still come only from the same Claktory.',
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('OK'));
+      await settle(tester);
+      expect(harness.last.acceptPipeIdentity.pipeId, 'pipe1');
+    });
+
+    testWidgets('a new email on the same account: a quiet notice, OK '
+        'accepts it', (tester) async {
+      final pipe = verified()
+        ..peer.verifiedEmail = 'ana@newco.example'
+        ..peer.identityChange =
+            PipeIdentityChange.PIPE_IDENTITY_CHANGE_EMAIL_CHANGED
+        ..peer.previousEmail = 'ana@acme.example';
+      final harness = await show(tester, signedIn([pipe]));
+      expect(find.text('Email changed'), findsOneWidget);
+      expect(
+        find.text(
+          "This pipe's Claktory is now ana@newco.example, on the same account "
+          "as ana@acme.example. It's still verified.",
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Verified · ana@newco.example'), findsOneWidget);
+      await tester.tap(find.text('OK'));
+      await settle(tester);
+      expect(harness.last.acceptPipeIdentity.pipeId, 'pipe1');
+    });
+
+    testWidgets('another account: a warning, and Trust asks first', (
+      tester,
+    ) async {
+      final pipe = _pipe()
+        ..peer.verifiedEmail = 'bo@example.com'
+        ..peer.identityChange =
+            PipeIdentityChange.PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED
+        ..peer.previousEmail = 'ana@acme.example';
+      final harness = await show(tester, signedIn([pipe]));
+      expect(
+        find.text(
+          "This pipe's Claktory is now confirmed as bo@example.com's, not "
+          "ana@acme.example's.",
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Check with Ana before you go on. Until you check, their messages '
+          "wait for you in Needs you, and your agents can't send here.",
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Not verified'), findsOneWidget);
+      await tester.tap(find.text('Trust this Claktory…'));
+      await settle(tester);
+      expect(
+        find.text("Trust this Claktory as bo@example.com's?"),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Messages waiting from it go through, and your agents can send here '
+          'again. Do this only if Ana told you about the change.',
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Cancel'));
+      await settle(tester);
+      expect(
+        harness.backend.sent.where((m) => m.hasAcceptPipeIdentity()),
+        isEmpty,
+      );
+      await tester.tap(find.text('Trust this Claktory…'));
+      await settle(tester);
+      await tester.tap(find.text('Trust'));
+      await settle(tester);
+      expect(harness.last.acceptPipeIdentity.pipeId, 'pipe1');
+    });
+
+    testWidgets('another account with none vouched: "Trust this Claktory?"', (
+      tester,
+    ) async {
+      final pipe = _pipe()
+        ..peer.identityChange =
+            PipeIdentityChange.PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED
+        ..peer.previousEmail = 'ana@acme.example';
+      await show(tester, signedIn([pipe]));
+      expect(
+        find.text(
+          "This pipe's Claktory is no longer confirmed as "
+          "ana@acme.example's.",
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Trust this Claktory…'));
+      await settle(tester);
+      expect(find.text('Trust this Claktory?'), findsOneWidget);
+      expect(
+        find.text(
+          'Messages waiting from it go through, and your agents can send here '
+          'again. The pipe then shows Not verified, since nothing confirms '
+          'whose Claktory it is now. Do this only if Ana told you about the '
+          'change.',
+        ),
+        findsOneWidget,
+      );
+    });
   });
 
   testWidgets('the person writes in an open pipe', (tester) async {
@@ -1076,5 +1291,159 @@ void main() {
     expect(inView('Message 7'), isTrue);
     expect(inView('Message 80'), isFalse);
     expect(harness.backend.reveal.extra, isNull, reason: 'used once');
+  });
+
+  group('a pipe with agents always has a lead', () {
+    test('the lead Claktory gives it: its liaison, else the first member '
+        'limited to the pipe; never one that can run commands', () {
+      expect(
+        pipeLeadFor(
+          ['june', 'omar', 'kai'],
+          limited: {'omar', 'kai'},
+          liaisonId: 'kai',
+        ),
+        'kai',
+      );
+      expect(pipeLeadFor(['june', 'kai'], liaisonId: 'kai'), '');
+      expect(pipeLeadFor(['june', 'omar'], limited: {'omar'}), 'omar');
+      expect(pipeLeadFor(['june', 'omar']), '');
+      expect(pipeLeadFor(const []), '');
+    });
+
+    Future<Harness> settings(WidgetTester tester, Pipe pipe) async {
+      final harness = await show(
+        tester,
+        _workspace([pipe], selected: 'pipe1'),
+        size: const Size(1200, 1500),
+      );
+      harness.backend.pipeChat.load(PipeTranscript(pipeId: 'pipe1'));
+      await settle(tester);
+      await tester.tap(find.text('Acme launch').last);
+      await settle(tester);
+      expect(find.text('Pipe settings'), findsOneWidget);
+      return harness;
+    }
+
+    Finder lead(String name) => find.descendant(
+      of: find.ancestor(of: find.text('Lead'), matching: find.byType(Field)),
+      matching: find.text(name),
+    );
+
+    testWidgets('unticking the lead shows who leads instead, never No lead; '
+        'ticking it back brings it back', (tester) async {
+      final harness = await settings(
+        tester,
+        _pipe(members: ['june', 'omar'], lead: 'omar', limited: ['june']),
+      );
+      expect(lead('Omar'), findsOneWidget);
+      // Omar's line under Who may use it; the sidebar's row comes first.
+      final omar = find.text('Omar').at(1);
+      await tester.tap(omar);
+      await settle(tester);
+      expect(lead('June'), findsOneWidget);
+      expect(find.text('No lead'), findsNothing);
+      await tester.tap(omar);
+      await settle(tester);
+      expect(lead('Omar'), findsOneWidget);
+
+      await tester.ensureVisible(find.text('Save'));
+      await tester.tap(find.text('Save'));
+      await settle(tester);
+      final update = harness.last.updatePipe;
+      expect(update.hasLeadId(), isFalse, reason: 'nothing changed');
+      expect(update.hasMembers(), isFalse);
+    });
+
+    testWidgets('saved without its lead, the pipe gets the one it shows', (
+      tester,
+    ) async {
+      final harness = await settings(
+        tester,
+        _pipe(members: ['june', 'omar'], lead: 'omar', limited: ['june']),
+      );
+      await tester.tap(find.text('Omar').at(1));
+      await settle(tester);
+      await tester.ensureVisible(find.text('Save'));
+      await tester.tap(find.text('Save'));
+      await settle(tester);
+      final update = harness.last.updatePipe;
+      expect(update.members.agentIds, ['june']);
+      expect(update.leadId, 'june');
+    });
+
+    testWidgets('with no agent limited to the pipe left, it has no lead '
+        'until the person chooses one; open, it says no one answers it', (
+      tester,
+    ) async {
+      final harness = await settings(
+        tester,
+        _pipe(members: ['june', 'omar'], lead: 'omar'),
+      );
+      await tester.tap(find.text('Omar').at(1));
+      await settle(tester);
+      expect(lead('No lead'), findsOneWidget);
+      expect(find.text(pipeNoLeadNote), findsOneWidget);
+      await tester.ensureVisible(find.text('Save'));
+      await tester.tap(find.text('Save'));
+      await settle(tester);
+      expect(harness.last.updatePipe.leadId, '');
+    });
+
+    testWidgets('a pipe with no agents has No lead, and says no one '
+        'answers it', (tester) async {
+      await settings(tester, _pipe());
+      expect(lead('No lead'), findsOneWidget);
+      expect(find.text(pipeNoLeadNote), findsNothing);
+      expect(find.text(pipeUnanswered), findsWidgets);
+    });
+
+    testWidgets('the person may choose one that can run commands', (
+      tester,
+    ) async {
+      final harness = await settings(
+        tester,
+        _pipe(members: ['june', 'omar'], lead: ''),
+      );
+      expect(lead('No lead'), findsOneWidget);
+      await tester.tap(lead('No lead'));
+      await settle(tester);
+      await tester.tap(find.text('June').last);
+      await settle(tester);
+      expect(lead('June'), findsOneWidget);
+      expect(find.text('No lead'), findsNothing);
+      await tester.ensureVisible(find.text('Save'));
+      await tester.tap(find.text('Save'));
+      await settle(tester);
+      expect(harness.last.updatePipe.leadId, 'june');
+    });
+
+    testWidgets('approving, the lead unticked goes back to a new liaison '
+        'and comes back when ticked', (tester) async {
+      final harness = await show(
+        tester,
+        _workspace([
+          _pipe(state: PipeState.PIPE_STATE_APPROVAL, digits: '4821'),
+        ], selected: 'pipe1'),
+      );
+      final omar = find.text('Omar').last;
+      await tester.tap(omar);
+      await tester.pump();
+      await tester.tap(lead('A new liaison agent'));
+      await settle(tester);
+      await tester.tap(find.text('Omar').last);
+      await settle(tester);
+      expect(lead('Omar'), findsOneWidget);
+      // Omar's toggle, under Who may use it.
+      await tester.tap(find.text('Omar').at(1));
+      await settle(tester);
+      expect(lead('A new liaison agent'), findsOneWidget);
+      await tester.tap(find.text('Omar').at(1));
+      await settle(tester);
+      expect(lead('Omar'), findsOneWidget);
+      await tester.ensureVisible(find.text('Approve'));
+      await tester.tap(find.text('Approve'));
+      await settle(tester);
+      expect(harness.last.approvePipe.leadId, 'omar');
+    });
   });
 }

@@ -210,7 +210,11 @@ void main() {
         find.ancestor(
           of: find.text('1'),
           matching: find.byWidgetPredicate(
-            (w) => w is SelectionContainer && w.registrar == null,
+            // Disabled: no registrar and no delegate of its own.
+            (w) =>
+                w is SelectionContainer &&
+                w.registrar == null &&
+                w.delegate == null,
           ),
         ),
         findsOneWidget,

@@ -1097,6 +1097,96 @@ void main() {
     });
   });
 
+  group('hidden characters', () {
+    testWidgets('a path with an override shows its code, closed and open', (
+      tester,
+    ) async {
+      const path = '/Users/me/files/evil\u202Etxt.exe';
+      await showing(tester, [
+        call(
+          'secrets_request',
+          {
+            'name': 'Signing key',
+            'import': [
+              {'path': path, 'variable': 'KEY'},
+            ],
+          },
+          output:
+              'Asked to import KEY ($path, 3 bytes) into the vault as '
+              'Signing key; Matt will approve or dismiss it.',
+        ),
+      ]);
+      await tester.tap(find.text('secrets_request'));
+      await settle(tester);
+      expect(find.text('Output'), findsOneWidget);
+      expect(
+        inTranscript(find.textContaining(r'evil\u{202E}txt.exe')),
+        findsWidgets,
+      );
+      expect(inTranscript(find.textContaining('\u202E')), findsNothing);
+    });
+
+    testWidgets("a view's words show codes too, emoji as they are", (
+      tester,
+    ) async {
+      await showing(tester, [
+        call(
+          'agents_send',
+          {
+            'to': 'builder',
+            'text': 'Approve \u202Eexe.txt 👩‍💻 می\u200Cخواهم',
+          },
+          output: 'Sent.',
+          details: {'to': 'builder', 'name': 'Sam', 'working': false},
+        ),
+      ]);
+      expect(
+        inTranscript(
+          find.textContaining('Approve \\u{202E}exe.txt 👩‍💻 می\u200Cخواهم'),
+        ),
+        findsOneWidget,
+      );
+      expect(inTranscript(find.textContaining('\u202E')), findsNothing);
+    });
+  });
+
+  group('hidden characters in prose', () {
+    const persian = 'می\u200Cخواهم'; // ZWNJ, which Persian needs
+    const arabic = 'مرحبا \u200Fabc'; // RLM
+
+    testWidgets("an agent's reply and an event show what reorders text by "
+        'its code; right-to-left words stay as they are', (tester) async {
+      await showing(tester, [
+        Entry(
+          seq: Int64(1),
+          assistant: AssistantText(
+            text: 'secrets_request answered: evil\u202Etxt.exe. $persian',
+          ),
+        ),
+        Entry(
+          seq: Int64(2),
+          event: Event(
+            source: EventSource.EVENT_SOURCE_AGENT,
+            from: 'Sam',
+            fromId: 'builder',
+            text: 'Look at \u2066evil\u2069 $arabic',
+          ),
+        ),
+      ]);
+      expect(
+        inTranscript(find.textContaining(r'evil\u{202E}txt.exe')),
+        findsOneWidget,
+      );
+      expect(
+        inTranscript(find.textContaining(r'\u{2066}evil\u{2069}')),
+        findsOneWidget,
+      );
+      expect(inTranscript(find.textContaining(persian)), findsOneWidget);
+      expect(inTranscript(find.textContaining(arabic)), findsOneWidget);
+      expect(inTranscript(find.textContaining('\u202E')), findsNothing);
+    });
+  });
+
   test('describeWhen', () {
     expect(describeWhen({'every': '3h'}), 'every 3h');
     expect(describeWhen({'at': '09:00'}), 'at 09:00');

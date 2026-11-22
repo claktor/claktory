@@ -316,7 +316,7 @@ void main() {
     expect(cache.kept, utf8.decode(file.data));
     // The host's bar, not the phone's as well.
     expect(find.text('Builder asks you to review this'), findsOneWidget);
-    expect(find.text('Add a comment'), findsOneWidget);
+    expect(find.byKey(const ValueKey('review-answer')), findsOneWidget);
   });
 
   test('the document host is an iPad\'s, for "pdf" panes only', () {

@@ -13,6 +13,7 @@
 
 pub(crate) mod a2ui;
 pub(crate) mod bundle;
+pub mod bundled;
 pub(crate) mod data;
 mod events;
 pub(crate) mod host;
@@ -94,9 +95,11 @@ pub(crate) fn grantee(app: &str) -> String {
     format!("app:{app}")
 }
 
-/// Apps aren't offered in the person's Claktory until Telegram has worked
-/// end to end; the dev Claktory (`factoryd --dev`) has them.
-const SHIPPED: bool = false;
+/// Apps are offered in every Claktory: Claktory's own (Charts, shipped with
+/// each release: `bundled`) install, run and update from Settings → Apps
+/// (#201, Zucchero's gate passed). Off, only the dev Claktory (`factoryd
+/// --dev`) would have them. Telegram isn't shipped until it's proven.
+const SHIPPED: bool = true;
 
 /// Apps' state while Claktory runs (what's installed is in config.json).
 pub(crate) struct Apps {
@@ -116,6 +119,8 @@ pub(crate) struct Apps {
     surfaces: surfaces::Surfaces,
     /// The dock's pins.
     pins: pins::Pins,
+    /// Claktory's own apps this release ships.
+    pub(crate) bundled: bundled::Bundled,
 }
 
 #[derive(Default)]
@@ -159,6 +164,7 @@ impl Default for Apps {
             events: events::Events::default(),
             surfaces: surfaces::Surfaces::default(),
             pins: pins::Pins::default(),
+            bundled: bundled::Bundled::default(),
         }
     }
 }
@@ -467,6 +473,13 @@ async fn call(factory: &Arc<Factory>, app: &str, tool: &str, args: &serde_json::
 // ---- Running them ----
 
 impl Factory {
+    /// Tests: apps aren't offered, as where they don't ship (`SHIPPED`
+    /// off), until `set_apps_host`.
+    #[doc(hidden)]
+    pub fn set_apps_unavailable_for_test(&self) {
+        self.apps.available.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// How the apps host starts, instead of its program beside factoryd's
     /// (tests use a stand-in).
     pub fn set_apps_host(&self, launcher: Launcher) {
@@ -925,7 +938,20 @@ impl Factory {
         request: &v1::InstallLocalApp,
     ) -> Result<Option<v1::AppPermissions>, RequestError> {
         let refused = |text: String| Err(RequestError::Apps(text));
-        let bytes = if request.content.is_empty() {
+        let bundled = request.bundled.trim();
+        let bytes = if !bundled.is_empty() {
+            // One of Claktory's own, from this release: read and checked
+            // again now, and held to Claktory's key, then reviewed and
+            // installed like any file.
+            let Some(path) = bundled::path(self, bundled) else {
+                return refused(format!("Claktory doesn't come with an app called {bundled}."));
+            };
+            tokio::task::spawn_blocking(move || bundled::read_bytes(&path))
+                .await
+                .map_err(|_| RequestError::Apps("Claktory couldn't read this app.".to_owned()))?
+                .map_err(RequestError::Apps)?
+                .1
+        } else if request.content.is_empty() {
             let path = request.path.trim();
             if path.is_empty() {
                 return refused("Choose an app file (.clapp) to install.".to_owned());
@@ -958,7 +984,8 @@ impl Factory {
             ));
         }
         if !request.approve {
-            return Ok(Some(self.permissions(&bundle, request.path.trim(), request.content.is_empty(), installed.as_ref())));
+            let from_path = request.content.is_empty() && bundled.is_empty();
+            return Ok(Some(self.permissions(&bundle, request.path.trim(), from_path, installed.as_ref())));
         }
         if request.sha256.trim() != bundle.sha256 {
             return refused("This file isn't the one you reviewed. Review it again before installing.".to_owned());
@@ -1233,7 +1260,7 @@ impl Factory {
         }
         let kept = self.lock().config.apps.iter().find(|app| app.id == request.app_id).and_then(|app| app.secrets.get(&spec.name).cloned());
         let values =
-            [crate::vault::Value { variable: spec.name.to_uppercase(), value: zeroize::Zeroizing::new(value.to_owned()), file: false }];
+            [crate::vault::Value { variable: spec.name.to_uppercase(), value: zeroize::Zeroizing::new(value.to_owned()), file: false, binary: false }];
         let label = if spec.label.is_empty() { spec.name.clone() } else { lower_first(&spec.label) };
         let description = format!("The {name} app's {label}. Only the {name} app uses it.", name = manifest.name);
         let exists = kept.as_ref().is_some_and(|id| self.vault.state(|_, _| false).secrets.iter().any(|secret| &secret.id == id));

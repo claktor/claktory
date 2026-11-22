@@ -4,6 +4,7 @@ import '../controls.dart';
 import '../identity.dart';
 import '../selection.dart' show Unselectable;
 import 'metrics.dart';
+import 'page_find.dart' show phonePageSearch;
 import 'platform_policy.dart';
 
 /// How large a [PhoneHeader]'s title grows with the person's text size.
@@ -24,8 +25,10 @@ class PhoneHeader extends StatelessWidget {
     this.titleLabel,
     this.titleHint,
     this.background,
+    this.marks,
     this.bottom,
     this.hairline = true,
+    this.search = true,
   }) : assert(trailing.length <= 2, 'at most two actions at the end');
 
   /// Menu or Back ([HeaderButton.menu], [HeaderButton.back]).
@@ -50,15 +53,32 @@ class PhoneHeader extends StatelessWidget {
   /// Its fill: the sidebar's color unless given (an agent's tint).
   final Color? background;
 
+  /// A second line under the title, lined up with it: what sets an agent
+  /// apart (mobile/agent_marks.dart), as tall as its words need.
+  final Widget? marks;
+
   /// Under the row, over the hairline: an agent's colored line.
   final Widget? bottom;
 
   /// A hairline along its bottom.
   final bool hairline;
 
+  /// Whether a page that can be searched, with no action of its own at
+  /// the header's end, shows Search there (a magnifier that opens the
+  /// page's find bar, mobile/page_find.dart). A page with a ⋯ offers
+  /// Search in its sheet instead.
+  final bool search;
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final searching = search && trailing.isEmpty
+        ? phonePageSearch(context)
+        : null;
+    final actions = [
+      ...trailing,
+      if (searching != null) HeaderButton.search(onTap: searching),
+    ];
     // A bar's title grows only so far, as iOS's navigation bars' do (the
     // page's own words grow in full): past that, a word as long as
     // "Notifications" no longer fits a small iPhone's bar and would break
@@ -126,13 +146,27 @@ class PhoneHeader extends StatelessWidget {
                       child: title,
                     ),
                   ),
-                  ...trailing,
-                  if (trailing.isEmpty)
+                  ...actions,
+                  if (actions.isEmpty)
                     const SizedBox(width: Touch.gutter - Space.xs),
                 ],
               ),
             ),
           ),
+          if (marks case final marks?)
+            Padding(
+              padding: EdgeInsetsDirectional.only(
+                start: leading != null
+                    ? Space.xs + PhonePlatformPolicy.of(context).touchTarget
+                    : Touch.gutter,
+                end: Touch.gutter,
+                bottom: Space.xs,
+              ),
+              child: Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: marks,
+              ),
+            ),
           ?bottom,
         ],
       ),
@@ -192,6 +226,20 @@ class HeaderButton extends StatelessWidget {
     glyph: (color) =>
         ExtensionGlyph(icon: 'ellipsis', name: 'More', color: color, size: 20),
   );
+
+  /// Search, which opens the page's find bar at its foot.
+  factory HeaderButton.search({Key? key, required VoidCallback onTap}) =>
+      HeaderButton(
+        key: key ?? const ValueKey('phone-search'),
+        label: 'Search',
+        onTap: onTap,
+        glyph: (color) => ExtensionGlyph(
+          icon: 'search',
+          name: 'Search',
+          color: color,
+          size: 20,
+        ),
+      );
 
   /// Close, for a page or sheet that rose from below.
   factory HeaderButton.close({Key? key, required VoidCallback onTap}) =>

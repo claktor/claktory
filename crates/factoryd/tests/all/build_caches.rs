@@ -213,17 +213,29 @@ async fn the_dev_claktory_keeps_to_its_own_data_folder() {
 #[tokio::test]
 async fn a_busy_agent_s_caches_are_cleared_between_its_steps_never_in_a_tool_call() {
     let dir = temp_dir();
-    let (factory, mut client, mut view, _repo, tree) = setup(&dir).await;
+    let (factory, mut client, mut view, repo, tree) = setup(&dir).await;
     apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
 
-    // In a tool call (a build, say): left, however long it runs.
-    let build = r#"call bash {"command":"sleep 2"}"#;
-    apply_request(&mut client, &mut view, send_message("builder", build)).await;
-    view.follow(&mut client, |view| view.agent("builder").status() == AgentStatus::Working).await;
+    // In a tool call (a build, say): left, however long it runs. The call
+    // says when it has started, and runs until the test lets it end, so
+    // nothing here depends on how fast the machine is.
+    let (started, release) = (dir.join("call-started"), dir.join("call-release"));
+    let build =
+        format!(r#"call bash {{"command":"touch {}; while [ ! -e {} ]; do sleep 0.05; done"}}"#, started.display(), release.display());
+    apply_request(&mut client, &mut view, send_message("builder", &build)).await;
+    eventually("Builder's tool call starting", || started.exists()).await;
     built(&tree.join("target/debug/big"), 2_000_000);
     factory.set_build_cache_every(Duration::from_millis(50));
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    // Sweeps that ran in full while the call runs: each clears a cache over
+    // budget in the project's folder, where no one works. The second is
+    // cleared by a sweep that began after the first was, so after Builder's
+    // cache was there.
+    for _ in 0..2 {
+        built(&repo.join("target/debug/big"), 2_000_000);
+        eventually("a sweep while Builder's tool call runs", || !repo.join("target").exists()).await;
+    }
     assert!(tree.join("target/debug/big").exists(), "left while Builder's tool call runs");
+    std::fs::write(&release, "").expect("release");
     view.follow(&mut client, |view| idle(view, "builder")).await;
     eventually("clearing once the call ended", || !tree.join("target").exists()).await;
     factory.set_build_cache_every(Duration::from_secs(3600));

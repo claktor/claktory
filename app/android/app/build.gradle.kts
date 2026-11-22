@@ -88,6 +88,11 @@ android {
             }
             isMinifyEnabled = true
             isShrinkResources = true
+            // The native libraries' symbol tables, kept apart before they're
+            // stripped: into the bundle for Play's crash reports, and as
+            // native-debug-symbols.zip (release_apk.sh puts it beside the
+            // .aab). The APK's libraries stay stripped.
+            ndk { debugSymbolLevel = "SYMBOL_TABLE" }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Device tests on the release build reach into the app's classes.
             if (testBuildType == "release") {

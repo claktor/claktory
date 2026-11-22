@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import 'backend.dart';
 import 'controls.dart';
 import 'extensions.dart' show logTime;
+import 'find.dart' show RenderedFindScope;
 import 'identity.dart';
 import 'mobile/lines.dart';
 import 'mobile/presentation.dart';
@@ -29,8 +30,12 @@ class MonitorsView extends StatelessWidget {
   /// Whose monitors they are.
   final String agentId;
 
+  /// Searchable with ⌘F, by the words it shows (find.dart).
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      RenderedFindScope(placeholder: 'Search monitors', child: _view(context));
+
+  Widget _view(BuildContext context) {
     final store = AppScope.of(context).workspace;
     List<Monitor> inState(Set<MonitorState> states) => [
       for (final monitor in monitors.monitors)
@@ -54,29 +59,38 @@ class MonitorsView extends StatelessWidget {
     return ListenableBuilder(
       listenable: store,
       builder: (context, _) => ListView(
+        // All of it laid out, for find.
+        scrollCacheExtent: RenderedFindScope.everything,
         padding: const EdgeInsets.fromLTRB(Space.s, Space.s, Space.s, Space.l),
         children: [
-          if (monitors.monitors.isEmpty)
-            const _Line(
-              'No monitors yet. The agent adds one when it needs to '
-              'come back to something later.',
+          // Each selectable where the pointer is at any zoom.
+          for (final child in <Widget>[
+            if (monitors.monitors.isEmpty)
+              const _Line(
+                'No monitors yet. The agent adds one when it needs to '
+                'come back to something later.',
+              ),
+            if (active.isNotEmpty) ...[
+              const _Heading('Active'),
+              for (final monitor in active) item(monitor),
+            ],
+            if (paused.isNotEmpty) ...[
+              const _Heading('Paused'),
+              for (final monitor in paused) item(monitor),
+            ],
+            if (ended.isNotEmpty) ...[
+              const _Heading('Ended'),
+              for (final monitor in ended) item(monitor),
+            ],
+            if (monitors.builtins.isNotEmpty) ...[
+              const _Heading('Also wakes it'),
+              for (final line in monitors.builtins) _Line(line, caption: true),
+            ],
+          ])
+            ScrolledSelection(
+              key: child.key == null ? null : ValueKey(child.key),
+              child: child,
             ),
-          if (active.isNotEmpty) ...[
-            const _Heading('Active'),
-            for (final monitor in active) item(monitor),
-          ],
-          if (paused.isNotEmpty) ...[
-            const _Heading('Paused'),
-            for (final monitor in paused) item(monitor),
-          ],
-          if (ended.isNotEmpty) ...[
-            const _Heading('Ended'),
-            for (final monitor in ended) item(monitor),
-          ],
-          if (monitors.builtins.isNotEmpty) ...[
-            const _Heading('Also wakes it'),
-            for (final line in monitors.builtins) _Line(line, caption: true),
-          ],
         ],
       ),
     );

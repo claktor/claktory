@@ -116,7 +116,9 @@ Emails a 6-digit code (it works for 15 minutes, 5 tries), from
 not the account exists: `200 {"request_id": "…", "expires_in": 900, "code_from": "code@auth.claktory.com"}`
 (`code_from`, the address the code comes from, is newer: a client reads its
 absence as unknown).
-Errors: `400 invalid_email`, `400 invalid_request`, `429 rate_limited`
+Errors: `400 invalid_email` (not an address, or one with an invisible
+character that changes how it reads, such as U+202E or a zero-width space),
+`400 invalid_request`, `429 rate_limited`
 (per email 5 an hour and 20 a day, per IP 30 sign-ins a day),
 `503 email_unavailable` (the day's email cap is reached, or the mail
 provider didn't send it: it failed or refused, or the address is on its
@@ -138,6 +140,36 @@ seen before `401 replayed`, each leaving the code to use again.
 Errors: `400 wrong_code` (`attempts_left`), `410 code_expired` (expired, or
 out of tries: start again), `409 claktory_taken` (that id belongs to another
 account), `403 too_many_claktories` (10 per account), `400 invalid_request`.
+
+### The review account (`--review-account`)
+For the stores' reviewers, who need sign-in details that work at any time,
+from anywhere, without a one-time code. Off unless the service is started
+with `--review-account FILE` and FILE is there (the operator's
+`review-account off` removes it). FILE (a systemd credential, `chmod 600`:
+one others may read stops the service) is one line,
+`<email> <salt> <sha256(salt || code), hex>`, with the salt (16 or more
+letters and digits) taken as the text it is:
+`printf '%s%s' "$salt" "$code" | sha256sum`. The service never holds the
+code, and the email is a secret too: no mailbox, never logged (log lines say
+"review account"), and never a `--vouch-claktory-email` (the service won't
+start with both).
+
+For that email (after the usual normalisation), every sign-in that takes a
+code (a Claktory's, a device's, the web pages', Delete account's among them)
+works as above, with the same request, 15 minutes, 5 tries, limits and
+answers, except:
+- no code is emailed, and nothing else is sent to it (unlock and move
+  notices included); the code is the fixed one;
+- 5 wrong codes in an hour, counted by the email and by the address they
+  come from, across sign-ins, lock it for the rest of the hour: every code,
+  the right one too, is `400 wrong_code`, and a new start is `429
+  rate_limited`;
+- each sign-in with it logs one line, `review sign-in: <route>, from
+  <region, country>` (`claktory`, `device` or `web`; the place from the
+  GeoIP file, never the IP).
+
+It's an ordinary account otherwise. Every other email is unchanged, and the
+fixed code opens no other email's sign-in.
 
 ### `POST /v1/share` (signed)
 `{"eph_pub": b64, "epoch": 4}` → `200 {"epoch", "sealed_share"}`.
@@ -271,6 +303,74 @@ unauthorized`, and checks whether its new pair works with a check-in.
 Errors: `400 invalid_request` (a key or token that isn't 32 bytes, or a
 token already in use), `401`, `403 revoked`, `429 rate_limited` (10 a day).
 
+### `POST /v1/pipe-identity` (signed)
+Verified pipes: the service's word, for the Claktories this one has pipes
+with, that whoever holds its pipe key is a Claktory of its account.
+```json
+{"endpoint_id": "<64 hex>", "time": 1795183320, "proof": b64}
+```
+`endpoint_id` is the Claktory's tunnel key (its iroh endpoint id, the key
+its pipes pin), and must be the `backend` it registered with `PUT
+/v1/endpoints`. `proof` is that key's own Ed25519 signature over
+`"claktory-pipe-peer/1 proof\n" claktory_id "\n" endpoint_id "\n" time`
+(`endpoint_id` in lower case; `time` within 300 s of the service's clock),
+so the service vouches only for a key the asking Claktory holds, and a
+proof serves no other Claktory or later.
+`200 {"statement", "expires_in": 604800}`. The statement is
+`b64(payload) "." b64(signature)`, the service key's signature over
+`"claktory-pipe-peer/1\n" ‖ payload`, the payload JSON:
+```json
+{"v": 1, "label": "claktory-pipe-peer/1", "service": "https://account.claktory.com", "service_key": b64,
+ "endpoint_id": "<64 hex>", "account_id": "…", "email": "ana@example.com", "iat": 1795183320, "exp": 1795788120}
+```
+Nothing in it is what the Claktory says of itself (no names), and it
+vouches for the Claktory's account and its email (confirmed with a code at
+sign-in), not for the person. It lasts a week; the Claktory asks again
+about once a day, and a signed-out or removed one, or one whose account is
+deleted, gets none, so its peers' verification ends by expiry.
+A peer checks it with `verify_pipe_peer` (`protocol.rs`): the signature
+with the service key it pinned at sign-in (never the payload's
+`service_key`, which must name that same key), the label, `v`, that
+`endpoint_id` is the pipe's pinned peer key, `exp - iat` at most a week,
+the time (60 s of skew) and an email in printable ASCII, 4096 bytes at most.
+Errors: `400 invalid_request` (a malformed endpoint id, a proof that
+doesn't verify, or a time more than 300 s off), `401`, `403 revoked`, `403
+wrong_endpoint` (not this Claktory's registered backend endpoint, or none
+registered yet), `403 unsupported_email` (the account's email isn't
+printable ASCII, so it can't be shown to others without look-alikes, or
+it's at claktory.com or a subdomain, which would read as Claktory's staff,
+unless the operator allowed that address with `--vouch-claktory-email`;
+that account stays unverified), `429 rate_limited` (48 a day).
+
+### `POST /v1/reports/ai` (signed, or not)
+Report this reply: a person sends one of their agents' (or chats') replies
+to Claktory's team, as their app's sheet showed it before they sent it.
+Signed by a signed-in Claktory, unsigned by one that isn't.
+```json
+{"text": "…", "model": "Claude Opus 4.5", "version": "v0.1.30", "platform": "macos-arm64", "note": "…"}
+```
+- `text`: the reply, the vault's values hidden, at most 16384 bytes (cut on
+  a character's boundary by the Claktory, `ai_report_text`); not blank.
+- `model`: the model's name, or its id when it's no longer listed; up to 100
+  characters. `version`, `platform`: up to 40. All three are one line,
+  with no control or format characters, and not blank.
+- `note`: optional, as `ai_report_note` leaves it (no control characters
+  but line breaks and tabs, no format characters, trimmed), at most 1000
+  characters.
+- No other field: an unknown one is refused, and so is a body over 40 KB
+  (a reply full of line breaks and quotes is twice its size in JSON).
+
+`200 {"keep_days": 30}`. The service keeps exactly those fields and the hour
+the report arrived in (never the second), for 30 days (the hourly purge), for Claktory's team to read
+on the server; no route serves them. Nothing of who sent it is kept with it:
+not the address, account, Claktory or key, signed or not. Who sent it
+counts only toward the limits, by a hash, which the purge forgets after
+two days. It sends no email and reaches no one.
+Limits: unsigned, 10 an hour and 50 a day per address; signed, 20 a day per
+Claktory (its address's other limits don't count); 2000 a day from
+everyone together. Errors: `400 invalid_request`, `401` (a signature that
+doesn't verify), `403 revoked`, `429 rate_limited`.
+
 ### Devices
 
 A person's devices sign in to the account themselves, to find its
@@ -286,8 +386,9 @@ already in (or with a pairing code too).
 Emails a 6-digit code (15 minutes, 5 tries) for signing in on that device,
 which works only with that account key. Limits are a Claktory sign-in's,
 counted together with them. `200 {"request_id", "expires_in": 900, "code_from"}`.
-Errors: `400 invalid_email`, `400 invalid_request`, `429 rate_limited`,
-`503 email_unavailable`.
+Errors: `400 invalid_email`, `400 invalid_request`, `403 device_removed`
+(this key was removed from that account; no code is sent),
+`429 rate_limited`, `503 email_unavailable`.
 
 #### `POST /v1/devices/sign-in/verify` (device signed, by the key that started it)
 `{"request_id", "code"}` → `200 {"account_id", "email", "name"}`. Makes the
@@ -295,15 +396,39 @@ account if it's new and binds the account key to it (from another account,
 it moves, and the old account's assertions for it leave the allowlist).
 Errors: `400 wrong_code`, `410 code_expired`, `401 unauthorized` (another
 key, which spends none of the code's tries), `403 too_many_devices` (30 per
-account).
+account), `403 device_removed` (the key was removed after the code was sent;
+the code is spent).
 
 #### `GET /v1/devices/me` (device signed)
 `200 {"account_id", "email", "name"}`, or `401 unauthorized` when the key isn't
-bound: never signed in, signed out, or removed at claktory.com/account.
+bound: never signed in, signed out, or removed (at claktory.com/account or
+by another device).
 
 #### `POST /v1/devices/sign-out` (device signed)
 `{}` → `200 {}`: the key is unbound (also when it wasn't bound), and the
 device keys of its assertions leave the allowlist.
+
+#### `POST /v1/devices/remove` (device signed)
+`{"account_key": b64}` → `200 {"removed": true}`: another device of the
+same account (lost, stolen, given away) is signed out, as removing it at
+claktory.com/account does: its key is unbound, so this service and the
+apps behind it (DMs' worker) answer it `401 unauthorized` from then on, and
+the device keys of its assertions leave the allowlist. A DM device's leaf id
+is its account key. The key is also remembered for good, as when it's
+removed at claktory.com/account (never when a device signs itself out): it
+never signs in to this account again, even with a right code, and is
+answered `403 device_removed` (message: "This device was removed from your
+account. Sign in again to start over as a new device."). The app then
+deletes what it kept for that account (its DM store) and makes a new account
+key, which signs in as a new device and joins DMs only through a hand-off
+from a device already in. Only this account is closed to it; other accounts
+aren't. The removed keys are in Download My Data, and go when the account is
+deleted. `{"removed": false}` when that key isn't (or is no longer) one of
+this account's devices, so a retry is no error, and another account's
+devices are never touched; the key is remembered all the same (a device
+that signed itself out first stays out). Errors: `400 invalid_request` (not a
+key, or the caller's own: that's sign-out), `401 unauthorized`, `429
+rate_limited` (10 an hour per device).
 
 #### `GET /v1/claktories` (device signed)
 `200 {"claktories": [{"claktory_id", "name", "color", "machine", "platform", "version", "endpoint_id", "relays": [], "last_contact_ms"}]}`:
@@ -387,8 +512,11 @@ Requests, friends and blocks, device signed only too:
   days), `DELETE /v1/apps/dms/declines/<id>` (reopen: their requests reach
   the person again, and the declined one waits again if it still could);
 - `POST /v1/apps/dms/reports` `{"action_id", "request_id"|"contact_id"|"block_id",
-  "reason", "note"?, "include_profile"?}` and `GET /v1/apps/dms/reports`:
-  reports to Claktory's operators, keeping only what the person chose;
+  "reason", "note"?, "include_profile"?, "messages"?}` and `GET
+  /v1/apps/dms/reports`: reports to Claktory's operators, keeping only what
+  the person chose; `messages` (only with `contact_id`, at most 50, oldest
+  first) are `{"seq", "text", "from": "you"|"them", "sent_ms"}` as the
+  reporter's device shows them, labelled not verifiable for operators;
 - `GET /v1/apps/dms/conversations` (the friend in `with`, with their
   `account_id`); `POST /v1/apps/dms/conversations/<id>/messages`
   `{"client_message_id", "contact_generation", "envelope"}`: an MLS
@@ -448,7 +576,7 @@ Sign in with an emailed code; lists the account's Claktories (name, version,
 platform, last contact, recent unlocks with their IP, and what their
 check-ins sent: place, counts, agent hours in the last 7 days, tokens per
 model in the last 30); **Remove** a Claktory (what `revoked` means above); the devices signed in
-(name, platform, last seen), each with **Remove** (its key is unbound);
+(name, platform, last seen), each with **Remove** (its key is unbound, and never signs in to the account again: `403 device_removed`);
 **Agents' access**, the grants agents on its Claktories hold in the user-level
 apps (agent, Claktory, app, what it may do, how many conversations, since
 when), each with **Remove**, asked of the user-apps worker, so it works with
@@ -486,6 +614,9 @@ Emails now draw the mark in HTML and load nothing (Gmail hides remote images).
 | 403 | `revoked` | the Claktory was removed from its account |
 | 403 | `too_many_claktories` | |
 | 403 | `too_many_devices` | |
+| 403 | `device_removed` | this device's key was removed from the account (by another of its devices, or at claktory.com/account); it never signs in to that account again |
+| 403 | `wrong_endpoint` | not this Claktory's registered backend endpoint |
+| 403 | `unsupported_email` | an email a pipe statement can't carry (not printable ASCII, or claktory.com's own) |
 | 404 | `not_found` | |
 | 409 | `claktory_taken` | |
 | 410 | `code_expired` | |

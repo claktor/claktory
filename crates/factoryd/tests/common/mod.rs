@@ -866,6 +866,11 @@ impl View {
                 let Some(entry) = update.entry.clone() else { return };
                 // An entry older than the ones held is left for when they're loaded.
                 let Some(at) = (entry.seq as usize).checked_sub(self.first_seq()) else { return };
+                // Before the selected agent's transcript is loaded (a run
+                // already going as it's selected), its entries come with it.
+                if self.entries.is_empty() && entry.seq > 0 {
+                    return;
+                }
                 if at < self.entries.len() {
                     self.entries[at] = entry;
                 } else {

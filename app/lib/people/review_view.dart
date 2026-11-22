@@ -47,6 +47,9 @@ String reviewProblemText(String problem, {String agent = ''}) =>
         '$agent changed it since you read it. Check it again, then send.',
       'changed' => 'It changed since you read it. Check it again, then send.',
       'unsendable' => "This message can't be sent anymore.",
+      'unencryptable' =>
+        "Not sent: their security key changed. Read the note above, then "
+            'send it again.',
       _ => problemText(
         UserAppError(
           UserAppProblem.values

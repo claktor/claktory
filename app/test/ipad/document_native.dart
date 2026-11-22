@@ -51,6 +51,7 @@ Entry _ask({String path = documentPath}) => Entry(
   askPerson: AskPerson(
     id: 'q1',
     title: 'Check the figures on page 3',
+    body: 'The totals look off.',
     state: AskPersonState.ASK_PERSON_STATE_PENDING,
     reviewPath: path,
   ),
@@ -436,6 +437,10 @@ class DocumentNative {
       },
   });
 
+  /// The person turned to [page] (of 5).
+  Future<void> turned(int page) =>
+      _send('pageChanged', {'page_1based': page, 'page_count': 5});
+
   /// The person chose [strokes] strokes on [page] with the lasso.
   Future<void> lasso(int page, int strokes) => _send('strokeSelectionChanged', {
     'page_1based': page,
@@ -495,6 +500,7 @@ Future<Harness> showDocument(
   bool asking = true,
   Size size = const Size(1366, 1024),
   bool phoneRoutes = false,
+  void Function(AskPerson ask)? ask,
 }) async {
   final workspace = snapshot(layout: _layout());
   if (asking) {
@@ -503,10 +509,12 @@ Future<Harness> showDocument(
         .waitingSeqs
         .add(Int64(7));
   }
+  final entry = _ask();
+  ask?.call(entry.askPerson);
   final harness = Harness(workspace);
   harness.backend
     ..files[documentPath] = documentPdf()
-    ..entriesById['a1/7'] = _ask();
+    ..entriesById['a1/7'] = entry;
   final focus = WorkbenchFocus();
   addTearDown(focus.dispose);
   if (phoneRoutes) {

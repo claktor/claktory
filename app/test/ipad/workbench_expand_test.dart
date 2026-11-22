@@ -45,5 +45,51 @@ void main() {
       await settle(tester);
       expect(find.byType(ExpandedPane), findsNothing);
     });
+
+    testWidgets('${size.width.round()}×${size.height.round()}: the expanded '
+        'pane ends above the on-screen keyboard (Zucchero, row 63)', (
+      tester,
+    ) async {
+      asIPad();
+      final focus = WorkbenchFocus();
+      addTearDown(focus.dispose);
+      final harness = Harness(snapshot(layout: beside()))
+        ..backend.appliesLayouts = true;
+      harness.backend.files['/w/main.rs'] = text(
+        '/w/main.rs',
+        'fn main() {}\n',
+      );
+      await harness.show(
+        tester,
+        size: size,
+        home: WorkbenchScope(
+          focus: focus,
+          child: const Shell(rail: SizedBox(width: 56)),
+        ),
+      );
+      await settle(tester);
+      if (glyphButton('Expand main.rs').evaluate().isEmpty) {
+        await tester.tap(find.text('main.rs').first);
+        await settle(tester);
+      }
+      await tester.tap(glyphButton('Expand main.rs'));
+      await settle(tester);
+      const keyboard = 400.0;
+      tester.view.viewInsets = FakeViewPadding(
+        bottom: keyboard * tester.view.devicePixelRatio,
+      );
+      addTearDown(tester.view.resetViewInsets);
+      await settle(tester);
+      final body = find
+          .descendant(
+            of: find.byType(ExpandedPane),
+            matching: find.byType(Column),
+          )
+          .first;
+      expect(tester.getRect(body).bottom, size.height - keyboard);
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await settle(tester);
+      expect(tester.getRect(body).bottom, size.height);
+    });
   }
 }

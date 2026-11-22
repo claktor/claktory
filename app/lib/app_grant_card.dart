@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 
 import 'avatar.dart';
@@ -10,11 +12,15 @@ import 'forms.dart' show rivetIn;
 import 'identity.dart';
 import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
+import 'people/contacts.dart';
+import 'people/people_view.dart' show contactsApi;
 import 'pipes.dart' show PortalGlyph, pipeColor;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart' show SelectableArea;
 import 'tool_views.dart' show ShowMore;
+import 'user_apps/session.dart';
+import 'visible_codes.dart' show proseCodes;
 
 /// What the card and Needs you ask, in a line: "Give Mike access to Direct
 /// messages?".
@@ -44,6 +50,35 @@ String appGrantReadPipes(String name, {required bool sends}) => sends
 bool appGrantNamed(List<AppGrantResource> resources) => resources.every(
   (resource) => resource.label.isNotEmpty && resource.label != resource.id,
 );
+
+/// A resource that is one of the person's conversations, named on this
+/// device from People's friends, never from the card (Fugo F1).
+const appGrantConversation = 'conversation';
+
+/// A conversation the card would reach that isn't one of the person's
+/// friends' on this device.
+const appGrantUnknownConversation = "A conversation this device can't find";
+
+/// A conversation the card would reach, while People's friends can't be
+/// read: maybe the person's, maybe not, so neither named nor called
+/// unknown (Abbacchio).
+const appGrantUncheckedConversation =
+    "A conversation that can't be checked right now";
+
+/// Each conversation [resources] reach, by whose it is on this device
+/// ([friends]: conversation id to "Ana · K7QF2M"), and whether every one
+/// is known: until then, Approve is off.
+({List<String> lines, bool known}) appGrantConversations(
+  List<AppGrantResource> resources,
+  Map<String, String> friends,
+) {
+  final lines = [
+    for (final resource in resources)
+      if (resource.kind == appGrantConversation)
+        friends[resource.id] ?? appGrantUnknownConversation,
+  ];
+  return (lines: lines, known: !lines.contains(appGrantUnknownConversation));
+}
 
 /// What a grant reaches, counted when the app gives no names: "In 2
 /// conversations".
@@ -107,6 +142,60 @@ class AppGrantCard extends StatefulWidget {
 class _AppGrantCardState extends State<AppGrantCard> {
   final _comment = TextEditingController();
 
+  /// Whose each conversation it reaches is, from People's friends on this
+  /// device (Fugo F1): null while they load; [_friendsFailed] when they
+  /// couldn't be read, so none is known.
+  Map<String, String>? _friends;
+  var _friendsFailed = false;
+  var _friendsAsked = false;
+
+  bool get _reachesConversations => widget.grant.resources.any(
+    (resource) => resource.kind == appGrantConversation,
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_friendsAsked && _reachesConversations) {
+      _friendsAsked = true;
+      unawaited(_loadFriends());
+    }
+  }
+
+  Future<void> _loadFriends() async {
+    setState(() {
+      _friends = null;
+      _friendsFailed = false;
+    });
+    try {
+      final api =
+          contactsApi?.call(context) ??
+          ContactsApi(UserAppsSession.of(context));
+      final lists = await api.lists();
+      if (!mounted) return;
+      setState(
+        () => _friends = {
+          for (final friend in lists.friends)
+            if (friend.conversationId.isNotEmpty)
+              friend.conversationId: friend.person.label,
+        },
+      );
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _friends = const {};
+          _friendsFailed = true;
+        });
+      }
+    }
+  }
+
+  /// Every conversation it reaches is known here (or it reaches none).
+  bool get _known =>
+      !_reachesConversations ||
+      (_friends != null &&
+          appGrantConversations(widget.grant.resources, _friends!).known);
+
   /// Which decision is on its way: approving waits for the account.
   bool? _approving;
   String? _error;
@@ -118,7 +207,7 @@ class _AppGrantCardState extends State<AppGrantCard> {
   }
 
   Future<void> _decide({required bool approve}) async {
-    if (_approving != null) return;
+    if (_approving != null || (approve && !_known)) return;
     final backend = AppScope.of(context);
     setState(() {
       _approving = approve;
@@ -211,7 +300,9 @@ class _AppGrantCardState extends State<AppGrantCard> {
             const SizedBox(height: Space.m),
             _Reason(
               rivetName: rivetName,
-              reason: grant.reason.trim(),
+              // Rivet's words, to decide on: what reorders text shows by
+              // its code (proseCodes, Fugo).
+              reason: proseCodes(grant.reason.trim()),
               color: color,
             ),
           ],
@@ -256,7 +347,52 @@ class _AppGrantCardState extends State<AppGrantCard> {
             ),
           ),
       ],
-      if (grant.resources.isNotEmpty) ...[
+      if (_reachesConversations) ...[
+        const SizedBox(height: Space.s),
+        if (_friendsFailed) ...[
+          Text(
+            'Only in:',
+            style: type.caption.copyWith(
+              color: palette.textMuted,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          for (final resource in grant.resources)
+            if (resource.kind == appGrantConversation)
+              Padding(
+                padding: const EdgeInsets.only(left: Space.xs, top: 2),
+                child: Text(
+                  '•  $appGrantUncheckedConversation',
+                  style: line.copyWith(color: palette.textMuted),
+                ),
+              ),
+        ] else if (_friends case final friends?) ...[
+          Text(
+            'Only in:',
+            style: type.caption.copyWith(
+              color: palette.textMuted,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          for (final each in appGrantConversations(
+            grant.resources,
+            friends,
+          ).lines)
+            Padding(
+              padding: const EdgeInsets.only(left: Space.xs, top: 2),
+              child: Text(
+                '•  $each',
+                style: each == appGrantUnknownConversation
+                    ? line.copyWith(
+                        color: palette.danger,
+                        fontWeight: FontWeight.w500,
+                      )
+                    : line,
+              ),
+            ),
+        ] else
+          Text(appGrantReach(grant.resources), style: line),
+      ] else if (grant.resources.isNotEmpty) ...[
         const SizedBox(height: Space.s),
         if (appGrantNamed(grant.resources)) ...[
           Text(
@@ -286,20 +422,35 @@ class _AppGrantCardState extends State<AppGrantCard> {
     String rivetName,
   ) {
     final busy = _approving != null;
+    final loading = _reachesConversations && _friends == null;
+    final unknown = !loading && !_known;
     return [
       ActionLine(
         lead: Text(
           _error ??
               (_approving == true
                   ? 'Giving $name access…'
+                  : _friendsFailed
+                  ? "Can't check these conversations right now, so you "
+                        "can't approve yet."
+                  : unknown
+                  ? "You can't approve this: one of these conversations "
+                        "isn't among yours on this device."
                   : 'Approving gives $name this access through your '
                         'claktory.com account.'),
           style: type.caption.copyWith(
-            color: _error == null ? palette.textFaint : palette.danger,
+            color: _error == null && !unknown
+                ? palette.textFaint
+                : palette.danger,
           ),
         ),
         action: ControlsLine(
           children: [
+            if (_friendsFailed)
+              Button(
+                label: 'Try again',
+                onPressed: busy ? null : () => unawaited(_loadFriends()),
+              ),
             Button(
               label: 'Decline',
               onPressed: busy ? null : () => _decide(approve: false),
@@ -307,7 +458,8 @@ class _AppGrantCardState extends State<AppGrantCard> {
             Button(
               label: 'Approve',
               primary: true,
-              onPressed: busy ? null : () => _decide(approve: true),
+              // Only once every conversation it reaches is known here.
+              onPressed: busy || !_known ? null : () => _decide(approve: true),
             ),
           ],
         ),

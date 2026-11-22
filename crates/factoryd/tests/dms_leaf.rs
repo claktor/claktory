@@ -654,3 +654,135 @@ async fn a_leaf_away_past_the_mailbox_rejoins_its_channel() {
     let cy_key = cy.identity.public().0;
     until("the rejoined leaf never read the channel", || factoryd::user_apps::dms::pinned_identity(&factory, "cy") == Some(cy_key)).await;
 }
+
+/// Whether every member of `group` is one `device` trusts now, `n` of them,
+/// all under `identity`'s certificates for `account`'s leaves.
+fn moved(device: &dm_device::Device, group: &str, n: usize, account: &str, identity: [u8; 32]) -> bool {
+    let members = device.members(group);
+    members.len() == n
+        && members.iter().all(|member| member.as_ref().is_ok_and(|certificate| certificate.leaf.account_id != account || certificate.identity.0 == identity))
+}
+
+/// Rotation, the leaf's side (dms-e2ee.md §2.1, R2). Matt makes a new
+/// security key on his phone, which moves to it in the channel and in Bo's
+/// conversation; Bo's device takes the new key in. Until the phone enrolls
+/// this Claktory again, its channel waits at the phone's move (a key it
+/// wasn't given) and Mike's drafts are refused in words. Enrolled under the
+/// new key, the leaf reads on and moves too, by one Update in each group
+/// that the phone and Bo accept from a leaf under the key they retired; then
+/// Mike drafts again and reads what Bo says next.
+#[tokio::test(flavor = "multi_thread")]
+async fn after_a_new_security_key_the_leaf_moves_to_it_in_every_group() {
+    let mut people = people().await;
+    let (offer, channel) = people.channel().await;
+    people.grant(&["dm.read", "dm.draft"]).await;
+    let group = people.conversation_group().await;
+    people.add_leaf(&group, &offer).await;
+    people.bo.catch_up(&group).await;
+    people.phone.catch_up(&channel).await;
+    let matt = people.matt.clone();
+    let old = people.phone.identity.public().0;
+
+    // The new key, and the phone's moves; Bo's device takes it in.
+    people.phone.rotate_identity().await;
+    let new = people.phone.identity.public().0;
+    people.phone.commit(&channel, |mls, provider, me, _| mls.update_certificate(provider, me).expect("moved")).await;
+    people.phone.commit(&group, |mls, provider, me, _| mls.update_certificate(provider, me).expect("moved")).await;
+    let phone = &people.phone;
+    people.bo.key_changed(phone);
+    people.bo.catch_up(&group).await;
+
+    // Not enrolled again yet: the channel waits, and nothing is sent.
+    let factory = people.factory.clone();
+    until("the channel never stopped at the phone's move", || factoryd::user_apps::dms::channel_waits(&factory)).await;
+    assert_eq!(factoryd::user_apps::dms::pinned_identity(&factory, &matt), Some(old));
+    let draft = json!({"conversation": people.conversation, "text": "Hi Bo, Matt will call you."});
+    let People { client, view, .. } = &mut people;
+    select(client, view, "mike").await;
+    view.follow(client, |view| idle(view, "mike")).await;
+    let refused = call(client, view, "mike", "dm_draft", &draft).await;
+    assert!(refused.contains("changed their security key, and this Claktory is catching up"), "{refused}");
+
+    // Enrolled under the new key: the leaf moves in both groups.
+    let People { client, phone, .. } = &mut people;
+    phone.enroll(client).await;
+    people.bo.refresh(&people.phone);
+    until("the leaf never took the new key", || factoryd::user_apps::dms::pinned_identity(&factory, &matt) == Some(new)).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        people.phone.catch_up(&channel).await;
+        people.phone.catch_up(&group).await;
+        people.bo.catch_up(&group).await;
+        if moved(&people.phone, &channel, 2, &matt, new) && moved(&people.phone, &group, 3, &matt, new) && moved(&people.bo, &group, 3, &matt, new) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the leaf never moved: {:?} {:?}", people.phone.members(&channel), people.bo.members(&group));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(!factoryd::user_apps::dms::channel_waits(&factory));
+
+    // Mike drafts again, opened by the phone from the leaf under the new key,
+    // and reads what Bo says next.
+    let People { client, view, .. } = &mut people;
+    let drafted = call(client, view, "mike", "dm_draft", &draft).await;
+    assert!(drafted.starts_with("Kept your draft for the person"), "{drafted}");
+    let (status, drafts) = people.phone.call("GET", &format!("conversations/{}/agent-drafts", people.conversation), serde_json::Value::Null).await;
+    assert_eq!(status, 200, "{drafts}");
+    let opened = people.phone.open(&channel, &drafts["drafts"][0]);
+    assert_eq!(opened.content.text.as_deref(), Some("Hi Bo, Matt will call you."));
+    assert_eq!(opened.from.identity.0, new);
+    people.bo.post(&group, &people.conversation, people.generation, 1, "New key, same Bo").await;
+    let People { client, view, conversation, .. } = &mut people;
+    let read = call(client, view, "mike", "dm_read", &json!({"conversation": conversation})).await;
+    assert!(read.contains("New key, same Bo"), "{read}");
+}
+
+/// Matt ends Mike's access to Bo's conversation (Fugo L6): the worker tells
+/// this Claktory's feed at once and stops listing the conversation for it,
+/// so the leaf asks to leave (its own Remove, taken with no grant) and
+/// forgets the group. Matt's phone commits the Remove; the conversation is
+/// Matt's phone and Bo's device again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conversation_whose_grant_ends_is_left_and_forgotten() {
+    let mut people = people().await;
+    let (offer, _) = people.channel().await;
+    people.grant(&["dm.read"]).await;
+    let group = people.conversation_group().await;
+    people.add_leaf(&group, &offer).await;
+    people.bo.catch_up(&group).await;
+    people.phone.catch_up(&group).await;
+    assert_eq!(people.phone.members(&group).len(), 3);
+
+    // Revoked, as from the app's Agents' access.
+    let worker = rusqlite::Connection::open(people.dir.join("apps.db")).expect("the worker's records");
+    let grant: String = worker.query_row("SELECT id FROM grants WHERE app = 'dms'", [], |row| row.get(0)).expect("the grant");
+    people.phone.revoke_grant(&grant).await;
+
+    // The leaf forgets it, having asked to leave.
+    let factory = people.factory.clone();
+    let joined = (people.conversation.clone(), "bo".to_owned());
+    until("the leaf never forgot the conversation", || !factoryd::user_apps::dms::kept_groups(&factory).contains(&joined)).await;
+    assert!(factoryd::user_apps::dms::kept_groups(&factory).contains(&(String::new(), String::new())), "its channel stays");
+    let leaf = offer.leaf_id.clone();
+    let asked = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let after = people.phone.positions.get(&group).copied().unwrap_or(0);
+        let (status, page) = people.phone.call("GET", &format!("groups/{group}/messages?after={after}"), serde_json::Value::Null).await;
+        assert_eq!(status, 200, "{page}");
+        if page["messages"].as_array().expect("messages").iter().any(|message| message["kind"] == "proposal") {
+            break;
+        }
+        assert!(std::time::Instant::now() < asked, "the leaf's leaving never reached the phone");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    people.phone.catch_up(&group).await;
+
+    // The phone's next commit takes it in, and Bo's device follows.
+    people.phone.commit(&group, |mls, provider, me, _| mls.update(provider, me).expect("committed")).await;
+    people.bo.catch_up(&group).await;
+    for device in [&people.phone, &people.bo] {
+        let members = device.members(&group);
+        assert_eq!(members.len(), 2, "{members:?}");
+        assert!(members.iter().all(|member| member.as_ref().is_ok_and(|certificate| certificate.leaf.leaf_id != leaf)), "{members:?}");
+    }
+}

@@ -363,6 +363,49 @@ fn it_starts_with_the_default_dashboard_and_never_replaces_one() {
 }
 
 #[test]
+fn the_tokens_stat_counts_the_hour_the_range_began_in() {
+    // Rivet's tokens 1 hour ago are kept in an hour that began before the
+    // last hour did (NOW is 53 minutes into its hour): the stat counts
+    // them, as Tokens by agent does.
+    let (mut app, mut host) = opened(true);
+    host.press(&mut app, "s1", "1 hour");
+    let data = host.surface("s1").data.clone();
+    assert_eq!(data["panels"][3]["value"], 120);
+    let rows = data["panels"][4]["data"]["rows"].as_array().unwrap().clone();
+    let by_agent: i64 = rows.iter().map(|row| row[2].as_i64().unwrap()).sum();
+    assert_eq!(by_agent, 120, "{rows:?}");
+}
+
+#[test]
+fn the_default_tokens_stat_is_fixed_where_it_was_left_alone() {
+    // 0.2.0's query, as it kept it.
+    let old = "WITH RECURSIVE t(at) AS (SELECT ($from / $step) * $step UNION ALL SELECT at + $step FROM t WHERE at + $step < $to), \
+               c AS (SELECT ((hour * 1000) / $step) * $step AS at, SUM(input + output) AS n FROM agent_usage \
+               WHERE hour >= $from_s - 3599 AND hour < $to_s AND ($agent = '' OR agent = $agent) GROUP BY 1) \
+               SELECT t.at AS time, COALESCE(c.n, 0) AS tokens FROM t LEFT JOIN c USING (at) ORDER BY t.at";
+    let mut host = stand(true);
+    App::default().start(&mut host);
+    let mut kept = host.dashboard("claktory");
+    kept.panels[3].query.sql = old.into();
+    model::save(&mut host, kept, Some(1), "").unwrap();
+
+    App::default().start(&mut host);
+    let fixed = host.dashboard("claktory");
+    assert_eq!(fixed.rev, 3);
+    assert_eq!(fixed.panels, model::default_dashboard().panels);
+    assert_eq!(model::previous(&mut host, "claktory").unwrap().panels[3].query.sql, old);
+
+    // Once fixed, or changed by someone, it's left alone.
+    App::default().start(&mut host);
+    assert_eq!(host.dashboard("claktory").rev, 3);
+    let mut theirs = host.dashboard("claktory");
+    theirs.panels[3].query.sql = old.replace("SUM(input + output)", "SUM(output)");
+    model::save(&mut host, theirs.clone(), Some(3), "rivet").unwrap();
+    App::default().start(&mut host);
+    assert_eq!(host.dashboard("claktory").panels[3].query.sql, theirs.panels[3].query.sql);
+}
+
+#[test]
 fn every_save_keeps_the_version_before_it() {
     let mut host = stand(true);
     App::default().start(&mut host);

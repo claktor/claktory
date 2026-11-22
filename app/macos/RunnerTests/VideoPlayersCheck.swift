@@ -90,8 +90,71 @@ enum VideoPlayersCheck {
     check(player.state()["playing"] as? Bool == false, "pauses")
     player.close()
 
+    // A video with sound: none until it first plays, so loading it never
+    // opens the sound output (where that output is also a microphone,
+    // macOS would ask for the microphone then).
+    let voiced = try withSound(file)
+    let talker = VideoPlayer(url: voiced)
+    var talkerLoaded = false
+    talker.load { _ in talkerLoaded = true }
+    wait(10) { talkerLoaded }
+    check(talkerLoaded, "a video with sound loads")
+    wait(0.5)
+    check(talker.state()["duration"] as? Double ?? 0 > 2.5, "its length: \(talker.state())")
+    check(!talker.soundEnabled, "no sound while it only loads")
+    var talkerSought = false
+    talker.seek(to: 1) { talkerSought = true }
+    wait(5) { talkerSought }
+    check(!talker.soundEnabled, "nor when it's moved")
+    var talkerFrames = 0
+    talker.frameAvailable = { talkerFrames += 1 }
+    talker.play()
+    // While its sound goes in, it still says where it was.
+    check(abs((talker.state()["position"] as? Double ?? 0) - 1) < 0.05, "where it was: \(talker.state())")
+    wait(1)
+    check(talker.soundEnabled, "its sound once it plays")
+    let going = talker.state()
+    check(going["playing"] as? Bool == true, "it plays: \(going)")
+    // From where it was, not the start.
+    check((going["position"] as? Double ?? 0) > 1.3, "from where it was: \(going)")
+    check(talkerFrames > 10, "frames with its sound: \(talkerFrames)")
+    talker.pause()
+    talker.close()
+
     print(failures == 0 ? "VideoPlayers: all checks passed" : "VideoPlayers: \(failures) failed")
     exit(failures == 0 ? 0 : 1)
+  }
+
+  /// [video] with a silent AAC sound track as long as it, beside it.
+  static func withSound(_ video: URL) throws -> URL {
+    let folder = video.deletingLastPathComponent()
+    let sound = folder.appendingPathComponent("silence.caf")
+    let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1)!
+    let file = try AVAudioFile(forWriting: sound, settings: format.settings)
+    let frames = AVAudioFrameCount(44_100 * 3)
+    let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
+    buffer.frameLength = frames
+    try file.write(from: buffer)
+    let composition = AVMutableComposition()
+    let videoAsset = AVURLAsset(url: video)
+    let soundAsset = AVURLAsset(url: sound)
+    let range = CMTimeRange(start: .zero, duration: videoAsset.duration)
+    try composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)!
+      .insertTimeRange(range, of: videoAsset.tracks(withMediaType: .video)[0], at: .zero)
+    try composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)!
+      .insertTimeRange(
+        CMTimeRange(start: .zero, duration: soundAsset.duration),
+        of: soundAsset.tracks(withMediaType: .audio)[0], at: .zero)
+    // H.264 and AAC in .mp4, as a phone's or a camera's videos are.
+    let out = folder.appendingPathComponent("voiced.mp4")
+    let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetMediumQuality)!
+    export.outputURL = out
+    export.outputFileType = .mp4
+    var done = false
+    export.exportAsynchronously { done = true }
+    while !done { usleep(1000) }
+    if export.status != .completed { throw export.error ?? NSError(domain: "check", code: 2) }
+    return out
   }
 
   /// A video of [seconds] at 30 frames a second, grey getting lighter.

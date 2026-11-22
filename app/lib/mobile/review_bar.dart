@@ -6,358 +6,321 @@ import 'package:flutter/widgets.dart';
 import '../backend.dart';
 import '../characters/character.dart';
 import '../controls.dart';
+import '../dictation.dart';
 import '../identity.dart';
 import '../protocol/factory/v1/factory.pb.dart';
+import '../review_answer.dart'
+    show PendingReview, ReviewAnswering, ReviewWatch, finishReview;
 import '../scope.dart';
+import '../visible_codes.dart' show proseCodes;
 import 'drawer.dart' show largeText;
 import 'haptics.dart';
 import 'input.dart';
 import 'metrics.dart' show TypeScale;
-import 'presentation.dart';
 
-/// An agent's question asking the person to review [path] (ask_person with
-/// a review path, #275): its seq and what it asks.
-typedef ReviewAsk = ({int seq, AskPerson ask});
-
-/// At the foot of a file's viewer on a phone, while [agentId] waits for
-/// the person's review of it: who asks and what, then Dismiss and
-/// Approve at thumb reach. Approve opens a sheet for an optional note.
-/// Comments on the file go to the agent as on any viewer; this answers the
-/// question. Nothing shows when no question waits on the file.
+/// A file's viewer on a phone, and at its foot, while [agentId] waits for
+/// the person's review of it, the answer: who asks and what, then a field
+/// that's always open. Return or Send answers with what's typed (Approve
+/// when nothing is, unless the question wants words); Dismiss, quieter,
+/// takes the same words. Answered, the viewer closes ([finishReview]),
+/// back where the person was. While the question waits, nothing else is added
+/// to the file: on text, comments on lines go with the answer.
 class PhoneReviewBar extends StatefulWidget {
-  const PhoneReviewBar({super.key, required this.agentId, required this.path});
+  const PhoneReviewBar({
+    super.key,
+    required this.agentId,
+    required this.path,
+    required this.child,
+    this.kind = '',
+  });
 
   final String agentId;
   final String path;
+
+  /// The viewer: it keeps its place in the tree whether a question waits
+  /// or not, so a video or a PDF keeps where it was.
+  final Widget child;
+
+  /// The viewer's kind ("text", "image"…): text says where its comments go.
+  final String kind;
 
   @override
   State<PhoneReviewBar> createState() => _PhoneReviewBarState();
 }
 
 class _PhoneReviewBarState extends State<PhoneReviewBar> {
-  Backend? _backend;
+  /// The question waiting on the file, as the agent's entries come.
+  ReviewWatch? _watch;
 
-  /// The agent's waiting entries fetched so far, by seq.
-  final _entries = <int, Entry>{};
-  final _fetching = <int>{};
-
+  final _answer = TextEditingController();
+  final _focus = FocusNode();
   var _busy = false;
   String? _error;
 
   @override
+  void initState() {
+    super.initState();
+    _answer.addListener(_changed);
+  }
+
+  void _changed() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final backend = AppScope.of(context);
-    if (backend == _backend) return;
-    _backend?.workspace.removeListener(_changed);
-    _backend = backend..workspace.addListener(_changed);
-    _entries.clear();
-    _fetching.clear();
-    _fetch();
+    _rewatch();
   }
 
   @override
   void didUpdateWidget(PhoneReviewBar old) {
     super.didUpdateWidget(old);
-    if (old.agentId == widget.agentId) return;
-    _entries.clear();
-    _fetching.clear();
-    _fetch();
+    if (old.agentId != widget.agentId || old.path != widget.path) _rewatch();
+  }
+
+  void _rewatch() {
+    final backend = AppScope.of(context);
+    final watch = _watch;
+    if (watch != null &&
+        watch.backend == backend &&
+        watch.agentId == widget.agentId &&
+        watch.path == widget.path) {
+      return;
+    }
+    watch?.dispose();
+    _watch = ReviewWatch(backend, widget.agentId, widget.path)
+      ..addListener(_changed);
   }
 
   @override
   void dispose() {
-    _backend?.workspace.removeListener(_changed);
+    _watch?.dispose();
+    _answer.dispose();
+    _focus.dispose();
     super.dispose();
   }
 
-  void _changed() {
-    if (!mounted) return;
-    setState(() {});
-    _fetch();
-  }
-
-  List<int> get _waiting => [
-    for (final seq
-        in _backend?.workspace.agent(widget.agentId)?.waitingSeqs ?? const [])
-      seq.toInt(),
-  ];
-
-  /// Fetches the waiting entries not seen yet: one of them may be the
-  /// question about this file.
-  void _fetch() {
-    final backend = _backend;
-    if (backend == null) return;
-    final agentId = widget.agentId;
-    for (final seq in _waiting) {
-      if (_entries.containsKey(seq) || !_fetching.add(seq)) continue;
-      unawaited(() async {
-        try {
-          final entry = await backend.fetchEntry(agentId, seq);
-          if (entry != null && mounted && agentId == widget.agentId) {
-            setState(() => _entries[seq] = entry);
-          }
-        } on RequestFailure {
-          // Tried again when the workspace next changes.
-        } finally {
-          _fetching.remove(seq);
-        }
-      }());
-    }
-  }
-
-  /// The oldest question still waiting on this file.
-  ReviewAsk? get _ask {
-    for (final seq in _waiting) {
-      final entry = _entries[seq];
-      if (entry == null || entry.whichKind() != Entry_Kind.askPerson) {
-        continue;
-      }
-      final ask = entry.askPerson;
-      if (ask.reviewPath == widget.path &&
-          ask.state == AskPersonState.ASK_PERSON_STATE_PENDING) {
-        return (seq: seq, ask: ask);
-      }
-    }
-    return null;
-  }
-
-  Future<bool> _answer(
-    ReviewAsk ask, {
-    String note = '',
-    bool dismiss = false,
-  }) async {
-    if (_busy) return false;
+  /// Answers [ask] with what's typed: Approve (or the words it asked for),
+  /// or Dismiss. A failure keeps the words and says so under the field.
+  Future<void> _send(PendingReview ask, {bool dismiss = false}) async {
+    final text = _answer.text.trim();
+    if (_busy || !dismiss && ask.ask.wantsText && text.isEmpty) return;
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      await _backend!.answerAsk(
+      await _watch!.backend.answerAsk(
         widget.agentId,
         ask.seq,
-        text: note.trim(),
+        text: text,
         dismiss: dismiss,
       );
-      unawaited(dismiss ? Haptics.light() : Haptics.success());
-      return true;
-    } on RequestFailure catch (failure) {
+    } on RequestFailure {
       unawaited(Haptics.warning());
-      if (mounted) setState(() => _error = failure.message);
-      return false;
-    } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _error = "Couldn't send your answer. Try again.";
+        });
+      }
+      return;
     }
+    unawaited(dismiss ? Haptics.light() : Haptics.success());
+    if (!mounted) return;
+    _focus.unfocus();
+    _answer.clear();
+    setState(() => _busy = false);
+    // Its pane closes, everywhere, and this page with it; back where the
+    // person pressed Review.
+    await finishReview(context, widget.agentId, widget.path);
   }
-
-  /// Approve's or Dismiss's sheet: either way the person may say why, and
-  /// the agent gets it with the answer (Matt's rule).
-  Future<void> _decide(ReviewAsk ask, String name, {required bool dismiss}) =>
-      presentSheet<void>(
-        context,
-        title: dismiss ? 'Dismiss' : 'Approve',
-        builder: (context, close) => _DecisionNote(
-          name: name,
-          action: dismiss ? 'Dismiss' : 'Approve',
-          primary: !dismiss,
-          decide: (note) async {
-            final ok = await _answer(ask, note: note, dismiss: dismiss);
-            if (ok) close();
-            return ok;
-          },
-          error: () => _error,
-        ),
-      );
 
   @override
   Widget build(BuildContext context) {
-    final ask = _ask;
-    final agent = _backend?.workspace.agent(widget.agentId);
-    if (ask == null || agent == null) return const SizedBox.shrink();
+    final ask = _watch?.pending;
+    final agent = _watch?.backend.workspace.agent(widget.agentId);
+    final asking = ask != null && agent != null;
+    final media = MediaQuery.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          // The bar takes the keyboard's room: the viewer above it ends at
+          // the bar either way. The same tree with or without a question,
+          // so the viewer keeps its place.
+          child: MediaQuery(
+            data: asking ? media.removeViewInsets(removeBottom: true) : media,
+            // Meanwhile nothing else is added to the file: no comments
+            // on media.
+            child: ReviewAnswering(answering: asking, child: widget.child),
+          ),
+        ),
+        if (asking) _bar(context, ask, agent),
+      ],
+    );
+  }
+
+  Widget _bar(BuildContext context, PendingReview ask, Agent agent) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
+    final name = agent.name;
+    final typed = _answer.text.trim().isNotEmpty;
+    // Approve with nothing typed, unless the question wants words: then
+    // Send, faint until there are some.
+    final approves = !typed && !ask.ask.wantsText;
+    final send = Button(
+      label: approves ? 'Approve' : 'Send',
+      primary: true,
+      onPressed: _busy || ask.ask.wantsText && !typed
+          ? null
+          : () => unawaited(_send(ask)),
+    );
     final dismiss = Button(
       label: 'Dismiss',
-      onPressed: _busy
-          ? null
-          : () => unawaited(_decide(ask, agent.name, dismiss: true)),
+      onPressed: _busy ? null : () => unawaited(_send(ask, dismiss: true)),
     );
-    final approve = Button(
-      label: 'Approve',
-      primary: true,
-      onPressed: _busy
-          ? null
-          : () => unawaited(_decide(ask, agent.name, dismiss: false)),
-    );
-    final stacked = largeText(context);
-    // A bar over the file, as iOS's toolbars: it grows with the text only
-    // so far, so the file keeps its room at the largest sizes.
-    return MediaQuery.withClampedTextScaling(
-      maxScaleFactor: 2,
-      child: Semantics(
-        container: true,
-        explicitChildNodes: true,
-        child: Container(
-          decoration: BoxDecoration(
-            color: palette.canvas,
-            border: Border(top: BorderSide(color: palette.hairline)),
-          ),
-          padding: const EdgeInsets.fromLTRB(
-            Space.m,
-            Space.s,
-            Space.m,
-            Space.s,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // At the largest sizes the question alone, so the file keeps
-              // some room above it.
-              if (!stacked || ask.ask.title.isEmpty)
-                Row(
-                  children: [
-                    ExcludeSemantics(
-                      child: AgentCharacter(agent: agent, size: 20),
-                    ),
-                    const SizedBox(width: Space.s),
-                    Expanded(
-                      child: Text(
-                        '${agent.name} asks you to review this',
-                        maxLines: stacked ? 1 : 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: type.secondary.copyWith(
-                          color: palette.textMuted,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              if (ask.ask.title.isNotEmpty) ...[
-                if (!stacked) const SizedBox(height: Space.xs),
-                Text(
-                  ask.ask.title,
-                  maxLines: stacked ? 2 : 3,
-                  overflow: TextOverflow.ellipsis,
-                  semanticsLabel: stacked
-                      ? '${agent.name} asks you to review this: '
-                            '${ask.ask.title}'
-                      : null,
-                  style: type.body.copyWith(color: palette.text),
-                ),
-              ],
-              if (_error case final error?) ...[
-                const SizedBox(height: Space.xs),
-                Text(
-                  error,
-                  style: type.secondary.copyWith(color: palette.danger),
-                ),
-              ],
-              const SizedBox(height: Space.s),
-              if (stacked) ...[
-                approve,
-                const SizedBox(height: Space.s),
-                dismiss,
-              ] else
-                Row(
-                  children: [
-                    Expanded(child: dismiss),
-                    const SizedBox(width: Space.s),
-                    // The primary action last, under the thumb.
-                    Expanded(child: approve),
-                  ],
-                ),
-            ],
-          ),
-        ),
+    final field = Semantics(
+      hint: 'Return sends it to $name.',
+      child: TextField(
+        controller: _answer,
+        focusNode: _focus,
+        placeholder: 'Your answer to $name',
+        kind: InputKind.message,
+        textInputAction: TextInputAction.send,
+        // Return with nothing typed does nothing: Approve is its button.
+        onSubmitted: (_) {
+          if (_answer.text.trim().isEmpty) {
+            _focus.requestFocus();
+            return;
+          }
+          unawaited(_send(ask));
+        },
+        minLines: 1,
+        maxLines: 4,
       ),
     );
-  }
-}
-
-/// Approve's or Dismiss's sheet: a comment for the agent, if the person
-/// has one, and the button that answers.
-class _DecisionNote extends StatefulWidget {
-  const _DecisionNote({
-    required this.name,
-    required this.action,
-    required this.primary,
-    required this.decide,
-    required this.error,
-  });
-
-  final String name;
-  final String action;
-  final bool primary;
-  final Future<bool> Function(String note) decide;
-  final String? Function() error;
-
-  @override
-  State<_DecisionNote> createState() => _DecisionNoteState();
-}
-
-class _DecisionNoteState extends State<_DecisionNote> {
-  final _note = TextEditingController();
-  var _busy = false;
-  String? _error;
-
-  @override
-  void dispose() {
-    _note.dispose();
-    super.dispose();
-  }
-
-  Future<void> _submit() async {
-    if (_busy) return;
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    final ok = await widget.decide(_note.text);
-    if (!mounted || ok) return;
-    setState(() {
-      _busy = false;
-      _error = widget.error();
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    final type = TypeScale.of(context);
-    return SingleChildScrollView(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          TextField(
-            controller: _note,
-            placeholder: 'A comment for ${widget.name}, if you like',
-            kind: InputKind.message,
-            textInputAction: TextInputAction.send,
-            onSubmitted: (_) => unawaited(_submit()),
-            minLines: 2,
-            maxLines: 6,
-          ),
-          const SizedBox(height: Space.xs),
-          Text(
-            '${widget.name} gets it with your answer.',
-            style: type.caption.copyWith(color: palette.textFaint),
-          ),
-          if (_error case final error?)
-            Padding(
-              padding: const EdgeInsets.only(top: Space.s),
-              child: Text(
-                error,
-                style: type.secondary.copyWith(color: palette.danger),
-              ),
+    final stacked = largeText(context);
+    final asks = '$name asks you to review this';
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom;
+    // A bar over the file, as iOS's toolbars: it grows with the text only
+    // so far, so the file keeps its room at the largest sizes. A viewer's
+    // page ends at the home indicator, not the keyboard: the bar rises by
+    // the keyboard itself.
+    return Padding(
+      padding: EdgeInsets.only(bottom: keyboard),
+      child: MediaQuery.withClampedTextScaling(
+        maxScaleFactor: 2,
+        child: Semantics(
+          container: true,
+          explicitChildNodes: true,
+          child: Container(
+            key: const ValueKey('phone-review-bar'),
+            decoration: BoxDecoration(
+              color: palette.canvas,
+              border: Border(top: BorderSide(color: palette.hairline)),
             ),
-          const SizedBox(height: Space.m),
-          Button(
-            label: widget.action,
-            primary: widget.primary,
-            onPressed: _busy ? null : () => unawaited(_submit()),
+            padding: const EdgeInsets.fromLTRB(
+              Space.m,
+              Space.s,
+              Space.m,
+              Space.s,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // At the largest sizes the question alone, so the file
+                // keeps some room above it.
+                if (!stacked || ask.ask.title.isEmpty)
+                  Row(
+                    children: [
+                      ExcludeSemantics(
+                        child: AgentCharacter(agent: agent, size: 20),
+                      ),
+                      const SizedBox(width: Space.s),
+                      Expanded(
+                        child: Text(
+                          asks,
+                          maxLines: stacked ? 1 : 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: type.secondary.copyWith(
+                            color: palette.textMuted,
+                          ),
+                        ),
+                      ),
+                      if (!stacked) ...[
+                        const SizedBox(width: Space.s),
+                        dismiss,
+                      ],
+                    ],
+                  ),
+                if (ask.ask.title.isNotEmpty) ...[
+                  if (!stacked) const SizedBox(height: Space.xs),
+                  // The agent's words: what reorders them shows by its code
+                  // (proseCodes, Fugo).
+                  Text(
+                    proseCodes(ask.ask.title),
+                    maxLines: stacked ? 2 : 3,
+                    overflow: TextOverflow.ellipsis,
+                    semanticsLabel: stacked
+                        ? '$asks: ${proseCodes(ask.ask.title)}'
+                        : null,
+                    style: type.body.copyWith(color: palette.text),
+                  ),
+                ],
+                if (!stacked && ask.ask.body.isNotEmpty)
+                  Text(
+                    ask.ask.body,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: type.secondary.copyWith(color: palette.textMuted),
+                  ),
+                const SizedBox(height: Space.s),
+                // Or said: the mic puts what's said in, to check first.
+                if (stacked) ...[
+                  Dictation(
+                    controller: _answer,
+                    focusNode: _focus,
+                    enabled: !_busy,
+                    child: field,
+                  ),
+                  const SizedBox(height: Space.s),
+                  Row(
+                    children: [
+                      Expanded(child: dismiss),
+                      const SizedBox(width: Space.s),
+                      Expanded(child: send),
+                    ],
+                  ),
+                ] else
+                  Dictation(
+                    controller: _answer,
+                    focusNode: _focus,
+                    enabled: !_busy,
+                    // The answer's button last, under the thumb.
+                    trailing: send,
+                    child: field,
+                  ),
+                if (widget.kind == 'text') ...[
+                  const SizedBox(height: Space.xs),
+                  Text(
+                    'Your comments on lines go to $name with your answer.',
+                    style: type.caption.copyWith(color: palette.textFaint),
+                  ),
+                ],
+                if (_error case final error?) ...[
+                  const SizedBox(height: Space.xs),
+                  Text(
+                    error,
+                    style: type.secondary.copyWith(color: palette.danger),
+                  ),
+                ],
+              ],
+            ),
           ),
-        ],
+        ),
       ),
     );
   }

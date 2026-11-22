@@ -228,7 +228,13 @@ class _Renderer {
             // side by side (a phone): one under another instead. Unweighted
             // ones (buttons, say) keep their line.
             final each = constraints.maxWidth / math.max(1, weighted.length);
-            if (anyWeight && weighted.length > 1 && each < minRowChildWidth) {
+            // The least grows with the text: at a large text size, half a
+            // phone's width breaks words mid-word.
+            final least =
+                minRowChildWidth *
+                MediaQuery.textScalerOf(context).scale(14) /
+                14;
+            if (anyWeight && weighted.length > 1 && each < least) {
               return Column(
                 spacing: Space.s,
                 mainAxisSize: MainAxisSize.min,
@@ -785,8 +791,9 @@ class _QuietButton extends StatelessWidget {
   }
 }
 
-/// The least each of a weighted Row's children gets side by side;
-/// narrower, they go one under another.
+/// The least each of a weighted Row's children gets side by side, at the
+/// standard text size (more as the text grows); narrower, they go one
+/// under another.
 const minRowChildWidth = 120.0;
 
 /// One of a ChoicePicker's options: a row with a round (one of them) or

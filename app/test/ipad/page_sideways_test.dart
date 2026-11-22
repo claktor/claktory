@@ -22,16 +22,17 @@ import '../panes_test.dart' show beside, snapshot;
 import 'as_ipad.dart';
 
 void main() {
-  /// Settings as a 280pt pane beside the conversation, as the B6 pass had
-  /// it, on an iPad.
+  /// Settings as a pane narrower than a page's least beside the
+  /// conversation, as the B6 pass had it, on an iPad: a window too narrow
+  /// for both their leasts (with room, a page gets its least).
   Future<Finder> show(WidgetTester tester) async {
     asIPad();
     final harness = Harness(snapshot(layout: beside('settings', '')));
     harness.backend.appliesLayouts = true;
-    await harness.show(tester, size: const Size(848, 900));
+    await harness.show(tester, size: const Size(790, 900));
     await settle(tester);
     final pane = find.byType(PageSideways);
-    expect(tester.getSize(pane).width, closeTo(280, 4));
+    expect(tester.getSize(pane).width, lessThan(pagePaneMinWidth - 40));
     return pane;
   }
 

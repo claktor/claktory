@@ -60,17 +60,35 @@ class AppsSettings extends StatelessWidget {
       builder: (context, _) {
         final palette = Palette.of(context);
         final apps = backend.workspace.workspace.apps;
+        final bundled = backend.workspace.workspace.bundledApps;
+        // A newer version of an installed app updates it from its own row.
+        final updates = {
+          for (final offer in bundled)
+            if (offer.installedVersion.isNotEmpty &&
+                apps.any((app) => app.id == offer.id))
+              offer.id: offer,
+        };
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (apps.isEmpty)
+            if (apps.isEmpty && bundled.isEmpty)
               Text(
                 'No apps yet.',
                 style: TypeScale.of(context).body
                     .copyWith(color: palette.textFaint),
               )
             else
-              for (final app in apps) AppRow(key: ValueKey(app.id), app: app),
+              for (final app in apps)
+                AppRow(
+                  key: ValueKey(app.id),
+                  app: app,
+                  update: updates[app.id],
+                ),
+            // Claktory's own apps this release ships, not installed yet (or
+            // newer than one whose row is gone).
+            for (final offer in bundled)
+              if (!updates.containsKey(offer.id))
+                BundledAppRow(key: ValueKey('bundled:${offer.id}'), app: offer),
             const SizedBox(height: Space.s),
             Align(
               alignment: Alignment.centerLeft,
@@ -94,6 +112,75 @@ class AppsSettings extends StatelessWidget {
   }
 }
 
+/// One of Claktory's own apps this release ships: its icon, name and what
+/// it's for, "Made by Claktory", and Install (Update to v0.2.1 when an
+/// older version is installed), which reviews it as a file is reviewed.
+class BundledAppRow extends StatelessWidget {
+  const BundledAppRow({super.key, required this.app});
+
+  final BundledApp app;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final update = app.installedVersion.isNotEmpty;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: Space.s),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: ExtensionGlyph(
+              icon: app.icon,
+              name: app.name,
+              color: palette.textMuted,
+              size: 16,
+            ),
+          ),
+          const SizedBox(width: Space.s),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  app.name,
+                  style: type.body.copyWith(
+                    color: palette.text,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                if (app.description.isNotEmpty)
+                  Text(
+                    app.description,
+                    style: type.caption.copyWith(color: palette.textMuted),
+                  ),
+                Text(
+                  update
+                      ? 'Made by Claktory · Version ${app.installedVersion} '
+                            'installed'
+                      : 'Made by Claktory · Version ${app.version}',
+                  style: type.caption.copyWith(color: palette.textFaint),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: Space.s),
+          Button(
+            label: update ? 'Update to v${app.version}' : 'Install',
+            primary: !update,
+            onPressed: () => showModal(
+              context,
+              (context, close) => AppInstallForm(bundled: app.id, close: close),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// Asks for a .clapp file, then shows what the app can reach, to install.
 Future<void> installAppFromFile(BuildContext context) async {
   final content = await pickAppFile();
@@ -108,9 +195,19 @@ Future<void> installAppFromFile(BuildContext context) async {
 /// the file, and Install. Installing repeats the review's checksum, so what
 /// installs is the file reviewed.
 class AppInstallForm extends StatefulWidget {
-  const AppInstallForm({super.key, required this.content, required this.close});
+  const AppInstallForm({
+    super.key,
+    this.content = const [],
+    this.bundled = '',
+    required this.close,
+  });
 
+  /// The .clapp picked; empty for one of Claktory's own apps.
   final List<int> content;
+
+  /// The id of one of Claktory's own apps this release ships
+  /// (Workspace.bundled_apps), checked as any file is.
+  final String bundled;
   final VoidCallback close;
 
   @override
@@ -131,7 +228,7 @@ class _AppInstallFormState extends State<AppInstallForm> {
   Future<void> _review() async {
     try {
       final permissions = await AppScope.of(context)
-          .installLocalApp(widget.content);
+          .installLocalApp(widget.content, bundled: widget.bundled);
       if (mounted) setState(() => _permissions = permissions);
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
@@ -150,6 +247,7 @@ class _AppInstallFormState extends State<AppInstallForm> {
         widget.content,
         approve: true,
         sha256: permissions.sha256,
+        bundled: widget.bundled,
       );
       widget.close();
     } on RequestFailure catch (failure) {
@@ -172,7 +270,7 @@ class _AppInstallFormState extends State<AppInstallForm> {
         fields: [
           if (_error == null)
             Text(
-              'Reading the file…',
+              widget.bundled.isEmpty ? 'Reading the file…' : 'Checking it…',
               style: TypeScale.of(context).body
                   .copyWith(color: palette.textMuted),
             ),
@@ -189,14 +287,16 @@ class _AppInstallFormState extends State<AppInstallForm> {
         .copyWith(color: palette.textFaint);
     return FormFrame(
       title: update
-          ? 'Update ${permissions.name} to ${permissions.version}?'
+          ? 'Update ${permissions.name} to v${permissions.version}?'
           : 'Install ${permissions.name}?',
       body: permissions.description.isEmpty ? null : permissions.description,
       fields: [
         Text(
           [
-            if (!update) 'Version ${permissions.version}',
-            if (permissions.publisher.isNotEmpty)
+            if (!update) 'v${permissions.version}',
+            // Claktory's own says so once, in the tier's line.
+            if (permissions.publisher.isNotEmpty &&
+                permissions.tier != AppTier.APP_TIER_CLAKTORY)
               publisherLine(permissions.tier, permissions.publisher),
             tierLine(permissions.tier, permissions.publisherKey),
           ].join(' · '),
@@ -346,9 +446,13 @@ bool appOn(AppState state) => switch (state) {
 /// it, its own line and what its setup still needs. Opened, what it's for,
 /// its setup, the agents it's given to, what it reaches, and Uninstall.
 class AppRow extends StatefulWidget {
-  const AppRow({super.key, required this.app});
+  const AppRow({super.key, required this.app, this.update});
 
   final AppInfo app;
+
+  /// A newer version of it that Claktory ships, to update to; null for
+  /// none.
+  final BundledApp? update;
 
   @override
   State<AppRow> createState() => _AppRowState();
@@ -502,6 +606,34 @@ class _AppRowState extends State<AppRow> {
                 // the person.
                 if (!_open)
                   for (final item in missing) _SetupLine(app: app, item: item),
+                if (widget.update case final update?)
+                  Padding(
+                    padding: const EdgeInsets.only(top: Space.xs),
+                    // Which version it's on, beside the one to update to.
+                    child: Wrap(
+                      spacing: Space.s,
+                      runSpacing: Space.xs,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Button(
+                          label: 'Update to v${update.version}',
+                          primary: true,
+                          onPressed: () => showModal(
+                            context,
+                            (context, close) => AppInstallForm(
+                              bundled: update.id,
+                              close: close,
+                            ),
+                          ),
+                        ),
+                        Text(
+                          'v${update.installedVersion} installed',
+                          style: TypeScale.of(context).caption
+                              .copyWith(color: palette.textFaint),
+                        ),
+                      ],
+                    ),
+                  ),
                 if (_open) _details(context, palette, backend),
                 if (_error != null)
                   Text(
@@ -598,7 +730,8 @@ class _AppRowState extends State<AppRow> {
         Text(
           [
             'Version ${app.version}',
-            if (app.publisher.isNotEmpty)
+            if (app.publisher.isNotEmpty &&
+                app.tier != AppTier.APP_TIER_CLAKTORY)
               publisherLine(app.tier, app.publisher),
             tierLine(app.tier, app.publisherKey),
             if (app.installedMs > 0)

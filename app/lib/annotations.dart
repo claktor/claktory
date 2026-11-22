@@ -14,6 +14,7 @@ import 'decision.dart';
 import 'identity.dart';
 import 'mobile/comment_editor.dart';
 import 'mobile/drawer.dart' show largeText;
+import 'mobile/input.dart' show nativeSelectionHere;
 import 'mobile/metrics.dart';
 import 'mobile/presentation.dart';
 import 'protocol/factory/v1/factory.pb.dart';
@@ -979,6 +980,10 @@ class Commented extends StatefulWidget {
 class _CommentedState extends State<Commented> {
   final _stack = GlobalKey();
 
+  /// Whether the latest press in it was a finger's: a selection made by
+  /// touch has the system's own menu, Comment and Suggest in it.
+  final _touch = _Touched();
+
   @override
   Widget build(BuildContext context) {
     final controller = widget.controller;
@@ -1006,53 +1011,58 @@ class _CommentedState extends State<Commented> {
                 : markers
                 ? Commented.markerWidth
                 : 0.0;
-            return Stack(
-              key: _stack,
-              children: [
-                Positioned.fill(
-                  child: widget.insetInside
-                      ? CommentsInset(right: inset, child: widget.child)
-                      : Padding(
-                          padding: EdgeInsets.only(right: inset),
-                          child: widget.child,
-                        ),
-                ),
-                if (shown.isNotEmpty && wide)
-                  Positioned(
-                    top: 0,
-                    bottom: 0,
-                    right: Commented.edge,
-                    width: Commented.cardWidth,
-                    child: _Margin(controller: controller),
-                  )
-                else if (shown.isNotEmpty && markers)
-                  Positioned(
-                    top: 0,
-                    bottom: 0,
-                    right: 0,
-                    // A finger's width to tap, reaching over the text's
-                    // edge; the dots stay in their strip.
-                    width: phone ? Touch.target : Commented.markerWidth,
-                    child: _Markers(controller: controller),
+            return Listener(
+              onPointerDown: (event) =>
+                  _touch.value = event.kind == PointerDeviceKind.touch,
+              child: Stack(
+                key: _stack,
+                children: [
+                  Positioned.fill(
+                    child: widget.insetInside
+                        ? CommentsInset(right: inset, child: widget.child)
+                        : Padding(
+                            padding: EdgeInsets.only(right: inset),
+                            child: widget.child,
+                          ),
                   ),
-                Positioned.fill(
-                  child: _Popovers(
-                    controller: controller,
-                    stack: _stack,
-                    wide: wide,
-                    right: inset,
+                  if (shown.isNotEmpty && wide)
+                    Positioned(
+                      top: 0,
+                      bottom: 0,
+                      right: Commented.edge,
+                      width: Commented.cardWidth,
+                      child: _Margin(controller: controller),
+                    )
+                  else if (shown.isNotEmpty && markers)
+                    Positioned(
+                      top: 0,
+                      bottom: 0,
+                      right: 0,
+                      // A finger's width to tap, reaching over the text's
+                      // edge; the dots stay in their strip.
+                      width: phone ? Touch.target : Commented.markerWidth,
+                      child: _Markers(controller: controller),
+                    ),
+                  Positioned.fill(
+                    child: _Popovers(
+                      controller: controller,
+                      stack: _stack,
+                      wide: wide,
+                      right: inset,
+                      touch: _touch,
+                    ),
                   ),
-                ),
-                Positioned(
-                  right: Space.m,
-                  bottom: Space.m,
-                  child: _Footer(controller: controller),
-                ),
-                if (phone)
-                  _PhoneComments(controller: controller)
-                else if (!wide)
-                  Positioned.fill(child: _Sheet(controller: controller)),
-              ],
+                  Positioned(
+                    right: Space.m,
+                    bottom: Space.m,
+                    child: _Footer(controller: controller),
+                  ),
+                  if (phone)
+                    _PhoneComments(controller: controller)
+                  else if (!wide)
+                    Positioned.fill(child: _Sheet(controller: controller)),
+                ],
+              ),
             );
           },
         );
@@ -1122,7 +1132,11 @@ class _Popovers extends StatelessWidget {
     required this.stack,
     required this.wide,
     required this.right,
+    required this.touch,
   });
+
+  /// Whether the latest press was a finger's ([_CommentedState._touch]).
+  final _Touched touch;
 
   final CommentsController controller;
   final GlobalKey stack;
@@ -1183,7 +1197,11 @@ class _Popovers extends StatelessWidget {
         );
       }
       final mark = controller.selection.value;
-      if (mark != null && !mark.isEmpty) {
+      // Selected with a finger where text selects the platform's way (an
+      // iPad), its own menu has Comment and Suggest already: none float
+      // over it too. A trackpad's selection has no menu, so they do.
+      final menu = touch.value && nativeSelectionHere;
+      if (mark != null && !mark.isEmpty && !menu) {
         return _Popover(
           anchor: local(controller.rectOf(mark)) ?? fallback,
           above: true,
@@ -1300,6 +1318,12 @@ class _PopoverLayout extends SingleChildLayoutDelegate {
       old.anchor != anchor ||
       old.above != above ||
       old.alignRight != alignRight;
+}
+
+/// Whether the latest press in a [Commented] was a finger's. Read as the
+/// selection changes, after the press, so nothing listens to it.
+class _Touched {
+  bool value = false;
 }
 
 /// At the selection: a primary Comment, and Suggest for text.
@@ -2583,62 +2607,68 @@ class _ComposerState extends State<_Composer> {
       canRequestFocus: false,
       skipTraversal: true,
       onKeyEvent: _key,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (replacement != null) ...[
+      // A scope of its own, so its field takes the keys as it opens even
+      // when the viewer under it has them (the click that opened it gave
+      // them to a video's player): a field's autofocus waits for a scope
+      // with nothing focused.
+      child: FocusScope(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (replacement != null) ...[
+              TextField(
+                controller: replacement,
+                placeholder: 'New text',
+                minLines: 2,
+                maxLines: 8,
+                autofocus: true,
+              ),
+              const SizedBox(height: Space.s),
+            ],
             TextField(
-              controller: replacement,
-              placeholder: 'New text',
-              minLines: 2,
+              controller: _text,
+              placeholder: replacement != null
+                  ? 'Comment (optional)'
+                  : widget.placeholder,
+              minLines: replacement != null ? 1 : 2,
               maxLines: 8,
-              autofocus: true,
+              autofocus: replacement == null,
             ),
             const SizedBox(height: Space.s),
-          ],
-          TextField(
-            controller: _text,
-            placeholder: replacement != null
-                ? 'Comment (optional)'
-                : widget.placeholder,
-            minLines: replacement != null ? 1 : 2,
-            maxLines: 8,
-            autofocus: replacement == null,
-          ),
-          const SizedBox(height: Space.s),
-          Unselectable(
-            child: Wrap(
-              alignment: WrapAlignment.end,
-              spacing: Space.xs,
-              runSpacing: Space.xs,
-              children: [
-                Button(label: 'Cancel', onPressed: widget.controller.cancel),
-                ListenableBuilder(
-                  listenable: Listenable.merge([_text, ?replacement]),
-                  builder: (context, _) => Button(
-                    label: replacement != null
-                        ? 'Suggest'
-                        : widget.initial.isNotEmpty
-                        ? 'Save'
-                        : replying
-                        ? 'Reply'
-                        : 'Comment',
-                    primary: true,
-                    onPressed: _busy || !_ready ? null : _submit,
+            Unselectable(
+              child: Wrap(
+                alignment: WrapAlignment.end,
+                spacing: Space.xs,
+                runSpacing: Space.xs,
+                children: [
+                  Button(label: 'Cancel', onPressed: widget.controller.cancel),
+                  ListenableBuilder(
+                    listenable: Listenable.merge([_text, ?replacement]),
+                    builder: (context, _) => Button(
+                      label: replacement != null
+                          ? 'Suggest'
+                          : widget.initial.isNotEmpty
+                          ? 'Save'
+                          : replying
+                          ? 'Reply'
+                          : 'Comment',
+                      primary: true,
+                      onPressed: _busy || !_ready ? null : _submit,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          if (widget.canSendNow && widget.agentName.isNotEmpty) ...[
-            const SizedBox(height: Space.xs),
-            Text(
-              '↩ sends to ${widget.agentName} · ⇧↩ starts a new line',
-              textAlign: TextAlign.right,
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
-            ),
+            if (widget.canSendNow && widget.agentName.isNotEmpty) ...[
+              const SizedBox(height: Space.xs),
+              Text(
+                '↩ sends to ${widget.agentName} · ⇧↩ starts a new line',
+                textAlign: TextAlign.right,
+                style: TextStyles.caption.copyWith(color: palette.textFaint),
+              ),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }

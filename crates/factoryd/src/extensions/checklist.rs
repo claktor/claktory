@@ -239,11 +239,12 @@ You keep a checklist of everything the person asks you for, so nothing they said
 - Keep items current with checklist_update: in_progress or an owner when work starts, done or dropped with a short note when it ends.
 - in_progress means someone is working on it right now; work waiting its turn stays open, with its owner. Hand each worker one or two items at a time, and the next when one is done.
 - blocked means nothing can move until something comes; say what with waits_on: person_decision (a decision only the person can make), person_action (something only they can do), item (another item, ref 12 or Ana#12: it opens again by itself when that one is done or dropped), agent (ref, its id or name: it's told you're waiting) or external (something outside; you're told to check again at retry_at, such as 2h or \"2026-11-23 14:00\", or after a while if you give none, then less and less often). blocked_on adds a few words if useful; say more in a note.
-- An item waiting on the person shows in their Needs you. A decision that gates work is asked the moment it blocks: file ask_person then and there with item naming it, one card per real decision; only pure preferences batch into one question. Something only they can do needs no card. When they answer, clear the block. If they dismiss it, decide yourself if you can and note what you chose; if you truly can't move without them, leave it blocked with a note why, and Claktory has you ask again later.
+- An item waiting on the person shows in their Needs you only as your question about it: blocked on a decision of theirs or something only they can do, file ask_person then and there with item naming it, one card per decision or action (steps for a procedure), never several on one card. A question without item covers no item. An item that waits on them is one concern: if it bundles several, split it into separate items first, each with its own card. Never asked, dismissed, or waiting to be asked again, it shows only on your checklist, not to them. When they answer, clear the block. If they dismiss it, decide yourself if you can and note what you chose; if you truly can't move without them, leave it blocked with a note why, and Claktory has you ask again later.
 - Now and then Claktory asks whether a blocked item is still blocked: try it again, since it may not be. A block that lasts too long (a day, unless the person changed it) is told to your lead.
 - parked means set aside for later (after a release, say) or ongoing, with nothing to wait on: never mark that blocked. Parked items aren't nudged; retry_at sets when one resumes, if you know.
 - Goals are the person's: outcomes they want (\"a link to the Android app I can share\"). Record one with checklist_goals only when the person states it, in their words, never your own plans; the person also adds and changes goals in the app, and you're told when they do. Link the items that serve a goal with `goal` on checklist_add or checklist_update. Mark a goal done only when the person's outcome is reached, or dropped when they say so.
 - checklist_list shows open goals, then open items; filter by status, day, owner or text. checklist_item shows one item's history. Both take `agent` to read another agent's checklist.
+- The person can reply on an item from the app: it comes as their message, its `<sent>` tag naming the item (about=\"checklist item #12: …\", or Ana#12 on another agent's checklist), and the item's history keeps it. It changes nothing by itself: act on it, then update the item.
 - Check the list before telling the person work is finished.
 ";
 
@@ -818,13 +819,283 @@ fn text_of(store: &Store, key: &str) -> Option<String> {
         .flatten()
 }
 
+/// The migration that added links from cards other than ask_person's to
+/// the checklist items they're about (secrets_request's and
+/// propose_to_rivet's item).
+pub(crate) const CARD_ITEMS: &str = "
+-- Cards that name the checklist item they're about, besides ask_person's
+-- (kept in asks.item): kind 'secret' (a vault request's id) or 'proposal'
+-- (a proposal's id), the agent that asked, and the item, 'agent#12'.
+CREATE TABLE card_items (kind TEXT NOT NULL, card TEXT NOT NULL, agent TEXT NOT NULL, item TEXT NOT NULL, PRIMARY KEY (kind, card));
+CREATE INDEX card_items_by_item ON card_items (agent, item);
+";
+
+/// What the person last dismissed about a blocked item, so asking again
+/// uses the same tool: 'ask' (a question), 'secret' (a request for a
+/// secret) or 'proposal' (a proposal to Rivet); '' before this was kept,
+/// read as a question.
+pub(crate) const DISMISSED_CARD: &str = "
+ALTER TABLE checklist_items ADD COLUMN dismissed_card TEXT NOT NULL DEFAULT '';
+";
+
+/// A card waiting for the person that names a checklist item.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Card {
+    /// An ask_person question (a procedure too), by its id.
+    Ask(i64),
+    /// A request for a secret, by its id.
+    Secret(String),
+    /// A proposal to Rivet, by its id.
+    Proposal(i64),
+}
+
+impl Card {
+    /// The kind, as card_items and dismissed_card keep it.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Card::Ask(_) => "ask",
+            Card::Secret(_) => "secret",
+            Card::Proposal(_) => "proposal",
+        }
+    }
+}
+
+/// Links `agent`'s card to the item it names ("agent#12").
+pub(crate) fn link(store: &Store, card: &Card, agent: &str, item: &str) {
+    let id = match card {
+        Card::Ask(_) => return,
+        Card::Secret(id) => id.clone(),
+        Card::Proposal(id) => id.to_string(),
+    };
+    let kind = card.kind();
+    let linked = store.db().execute(
+        "INSERT OR REPLACE INTO card_items (kind, card, agent, item) VALUES (?1, ?2, ?3, ?4)",
+        params![kind, id, agent, item],
+    );
+    if let Err(error) = linked {
+        tracing::error!(%agent, %item, %error, "could not link a card to its checklist item");
+    }
+}
+
+/// `agent`'s cards waiting for the person about item `key` ("agent#12"),
+/// oldest first by kind: its questions, its requests for secrets still
+/// waiting on the person, and its proposals.
+pub(crate) fn cards_about(factory: &Factory, agent: &str, key: &str) -> Vec<Card> {
+    let mut cards: Vec<Card> = super::ask::pending_ids_about(&factory.store, agent, key).into_iter().map(Card::Ask).collect();
+    let linked: Vec<(String, String)> = crate::store::query(
+        &factory.store.db(),
+        "SELECT kind, card FROM card_items WHERE agent = ?1 AND item = ?2 ORDER BY rowid",
+        params![agent, key],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap_or_default();
+    for (kind, id) in linked {
+        match kind.as_str() {
+            // Waiting on the person: pending, or approved with no admin
+            // agent to find it (as `Agent.waiting_seqs` counts it).
+            "secret" => {
+                let waits = factory.vault.pending_request(agent, &id).is_ok_and(|request| {
+                    request.state() == v1::SecretRequestState::Pending
+                        || (request.state() == v1::SecretRequestState::Approved && request.admin_agent_id.is_empty())
+                });
+                if waits {
+                    cards.push(Card::Secret(id));
+                }
+            }
+            "proposal" => {
+                let Ok(number) = id.parse::<i64>() else { continue };
+                let waits = factory
+                    .store
+                    .db()
+                    .query_row(
+                        "SELECT EXISTS (SELECT 1 FROM proposals WHERE id = ?1 AND agent = ?2 AND state = 'pending')",
+                        params![number, agent],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+                if waits {
+                    cards.push(Card::Proposal(number));
+                }
+            }
+            _ => {}
+        }
+    }
+    cards
+}
+
+/// The person decided `card` (a request for a secret or a proposal):
+/// what the event telling its agent adds about the item it's linked to,
+/// as for a question (`decided`); "" for none, or an item that no longer
+/// waits on them. Its checklist and Needs you show it afresh.
+pub(crate) fn card_decided(factory: &Factory, card: &Card, dismissed: bool) -> String {
+    let id = match card {
+        Card::Ask(_) => return String::new(),
+        Card::Secret(id) => id.clone(),
+        Card::Proposal(id) => id.to_string(),
+    };
+    let kind = card.kind();
+    let item: Option<String> = factory
+        .store
+        .db()
+        .query_row("SELECT item FROM card_items WHERE kind = ?1 AND card = ?2", params![kind, id], |row| row.get(0))
+        .optional()
+        .unwrap_or_default();
+    let Some(item) = item else { return String::new() };
+    let said = decided(factory, &item, dismissed, kind).unwrap_or_else(|error| {
+        tracing::error!(%item, %error, "could not note a decided card on its item");
+        None
+    });
+    if let Some((whose, _)) = item.rsplit_once('#') {
+        factory.refresh_view(whose);
+    }
+    factory.broadcast_workspace(&factory.lock());
+    said.unwrap_or_default()
+}
+
+/// Whether `agent` has a card waiting for the person about item `key`.
+pub(crate) fn asked_about(factory: &Factory, agent: &str, key: &str) -> bool {
+    !cards_about(factory, agent, key).is_empty()
+}
+
+/// The seq of `card`'s entry in `transcript`, if it shows it.
+pub(crate) fn seq_of(transcript: &crate::transcript::Transcript, card: &Card) -> Option<u64> {
+    use v1::entry::Kind;
+    transcript.entries().iter().rev().find_map(|entry| {
+        let shows = match (&entry.kind, card) {
+            (Some(Kind::AskPerson(ask)), Card::Ask(id)) => ask.id == id.to_string(),
+            (Some(Kind::SecretRequest(request)), Card::Secret(id)) => request.id == *id,
+            (Some(Kind::Proposal(proposal)), Card::Proposal(id)) => proposal.id == id.to_string(),
+            _ => false,
+        };
+        shows.then_some(entry.seq)
+    })
+}
+
+/// The checklist item a card `agent` is about to file is about: the one it
+/// names (`given`: 12, or Ana#12), or with none, the one item it just
+/// blocked on the person and hasn't asked about (`just_blocked`). Its key,
+/// "agent#12", and when it was taken from the block rather than named, how
+/// the tool's result names it and the item's text; ("", None) for none.
+pub(crate) fn item_for(factory: &Factory, agent: &str, given: Option<&str>) -> Result<(String, Option<(String, String)>), String> {
+    if let Some(given) = given.map(str::trim).filter(|given| !given.is_empty()) {
+        let key = resolve_item(factory, agent, given)?;
+        // Only the agent that acts on an item asks about it: its owner, or
+        // with none its checklist's agent, as replies about items go.
+        let (whose, id) = key.rsplit_once('#').unwrap_or_default();
+        let owner: String = factory
+            .store
+            .db()
+            .query_row("SELECT owner FROM checklist_items WHERE agent = ?1 AND id = ?2", params![whose, id], |row| row.get(0))
+            .map_err(failed)?;
+        let acting = owning(whose, &owner);
+        if acting != agent {
+            let (checklist, acts) = (name_of(factory, whose), name_of(factory, acting));
+            let whose_it_is = if owner.is_empty() { format!("on {checklist}'s checklist") } else { format!("{acts}'s") };
+            return Err(format!(
+                "{checklist}#{id} is {whose_it_is} and isn't yours: ask {acts} to ask, or have it assigned to you"
+            ));
+        }
+        return Ok((key, None));
+    }
+    let Some((whose, id, text)) = just_blocked(factory, agent, now_ms()) else { return Ok((String::new(), None)) };
+    let label = if whose == agent {
+        format!("#{id}")
+    } else {
+        format!("{}#{id}", factory.lock().config.agent(&whose).map_or_else(|| whose.clone(), |owner| owner.name.clone()))
+    };
+    Ok((item_key(&whose, id), Some((label, text))))
+}
+
+/// What a tool's result adds when its card was taken to be about the item
+/// just blocked: so the agent can tell when that's wrong.
+pub(crate) fn taken_for(linked: Option<(String, String)>, person: &str) -> String {
+    match linked {
+        Some((label, text)) => format!(
+            " It's taken to be about {label} \"{text}\", the item you just blocked on {person}, and shows with it in their Needs you; if it's about something else, give item when you ask."
+        ),
+        None => String::new(),
+    }
+}
+
+/// How soon after an item is blocked on the person a question that names
+/// no item is taken to be about it (`just_blocked`).
+const JUST_BLOCKED_MS: i64 = 10 * 60 * 1000;
+
+/// The item a question `agent` asks without naming one is about, when
+/// that's certain: the one item blocked on the person, in the past few
+/// minutes, that `agent` acts on and hasn't asked about. "agent#12" and its
+/// text; None when there's none, or more than one.
+pub(crate) fn just_blocked(factory: &Factory, agent: &str, now: i64) -> Option<(String, u32, String)> {
+    let rows: Vec<(String, u32, String)> = crate::store::query(
+        &factory.store.db(),
+        "SELECT agent, id, text FROM checklist_items
+         WHERE status = 'blocked' AND blocked_kind IN ('person_decision', 'person_action') AND updated >= ?2
+         AND ((agent = ?1 AND owner IN ('', ?1)) OR owner = ?1)",
+        params![agent, now - JUST_BLOCKED_MS],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .ok()?;
+    let mut unasked = rows.into_iter().filter(|(whose, id, _)| !asked_about(factory, agent, &item_key(whose, *id)));
+    let only = unasked.next()?;
+    unasked.next().is_none().then_some(only)
+}
+
 /// The agent that acts on an item: its owner, or the checklist's agent.
 fn owning<'a>(agent: &'a str, owner: &'a str) -> &'a str {
     if owner.is_empty() { agent } else { owner }
 }
 
-/// Items that wait on the person, by checklist (Agent.waiting_items).
-pub(crate) fn waiting_items(store: &Store) -> rusqlite::Result<std::collections::HashMap<String, Vec<v1::WaitingItem>>> {
+/// The person replies to `receiver` on item `id` of `checklist`'s checklist
+/// ("" for the receiver's own): the item as the message names it. Refused
+/// for an item that isn't there, or a receiver that's neither the
+/// checklist's agent nor the item's owner.
+pub(crate) fn reply_target(factory: &Factory, receiver: &str, checklist: &str, id: u32) -> Result<factory_agent::ChecklistItemRef, String> {
+    let checklist = if checklist.is_empty() { receiver } else { checklist };
+    let found: Option<(String, String)> = factory
+        .store
+        .db()
+        .query_row("SELECT text, owner FROM checklist_items WHERE agent = ?1 AND id = ?2", params![checklist, id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()
+        .map_err(failed)?;
+    let name = |agent: &str| factory.lock().config.agent(agent).map_or_else(|| agent.to_owned(), |agent| agent.name.clone());
+    let Some((text, owner)) = found else {
+        return Err(format!("That item is no longer on {}'s checklist.", name(checklist)));
+    };
+    if receiver != checklist && receiver != owner {
+        return Err(if owner.is_empty() {
+            format!("That item is on {0}'s checklist, so reply to {0}.", name(checklist))
+        } else {
+            format!("That item is {0}'s, so reply to {0}.", name(&owner))
+        });
+    }
+    let label = if receiver == checklist { format!("#{id}") } else { format!("{}#{id}", name(checklist)) };
+    Ok(factory_agent::ChecklistItemRef { agent: checklist.to_owned(), id, label, text })
+}
+
+/// The person's reply on `item` went: its history keeps it as theirs (an
+/// empty actor). Apart from the agent's notes, so a blocked item still
+/// shows what it asked.
+pub(crate) fn replied(factory: &Factory, item: &factory_agent::ChecklistItemRef, text: &str) {
+    let recorded = record(&factory.store.db(), &item.agent, item.id, now_ms(), "", "reply", text);
+    if let Err(error) = recorded {
+        tracing::warn!(agent = %item.agent, item = item.id, %error, "a reply wasn't kept in the item's history");
+    }
+    factory.refresh_view(&item.agent);
+}
+
+/// Items that wait on the person with a card about them waiting too (a
+/// question, a request for a secret or a proposal), by checklist
+/// (Agent.waiting_items): one for each such card, with its place,
+/// `card_seq` giving the seq of the card's entry in `agent`'s conversation
+/// (0 when it isn't loaded). An item with no card about it is the agent's
+/// own business, not the person's.
+pub(crate) fn waiting_items(
+    factory: &Factory,
+    card_seq: impl Fn(&str, &Card) -> u64,
+) -> rusqlite::Result<std::collections::HashMap<String, Vec<v1::WaitingItem>>> {
+    let store = &factory.store;
     /// Agent, id, text, owner, kind, blocked since, re-ask and dismissal times.
     type Waiting = (String, u32, String, String, String, Option<i64>, Option<i64>, Option<i64>);
     let rows: Vec<Waiting> = {
@@ -840,25 +1111,23 @@ pub(crate) fn waiting_items(store: &Store) -> rusqlite::Result<std::collections:
     };
     let mut waiting: std::collections::HashMap<String, Vec<v1::WaitingItem>> = std::collections::HashMap::new();
     for (agent, id, text, owner, kind, since, reask, dismissed) in rows {
-        let has_pending_ask = super::ask::pending_about(store, owning(&agent, &owner), &item_key(&agent, id));
-        waiting.entry(agent).or_default().push(v1::WaitingItem {
-            item: id,
-            text,
-            kind: Wait::read(&kind).proto().into(),
-            since_ms: since.unwrap_or_default(),
-            reask_at_ms: reask.unwrap_or_default(),
-            has_pending_ask,
-            owner,
-            dismissed_ms: dismissed.unwrap_or_default(),
-        });
+        let asker = owning(&agent, &owner).to_owned();
+        for card in cards_about(factory, &asker, &item_key(&agent, id)) {
+            waiting.entry(agent.clone()).or_default().push(v1::WaitingItem {
+                item: id,
+                text: text.clone(),
+                kind: Wait::read(&kind).proto().into(),
+                since_ms: since.unwrap_or_default(),
+                reask_at_ms: reask.unwrap_or_default(),
+                has_pending_ask: true,
+                owner: owner.clone(),
+                dismissed_ms: dismissed.unwrap_or_default(),
+                card_agent_id: if asker == agent { String::new() } else { asker.clone() },
+                card_seq: card_seq(&asker, &card),
+            });
+        }
     }
     Ok(waiting)
-}
-
-/// Whether the agent's checklist has an item waiting on the person with
-/// no question waiting about it: something for the person all the same.
-pub(crate) fn waits_unasked(store: &Store, agent: &str) -> bool {
-    waiting_items(store).is_ok_and(|waiting| waiting.get(agent).is_some_and(|items| items.iter().any(|item| !item.has_pending_ask)))
 }
 
 /// Items `agent`'s #`id` was blocking open again now it's done or dropped,
@@ -886,7 +1155,7 @@ pub(crate) fn finished(factory: &Arc<Factory>, agent: &str, id: u32, status: Sta
     for (whose, item, item_text, owner) in waiting {
         let note = format!("{name}'s #{id} is {how}");
         update(&factory.store, &whose, actor, &[Update { id: item, status: Some(Status::Open), note: Some(note), ..Update::default() }])?;
-        let on = if whose == owning(&whose, &owner) { String::new() } else { format!(" on {whose}'s checklist") };
+        let on = if whose == owning(&whose, &owner) { String::new() } else { format!(" on {}'s checklist", name_of(factory, &whose)) };
         let said = format!(
             "#{item}{on} \"{item_text}\" was waiting on {name}'s #{id} \"{text}\", which is {how}: it's open again. Carry on with it, or mark it again if it still can't move."
         );
@@ -911,9 +1180,10 @@ fn waited_on(factory: &Arc<Factory>, agent: &str, id: u32, on: &str) {
 /// event telling its agent adds, while the item still waits on them; None
 /// when it no longer does. Answered, the agent clears the block or says
 /// what's missing. Dismissed, it decides itself if it can; if it truly
-/// can't, the item stays in Needs you and Claktory has it ask again after
-/// Settings → Checklist's re-ask interval, as often as it takes.
-pub(crate) fn decided(factory: &Factory, key: &str, dismissed: bool) -> rusqlite::Result<Option<String>> {
+/// can't, it stays blocked, out of Needs you, and Claktory has it ask again after
+/// Settings → Checklist's re-ask interval, as often as it takes, with the
+/// same kind of card (`kind`, as `Card::kind`).
+pub(crate) fn decided(factory: &Factory, key: &str, dismissed: bool, kind: &str) -> rusqlite::Result<Option<String>> {
     let Some((agent, id)) = key.rsplit_once('#') else { return Ok(None) };
     let Ok(id) = id.parse::<u32>() else { return Ok(None) };
     let row: Option<(String, String)> = factory
@@ -925,8 +1195,8 @@ pub(crate) fn decided(factory: &Factory, key: &str, dismissed: bool) -> rusqlite
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let Some((text, kind)) = row else { return Ok(None) };
-    if !Wait::read(&kind).is_person() {
+    let Some((text, wait)) = row else { return Ok(None) };
+    if !Wait::read(&wait).is_person() {
         return Ok(None);
     }
     let person = factory.lock().config.person().to_owned();
@@ -943,12 +1213,17 @@ pub(crate) fn decided(factory: &Factory, key: &str, dismissed: bool) -> rusqlite
     let now = now_ms();
     let reask_at = now + Times::read(&factory.store).reask.saturating_mul(factory.nudge_minute());
     factory.store.db().execute(
-        "UPDATE checklist_items SET dismissed_at = ?3, reask_at = ?4 WHERE agent = ?1 AND id = ?2",
-        params![agent, id, now, reask_at],
+        "UPDATE checklist_items SET dismissed_at = ?3, reask_at = ?4, dismissed_card = ?5 WHERE agent = ?1 AND id = ?2",
+        params![agent, id, now, reask_at, kind],
     )?;
     let when = super::monitors::when::local(reask_at, now);
+    let again = match kind {
+        "secret" => format!("ask them again {when}, as a new request for it"),
+        "proposal" => format!("propose it again {when}, as a new proposal"),
+        _ => format!("ask them again {when}, as a new question"),
+    };
     Ok(Some(format!(
-        "\n\nIt was about #{id} \"{text}\", which still waits on {person}. Decide it yourself if you can, and update #{id}; note what you chose. If you truly can't move without them, leave #{id} blocked and say why in a note: it stays in their Needs you, and Claktory has you ask them again {when}."
+        "\n\nIt was about #{id} \"{text}\", which still waits on {person}. Decide it yourself if you can, and update #{id}; note what you chose. If you truly can't move without them, leave #{id} blocked and say why in a note: it's yours to settle meanwhile, out of their Needs you, and Claktory has you {again}."
     )))
 }
 
@@ -970,6 +1245,8 @@ struct Due {
     on: String,
     since: i64,
     retries: i64,
+    /// What the person last dismissed about it (`DISMISSED_CARD`).
+    dismissed: String,
 }
 
 impl Due {
@@ -978,8 +1255,8 @@ impl Due {
     }
 
     /// " on Ana's checklist" when it isn't `owning`'s own.
-    fn whose(&self) -> String {
-        if self.owning() == self.agent { String::new() } else { format!(" on {}'s checklist", self.agent) }
+    fn whose(&self, factory: &Factory) -> String {
+        if self.owning() == self.agent { String::new() } else { format!(" on {}'s checklist", name_of(factory, &self.agent)) }
     }
 }
 
@@ -1002,7 +1279,7 @@ pub(crate) fn check_waits(factory: &Arc<Factory>) -> rusqlite::Result<()> {
     let due = |condition: &str, at: i64| -> rusqlite::Result<Vec<Due>> {
         let db = factory.store.db();
         let mut statement = db.prepare(&format!(
-            "SELECT agent, id, text, owner, blocked_kind, blocked_on, COALESCE(blocked_since, updated), retries
+            "SELECT agent, id, text, owner, blocked_kind, blocked_on, COALESCE(blocked_since, updated), retries, dismissed_card
              FROM checklist_items WHERE {condition} ORDER BY agent, id"
         ))?;
         let rows = statement.query_map([at], |row| {
@@ -1015,6 +1292,7 @@ pub(crate) fn check_waits(factory: &Arc<Factory>) -> rusqlite::Result<()> {
                 on: row.get(5)?,
                 since: row.get(6)?,
                 retries: row.get(7)?,
+                dismissed: row.get(8)?,
             })
         })?;
         rows.collect()
@@ -1033,7 +1311,7 @@ pub(crate) fn check_waits(factory: &Arc<Factory>) -> rusqlite::Result<()> {
             &[Update { id: item.id, status: Some(Status::Open), note: Some("Resumed at its set time".to_owned()), ..Update::default() }],
         )?;
         let said =
-            format!("#{}{} \"{}\" was parked until now: it's open again. Pick it up, or park it again.", item.id, item.whose(), item.text);
+            format!("#{}{} \"{}\" was parked until now: it's open again. Pick it up, or park it again.", item.id, item.whose(factory), item.text);
         factory.deliver_event(item.owning(), said, crate::factory::host_event(format!("#{} resumes", item.id)));
         factory.refresh_view(&item.agent);
         changed = true;
@@ -1048,7 +1326,7 @@ pub(crate) fn check_waits(factory: &Arc<Factory>) -> rusqlite::Result<()> {
         let said = format!(
             "#{}{} \"{}\" waits on {}, and it's time to check again. If it can move now, carry on and update it; if not, leave it: you're told again {}, or set your own retry_at.",
             item.id,
-            item.whose(),
+            item.whose(factory),
             item.text,
             item.on,
             super::monitors::when::local(next, now),
@@ -1066,18 +1344,34 @@ pub(crate) fn check_waits(factory: &Arc<Factory>) -> rusqlite::Result<()> {
         factory.refresh_view(&item.agent);
         changed = true;
         let owning = item.owning();
-        if super::ask::pending_about(&factory.store, owning, &item_key(&item.agent, item.id)) {
+        if asked_about(factory, owning, &item_key(&item.agent, item.id)) {
             continue;
         }
-        let name = if owning == item.agent { item.id.to_string() } else { item_key(&item.agent, item.id) };
-        let said = format!(
-            "{person_capitalized} dismissed your question about #{}{} \"{}\", and it still waits on them. If you can decide it yourself now, do, and update #{}. If not, ask them again with ask_person (item: \"{name}\"), saying in a line why only they can settle it.",
-            item.id,
-            item.whose(),
-            item.text,
-            item.id,
-        );
-        factory.deliver_event(owning, said, crate::factory::host_event(format!("Ask {person} again: #{}", item.id)));
+        let name = if owning == item.agent { item.id.to_string() } else { format!("{}#{}", name_of(factory, &item.agent), item.id) };
+        // Again with what was dismissed: a secret with secrets_request, a
+        // proposal with propose_to_rivet; anything else is a question.
+        let (id, whose, text) = (item.id, item.whose(factory), &item.text);
+        let (said, summary) = match item.dismissed.as_str() {
+            "secret" => (
+                format!(
+                    "{person_capitalized} dismissed your request for a secret for #{id}{whose} \"{text}\", and it still waits on them. If you can do without it now, do, and update #{id}. If not, ask again with secrets_request (item: \"{name}\"), saying in a line why only they can give it."
+                ),
+                format!("Ask {person} again: #{id}"),
+            ),
+            "proposal" => (
+                format!(
+                    "{person_capitalized} dismissed your proposal about #{id}{whose} \"{text}\", and it still waits on them. If you can do without it now, do, and update #{id}. If not, propose again with propose_to_rivet (item: \"{name}\"), saying in a line why it's needed."
+                ),
+                format!("Propose again: #{id}"),
+            ),
+            _ => (
+                format!(
+                    "{person_capitalized} dismissed your question about #{id}{whose} \"{text}\", and it still waits on them. If you can decide it yourself now, do, and update #{id}. If not, ask them again with ask_person (item: \"{name}\"), saying in a line why only they can settle it."
+                ),
+                format!("Ask {person} again: #{id}"),
+            ),
+        };
+        factory.deliver_event(owning, said, crate::factory::host_event(summary));
     }
 
     // Still blocked? On agents and items (and untyped) after the agent
@@ -1091,7 +1385,7 @@ pub(crate) fn check_waits(factory: &Arc<Factory>) -> rusqlite::Result<()> {
         );
         for item in due(&condition, now - after(minutes))? {
             let key = item_key(&item.agent, item.id);
-            if item.kind == Wait::PersonDecision && !super::ask::pending_about(&factory.store, item.owning(), &key) {
+            if item.kind.is_person() && !asked_about(factory, item.owning(), &key) {
                 continue;
             }
             factory
@@ -1110,7 +1404,7 @@ pub(crate) fn check_waits(factory: &Arc<Factory>) -> rusqlite::Result<()> {
             .map(|(item, _)| {
                 let on = if item.on.is_empty() { String::new() } else { format!(", waiting on {}", item.on) };
                 let how_long = super::monitors::when::duration(now - item.since);
-                format!("#{}{} \"{}\"{on}, blocked {how_long}", item.id, item.whose(), item.text)
+                format!("#{}{} \"{}\"{on}, blocked {how_long}", item.id, item.whose(factory), item.text)
             })
             .collect();
         let person_waits = items.iter().any(|(item, _)| item.kind.is_person());
@@ -1121,7 +1415,7 @@ pub(crate) fn check_waits(factory: &Arc<Factory>) -> rusqlite::Result<()> {
         if person_waits {
             let _ = write!(
                 said,
-                " One waiting on {person} should be in their Needs you or on a card: ask_person with item, if a question is what it needs."
+                " One waiting on {person} shows in their Needs you only once you ask: ask_person with item, one question."
             );
         }
         let count = items.len();
@@ -1142,7 +1436,8 @@ pub(crate) fn check_waits(factory: &Arc<Factory>) -> rusqlite::Result<()> {
         let Some(lead) = lead else { continue };
         let on = if item.on.is_empty() { String::new() } else { format!(", waiting on {}", item.on) };
         let how_long = super::monitors::when::duration(now - item.since);
-        let whose = if item.owning() == item.agent { String::new() } else { format!(" (on {}'s checklist)", item.agent) };
+        let whose =
+            if item.owning() == item.agent { String::new() } else { format!(" (on {}'s checklist)", name_of(factory, &item.agent)) };
         let said = format!(
             "{name}'s #{}{whose} \"{}\" has been blocked for {how_long}{on}. See whether you can unblock it, or settle with {name} what happens next.",
             item.id, item.text,
@@ -1487,10 +1782,9 @@ impl Extension for Checklist {
         };
         let mut shown = Vec::new();
         for item in &items {
-            // A question waiting about it: one that names it, or (asked
-            // without naming one) any of its owning agent's.
+            // A card waiting about it: one its owning agent filed naming it.
             let has_pending_ask = (item.blocked_on == "person" || item.wait.is_person())
-                && super::ask::pending_about(&factory.store, owning(agent, &item.owner), &item_key(agent, item.id));
+                && asked_about(factory, owning(agent, &item.owner), &item_key(agent, item.id));
             // An item waited on reads by its text, as it is now.
             let blocked_on = match item.wait {
                 Wait::Item => text_of(&factory.store, &item.wait_ref).unwrap_or_else(|| item.blocked_on.clone()),
@@ -1638,6 +1932,11 @@ struct UpdateArg {
     note: Option<String>,
 }
 
+/// How texts name `agent`: its name, or its id once it's gone.
+pub(crate) fn name_of(factory: &Factory, agent: &str) -> String {
+    factory.lock().config.agent(agent).map_or_else(|| agent.to_owned(), |config| config.name.clone())
+}
+
 /// The item `reference` names, as its key ("agent#12"): "12" or "#12" on
 /// `agent`'s own checklist, "Ana#12" on Ana's (an id or name).
 pub(crate) fn resolve_item(factory: &Factory, agent: &str, reference: &str) -> Result<String, String> {
@@ -1646,7 +1945,7 @@ pub(crate) fn resolve_item(factory: &Factory, agent: &str, reference: &str) -> R
         id.trim().parse().map_err(|_| format!("\"{reference}\" isn't an item: write 12 for #12, or Ana#12 on Ana's checklist"))?;
     let whose = if whose.trim().is_empty() { agent.to_owned() } else { agent_id(factory, agent, whose)? };
     if !has_item(&factory.store, &whose, id).map_err(failed)? {
-        return Err(format!("there's no #{id} on {whose}'s checklist"));
+        return Err(format!("there's no #{id} on {}'s checklist", name_of(factory, &whose)));
     }
     Ok(item_key(&whose, id))
 }
@@ -1683,7 +1982,7 @@ fn typed_wait(factory: &Factory, agent: &str, item: u32, arg: &UpdateArg) -> Res
         }
         (Wait::Item, Some(reference)) => {
             let key = resolve_item(factory, agent, reference).map_err(|problem| format!("#{item}: {problem}"))?;
-            waitable(&factory.store, &item_key(agent, item), &key).map_err(|problem| format!("#{item}: {problem}"))?;
+            waitable(factory, &item_key(agent, item), &key).map_err(|problem| format!("#{item}: {problem}"))?;
             key
         }
         (Wait::Agent, None) => return Err(format!("#{item}: waits_on agent needs ref, the agent's id or name")),
@@ -1697,7 +1996,8 @@ fn typed_wait(factory: &Factory, agent: &str, item: u32, arg: &UpdateArg) -> Res
 /// Whether item `from` can wait on item `on` (both "agent#12"): not on
 /// itself, not on one that's already done or dropped, and not in a loop
 /// of items each waiting on the next.
-fn waitable(store: &Store, from: &str, on: &str) -> Result<(), String> {
+fn waitable(factory: &Factory, from: &str, on: &str) -> Result<(), String> {
+    let store = &factory.store;
     if on == from {
         return Err("an item can't wait on itself".to_owned());
     }
@@ -1715,7 +2015,11 @@ fn waitable(store: &Store, from: &str, on: &str) -> Result<(), String> {
             .ok()
             .flatten()
     };
-    let shown = on.replace('#', " #");
+    // Named as people read it: "Ana #12".
+    let shown = match on.rsplit_once('#') {
+        Some((agent, id)) => format!("{} #{id}", name_of(factory, agent)),
+        None => on.to_owned(),
+    };
     if let Some((status, _, _)) = read(on)
         && let Some(status @ (Status::Done | Status::Dropped)) = Status::parse(&status)
     {
@@ -1845,7 +2149,35 @@ fn run_update(factory: &Arc<Factory>, agent: &str, args: serde_json::Value) -> R
             }
         })
         .collect();
-    Ok(ToolResult::text(format!("{}.", said.join("; ")), json!({"agent": agent, "items": items})))
+    // Blocked on the person with no question naming it: nothing shows in
+    // their Needs you until one does, so the agent is told how.
+    let person = factory.lock().config.person().to_owned();
+    let mut text = format!("{}.", said.join("; "));
+    for update in updates.iter().filter(|update| update.status.is_some() || update.wait.is_some() || update.blocked_on.is_some()) {
+        let Some(item) = now.iter().find(|item| item.id == update.id && item.status == Status::Blocked && item.wait.is_person()) else {
+            continue;
+        };
+        let asker = owning(agent, &item.owner);
+        if asked_about(factory, asker, &item_key(agent, item.id)) {
+            continue;
+        }
+        let _ = if asker == agent {
+            write!(
+                text,
+                " #{0} doesn't show in {person}'s Needs you until you ask: ask_person with item {0}, one question (or secrets_request or propose_to_rivet with item {0}, if it waits on a secret or on Rivet).",
+                item.id
+            )
+        } else {
+            let name = factory.lock().config.agent(asker).map_or_else(|| asker.to_owned(), |owner| owner.name.clone());
+            let mine = factory.lock().config.agent(agent).map_or_else(|| agent.to_owned(), |me| me.name.clone());
+            write!(
+                text,
+                " #{0} doesn't show in {person}'s Needs you until {name}, its owner, asks: ask_person with item {mine}#{0}, one question (or secrets_request or propose_to_rivet with that item, if it waits on a secret or on Rivet).",
+                item.id
+            )
+        };
+    }
+    Ok(ToolResult::text(text, json!({"agent": agent, "items": items})))
 }
 
 #[derive(Deserialize)]
@@ -1931,7 +2263,7 @@ fn run_item(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<T
     let whose = whose(factory, agent, args.agent.as_deref())?;
     let (items, _) = query(&factory.store, &Query { agent: &whose, with_log: true, ..Query::default() }).map_err(failed)?;
     let Some(item) = items.into_iter().find(|item| item.id == args.id) else {
-        return Err(format!("No item #{} on {whose}'s checklist.", args.id));
+        return Err(format!("No item #{} on {}'s checklist.", args.id, name_of(factory, &whose)));
     };
     let mut lines = vec![line(&item)];
     for change in &item.log {

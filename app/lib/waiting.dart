@@ -1,19 +1,17 @@
+import 'dart:math' as math;
+
 import 'package:flutter/widgets.dart';
 
 import 'identity.dart';
 import 'protocol/factory/v1/factory.pb.dart';
+import 'selection.dart' show Unselectable;
 
 /// What waits for the person's answer in agents' conversations: pending
 /// secret requests, connections to make and proposals to Rivet
-/// (Agent.waiting_seqs, the backend's), and checklist items waiting on the
-/// person with no card asking (Agent.waiting_items).
-int waitingIn(Iterable<Agent> agents) => agents.fold(
-  0,
-  (sum, agent) =>
-      sum +
-      agent.waitingSeqs.length +
-      agent.waitingItems.where((item) => !item.hasPendingAsk).length,
-);
+/// (Agent.waiting_seqs, the backend's). A checklist item waiting on the
+/// person counts only as the card asking about it.
+int waitingIn(Iterable<Agent> agents) =>
+    agents.fold(0, (sum, agent) => sum + agent.waitingSeqs.length);
 
 /// How a count of what waits reads on a mark: "9+" past nine.
 String waitingCount(int count) => count > 9 ? '9+' : '$count';
@@ -40,26 +38,35 @@ class NeedsYouMark extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    return Semantics(
-      label: label,
-      excludeSemantics: true,
-      child: Container(
-        height: 16,
-        constraints: const BoxConstraints(minWidth: 16),
-        padding: const EdgeInsets.symmetric(horizontal: 4),
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: palette.signal,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Text(
-          waitingCount(count),
-          style: TextStyles.caption.copyWith(
-            color: _ink,
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            height: 1,
-            fontFeatures: const [FontFeature.tabularFigures()],
+    // 16px at the standard text size; a pill that grows with its number
+    // at larger ones, so the number is never cut.
+    final height = math.max(
+      16.0,
+      MediaQuery.textScalerOf(context).scale(11) + 5,
+    );
+    // A mark, not words: no part of a selection around it (Needs you's).
+    return Unselectable(
+      child: Semantics(
+        label: label,
+        excludeSemantics: true,
+        child: Container(
+          height: height,
+          constraints: BoxConstraints(minWidth: height),
+          padding: EdgeInsets.symmetric(horizontal: height / 4),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: palette.signal,
+            borderRadius: BorderRadius.circular(height / 2),
+          ),
+          child: Text(
+            waitingCount(count),
+            style: TextStyles.caption.copyWith(
+              color: _ink,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              height: 1,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
           ),
         ),
       ),

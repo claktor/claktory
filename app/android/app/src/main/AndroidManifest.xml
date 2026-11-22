@@ -7,9 +7,15 @@
     <!-- Voice messages (factory/recorder), asked for when the person first
          records, never at launch. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Not required: without it the permission would make Play hide the
+         app from devices with no microphone. -->
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <!-- Scanning a pairing code's QR code, asked for on the pairing screen,
          never at launch. A phone without a camera pairs by pasting. -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Neither is required: the permission alone implies a back camera,
+         which would make Play hide the app from devices without one. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <application
@@ -65,6 +71,16 @@
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="${applicationId}"/>
+            </intent-filter>
+            <!-- A pairing code itself (factory://?t=…&e=…), as a Mac's QR code
+                 holds it, so the phone's camera or Lens opens it here, as
+                 the iPhone's Camera does. The app still asks before it
+                 connects. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="factory"/>
             </intent-filter>
         </activity>
         <!-- Flutter generates GeneratedPluginRegistrant.java from this. -->

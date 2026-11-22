@@ -9,6 +9,7 @@ import 'package:factory_app/mobile/composer.dart' show SendButton;
 import 'package:factory_app/transcript.dart' show TranscriptView;
 import 'package:factory_app/forms.dart';
 import 'package:factory_app/inbox.dart';
+import 'package:factory_app/mobile/needs_you_button.dart';
 import 'package:factory_app/mobile/platform_policy.dart';
 import 'package:factory_app/phone.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -121,7 +122,7 @@ Future<Harness> _approval(
       state: AskPersonState.ASK_PERSON_STATE_PENDING,
     ),
   );
-  await tester.tap(find.byType(NeedsYouChip));
+  await tester.tap(find.byType(PhoneNeedsYouButton));
   await pumpFrames(tester);
   expect(find.byType(NeedsYouList), findsOneWidget);
   await tester.tap(find.text('Deploy staging?'));

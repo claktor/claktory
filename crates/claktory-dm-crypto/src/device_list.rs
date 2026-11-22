@@ -8,7 +8,7 @@
 //! starts again at 1 when the key rotates, and versions are only ever
 //! compared under one key (`validation::Pins`).
 
-use tls_codec::{DeserializeBytes, Serialize as _, TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
+use tls_codec::{Deserialize as _, Serialize as _, TlsDeserialize, TlsSerialize, TlsSize, VLBytes};
 
 use crate::Error;
 use crate::certificate::{LeafCertificate, LeafKind, MAX_ACCOUNT_ID, MAX_LEAF_ID};
@@ -35,14 +35,14 @@ pub struct DeviceList {
     pub leaves: Vec<Listed>,
 }
 
-#[derive(Debug, Clone, PartialEq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+#[derive(Debug, Clone, PartialEq, TlsSerialize, TlsDeserialize, TlsSize)]
 struct WireLeaf {
     kind: u8,
     leaf_id: VLBytes,
     signature_key: [u8; 32],
 }
 
-#[derive(Debug, Clone, PartialEq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+#[derive(Debug, Clone, PartialEq, TlsSerialize, TlsDeserialize, TlsSize)]
 struct Body {
     format: u8,
     account_id: VLBytes,
@@ -52,7 +52,7 @@ struct Body {
     leaves: Vec<WireLeaf>,
 }
 
-#[derive(Debug, Clone, PartialEq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+#[derive(Debug, Clone, PartialEq, TlsSerialize, TlsDeserialize, TlsSize)]
 struct Wire {
     body: Body,
     signature: [u8; 64],
@@ -140,7 +140,7 @@ impl SignedDeviceList {
     /// identity inside signed it. Whether that identity is the account's
     /// pinned one is `validation`'s.
     pub fn from_bytes(bytes: &[u8]) -> Result<SignedDeviceList, Error> {
-        let wire = Wire::tls_deserialize_exact_bytes(bytes).map_err(|_| Error::Format("not a device list".to_owned()))?;
+        let wire = Wire::tls_deserialize_exact(bytes).map_err(|_| Error::Format("not a device list".to_owned()))?;
         let body = &wire.body;
         if body.format != VERSION {
             return Err(Error::Format(format!("device list format {}", body.format)));

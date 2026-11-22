@@ -9,8 +9,8 @@
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use openmls::prelude::{
-    Capabilities, Credential, CredentialWithKey, ExtensionType, GroupId, KeyPackage, KeyPackageIn, LeafNodeIndex, MlsGroup,
-    MlsGroupCreateConfig, MlsGroupJoinConfig, MlsMessageBodyIn, MlsMessageIn, MlsMessageOut, PURE_PLAINTEXT_WIRE_FORMAT_POLICY,
+    Capabilities, Credential, CredentialWithKey, ExtensionType, GroupId, KeyPackage, KeyPackageIn, LeafNodeIndex, LeafNodeParameters,
+    MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, MlsMessageBodyIn, MlsMessageIn, MlsMessageOut, PURE_PLAINTEXT_WIRE_FORMAT_POLICY,
     ProcessedMessageContent, ProtocolVersion, Sender, SignaturePublicKey, StagedWelcome,
 };
 use openmls_traits::OpenMlsProvider;
@@ -19,7 +19,7 @@ use openmls_traits::types::SignatureScheme;
 use tls_codec::{Deserialize as _, Serialize as _};
 use zeroize::Zeroizing;
 
-use crate::certificate::{LeafCertificate, LeafKind};
+use crate::certificate::{Leaf, LeafCertificate, LeafKind};
 use crate::validation::{self, GroupKind, Member, Trust};
 use crate::{CIPHERSUITE, Error};
 
@@ -71,6 +71,22 @@ impl Me {
             return Err(Error::Refused("the certificate is for another leaf key".to_owned()));
         }
         Ok(Me { key, certificate })
+    }
+
+    /// The same leaf key under a new certificate: the person made a new
+    /// identity key (dms-e2ee §2.1), and a device of theirs certified this
+    /// leaf again. Account, leaf id and kind stay; only the identity moves.
+    pub fn recertified(&self, certificate: LeafCertificate) -> Result<Me, Error> {
+        let leaf = &self.certificate.leaf;
+        let new = &certificate.leaf;
+        if new.signature_key != leaf.signature_key
+            || new.account_id != leaf.account_id
+            || new.leaf_id != leaf.leaf_id
+            || new.kind != leaf.kind
+        {
+            return Err(Error::Refused("a new certificate for another leaf".to_owned()));
+        }
+        Me::new(LeafKey::from_secret(&self.key.secret()), certificate)
     }
 
     fn credential(&self) -> Result<CredentialWithKey, Error> {
@@ -290,8 +306,40 @@ impl Group {
         self.mls.members().map(|member| validation::member(&self.kind, trust, &member.credential, &member.signature_key)).collect()
     }
 
+    /// Every leaf's id as its certificate names it, in tree order,
+    /// **unchecked**: for telling who came and went across a commit, not
+    /// for trusting anyone (`members` does that). A leaf under a key its
+    /// account replaced is still here; one whose credential isn't a
+    /// certificate isn't.
+    pub fn leaf_ids(&self) -> Vec<String> {
+        self.leaves_unchecked().into_iter().map(|leaf| leaf.leaf_id).collect()
+    }
+
+    /// Every leaf as its certificate claims (account, kind, id, name),
+    /// in tree order, **unchecked**: for removal decisions only, since
+    /// removing a leaf takes access away, never grants it (a leaf taken
+    /// off its list, revoked or under a replaced key fails `members`' checks
+    /// but must still be removable). Never for trusting what a leaf says or
+    /// showing who's in (`members` does that). One whose credential isn't a
+    /// certificate isn't here, as in `leaf_ids`.
+    pub fn leaves_unchecked(&self) -> Vec<Leaf> {
+        self.mls
+            .members()
+            .filter_map(|member| LeafCertificate::from_credential(&member.credential).ok())
+            .map(|certificate| certificate.leaf)
+            .collect()
+    }
+
     fn leaf(&self, index: LeafNodeIndex) -> Option<(Credential, Vec<u8>)> {
         self.mls.member_at(index).map(|member| (member.credential, member.signature_key))
+    }
+
+    /// Whether this endpoint's own leaf here carries `me`'s certificate:
+    /// not yet in a group it hasn't moved to the person's new identity key
+    /// in (`update_certificate`).
+    pub fn holds(&self, me: &Me) -> Result<bool, Error> {
+        let own = self.mls.own_leaf_node().ok_or_else(|| Error::Refused("this endpoint isn't in the group".to_owned()))?;
+        Ok(*own.credential() == me.certificate.to_credential()?)
     }
 
     /// Adds leaves from their key packages (as the worker handed them out):
@@ -356,6 +404,28 @@ impl Group {
         Ok(Outgoing { commit: commit.tls_serialize_detached().map_err(mls)?, welcome: None, group_info: group_info(info)? })
     }
 
+    /// This leaf's move to the person's new identity key (dms-e2ee §2.1):
+    /// an Update carrying `me`'s new certificate, with the same signature
+    /// key, and nothing else (no waiting proposal rides along), the one
+    /// commit a member under a replaced key may make.
+    pub fn update_certificate(&mut self, provider: &impl OpenMlsProvider, me: &Me) -> Result<Outgoing, Error> {
+        let parameters = LeafNodeParameters::builder().with_credential_with_key(me.credential()?).build();
+        let bundle = self
+            .mls
+            .commit_builder()
+            .consume_proposal_store(false)
+            .force_self_update(true)
+            .leaf_node_parameters(parameters)
+            .load_psks(provider.storage())
+            .map_err(mls)?
+            .build(provider.rand(), provider.crypto(), &me.key, |_| true)
+            .map_err(mls)?
+            .stage_commit(provider)
+            .map_err(mls)?;
+        let (commit, _, info) = bundle.into_contents();
+        Ok(Outgoing { commit: commit.tls_serialize_detached().map_err(mls)?, welcome: None, group_info: group_info(info)? })
+    }
+
     /// Asks to leave: a proposal a device of the person's commits (MLS
     /// doesn't let a member commit its own removal). How a Claktory leaves.
     pub fn leave(&mut self, provider: &impl OpenMlsProvider, me: &Me) -> Result<Vec<u8>, Error> {
@@ -411,6 +481,13 @@ impl Group {
                 self.mls.merge_staged_commit(provider, *staged).map_err(mls)?;
                 Ok(Incoming::Committed { epoch: self.epoch() })
             }
+            // Its own commit back from the worker, the one it made and kept
+            // pending (its confirmation tag says so): taken, so merged. How
+            // an endpoint that never heard the worker's answer carries on.
+            ProcessedMessageContent::OwnPendingCommit => {
+                self.mls.merge_pending_commit(provider).map_err(mls)?;
+                Ok(Incoming::Committed { epoch: self.epoch() })
+            }
             _ => Err(Error::Refused("a kind of message Claktory doesn't use".to_owned())),
         }
     }
@@ -418,7 +495,7 @@ impl Group {
 
 #[cfg(test)]
 mod tests {
-    use openmls::prelude::{PURE_CIPHERTEXT_WIRE_FORMAT_POLICY, WireFormat};
+    use openmls::prelude::{NewSignerBundle, PURE_CIPHERTEXT_WIRE_FORMAT_POLICY, WireFormat};
     use openmls_libcrux_crypto::Provider as Libcrux;
 
     use super::*;
@@ -707,5 +784,174 @@ mod tests {
         let forced = bundle.into_contents().0.tls_serialize_detached().unwrap();
         let refused = w.groups[0].process(&w.phone.provider, &w.pins, &forced);
         assert_eq!(refused.err().map(|e| e.to_string()), Some("refused: a Claktory doesn't join a conversation by itself".to_owned()));
+    }
+
+    /// Ana made a new security key (dms-e2ee §2.1): a certificate for her
+    /// iPad's leaf, the same key under the new identity, and a version-1
+    /// list under it. Matt's pins once they've taken the change in.
+    struct Rotation {
+        ana2: IdentityKey,
+        me: Me,
+        pins: Pins,
+    }
+
+    fn rotate(w: &World) -> Rotation {
+        let ana2 = IdentityKey::generate().unwrap();
+        let certificate = LeafCertificate::issue(&ana2, w.ipad.me.certificate.leaf.clone()).unwrap();
+        let me = w.ipad.me.recertified(certificate).unwrap();
+        let mut pins = w.pins.clone();
+        pins.key_changed("ana", ana2.public()).unwrap();
+        let list = DeviceList { account_id: "ana".to_owned(), version: 1, created_ms: 3, leaves: vec![listed(&w.ipad)] };
+        pins.accept_list("ana", &list.sign(&ana2).unwrap().to_bytes().unwrap()).unwrap();
+        Rotation { ana2, me, pins }
+    }
+
+    /// A commit the iPad forges with OpenMLS directly, past its own checks:
+    /// an Update carrying `credential` (signed with `new_key` if it moves to
+    /// another one), with `adds` riding along. Left pending, then dropped.
+    fn forge(w: &mut World, credential: CredentialWithKey, new_key: Option<&LeafKey>, adds: Vec<KeyPackage>) -> Vec<u8> {
+        let parameters = LeafNodeParameters::builder().with_credential_with_key(credential.clone()).build();
+        let builder = w.groups[1]
+            .mls
+            .commit_builder()
+            .consume_proposal_store(false)
+            .force_self_update(true)
+            .propose_adds(adds)
+            .leaf_node_parameters(parameters)
+            .load_psks(w.ipad.provider.storage())
+            .unwrap();
+        let (rand, crypto) = (w.ipad.provider.rand(), w.ipad.provider.crypto());
+        let built = match new_key {
+            Some(new) => builder
+                .build_with_new_signer(
+                    rand,
+                    crypto,
+                    &w.ipad.me.key,
+                    NewSignerBundle { signer: new, credential_with_key: credential },
+                    |_| true,
+                )
+                .unwrap(),
+            None => builder.build(rand, crypto, &w.ipad.me.key, |_| true).unwrap(),
+        };
+        let commit = built.stage_commit(&w.ipad.provider).unwrap().into_contents().0.tls_serialize_detached().unwrap();
+        w.groups[1].clear_pending(&w.ipad.provider).unwrap();
+        commit
+    }
+
+    fn refusal(result: Result<Incoming, Error>) -> String {
+        result.err().map(|error| error.to_string()).unwrap_or_else(|| "taken".to_owned())
+    }
+
+    /// Hostile 27 (R1, with Fugo's three tightenings): once Ana's key is
+    /// replaced, her iPad's leaf, still under the old one, may do one
+    /// thing: move itself to the new key with the same signature key, and
+    /// nothing else in that commit. Its messages, proposals and any other
+    /// commit are refused, and so is a move to another key, another
+    /// signature key, a leaf her new list doesn't name, or one with an Add.
+    #[test]
+    fn a_leaf_moves_to_its_persons_new_key_and_does_nothing_else_under_the_old_one() {
+        let mut w = world();
+        let r = rotate(&w);
+        // The leaf key can't go under someone else's leaf, nor another key.
+        let other = LeafCertificate::issue(&r.ana2, Leaf { leaf_id: "ipad-2".to_owned(), ..w.ipad.me.certificate.leaf.clone() }).unwrap();
+        assert!(w.ipad.me.recertified(other).is_err());
+
+        // Under the old key it's inert for Matt's phone, which saw the change:
+        // what it says, and what it proposes.
+        let said = w.groups[1].send(&w.ipad.provider, &w.ipad.me, b"from the old key").unwrap();
+        assert!(refusal(w.groups[0].process(&w.phone.provider, &r.pins, &said)).contains("was replaced"));
+        let leaving = w.groups[1].leave(&w.ipad.provider, &w.ipad.me).unwrap();
+        assert!(refusal(w.groups[0].process(&w.phone.provider, &r.pins, &leaving)).contains("was replaced"));
+        w.groups[1].mls.clear_pending_proposals(w.ipad.provider.storage()).unwrap();
+        // An ordinary Update under the old key: refused.
+        let plain = w.groups[1].update(&w.ipad.provider, &w.ipad.me).unwrap();
+        w.groups[1].clear_pending(&w.ipad.provider).unwrap();
+        assert!(refusal(w.groups[0].process(&w.phone.provider, &r.pins, &plain.commit)).contains("was replaced"));
+
+        // A move with an Add riding along.
+        let tablet = end(&r.ana2, LeafKind::Device, "ana", "ipad-2");
+        let mut with_tablet = r.pins.clone();
+        let list = DeviceList { account_id: "ana".to_owned(), version: 2, created_ms: 4, leaves: vec![listed(&w.ipad), listed(&tablet)] };
+        with_tablet.accept_list("ana", &list.sign(&r.ana2).unwrap().to_bytes().unwrap()).unwrap();
+        let MlsMessageBodyIn::KeyPackage(package) = read(&tablet.me.key_package(&tablet.provider).unwrap()).unwrap() else { panic!() };
+        let package = KeyPackageIn::validate(package, w.ipad.provider.crypto(), ProtocolVersion::Mls10).unwrap();
+        let riding = forge(&mut w, r.me.credential().unwrap(), None, vec![package]);
+        assert_eq!(
+            refusal(w.groups[0].process(&w.phone.provider, &with_tablet, &riding)),
+            "refused: a leaf under a replaced key commits only its own move to the new one"
+        );
+
+        // A move to another signature key, though the new list names it.
+        let new_key = LeafKey::generate().unwrap();
+        let moved = Leaf { signature_key: new_key.public(), ..w.ipad.me.certificate.leaf.clone() };
+        let moved = Me::new(LeafKey::from_secret(&new_key.secret()), LeafCertificate::issue(&r.ana2, moved).unwrap()).unwrap();
+        let mut naming_it = w.pins.clone();
+        naming_it.key_changed("ana", r.ana2.public()).unwrap();
+        let list = DeviceList { account_id: "ana".to_owned(), version: 1, created_ms: 3, leaves: vec![listed(&moved_end(&moved))] };
+        naming_it.accept_list("ana", &list.sign(&r.ana2).unwrap().to_bytes().unwrap()).unwrap();
+        let rekeyed = forge(&mut w, moved.credential().unwrap(), Some(&new_key), Vec::new());
+        assert_eq!(
+            refusal(w.groups[0].process(&w.phone.provider, &naming_it, &rekeyed)),
+            "refused: a leaf moving to the new key keeps its own signature key"
+        );
+
+        // A move that the new list doesn't name.
+        let mut unlisted = w.pins.clone();
+        unlisted.key_changed("ana", r.ana2.public()).unwrap();
+        let list = DeviceList { account_id: "ana".to_owned(), version: 1, created_ms: 3, leaves: vec![listed(&tablet)] };
+        unlisted.accept_list("ana", &list.sign(&r.ana2).unwrap().to_bytes().unwrap()).unwrap();
+        let update = w.groups[1].update_certificate(&w.ipad.provider, &r.me).unwrap();
+        w.groups[1].clear_pending(&w.ipad.provider).unwrap();
+        assert_eq!(
+            refusal(w.groups[0].process(&w.phone.provider, &unlisted, &update.commit)),
+            "refused: ana's device list doesn't name this leaf"
+        );
+
+        // A move to a key that was replaced too: Ana went on to a third one.
+        let ana3 = IdentityKey::generate().unwrap();
+        let mut third = r.pins.clone();
+        third.key_changed("ana", ana3.public()).unwrap();
+        assert!(refusal(w.groups[0].process(&w.phone.provider, &third, &update.commit)).contains("was replaced"));
+
+        // Before Matt's side knows the new key: it says whose it is, takes
+        // nothing, and the same commit goes through once the change is in.
+        let update = w.groups[1].update_certificate(&w.ipad.provider, &r.me).unwrap();
+        let unknown = w.groups[0].process(&w.phone.provider, &w.pins, &update.commit);
+        assert!(matches!(unknown, Err(Error::UnknownIdentity { ref account }) if account == "ana"), "{unknown:?}");
+        assert_eq!(w.groups[0].epoch(), 1);
+        for (n, end) in [(0, &w.phone), (2, &w.mini)] {
+            assert!(matches!(w.groups[n].process(&end.provider, &r.pins, &update.commit).unwrap(), Incoming::Committed { epoch: 2 }));
+        }
+        // The iPad never heard the worker's answer: its own commit, back
+        // from the worker, is the one it kept pending, so it merges that.
+        assert!(!w.groups[1].holds(&r.me).unwrap() && w.groups[1].holds(&w.ipad.me).unwrap());
+        let own = w.groups[1].process(&w.ipad.provider, &r.pins, &update.commit);
+        assert!(matches!(own, Ok(Incoming::Committed { epoch: 2 })), "{own:?}");
+        assert!(w.groups[1].holds(&r.me).unwrap());
+
+        // Under a key the pins don't hold (here the new one), the iPad's
+        // leaf fails member() but is the same leaf by its id.
+        let ids = vec!["phone".to_owned(), "ipad".to_owned(), claktory_leaf_id("mini", 1)];
+        assert_eq!(w.groups[0].leaf_ids(), ids);
+        assert_eq!(
+            w.groups[0].members(&w.pins).iter().filter(|member| member.is_ok()).count(),
+            2,
+            "the iPad's isn't trusted under these pins"
+        );
+        // Unchecked, its whole leaf is there too, as its certificate claims.
+        let leaves = w.groups[0].leaves_unchecked();
+        assert_eq!(leaves.iter().map(|leaf| leaf.leaf_id.clone()).collect::<Vec<_>>(), ids);
+        assert_eq!(leaves[1], w.ipad.me.certificate.leaf);
+        assert_eq!(leaves.iter().map(|leaf| leaf.account_id.as_str()).collect::<Vec<_>>(), ["matt", "ana", "matt"]);
+        assert_eq!(leaves.iter().map(|leaf| leaf.kind).collect::<Vec<_>>(), [LeafKind::Device, LeafKind::Device, LeafKind::Claktory]);
+
+        // Moved: she's heard again, under the new key.
+        let said = w.groups[1].send(&w.ipad.provider, &r.me, b"from the new key").unwrap();
+        let Incoming::Application { from, content } = w.groups[0].process(&w.phone.provider, &r.pins, &said).unwrap() else { panic!() };
+        assert_eq!((from.certificate.identity, content.as_slice()), (r.ana2.public(), b"from the new key".as_slice()));
+    }
+
+    fn moved_end(me: &Me) -> End {
+        End { provider: Libcrux::default(), me: Me::new(LeafKey::from_secret(&me.key.secret()), me.certificate.clone()).unwrap() }
     }
 }
