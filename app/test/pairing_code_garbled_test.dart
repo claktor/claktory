@@ -32,7 +32,7 @@ void main() {
     );
   });
 
-  testWidgets('pasting a garbled code on a phone says it isn\'t one', (
+  testWidgets('pasting a garbled code on a phone says to copy it again', (
     tester,
   ) async {
     final harness = Harness(Workspace(), localBackend: false);
@@ -46,7 +46,11 @@ void main() {
     await tester.enterText(find.byType(EditableText), garbled.first);
     await pumpFrames(tester);
     expect(tester.takeException(), isNull);
-    expect(find.textContaining("That isn't a Claktory code."), findsOneWidget);
+    // It starts as one: copied again, all of it (friend bug #2).
+    expect(
+      find.textContaining("That's only part of a Claktory code."),
+      findsOneWidget,
+    );
     expect(find.byType(EditableText), findsOneWidget, reason: 'the form stays');
   });
 }

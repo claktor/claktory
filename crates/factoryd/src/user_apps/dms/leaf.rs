@@ -47,16 +47,42 @@ pub(crate) struct State {
     stopped: std::sync::atomic::AtomicBool,
     /// A full round is wanted now (an enrollment), not at the next one.
     pub(super) round_now: std::sync::atomic::AtomicBool,
-    /// The channel stopped at a commit under the person's new security key,
-    /// which this Claktory hasn't been given yet (`process`): nothing is
-    /// sent there until it reads on. Known again after a restart at the
+    /// Why the channel stopped at a commit, if it did (`process`): one under
+    /// the person's new security key, which this Claktory hasn't been given
+    /// yet, or one with a leaf the newest device list doesn't name. Nothing
+    /// is sent there until it reads on. Known again after a restart at the
     /// first catch-up.
-    pub(super) channel_waits: std::sync::atomic::AtomicBool,
+    pub(super) channel_waits: Mutex<Option<Unready>>,
+    /// When the channel may next be rejoined for a commit that stays
+    /// refused (`process::unlisted`), and the wait after that one fails.
+    pub(super) rejoin: Mutex<Rejoin>,
+}
+
+/// The throttle on rejoining the channel for a commit that stays refused
+/// (Fugo, R5): one attempt, then a wait that doubles after each one that
+/// fails, so a service that flaps can't make the leaf churn epochs.
+#[derive(Default)]
+pub(crate) struct Rejoin {
+    pub next: Option<std::time::Instant>,
+    pub wait: std::time::Duration,
 }
 
 impl State {
     fn lock(&self) -> MutexGuard<'_, Option<Store>> {
         self.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Why the channel waits, if it does.
+    pub(crate) fn channel_waits(&self) -> Option<Unready> {
+        self.channel_waits.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    pub(super) fn set_channel_waits(&self, why: Option<Unready>) {
+        *self.channel_waits.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = why;
+    }
+
+    pub(super) fn rejoin(&self) -> MutexGuard<'_, Rejoin> {
+        self.rejoin.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -82,6 +108,10 @@ pub(crate) enum Unready {
     /// A friend's security key changed in a conversation, and the person's
     /// devices haven't passed the new one on yet: the conversation waits.
     FriendsNewKey,
+    /// A commit names a leaf that the newest device list this Claktory
+    /// could fetch doesn't (R5): the group waits there, never skipping it,
+    /// until a newer list names it (or, in the channel, it rejoins).
+    Unlisted,
 }
 
 impl Unready {
@@ -99,6 +129,7 @@ impl Unready {
             Unready::FriendsNewKey => {
                 format!("Their security key changed, and this Claktory waits until {person}'s devices pass the new one on. Try again later.")
             }
+            Unready::Unlisted => format!("{person}'s devices changed, and this Claktory is catching up. Try again in a few minutes."),
         }
     }
 }
@@ -165,7 +196,7 @@ pub(crate) struct Step<'a> {
     tx: &'a Transaction<'a>,
     store: &'a StoreKeys<'a>,
     registration: (String, String, u64),
-    channel_waits: bool,
+    channel_waits: Option<Unready>,
 }
 
 /// The store's key and cryptography, apart from its connection.
@@ -235,7 +266,7 @@ pub(crate) fn step<T>(factory: &Factory, f: impl FnOnce(&mut Step<'_>) -> Result
     let Store { db, key, crypto } = store;
     let tx = db.transaction()?;
     let keys = StoreKeys { key, crypto };
-    let channel_waits = factory.dm_leaf.channel_waits.load(std::sync::atomic::Ordering::SeqCst);
+    let channel_waits = factory.dm_leaf.channel_waits();
     let mut step = Step { tx: &tx, store: &keys, registration, channel_waits };
     let out = f(&mut step)?;
     drop(step);
@@ -315,6 +346,11 @@ impl Step<'_> {
         self.keep_pins(&pins)
     }
 
+    /// The version of `account`'s device list kept, 0 for none.
+    pub(crate) fn list_version(&self, account: &str) -> Result<u64, StepError> {
+        Ok(self.kept_pins()?.and_then(|pins| pins.get(account).map(|pin| pin.highest_version)).unwrap_or(0))
+    }
+
     /// The identity pinned for `account`, if any.
     pub(crate) fn pinned(&self, account: &str) -> Result<Option<[u8; 32]>, StepError> {
         Ok(self.kept_pins()?.and_then(|pins| pins.get(account).map(|pin| pin.identity.0)))
@@ -364,11 +400,20 @@ impl Step<'_> {
     pub(crate) fn channel_send(&mut self, content: &Content) -> Result<Envelope, StepError> {
         let (leaf, mut group) = self.channel()?;
         // Nothing goes from its place under a replaced key (the person's
-        // devices would drop it), nor while the channel waits for the new one.
-        if self.channel_waits || !group.holds(&leaf.me)? {
+        // devices would drop it), nor while the channel waits at a commit.
+        if let Some(why) = &self.channel_waits {
+            return Err(StepError::Unready(why.clone()));
+        }
+        if !group.holds(&leaf.me)? {
             return Err(StepError::Unready(Unready::Rotating));
         }
-        let bytes = group.send(&self.provider()?, &leaf.me, &content.encode()?)?;
+        // Nor while a dead device of the person's is still in it, after they
+        // started over (row 630): it could read it until a device of theirs
+        // takes it out.
+        let bytes = match group.send(&self.provider()?, &leaf.me, &leaf.pins, &content.encode()?) {
+            Err(claktory_dm_crypto::Error::Waiting { .. }) => return Err(StepError::Unready(Unready::Unlisted)),
+            sent => sent?,
+        };
         Ok(Envelope::new(bytes)?)
     }
 

@@ -7,6 +7,8 @@ import 'package:factory_app/people/e2ee.dart';
 import 'package:factory_app/tunnel/api/dm.dart';
 import 'package:factory_app/tunnel/api/dm_transfer.dart';
 import 'package:factory_app/user_apps/session.dart';
+import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
+    show AnyhowException;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'dm_fakes.dart';
@@ -103,6 +105,8 @@ void main() {
 
   test('an unreadable key fails set-up instead of making a new one', () async {
     final endpoint = FakeEndpoint(FakeWorker(), 'matt', 'phone');
+    // Its store is here: the key was this install's own (row 202).
+    endpoint.storeKept = true;
     endpoint.keys.unreadable.add(DmKeyName.leaf);
     await endpoint.e2ee.start();
     expect(endpoint.e2ee.setup, DmSetup.failed);
@@ -248,6 +252,51 @@ void main() {
     expect(await matt.e2ee.unsent(self.groupId), isEmpty);
   });
 
+  test(
+    'a reinstall over keys the keychain kept is a new device here: new '
+    'leaf and store keys, and no identity until a hand-off (row 202)',
+    () async {
+      final worker = FakeWorker();
+      final phone = await _ready(worker, 'matt', 'phone');
+      final ipad = FakeEndpoint(worker, 'matt', 'ipad');
+      await ipad.e2ee.start();
+      final code = await ipad.e2ee.offerThisDevice(platform: 'iPad');
+      await phone.e2ee.addDevice(await phone.e2ee.scanned(code!));
+      await ipad.e2ee.takeHandoff();
+      expect(ipad.e2ee.setup, DmSetup.ready);
+      Map<DmKeyName, List<int>> keptNow() => {
+        for (final MapEntry(:key, :value) in ipad.keys.kept.entries)
+          key: [...value],
+      };
+      final before = keptNow();
+      expect(before.keys, containsAll([DmKeyName.leaf, DmKeyName.store]));
+      expect(before[DmKeyName.identity], isNotNull);
+
+      // Opened again with its store: the same keys.
+      await ipad.relaunch().start();
+      expect(ipad.e2ee.setup, DmSetup.ready);
+      expect(keptNow(), before);
+
+      // Deleted and installed again: the keychain kept its keys, the store
+      // went. A new leaf key (so a new signature key under the same leaf
+      // id), a new store key, and the identity gone.
+      await ipad.reinstall().start();
+      expect(ipad.e2ee.setup, DmSetup.addThisDevice);
+      final after = keptNow();
+      expect(after[DmKeyName.leaf], isNot(before[DmKeyName.leaf]));
+      expect(after[DmKeyName.store], isNot(before[DmKeyName.store]));
+      expect(after.containsKey(DmKeyName.identity), isFalse);
+      expect(after.containsKey(DmKeyName.identityNext), isFalse);
+
+      // Added again from the phone: the identity comes back by hand-off.
+      final again = await ipad.e2ee.offerThisDevice(platform: 'iPad');
+      await phone.e2ee.addDevice(await phone.e2ee.scanned(again!));
+      await ipad.e2ee.takeHandoff();
+      expect(ipad.e2ee.setup, DmSetup.ready);
+      expect(ipad.keys.kept[DmKeyName.identity], isNotNull);
+    },
+  );
+
   test('a new device is added by its code and joins every group', () async {
     final worker = FakeWorker();
     final phone = await _ready(worker, 'matt', 'phone');
@@ -285,6 +334,179 @@ void main() {
       ('phone', true),
       ('ipad', false),
     ]);
+  });
+
+  test('a new device kept out of a group by a device under the old key says '
+      'so, and joins by itself once it can (row 611)', () async {
+    final worker = FakeWorker();
+    final phone = await _ready(worker, 'matt', 'phone');
+    final ipad = FakeEndpoint(worker, 'matt', 'ipad');
+    await ipad.e2ee.start();
+    final code = await ipad.e2ee.offerThisDevice(platform: 'iPad');
+    await phone.e2ee.addDevice(await phone.e2ee.scanned(code!));
+    var refusing = true;
+    ipad.device.refuseRejoin = () => refusing
+        ? AnyhowException(
+            "refused: matt's certificate is from a security key that was "
+            'replaced',
+          )
+        : null;
+    await ipad.e2ee.takeHandoff();
+    expect(ipad.e2ee.setup, DmSetup.ready);
+    expect(ipad.e2ee.waitingForOtherDevices, isTrue);
+    // Another refusal says nothing of the kind.
+    refusing = false;
+    ipad.now += const Duration(hours: 1).inMilliseconds;
+    await ipad.e2ee.sync();
+    expect(ipad.e2ee.waitingForOtherDevices, isFalse);
+    expect(ipad.e2ee.groups.values.map((each) => each.kind), contains('self'));
+  });
+
+  group('no other device (row 630)', () {
+    test('a device with no keys makes a new security key for the account '
+        'and is ready', () async {
+      final worker = FakeWorker();
+      final phone = await _ready(worker, 'matt', 'phone');
+      final old = worker.keys['matt']!['identity_key'];
+      // The phone is lost; a reinstalled Mac has nothing to be added from.
+      final mac = FakeEndpoint(worker, 'matt', 'mac')..skipSecrets(100);
+      await mac.e2ee.start();
+      expect(mac.e2ee.setup, DmSetup.addThisDevice);
+      expect(await mac.e2ee.startNewKey(), isNull, reason: mac.e2ee.problem);
+      expect(mac.e2ee.setup, DmSetup.ready);
+      expect(mac.e2ee.offer, isNull);
+      expect(worker.keys['matt']!['identity_key'], isNot(old));
+      expect(worker.keys['matt']!['identity_key'], dmB64(mac.device.identity!));
+      expect(worker.retired['matt'], contains(old));
+      // The old key held as retired here from the start.
+      expect(dmB64(mac.device.replacedKey!), old);
+      expect(mac.keys.kept[DmKeyName.identity], isNotNull);
+      expect(mac.device.lists['matt']!.leaves.map((each) => each.leafId), [
+        'mac',
+      ]);
+      expect(worker.packages['matt/mac'], hasLength(dmKeyPackages));
+      // The phone's old leaf is out of the self group, in a commit of its
+      // own, and listed apart; never signed out (Fugo).
+      final mine = mac.e2ee.groups.values
+          .singleWhere((each) => each.kind == 'self')
+          .groupId;
+      expect(await _leafIds(mac, mine), ['mac']);
+      expect((await mac.device.replacedDevices()).map((each) => each.leafId), [
+        'phone',
+      ]);
+      expect(mac.e2ee.waitingFor, isEmpty);
+      expect(worker.signedOut['matt'], isNull);
+      expect(worker.log, isNot(contains('POST /v1/devices/remove')));
+      // The phone, if it's still around, learns its key was replaced
+      // (the account's keys event, then a sync).
+      await phone.e2ee.refreshKeys('matt');
+      await phone.e2ee.sync();
+      expect(phone.e2ee.failure, DmFailure.identityReplaced);
+    });
+
+    test('after more than one start-over, every key the account replaced '
+        'is retired here too (row 654)', () async {
+      final worker = FakeWorker();
+      await _ready(worker, 'matt', 'phone');
+      final served = worker.keys['matt']!['identity_key']! as String;
+      final earlier = dmB64(List.filled(32, 61));
+      worker.retired['matt'] = {earlier};
+      final mac = FakeEndpoint(worker, 'matt', 'mac')..skipSecrets(100);
+      await mac.e2ee.start();
+      expect(await mac.e2ee.startNewKey(), isNull, reason: mac.e2ee.problem);
+      expect(dmB64(mac.device.replacedKey!), served);
+      expect(mac.device.replacedBefore.map(dmB64), [earlier]);
+    });
+
+    test('the old device is never signed out, even while its removal '
+        "doesn't go through (Fugo)", () async {
+      final worker = FakeWorker();
+      await _ready(worker, 'matt', 'phone');
+      final mac = FakeEndpoint(worker, 'matt', 'mac')..skipSecrets(100);
+      await mac.e2ee.start();
+      // The rejoin's commit goes through; every one after it doesn't.
+      var commits = 0;
+      worker.refuse = (route) =>
+          route.startsWith('POST groups/') &&
+              route.endsWith('/commits') &&
+              ++commits > 1
+          ? const AccountServiceUnreachable('x')
+          : null;
+      expect(await mac.e2ee.startNewKey(), isNull);
+      for (var i = 0; i < 3; i++) {
+        mac.now += const Duration(hours: 1).inMilliseconds;
+        await mac.e2ee.sync();
+      }
+      final mine = mac.e2ee.groups.values
+          .singleWhere((each) => each.kind == 'self')
+          .groupId;
+      expect(await _leafIds(mac, mine), contains('phone'));
+      // Nothing is sent there meanwhile, and the phone stays signed in.
+      expect(mac.e2ee.waitingFor[mine], 'matt');
+      expect(worker.signedOut['matt'], isNull);
+      expect(worker.log, isNot(contains('POST /v1/devices/remove')));
+      // Then it goes through.
+      worker.refuse = null;
+      mac.now += const Duration(hours: 1).inMilliseconds;
+      await mac.e2ee.sync();
+      expect(await _leafIds(mac, mine), ['mac']);
+      expect(mac.e2ee.waitingFor, isEmpty);
+      expect(worker.signedOut['matt'], isNull);
+    });
+
+    test(
+      'a sign-in too old is sent to sign in again, and nothing is kept',
+      () async {
+        final worker = FakeWorker();
+        await _ready(worker, 'matt', 'phone');
+        final old = worker.keys['matt']!['identity_key'];
+        final mac = FakeEndpoint(worker, 'matt', 'mac')..skipSecrets(100);
+        await mac.e2ee.start();
+        worker.staleSignIn.add('matt/mac');
+        expect(
+          await mac.e2ee.startNewKey(),
+          DmStartOverStop.signInAgain,
+          reason: mac.e2ee.problem,
+        );
+        expect(mac.e2ee.setup, DmSetup.addThisDevice);
+        expect(worker.keys['matt']!['identity_key'], old);
+        expect(mac.keys.kept[DmKeyName.identity], isNull);
+        // Signed in again: it goes through.
+        worker.staleSignIn.clear();
+        expect(await mac.e2ee.startNewKey(), isNull);
+        expect(mac.e2ee.setup, DmSetup.ready);
+        // What stopped the first try isn't left standing (row 640).
+        expect(mac.e2ee.problem, isEmpty);
+      },
+    );
+
+    test('this device is never removed as one that had the old key, and a '
+        'removal of it kept by an older build clears (row 640)', () async {
+      final worker = FakeWorker();
+      final mac = await _ready(worker, 'matt', 'mac');
+      await mac.device.beginRemoval(
+        removal: const DmRemoval(
+          remove: ['mac'],
+          names: ['Mac'],
+          keep: [],
+          newKey: false,
+        ),
+      );
+      mac.device.replaced.add(
+        DmMember(
+          account: 'matt',
+          leafId: 'mac',
+          kind: DmLeafKind.device,
+          name: 'Mac',
+          sinceMs: BigInt.zero,
+        ),
+      );
+      expect(await mac.e2ee.finishRemoval(), isNull);
+      expect(mac.e2ee.removal, isNull);
+      expect(mac.device.replaced, isEmpty);
+      expect(worker.signedOut['matt'], isNull);
+      expect(worker.log, isNot(contains('POST /v1/devices/remove')));
+    });
   });
 
   test("a hand-off that doesn't open is dropped and the offer spent", () async {
@@ -331,6 +553,264 @@ void main() {
     for (final group in phone.e2ee.groups.values) {
       expect(await _leafIds(phone, group.groupId), isNot(contains('ipad')));
     }
+  });
+
+  group('signing out of the Claktory account (row 671)', () {
+    Future<(FakeEndpoint, FakeEndpoint, DmServerGroup)> twoOfMatts(
+      FakeWorker worker,
+    ) async {
+      final phone = await _ready(worker, 'matt', 'phone');
+      await _ready(worker, 'ana', 'pixel');
+      final chat = (await phone.e2ee.conversationGroup('v1', 3, 'ana'))!;
+      final mac = FakeEndpoint(worker, 'matt', 'mac');
+      await mac.e2ee.start();
+      final code = await mac.e2ee.offerThisDevice(platform: 'Mac');
+      await phone.e2ee.addDevice(await phone.e2ee.scanned(code!));
+      await mac.e2ee.takeHandoff();
+      await phone.e2ee.sync();
+      expect(mac.e2ee.setup, DmSetup.ready);
+      return (phone, mac, chat);
+    }
+
+    test('with other devices: it leaves the list, its key packages go, the '
+        'others take it out of every group, and everything here is '
+        'deleted', () async {
+      final worker = FakeWorker();
+      final (phone, mac, chat) = await twoOfMatts(worker);
+      expect(worker.packages['matt/mac'], isNotEmpty);
+      expect(await mac.e2ee.signOutPlan(), DmSignOut.withOthers);
+      expect(await phone.e2ee.signOutPlan(), DmSignOut.withOthers);
+
+      await mac.e2ee.leave();
+      expect(worker.keys['matt']!['version'], 3);
+      expect(worker.packages.containsKey('matt/mac'), isFalse);
+      expect(worker.lastResort.containsKey('matt/mac'), isFalse);
+      expect(mac.keys.kept, isEmpty, reason: 'security key included');
+      expect(mac.storeKept, isFalse);
+      // It doesn't leave the groups itself: the others' sweep does.
+      expect(await _leafIds(phone, chat.groupId), contains('mac'));
+      await phone.e2ee.refreshKeys('matt');
+      await phone.e2ee.sync();
+      for (final group in phone.e2ee.groups.values) {
+        expect(await _leafIds(phone, group.groupId), isNot(contains('mac')));
+      }
+      expect((await phone.e2ee.devices()).map((each) => each.leafId), [
+        'phone',
+      ]);
+      expect(await phone.e2ee.signOutPlan(), DmSignOut.alone);
+    });
+
+    test("with other devices but the worker out of reach: deleted here all "
+        'the same, the list as it was', () async {
+      final worker = FakeWorker();
+      final (_, mac, _) = await twoOfMatts(worker);
+      worker.refuse = (route) => route == 'PUT me/keys'
+          ? const AccountServiceUnreachable('offline')
+          : null;
+      await mac.e2ee.leave();
+      expect(worker.keys['matt']!['version'], 2);
+      expect(mac.keys.kept, isEmpty);
+      expect(mac.storeKept, isFalse);
+    });
+
+    test('the only device: its messages stay, locked, and go on when it '
+        'signs in to the same account again', () async {
+      final worker = FakeWorker();
+      final phone = await _ready(worker, 'matt', 'phone');
+      final ana = await _ready(worker, 'ana', 'pixel');
+      final chat = (await phone.e2ee.conversationGroup('v1', 3, 'ana'))!;
+      await ana.e2ee.sync();
+      await phone.e2ee.say(chat.groupId, _text('m1', 'before'));
+      expect(await phone.e2ee.signOutPlan(), DmSignOut.alone);
+      final kept = {...phone.keys.kept.keys};
+
+      // Signed out (nothing here changes) and in again: the same store.
+      await phone.relaunch().start();
+      expect(phone.e2ee.setup, DmSetup.ready);
+      expect(phone.keys.kept.keys, kept);
+      await ana.e2ee.say(chat.groupId, _text('a1', 'after'));
+      await phone.e2ee.sync();
+      expect(
+        (await phone.e2ee.history(chat.groupId)).map((m) => m.content.text),
+        ['before', 'after'],
+      );
+    });
+
+    test('Delete messages: everything here, the security key too; signed '
+        'in again it has none, and the person starts over', () async {
+      final worker = FakeWorker();
+      final phone = await _ready(worker, 'matt', 'phone');
+      await phone.e2ee.deleteHere();
+      expect(phone.keys.kept, isEmpty);
+      expect(phone.storeKept, isFalse);
+      await phone.relaunch().start();
+      expect(phone.e2ee.setup, DmSetup.addThisDevice);
+      expect(phone.keys.kept.containsKey(DmKeyName.identity), isFalse);
+    });
+
+    test('nothing set up here: it only signs out', () async {
+      final worker = FakeWorker();
+      final mac = FakeEndpoint(worker, 'matt', 'mac');
+      await mac.e2ee.start();
+      expect(await mac.e2ee.signOutPlan(), DmSignOut.none);
+    });
+
+    test('a device that signed out shows as such to the others, and to '
+        "nobody else's", () async {
+      final worker = FakeWorker();
+      final (phone, _, _) = await twoOfMatts(worker);
+      final ana = FakeEndpoint(worker, 'ana', 'pixel');
+      worker.accountSignOuts['matt'] = {'mac'};
+      await phone.e2ee.readSignedOut();
+      expect(phone.e2ee.signedOut, {'mac'});
+      expect(
+        (await ana.e2ee.routes.keys('matt'))!.signedOut,
+        isEmpty,
+        reason: 'only to its own devices',
+      );
+      worker.accountSignOuts['matt'] = {};
+      await phone.e2ee.readSignedOut();
+      expect(phone.e2ee.signedOut, isEmpty);
+    });
+  });
+
+  group("a friend's first message (row 676)", () {
+    /// Ana's Mac [a] and her second device [c] (added from [a]), and
+    /// Matt's [b]; [route] wraps [a]'s worker calls.
+    Future<(FakeEndpoint, FakeEndpoint, FakeEndpoint)> people(
+      FakeWorker worker, {
+      SignedCall Function(SignedCall worker)? route,
+    }) async {
+      final a = FakeEndpoint(worker, 'ana', 'a', route: route);
+      await a.e2ee.start();
+      await a.e2ee.setUpFirst();
+      final c = FakeEndpoint(worker, 'ana', 'c');
+      await c.e2ee.start();
+      final code = await c.e2ee.offerThisDevice(platform: 'Mac');
+      await a.e2ee.addDevice(await a.e2ee.scanned(code!));
+      await c.e2ee.takeHandoff();
+      await a.e2ee.sync();
+      await c.e2ee.sync();
+      final b = await _ready(worker, 'matt', 'b');
+      return (a, c, b);
+    }
+
+    Future<List<String?>> texts(FakeEndpoint at, String group) async => [
+      for (final message in await at.e2ee.history(group)) message.content.text,
+    ];
+
+    test('another of her devices joining first: the add is made again, '
+        'and the first message reaches Matt', () async {
+      final worker = FakeWorker();
+      FakeEndpoint? other;
+      var race = false;
+      final (a, c, b) = await people(
+        worker,
+        route: (call) => (method, path, [body]) async {
+          if (race && method == 'POST' && path.endsWith('/commits')) {
+            // C sees the new group listed and joins it first (Abbacchio's
+            // row 676): the add comes back 409 epoch.
+            race = false;
+            await other!.e2ee.sync();
+          }
+          return call(method, path, body);
+        },
+      );
+      other = c;
+      race = true;
+      final chat = (await a.e2ee.conversationGroup('v1', 1, 'matt'))!;
+      expect(race, isFalse, reason: 'the race was run');
+      expect(await _leaves(a, chat.groupId), containsAll(['a', 'c', 'b']));
+      expect(a.e2ee.joining, isEmpty);
+
+      await b.e2ee.sync();
+      await a.e2ee.say(chat.groupId, _text('m1', 'ana 1'));
+      expect(a.e2ee.sending['m1']!.state, DmSendState.sent);
+      await b.e2ee.sync();
+      expect(await texts(b, chat.groupId), ['ana 1']);
+    });
+
+    test('with no key package of his: it waits, says so, sends nothing (the '
+        'worker would have taken it), and goes once he is in', () async {
+      final worker = FakeWorker();
+      final (a, c, b) = await people(worker);
+      worker.packages.remove('matt/b');
+      worker.lastResort.remove('matt/b');
+      final chat = (await a.e2ee.conversationGroup('v1', 1, 'matt'))!;
+      expect(a.e2ee.joining, {chat.groupId: 'matt'});
+      final posted = worker.log.length;
+      await a.e2ee.say(chat.groupId, _text('m1', 'ana 1'));
+      expect(a.e2ee.sending['m1']!.state, DmSendState.refused);
+      expect(a.e2ee.sending['m1']!.problem, 'waitingForFriend');
+      expect(
+        worker.log.skip(posted).where((route) => route.contains('messages')),
+        isEmpty,
+        reason: 'nothing on the wire',
+      );
+      expect(await a.device.unsent(), isEmpty, reason: 'nothing encrypted');
+
+      // Her other device leaves the add to the first of hers there.
+      await c.e2ee.sync();
+      final claims = worker.log.where((r) => r.contains('claim')).length;
+      await c.e2ee.sync();
+      expect(worker.log.where((r) => r.contains('claim')).length, claims);
+
+      // His device puts packages up: the next sync of hers adds him.
+      await b.e2ee.sync();
+      a.now += FakeEndpoint.retryAfter.inMilliseconds * 2;
+      await a.e2ee.sync();
+      expect(a.e2ee.joining, isEmpty);
+      await a.e2ee.say(chat.groupId, _text('m2', 'ana 1'));
+      expect(a.e2ee.sending['m2']!.state, DmSendState.sent);
+      await b.e2ee.sync();
+      expect(await texts(b, chat.groupId), ['ana 1']);
+    });
+
+    test("a claimed package for a device not on his list is refused: "
+        'nothing is added or sent, and the chat says it waits', () async {
+      final worker = FakeWorker();
+      final (a, _, _) = await people(
+        worker,
+        route: (call) => (method, path, [body]) async {
+          if (path.endsWith('/key-packages/claim') &&
+              body?['account_id'] == 'matt') {
+            return {
+              'key_packages': [
+                {
+                  'leaf_id': 'b',
+                  'key_package': jsonDecode(
+                    fakeEnvelope({'t': 'kp', 'member': 'matt/rogue', 'n': 1}),
+                  ),
+                },
+              ],
+            };
+          }
+          return call(method, path, body);
+        },
+      );
+      final chat = (await a.e2ee.conversationGroup('v1', 1, 'matt'))!;
+      expect(await _leaves(a, chat.groupId), isNot(contains('rogue')));
+      expect(a.e2ee.joining, {chat.groupId: 'matt'});
+      expect(a.e2ee.problem, contains("isn't on its account's list"));
+      await a.e2ee.say(chat.groupId, _text('m1', 'ana 1'));
+      expect(a.e2ee.sending['m1']!.problem, 'waitingForFriend');
+    });
+
+    test('the worker refusing it (409 waiting_for_friend): never sent, said '
+        'as waiting', () async {
+      final worker = FakeWorker();
+      final (a, _, b) = await people(worker);
+      final chat = (await a.e2ee.conversationGroup('v1', 1, 'matt'))!;
+      await b.e2ee.sync();
+      worker.refuse = (route) =>
+          route.startsWith('POST') && route.endsWith('/messages')
+          ? const AccountServiceError(409, 'waiting_for_friend', '', {})
+          : null;
+      await a.e2ee.say(chat.groupId, _text('m1', 'ana 1'));
+      expect(a.e2ee.sending['m1']!.state, DmSendState.refused);
+      expect(a.e2ee.sending['m1']!.problem, 'waitingForFriend');
+      expect(await a.device.unsent(), isEmpty);
+    });
   });
 
   group("the person's Claktory", () {
@@ -452,13 +932,17 @@ void main() {
       // the checks here, and its grant gone.
       phone.e2ee.claktory = null;
       final listed = phone.device.deviceList(account: 'matt')!.leaves;
-      await phone.device.signDeviceList(
-        version: BigInt.from(9),
-        createdMs: BigInt.one,
-        leaves: [
-          for (final each in listed)
-            if (each.leafId != 'mini#1') each,
-        ],
+      // Signed and taken (pinned once the worker has it).
+      await phone.device.acceptList(
+        account: 'matt',
+        deviceList: await phone.device.signDeviceList(
+          version: BigInt.from(9),
+          createdMs: BigInt.one,
+          leaves: [
+            for (final each in listed)
+              if (each.leafId != 'mini#1') each,
+          ],
+        ),
       );
       expect(await _leaves(phone, chat.groupId), isNot(contains('mini#1')));
       expect(await _leafIds(phone, chat.groupId), contains('mini#1'));
@@ -762,6 +1246,151 @@ void main() {
       },
     );
 
+    // Abbacchio's R5 rows 570–575: a kept device that missed the rotation
+    // had its move refused as behind at every pass of a sync, about 50
+    // requests a second, until the service said Too many tries.
+    test('a kept device whose move is refused as behind waits longer each '
+        'time, joins again from the group, and finishes once it can', () async {
+      final w = await world();
+      expect(
+        await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
+        isNull,
+      );
+      final commits = 'POST groups/${w.chat}/commits';
+      var refusing = true;
+      w.worker.refuse = (route) => refusing && route == commits
+          ? AccountServiceError(409, 'epoch', 'epoch', {
+              'epoch': w.worker.epochOf(w.chat),
+            })
+          : null;
+      final before = w.worker.log.length;
+      int tried() =>
+          w.worker.log.skip(before).where((route) => route == commits).length;
+
+      for (var i = 0; i < 5; i++) {
+        await w.ipad.e2ee.sync();
+      }
+      expect(tried(), 1, reason: 'refused once, then it waits');
+      expect(w.ipad.e2ee.finishingKey, isTrue);
+
+      // After the wait, once more, and behind again: it joins again from
+      // the group as the worker has it (refused too, here).
+      w.ipad.now += const Duration(seconds: 5).inMilliseconds;
+      for (var i = 0; i < 5; i++) {
+        await w.ipad.e2ee.sync();
+      }
+      expect(tried(), 3);
+      expect(w.worker.log, contains('GET groups/${w.chat}/group-info'));
+      // Its join refused, it's out of the group here until the next try.
+      expect(await _leaves(w.ipad, w.chat), isEmpty);
+      for (var i = 0; i < 5; i++) {
+        await w.ipad.e2ee.sync();
+      }
+      expect(tried(), 3, reason: 'nothing more until the wait is over');
+
+      // The worker takes it again: after the waits it's in, moved.
+      refusing = false;
+      w.ipad.now += const Duration(minutes: 10).inMilliseconds;
+      await w.ipad.e2ee.sync();
+      await w.ipad.e2ee.sync();
+      expect(w.ipad.e2ee.finishingKey, isFalse);
+      expect((await w.ipad.device.groups()).every((g) => g.moved), isTrue);
+      expect(await _leaves(w.ipad, w.chat), contains('ipad'));
+    });
+
+    // Abbacchio's row 590: after waiting out a refusal, the kept device
+    // never tried again by itself in a quiet account. Following the
+    // account, it syncs once a wait is over, with nothing new.
+    test('once a wait after a refusal is over, following syncs anyway, '
+        'and the kept device finishes', () async {
+      final w = await world();
+      expect(
+        await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
+        isNull,
+      );
+      final commits = 'POST groups/${w.chat}/commits';
+      var refusing = true;
+      w.worker.refuse = (route) => refusing && route == commits
+          ? AccountServiceError(409, 'epoch', 'epoch', {
+              'epoch': w.worker.epochOf(w.chat),
+            })
+          : null;
+      await w.ipad.e2ee.sync();
+      expect(w.ipad.e2ee.finishingKey, isTrue);
+      expect(w.ipad.e2ee.waitOver, isFalse, reason: 'still waiting');
+
+      refusing = false;
+      w.ipad.now += const Duration(seconds: 6).inMilliseconds;
+      expect(w.ipad.e2ee.waitOver, isTrue);
+      // What following does at its next answer, empty as it is.
+      await w.ipad.e2ee.sync();
+      expect(w.ipad.e2ee.finishingKey, isFalse);
+      expect((await w.ipad.device.groups()).every((g) => g.moved), isTrue);
+      expect(w.ipad.e2ee.waitOver, isFalse, reason: 'once, not every answer');
+    });
+
+    // Abbacchio's row 601: a sync that stopped on the worker's brief 503
+    // wasn't tried again until something else happened in the account.
+    test('a sync stopped by an error is tried again once its wait is over, '
+        'and the kept device takes the new key', () async {
+      final w = await world();
+      expect(
+        await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
+        isNull,
+      );
+      final messages = 'GET groups/${self(w.ipad)}/messages';
+      var failing = true;
+      w.worker.refuse = (route) => failing && route == messages
+          ? AccountServiceError(503, 'unavailable', 'unavailable', const {})
+          : null;
+      // Long after anything its setup waited for.
+      w.ipad.now += const Duration(hours: 1).inMilliseconds;
+      await w.ipad.e2ee.sync();
+      expect(w.ipad.e2ee.problem, contains('unavailable'));
+      expect(w.ipad.e2ee.newKeyFrom, isNull);
+      expect(w.ipad.e2ee.waitOver, isFalse, reason: 'still waiting');
+
+      failing = false;
+      w.ipad.now += const Duration(seconds: 6).inMilliseconds;
+      expect(w.ipad.e2ee.waitOver, isTrue);
+      // What following does at its next answer, empty as it is.
+      await w.ipad.e2ee.sync();
+      expect(w.ipad.e2ee.newKeyFrom, 'phone');
+      expect(w.ipad.device.identity, w.phone.device.identity);
+      expect(w.ipad.e2ee.finishingKey, isFalse);
+      expect(w.ipad.e2ee.waitOver, isFalse);
+    });
+
+    test('syncs that fail during the wait after a failed sync leave the wait '
+        'as it is; one after it doubles it', () async {
+      final w = await world();
+      expect(
+        await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
+        isNull,
+      );
+      final messages = 'GET groups/${self(w.ipad)}/messages';
+      w.worker.refuse = (route) => route == messages
+          ? AccountServiceError(503, 'unavailable', 'unavailable', const {})
+          : null;
+      w.ipad.now += const Duration(hours: 1).inMilliseconds;
+      await w.ipad.e2ee.sync();
+      expect(w.ipad.e2ee.problem, contains('unavailable'));
+      // Five more quick failures, as group events would start them: the
+      // wait still ends retryAfter after the first.
+      for (var i = 0; i < 5; i++) {
+        w.ipad.now += 500;
+        await w.ipad.e2ee.sync();
+      }
+      w.ipad.now += const Duration(seconds: 3).inMilliseconds;
+      expect(w.ipad.e2ee.waitOver, isTrue);
+      // The try once it's over fails too: the next wait is twice as long.
+      await w.ipad.e2ee.sync();
+      w.ipad.now += const Duration(seconds: 9).inMilliseconds;
+      expect(w.ipad.e2ee.waitOver, isFalse);
+      w.ipad.now += const Duration(seconds: 2).inMilliseconds;
+      expect(w.ipad.e2ee.waitOver, isTrue);
+    });
+
     test('the lost device is signed out before the new key; the kept device '
         'takes it from the self group, and Ana holds the moves until she has '
         'it', () async {
@@ -1006,13 +1635,17 @@ void main() {
       // As a build before the fix left it: the list without the Mac, its
       // leaf still in every group.
       final listed = w.phone.device.deviceList(account: 'matt')!.leaves;
-      await w.phone.device.signDeviceList(
-        version: BigInt.from(9),
-        createdMs: BigInt.one,
-        leaves: [
-          for (final each in listed)
-            if (each.leafId != 'mac') each,
-        ],
+      // Signed and taken (pinned once the worker has it).
+      await w.phone.device.acceptList(
+        account: 'matt',
+        deviceList: await w.phone.device.signDeviceList(
+          version: BigInt.from(9),
+          createdMs: BigInt.one,
+          leaves: [
+            for (final each in listed)
+              if (each.leafId != 'mac') each,
+          ],
+        ),
       );
       expect(await _leafIds(w.phone, self(w.phone)), contains('mac'));
       expect(await _leaves(w.phone, self(w.phone)), isNot(contains('mac')));
@@ -1170,6 +1803,124 @@ void main() {
       expect(phone.removal, isNull);
     });
 
+    test('a device signed out by an earlier sweep but still in a group '
+        'ends its row once the next sweep takes it out', () async {
+      final w = await world();
+      w.worker.refuse = (route) => route.endsWith('/commits')
+          ? const AccountServiceUnreachable('x')
+          : null;
+      expect(await w.phone.e2ee.remove('mac', 'MacBook'), DmRemoveStop.failed);
+      w.phone.device.removalRow = null;
+      w.phone.e2ee.removal = null;
+      // The first sweep takes it out of the self group and signs it out;
+      // the chat's commit doesn't go through.
+      final chat = 'POST groups/${w.chat}/commits';
+      w.worker.refuse = (route) =>
+          route == chat ? const AccountServiceUnreachable('x') : null;
+      await w.phone.e2ee.sync();
+      expect(w.worker.signedOut['matt'], {'mac'});
+      expect(await _leafIds(w.phone, self(w.phone)), isNot(contains('mac')));
+      expect(await _leafIds(w.phone, w.chat), contains('mac'));
+      // The next takes it out of the chat: nothing left under way
+      // (Abbacchio's row 613: "isn't fully removed yet" stayed).
+      w.worker.refuse = null;
+      w.phone.now += const Duration(hours: 1).inMilliseconds;
+      await w.phone.e2ee.sync();
+      expect(await _leafIds(w.phone, w.chat), isNot(contains('mac')));
+      expect(w.phone.e2ee.removal, isNull);
+      expect(w.phone.device.removalRow, isNull);
+      expect(await w.phone.e2ee.notFullyRemoved(), isEmpty);
+    });
+
+    test('a list the worker refused is never pinned, so the next one '
+        'another device puts is taken and the next change follows it '
+        '(row 615)', () async {
+      final w = await world();
+      final before = w.phone.device.lists['matt']!.version;
+      final laptop = FakeEndpoint(w.worker, 'matt', 'laptop');
+      await laptop.e2ee.start();
+      final code = await laptop.e2ee.offerThisDevice(platform: 'Mac');
+      final found = await w.phone.e2ee.scanned(code!);
+      w.worker.refuse = (route) => route == 'PUT me/keys'
+          ? AccountServiceError(503, 'unavailable', 'unavailable', const {})
+          : null;
+      await expectLater(w.phone.e2ee.addDevice(found), throwsA(anything));
+      w.worker.refuse = null;
+      expect(w.phone.device.lists['matt']!.version, before);
+      // The iPad takes the Mac off meanwhile, at that same version.
+      await w.ipad.e2ee.removeDevice('mac');
+      final theirs = w.worker.keys['matt']!['version']! as int;
+      expect(theirs, before.toInt() + 1);
+      await w.phone.e2ee.refreshKeys('matt');
+      expect(w.phone.device.lists['matt']!.version.toInt(), theirs);
+      // Added again: on top of the iPad's list.
+      await w.phone.e2ee.addDevice(found);
+      expect(w.worker.keys['matt']!['version'], theirs + 1);
+      expect(
+        w.phone.device.lists['matt']!.leaves.map((each) => each.leafId),
+        allOf(contains('laptop'), isNot(contains('mac'))),
+      );
+    });
+
+    test('a Lock out with a sign-in too old asks to sign in again, then '
+        'carries on where it stopped (row 630)', () async {
+      final w = await world();
+      final old = w.worker.keys['matt']!['identity_key'];
+      w.worker.staleSignIn.add('matt/phone');
+      expect(
+        await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
+        DmKeyChange.signInAgain,
+      );
+      expect(w.worker.keys['matt']!['identity_key'], old);
+      // Kept as under way, so nothing is lost.
+      expect(w.phone.e2ee.removal?.newKey, isTrue);
+      w.worker.staleSignIn.clear();
+      expect(
+        await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
+        isNull,
+      );
+      expect(w.worker.keys['matt']!['identity_key'], isNot(old));
+    });
+
+    test('an add code works once, and never again once its device is '
+        'removed (row 612)', () async {
+      final w = await world();
+      final laptop = FakeEndpoint(w.worker, 'matt', 'laptop');
+      await laptop.e2ee.start();
+      final code = await laptop.e2ee.offerThisDevice(platform: 'Mac');
+      // Shown and not added: it still works.
+      await w.phone.e2ee.scanned(code!);
+      await w.phone.e2ee.addDevice(await w.phone.e2ee.scanned(code));
+      await laptop.e2ee.takeHandoff();
+      await expectLater(
+        w.phone.e2ee.scanned(code),
+        throwsA(isA<DmCodeRefused>()),
+      );
+      // Locked out, with the iPad and the Mac kept: the same code can't
+      // bring it back, here or on the iPad, which took the list without it.
+      for (final device in [w.phone, w.ipad, w.mac, w.phone]) {
+        await device.e2ee.sync();
+      }
+      expect(
+        await w.phone.e2ee.changeKey(remove: ['laptop'], keep: ['ipad', 'mac']),
+        isNull,
+        reason: w.phone.e2ee.problem,
+      );
+      final version = w.worker.keys['matt']!['version'];
+      await w.ipad.e2ee.sync();
+      for (final device in [w.phone, w.ipad]) {
+        await expectLater(
+          device.e2ee.scanned(code),
+          throwsA(isA<DmCodeRefused>()),
+        );
+      }
+      expect(w.worker.keys['matt']!['version'], version);
+      expect(
+        w.phone.device.lists['matt']!.leaves.map((each) => each.leafId),
+        isNot(contains('laptop')),
+      );
+    });
+
     test('a new device another device just added is never taken for one '
         'removed', () async {
       final w = await world();
@@ -1293,6 +2044,75 @@ void main() {
       expect(w.ana.e2ee.heldLong(group), isTrue);
       await w.ana.e2ee.rejoinHeld(group);
       expect(w.ana.e2ee.held, isEmpty);
+    });
+
+    /// Ana's device held at a commit nobody can take; [said] messages
+    /// come after it before she joins again.
+    Future<({FakeEndpoint ana, String group, int held})> heldThenSaid(
+      int said,
+    ) async {
+      final w = await world();
+      final group = w.chat;
+      w.worker.deliver(
+        group,
+        fakeEnvelope({
+          't': 'commit',
+          'g': group,
+          'epoch': w.worker.epochOf(group),
+          'from': 'matt/phone',
+          'members': ['matt/phone', 'ana/pixel'],
+          'id': dmB64(List.filled(32, 98)),
+        }),
+        // The worker's GroupInfo stays the one to join again from.
+        advance: false,
+      );
+      final held = w.worker.mailboxOf(group).length;
+      await w.ana.e2ee.sync();
+      for (var i = 0; i < said; i++) {
+        w.worker.deliver(
+          group,
+          FakeDmDevice.claktorySays(
+            group,
+            'matt/phone',
+            DmContent(kind: 'text', clientMessageId: 'm$i', extraJson: ''),
+            epoch: w.worker.epochOf(group),
+          ),
+        );
+      }
+      // Still held; the worker's list says how far the group is.
+      await w.ana.e2ee.sync();
+      w.ana.now += E2ee.heldFor.inMilliseconds;
+      await w.ana.e2ee.rejoinHeld(group);
+      expect(w.ana.e2ee.held, isEmpty);
+      return (ana: w.ana, group: group, held: held);
+    }
+
+    List<DmMembers> skippedLines(List<DmMessage> history) => [
+      for (final message in history)
+        if (message.members case final members? when members.skipped != null)
+          members,
+    ];
+
+    test('joining again past messages it never read says so, where they '
+        'were (row 654, never silent)', () async {
+      final (:ana, :group, :held) = await heldThenSaid(2);
+      final history = await ana.e2ee.history(group);
+      final lines = skippedLines(history);
+      expect(lines, hasLength(1));
+      expect(lines.single.skipped, '');
+      // Where the unread part began: after everything read before it.
+      final line = history.singleWhere((each) => each.members == lines.single);
+      expect(line.seq, held);
+      expect(history.last, line);
+      expect(
+        history.where((each) => each.content.clientMessageId == 'm0'),
+        isEmpty,
+      );
+    });
+
+    test('joining again past only commits says nothing', () async {
+      final (:ana, :group, held: _) = await heldThenSaid(0);
+      expect(skippedLines(await ana.e2ee.history(group)), isEmpty);
     });
   });
 }

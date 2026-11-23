@@ -20,7 +20,6 @@ const settingsSections = {
   'account',
   'providers',
   'secrets',
-  'apps',
   'pipes',
   'defaults',
   'devices',
@@ -175,6 +174,12 @@ class _ScreenOpenerState extends State<ScreenOpener> {
     final target = request.target;
     final id = target.id;
     switch (target.kind) {
+      // Apps moved from Settings to the Marketplace: an older backend's
+      // settings/apps opens them there.
+      case 'settings' when id == 'apps':
+        AppScope.openPage(context, AppPage.marketplace);
+        backend.marketplaceTab.value = 'apps';
+        return true;
       case 'settings':
         AppScope.openPage(context, AppPage.settings);
         backend.settingsSection.value = settingsSections.contains(id)
@@ -189,6 +194,8 @@ class _ScreenOpenerState extends State<ScreenOpener> {
         return true;
       case 'marketplace':
         AppScope.openPage(context, AppPage.marketplace);
+        // A tab by its id ("apps"); the Marketplace ignores one it lacks.
+        if (id.isNotEmpty) backend.marketplaceTab.value = id;
         return true;
       case 'changelog':
         AppScope.openPage(context, AppPage.changelog);

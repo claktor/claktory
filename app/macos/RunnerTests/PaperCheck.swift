@@ -226,6 +226,27 @@ struct PaperCheck {
     let one = PaperCore.search(doc, query: "page", limit: 3)
     check(one.matches.count == 3 && one.truncated, "a search stops at its limit, and says so")
 
+    // A match's region is its own characters', where PDFKit's bounds take
+    // in far more (Zucchero's field-guide.pdf, rows 91 and 117: a line's
+    // first few placed far too wide, every character as tall as the page).
+    if let guide = PDFDocument(url: URL(fileURLWithPath: "../ios/RunnerTests/fixtures/field-guide.pdf")) {
+      for (query, column) in [("Line 30 of page", 0), ("Line 3 of", 0), ("weather", 44)] {
+        guard let selection = guide.findString(query, withOptions: [.caseInsensitive]).first,
+          let page = selection.pages.first
+        else {
+          check(false, "\(query) is found")
+          continue
+        }
+        let r = PaperCore.tightBounds(of: selection, on: page)
+        check(
+          abs(r.minX - (16.6 + CGFloat(column) * 7.2)) < 2
+            && abs(r.width - CGFloat(query.count) * 7.2) < 3 && r.height > 8 && r.height < 24,
+          "\(query)'s region is its own characters' \(r)")
+      }
+    } else {
+      check(false, "can't read field-guide.pdf")
+    }
+
     // Regions and page space, both ways, on a cropped page.
     let cropped = doc.page(at: 6)!
     let region = CGRect(x: 0.25, y: 0.5, width: 0.5, height: 0.25)

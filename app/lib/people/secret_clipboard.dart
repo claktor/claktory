@@ -1,8 +1,9 @@
 // The clipboard for a code that unlocks something (dms-e2ee §2, H3 as
-// Fugo amended it): a new device's code for adding it by pasting. Copied
-// marked sensitive, so clipboard managers and clipboard history skip it,
-// and cleared when it's done with, unless the person copied something
-// since. The platform's half, on the channel `factory/secret-clipboard`:
+// Fugo amended it): a new device's code for adding it by pasting, and a
+// pipe invite's code (row 166). Copied marked sensitive, so clipboard
+// managers and clipboard history skip it, and cleared when it's done with,
+// unless the person copied something since. The platform's half, on the
+// channel `factory/secret-clipboard`:
 //
 // - `copy` {text: String, seconds: int} → int token: writes [text] as
 //   plain text, marked sensitive. On iOS, expiring after [seconds]
@@ -19,7 +20,11 @@
 // has no half (MissingPluginException), there's no copying: [available]
 // is false.
 
+import 'dart:async';
+
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart'
+    show AppLifecycleListener, AppLifecycleState, WidgetsBinding;
 
 class SecretClipboard {
   const SecretClipboard({
@@ -32,12 +37,13 @@ class SecretClipboard {
   static const seconds = 30 * 60;
 
   /// Copies [text]; its token, for [clear], or null where this device
-  /// can't copy it safely (then it isn't copied at all).
-  Future<int?> copy(String text) async {
+  /// can't copy it safely (then it isn't copied at all). [lasts]: how long
+  /// it works, when that isn't [seconds] (a pipe invite's 10 minutes).
+  Future<int?> copy(String text, {int lasts = seconds}) async {
     try {
       return await channel.invokeMethod<int>('copy', {
         'text': text,
-        'seconds': seconds,
+        'seconds': lasts,
       });
     } on MissingPluginException {
       return null;
@@ -70,4 +76,82 @@ class SecretClipboard {
   /// What's on the clipboard as text, for pasting a code.
   Future<String?> paste() async =>
       (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+}
+
+/// From launch, for the app's life: clears any of this app's codes the
+/// clipboard still holds past their time (Fugo's row 181), at launch and on
+/// each return to the app. The platform's `sweep` reads only what's on the
+/// clipboard (its label and the expiry it carries), never its text, and
+/// clears it only when it's this app's and expired: a code copied before
+/// the app was stopped, or one due while it was away. Where the platform
+/// has no `sweep`, nothing.
+/// Answers how to stop them (for tests).
+VoidCallback startClipboardSweeps({
+  MethodChannel channel = const MethodChannel('factory/secret-clipboard'),
+}) {
+  Future<void> sweep() async {
+    try {
+      await channel.invokeMethod<void>('sweep');
+    } on MissingPluginException {
+      // No sweep here (an older native half, or none).
+    } on PlatformException {
+      // Left for the next return.
+    }
+  }
+
+  // Once its window has the focus Android asks for.
+  void soon() => Timer(const Duration(milliseconds: 500), () {
+    unawaited(sweep());
+  });
+  soon();
+  final sweeps = AppLifecycleListener(onResume: soon);
+  return sweeps.dispose;
+}
+
+/// Clears [token]'s copy on [clipboard] once [lasts] is over, if it's
+/// still there. Android lets an app check its clipboard only while it's in
+/// front, so a clear due while it isn't (the person in their messenger)
+/// waits for it to come back, and is tried again then (Zucchero's row 181).
+void clearWhenDue(SecretClipboard clipboard, int token, Duration lasts) {
+  final clear = _DueClear(clipboard, token);
+  _clears.add(clear);
+  _onResume ??= AppLifecycleListener(
+    // Once its window has the focus Android asks for.
+    onResume: () => Timer(const Duration(milliseconds: 500), _clearDue),
+  );
+  Timer(lasts, () {
+    clear.due = true;
+    _clearDue();
+  });
+}
+
+class _DueClear {
+  _DueClear(this.clipboard, this.token);
+
+  final SecretClipboard clipboard;
+  final int token;
+  var due = false;
+}
+
+final _clears = <_DueClear>[];
+AppLifecycleListener? _onResume;
+
+/// Clears what's due; in front, that's settled (the platform could
+/// check), so it's let go; away, it's kept for the next return.
+void _clearDue() {
+  final due = [
+    for (final clear in _clears)
+      if (clear.due) clear,
+  ];
+  for (final clear in due) {
+    unawaited(clear.clipboard.clear(clear.token));
+  }
+  final state = WidgetsBinding.instance.lifecycleState;
+  if (state == null || state == AppLifecycleState.resumed) {
+    _clears.removeWhere(due.contains);
+  }
+  if (_clears.isEmpty) {
+    _onResume?.dispose();
+    _onResume = null;
+  }
 }

@@ -9,6 +9,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
 import 'agent_name.dart';
+import 'app_access_card.dart' show AppAccessCard;
 import 'app_grant_card.dart';
 import 'attachments.dart';
 import 'backend.dart' show RequestFailure;
@@ -398,8 +399,23 @@ class _TranscriptViewState extends State<TranscriptView>
   late final _find = ConversationFind(
     search: _searchLog,
     pipe: widget.pipeFind != null,
+    // What waits at its end shows, so it's found too (Zucchero's row 207).
+    queued: () => [
+      for (final waiting in _waiting)
+        if (!waiting.gone) (waiting, _queuedWords(waiting.message)),
+    ],
     go: _findGo,
   );
+
+  /// Each queued message's place in the tree, to bring a match in it into
+  /// sight.
+  final _queuedKeys = Expando<GlobalKey>();
+
+  /// The words a queued message's bubble shows, as find matches them.
+  static String _queuedWords(QueuedMessage message) => switch (message.source) {
+    'person' || 'agent' => message.text,
+    _ => message.summary.isEmpty ? message.text : message.summary,
+  };
 
   /// Each entry's place in the tree, by seq, to tell whether a match is in
   /// sight.
@@ -436,6 +452,18 @@ class _TranscriptViewState extends State<TranscriptView>
   /// Brings a match into sight: where it is, if it's built; else goes to
   /// it, loading back to it first when it's older than what's held.
   void _findGo(FoundAt at, int nth, int hits) {
+    if (at.queued case final _Waiting waiting) {
+      // At the end, after every entry: built there, or gone to.
+      if (_bringIntoSight(_queuedKeys[waiting], nth, hits)) return;
+      _exact.value = null;
+      final index = _waiting.indexOf(waiting);
+      if (index < 0) return;
+      _goToFound(
+        widget.transcript.length + index,
+        () => _bringIntoSight(_queuedKeys[waiting], nth, hits),
+      );
+      return;
+    }
     final pipeFind = widget.pipeFind;
     if (at.pipe) {
       if (pipeFind == null) return;
@@ -548,6 +576,10 @@ class _TranscriptViewState extends State<TranscriptView>
       }
     }
     _exact.value = exact;
+    // On a long line in a block that scrolls sideways (code, a tool's
+    // input and output), sideways first: the occurrence gone to, or, where
+    // every one is marked, the first in each block (Zucchero's row 121).
+    _revealAcross(context, [if (single) shown[index] else ...shown]);
     final transform = target.getTransformTo(view);
     final top = MatrixUtils.transformPoint(transform, rect.topLeft).dy;
     final bottom = MatrixUtils.transformPoint(transform, rect.bottomLeft).dy;
@@ -568,6 +600,58 @@ class _TranscriptViewState extends State<TranscriptView>
       _controller.pinned = _atEnd();
     }
     return true;
+  }
+
+  /// Brings the first of [found] in each block of [entry] that scrolls
+  /// sideways into sight there, where it shows cut off: in the middle, so
+  /// what's around it reads too.
+  void _revealAcross(
+    BuildContext entry,
+    List<(RenderParagraph, int, int)> found,
+  ) {
+    final paragraphs = {for (final (paragraph, _, _) in found) paragraph};
+    final elements = <RenderObject, Element>{};
+    void visit(Element element) {
+      if (element is RenderObjectElement &&
+          paragraphs.contains(element.renderObject)) {
+        elements.putIfAbsent(element.renderObject, () => element);
+      }
+      element.visitChildElements(visit);
+    }
+
+    entry.visitChildElements(visit);
+    final revealed = <ScrollableState>{};
+    for (final (paragraph, start, end) in found) {
+      final element = elements[paragraph];
+      final rect = foundRect(paragraph, start, end);
+      if (element == null || rect == null) continue;
+      // The nearest scroll around it, and sideways: its viewport is the
+      // one that reveals it.
+      final across = Scrollable.maybeOf(element);
+      if (across == null ||
+          across.position.axis != Axis.horizontal ||
+          !revealed.add(across)) {
+        continue;
+      }
+      // Its own, not one the conversation sits in.
+      var inside = false;
+      across.context.visitAncestorElements((ancestor) {
+        inside = ancestor == entry;
+        return !inside;
+      });
+      final view = across.context.findRenderObject();
+      if (!inside || view is! RenderBox || !view.hasSize) continue;
+      final transform = paragraph.getTransformTo(view);
+      final left = MatrixUtils.transformPoint(transform, rect.topLeft).dx;
+      final right = MatrixUtils.transformPoint(transform, rect.topRight).dx;
+      if (left >= Space.m && right <= view.size.width - Space.m) continue;
+      final position = across.position;
+      final reveal = RenderAbstractViewport.of(paragraph)
+          .getOffsetToReveal(paragraph, 0.5, rect: rect, axis: Axis.horizontal);
+      position.jumpTo(
+        reveal.offset.clamp(position.minScrollExtent, position.maxScrollExtent),
+      );
+    }
   }
 
   void _stopFollowing() {
@@ -1534,7 +1618,18 @@ class _TranscriptViewState extends State<TranscriptView>
                     opacity: _queuedOpacity(context),
                     child: Column(
                       crossAxisAlignment: side,
-                      children: [bubble, if (!statusClear) ?status],
+                      children: [
+                        // Found in and marked, as an entry is: its words,
+                        // not what's under them.
+                        _Marked(
+                          key: _queuedKeys[waiting] ??= GlobalKey(),
+                          marks: _find.marks,
+                          exact: _exact,
+                          isAt: (at) => at.queued == waiting,
+                          child: bubble,
+                        ),
+                        if (!statusClear) ?status,
+                      ],
                     ),
                   ),
                   // On a phone, what it waits for is read at full strength.
@@ -1616,8 +1711,21 @@ class _TranscriptViewState extends State<TranscriptView>
                     content != null && content.plainText.isNotEmpty,
                 // Reply, for the message the right click is on.
                 menuItems: () => [
-                  if (_pointed.value case final pointed?)
+                  if (_pointed.value case final pointed?) ...[
                     MenuItem('Reply', () => _reply(pointed)),
+                    // The whole message, nothing selected first (friend
+                    // bug #5).
+                    MenuItem(
+                      'Copy message',
+                      () => copyMessage(
+                        messageCopyText(
+                          context,
+                          pointed.text,
+                          markdown: pointed.markdown,
+                        ),
+                      ),
+                    ),
+                  ],
                   if (_pointed.value?.report case final seq?)
                     MenuItem(
                       'Report…',
@@ -1774,8 +1882,7 @@ class _WithLatest extends StatefulWidget {
   State<_WithLatest> createState() => _WithLatestState();
 }
 
-class _WithLatestState extends State<_WithLatest>
-    with WidgetsBindingObserver {
+class _WithLatestState extends State<_WithLatest> with WidgetsBindingObserver {
   /// The transcript's length when the view left its end.
   int? _from;
 
@@ -2337,7 +2444,8 @@ class _EntryViewState extends State<EntryView> {
   VoidCallback? _replyTo(String text, String? from) {
     final scope = context.getInheritedWidgetOfExactType<_ReplyScope>();
     if (scope == null) return null;
-    return () => scope.reply((text: text, from: from, report: null));
+    return () =>
+        scope.reply((text: text, from: from, report: null, markdown: true));
   }
 
   Widget _build() {
@@ -2473,6 +2581,15 @@ class _EntryViewState extends State<EntryView> {
         ),
         Space.l,
       ),
+      Entry_Kind.appAccess => (
+        AppAccessCard(
+          key: ValueKey(entry.appAccess.id),
+          entry.appAccess,
+          agentId: AppScope.of(context).transcript.agentId,
+          seq: seq,
+        ),
+        Space.l,
+      ),
       Entry_Kind.notSet => (const SizedBox.shrink(), 0.0),
     };
     // A message's words, for its Copy and Select text on a phone and its
@@ -2501,6 +2618,7 @@ class _EntryViewState extends State<EntryView> {
               text: words,
               from: from,
               report: report,
+              markdown: entry.whichKind() != Entry_Kind.user,
               child: MessageActions(
                 text: words,
                 markdown: entry.whichKind() != Entry_Kind.user,
@@ -2694,9 +2812,8 @@ class _UserText extends StatelessWidget {
                       child: Text(
                         note,
                         textAlign: TextAlign.end,
-                        style: TypeScale.of(context).caption.copyWith(
-                          color: Palette.of(context).textFaint,
-                        ),
+                        style: TypeScale.of(context).caption
+                            .copyWith(color: Palette.of(context).textFaint),
                       ),
                     ),
                   ),
@@ -3275,7 +3392,27 @@ ReportedReply _reportedIn(BuildContext context, int seq) {
 /// A message in the conversation, its words and who sent it when it's
 /// another agent (null for the agent's own and the person's), and, for
 /// the agent's own reply, its seq, to report it.
-typedef _Pointed = ({String text, String? from, int? report});
+typedef _Pointed = ({String text, String? from, int? report, bool markdown});
+
+/// What copying the whole of a message puts on the clipboard: what a
+/// selection of all of it copies, Markdown's words without its markers
+/// and an @mention as its agent's name ([markdown], an agent's); the
+/// person's own as typed.
+String messageCopyText(
+  BuildContext context,
+  String text, {
+  bool markdown = true,
+}) => markdown
+    ? markdownToPlain(
+        text,
+        agents:
+            context
+                .getInheritedWidgetOfExactType<AgentTints>()
+                ?.agents
+                .values ??
+            const [],
+      )
+    : text;
 
 /// Where a message tells the conversation that the pointer is over it, and
 /// how to reply to one ([_Repliable]).
@@ -3302,10 +3439,14 @@ class _Repliable extends StatelessWidget {
     required this.from,
     required this.child,
     this.report,
+    this.markdown = true,
   });
 
   final String text;
   final String? from;
+
+  /// Whether [text] is Markdown (anything but the person's own).
+  final bool markdown;
 
   /// The agent's own reply's seq, which can be reported; null otherwise.
   final int? report;
@@ -3315,7 +3456,7 @@ class _Repliable extends StatelessWidget {
   Widget build(BuildContext context) {
     final scope = context.getInheritedWidgetOfExactType<_ReplyScope>();
     if (scope == null) return child;
-    final me = (text: text, from: from, report: report);
+    final me = (text: text, from: from, report: report, markdown: markdown);
     return MouseRegion(
       opaque: false,
       hitTestBehavior: HitTestBehavior.translucent,
@@ -3358,6 +3499,11 @@ class _OwnReply extends StatelessWidget {
       outgoing: false,
       wide: true,
       sentMs: sentMs,
+      // With a pointer, Copy beside its foot while it's under the pointer
+      // (friend bug #5); a phone's is in its touch and hold.
+      beside: isPhoneLayout(context) || text.trim().isEmpty
+          ? null
+          : _CopyReply(text: text, seq: seq),
       // What reorders text shows by its code: a reply can repeat what came
       // from outside (proseCodes, Fugo).
       child: Markdown(proseCodes(text)),
@@ -3746,11 +3892,17 @@ class Bubble extends StatelessWidget {
     this.wide = false,
     this.sentMs = 0,
     this.timeColor,
+    this.beside,
   });
 
   final Color color;
   final bool outgoing;
   final Widget child;
+
+  /// Beside a received bubble's foot, past its right edge, in the room
+  /// the column leaves it: the bubble's size and place stay the same
+  /// whatever it is ([_FootBeside]).
+  final Widget? beside;
 
   /// When it was sent, shown small at its foot ([TimeFoot]); 0 for none.
   final int sentMs;
@@ -3769,9 +3921,8 @@ class Bubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
-      builder: (context, constraints) => Align(
-        alignment: outgoing ? Alignment.centerRight : Alignment.centerLeft,
-        child: Padding(
+      builder: (context, constraints) {
+        final bubble = Padding(
           // Room for the tail.
           padding: EdgeInsets.only(
             left: outgoing ? 0 : _BubblePainter.tail,
@@ -3810,8 +3961,208 @@ class Bubble extends StatelessWidget {
               ),
             ),
           ),
-        ),
+        );
+        final beside = this.beside;
+        if (beside != null && !outgoing) {
+          return _FootBeside(children: [bubble, beside]);
+        }
+        return Align(
+          alignment: outgoing ? Alignment.centerRight : Alignment.centerLeft,
+          child: bubble,
+        );
+      },
+    );
+  }
+}
+
+/// A received bubble (the first child) at the left, as [Align] puts it,
+/// and the second beside its foot, past its right edge: laid out after
+/// it, so it never moves or resizes the bubble, and as tall as the bubble
+/// alone. Where the column leaves no room, it overlaps the bubble's edge
+/// rather than leaving the column.
+class _FootBeside extends MultiChildRenderObjectWidget {
+  const _FootBeside({required super.children});
+
+  @override
+  RenderObject createRenderObject(BuildContext context) => _RenderFootBeside();
+}
+
+class _FootBesideData extends ContainerBoxParentData<RenderBox> {}
+
+class _RenderFootBeside extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _FootBesideData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _FootBesideData> {
+  /// Between the bubble's edge and what's beside it.
+  static const gap = Space.xs;
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _FootBesideData) {
+      child.parentData = _FootBesideData();
+    }
+  }
+
+  RenderBox get _bubble => firstChild!;
+
+  @override
+  double computeMinIntrinsicWidth(double height) =>
+      _bubble.getMinIntrinsicWidth(height);
+
+  @override
+  double computeMaxIntrinsicWidth(double height) =>
+      _bubble.getMaxIntrinsicWidth(height);
+
+  @override
+  double computeMinIntrinsicHeight(double width) =>
+      _bubble.getMinIntrinsicHeight(width);
+
+  @override
+  double computeMaxIntrinsicHeight(double width) =>
+      _bubble.getMaxIntrinsicHeight(width);
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) {
+    final bubble = _bubble.getDryLayout(constraints.loosen());
+    return constraints.constrain(
+      Size(
+        constraints.hasBoundedWidth ? constraints.maxWidth : bubble.width,
+        bubble.height,
       ),
+    );
+  }
+
+  @override
+  void performLayout() {
+    final bubble = _bubble;
+    bubble.layout(constraints.loosen(), parentUsesSize: true);
+    size = constraints.constrain(
+      Size(
+        constraints.hasBoundedWidth ? constraints.maxWidth : bubble.size.width,
+        bubble.size.height,
+      ),
+    );
+    (bubble.parentData! as _FootBesideData).offset = Offset.zero;
+    final beside = childAfter(bubble);
+    if (beside == null) return;
+    beside.layout(BoxConstraints.loose(size), parentUsesSize: true);
+    final x = math.max(
+      0.0,
+      math.min(bubble.size.width + gap, size.width - beside.size.width),
+    );
+    (beside.parentData! as _FootBesideData).offset = Offset(
+      x,
+      size.height - beside.size.height,
+    );
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) =>
+      defaultPaint(context, offset);
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
+}
+
+/// Copy, beside an agent's reply's foot while it's under the pointer, or
+/// just copied: Lucide's copy, and for a moment after a click a check and
+/// "Copied" (friend bug #5). It copies what Copy message in the right
+/// click's menu does, the whole reply ([messageCopyText]).
+class _CopyReply extends StatefulWidget {
+  const _CopyReply({required this.text, required this.seq});
+
+  final String text;
+
+  /// The reply's seq: it shows while the pointer is over that reply.
+  final int seq;
+
+  @override
+  State<_CopyReply> createState() => _CopyReplyState();
+}
+
+class _CopyReplyState extends State<_CopyReply> {
+  Timer? _copied;
+
+  @override
+  void dispose() {
+    _copied?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _copy() async {
+    await copyMessage(messageCopyText(context, widget.text));
+    if (!mounted) return;
+    _copied?.cancel();
+    setState(
+      () => _copied = Timer(const Duration(milliseconds: 1500), () {
+        if (mounted) setState(() => _copied = null);
+      }),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pointed = context
+        .getInheritedWidgetOfExactType<_ReplyScope>()
+        ?.pointed;
+    if (pointed == null) return const SizedBox.shrink();
+    return ValueListenableBuilder(
+      valueListenable: pointed,
+      builder: (context, message, _) {
+        final copied = _copied != null;
+        if (!copied && message?.report != widget.seq) {
+          return const SizedBox.shrink();
+        }
+        final palette = Palette.of(context);
+        final button = GlyphButton(
+          label: copied ? 'Copied' : 'Copy message',
+          active: false,
+          onTap: _copy,
+          glyph: (color) => ExtensionGlyph(
+            icon: copied ? 'check' : 'copy',
+            name: 'Copy',
+            color: color,
+            size: 14,
+          ),
+        );
+        if (!copied) return Unselectable(child: button);
+        // The button's size alone, where it was: "Copied" floats over it, a
+        // card's capsule, clear of the bubble's time (Abbacchio's row 668).
+        return Unselectable(
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              button,
+              Positioned(
+                right: 0,
+                bottom: 28 + Space.xs,
+                child: ExcludeSemantics(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Space.s,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: palette.sidebar,
+                      borderRadius: BorderRadius.circular(Radii.control),
+                      border: Border.all(color: palette.hairline),
+                      boxShadow: floatingShadow,
+                    ),
+                    child: Text(
+                      'Copied',
+                      maxLines: 1,
+                      softWrap: false,
+                      style: TypeScale.of(context).caption
+                          .copyWith(color: palette.textMuted),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -3970,15 +4321,14 @@ class _HeaderLine extends StatelessWidget {
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => isPhoneLayout(context)
-      ? ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: Touch.target),
-          child: Align(
-            alignment: AlignmentDirectional.centerStart,
-            child: child,
-          ),
-        )
-      : SizedBox(height: 24, child: child);
+  // At least a finger's size on a phone, 24 elsewhere, and taller when
+  // large text needs it (an iPad at accessibility sizes), never cut.
+  Widget build(BuildContext context) => ConstrainedBox(
+    constraints: BoxConstraints(
+      minHeight: isPhoneLayout(context) ? Touch.target : 24,
+    ),
+    child: Align(alignment: AlignmentDirectional.centerStart, child: child),
+  );
 }
 
 class _ThinkingView extends StatelessWidget {
@@ -4495,37 +4845,65 @@ class _ToolCallView extends StatelessWidget {
                     : Dot(color: failed ? palette.danger : palette.textFaint),
               ),
             ),
-            Text(
-              name,
-              style: TypeScale.of(context).label
-                  .copyWith(color: failed ? palette.danger : palette.text),
-            ),
-            const SizedBox(width: Space.s),
-            // What it does: the command, the path, whom it messages.
+            // Its name first, cut short only when there's no room for it
+            // at all; what it does gives way before it (a narrow pane,
+            // Abbacchio's row 552: the name ran over how long it took).
             Expanded(
-              child: Text.rich(
-                FindHighlight.markText(
-                  context,
-                  summary.text,
-                  (summary.code
-                          ? TypeScale.of(context).code
-                          : TypeScale.of(context).body)
-                      .copyWith(
-                        color: hovered ? palette.text : palette.textMuted,
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final moreStyle = TypeScale.of(context).caption
+                      .copyWith(color: palette.textFaint);
+                  final more = summary.more.isEmpty
+                      ? 0.0
+                      : Space.s + _textWidth(context, summary.more, moreStyle);
+                  return Row(
+                    children: [
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth: math.max(
+                            0,
+                            constraints.maxWidth - Space.s - more,
+                          ),
+                        ),
+                        child: Text(
+                          name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TypeScale.of(context).label.copyWith(
+                            color: failed ? palette.danger : palette.text,
+                          ),
+                        ),
                       ),
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+                      const SizedBox(width: Space.s),
+                      // What it does: the command, the path, whom it
+                      // messages.
+                      Expanded(
+                        child: Text.rich(
+                          FindHighlight.markText(
+                            context,
+                            summary.text,
+                            (summary.code
+                                    ? TypeScale.of(context).code
+                                    : TypeScale.of(context).body)
+                                .copyWith(
+                                  color: hovered
+                                      ? palette.text
+                                      : palette.textMuted,
+                                ),
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (summary.more.isNotEmpty) ...[
+                        const SizedBox(width: Space.s),
+                        Text(summary.more, maxLines: 1, style: moreStyle),
+                      ],
+                    ],
+                  );
+                },
               ),
             ),
-            if (summary.more.isNotEmpty) ...[
-              const SizedBox(width: Space.s),
-              Text(
-                summary.more,
-                style: TypeScale.of(context).caption
-                    .copyWith(color: palette.textFaint),
-              ),
-            ],
             ...ending(open, hovered),
           ],
         ),
@@ -4533,6 +4911,19 @@ class _ToolCallView extends StatelessWidget {
       body: (context) => _ToolCallBody(call: call, running: running),
     );
   }
+}
+
+/// How wide [text] lays out in [style] on one line, at the text size.
+double _textWidth(BuildContext context, String text, TextStyle style) {
+  final painter = TextPainter(
+    text: TextSpan(text: text, style: style),
+    textDirection: Directionality.of(context),
+    textScaler: MediaQuery.textScalerOf(context),
+    maxLines: 1,
+  )..layout();
+  final width = painter.width;
+  painter.dispose();
+  return width;
 }
 
 /// Whether a find went to [call] (the [FindHighlight] above it is

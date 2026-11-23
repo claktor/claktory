@@ -134,7 +134,8 @@ CREATE TABLE IF NOT EXISTS devices (
     platform TEXT NOT NULL,
     version TEXT NOT NULL,
     created INTEGER NOT NULL,
-    last_seen INTEGER NOT NULL
+    last_seen INTEGER NOT NULL,
+    signed_in INTEGER
 );
 CREATE INDEX IF NOT EXISTS devices_account ON devices (account_id);
 CREATE TABLE IF NOT EXISTS device_keys (
@@ -153,6 +154,15 @@ CREATE TABLE IF NOT EXISTS removed_devices (
     removed INTEGER NOT NULL,
     PRIMARY KEY (account_id, account_key)
 );
+CREATE INDEX IF NOT EXISTS removed_devices_key ON removed_devices (account_key);
+-- The account each device key was last signed in to (row 671), kept after
+-- it signs out: a key never signs in to another account, so its direct-
+-- message leaf (the key) never spans two. Goes with the account.
+CREATE TABLE IF NOT EXISTS key_accounts (
+    account_key TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS key_accounts_account ON key_accounts (account_id);
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value INTEGER NOT NULL
@@ -205,6 +215,16 @@ CREATE TABLE IF NOT EXISTS apps_purges (
     tries INTEGER NOT NULL,
     next_try INTEGER NOT NULL
 );
+-- Devices signed out or removed that the user-apps worker hasn't heard of
+-- yet (row 671), asked until it has, like apps_purges.
+CREATE TABLE IF NOT EXISTS apps_sign_outs (
+    account_id TEXT NOT NULL,
+    account_key TEXT NOT NULL,
+    signed_out INTEGER NOT NULL,
+    tries INTEGER NOT NULL,
+    next_try INTEGER NOT NULL,
+    PRIMARY KEY (account_id, account_key)
+) WITHOUT ROWID;
 ";
 
 /// How long a period's id is kept, to know it if it's sent again. A
@@ -217,14 +237,18 @@ pub const PERIOD_AGE: i64 = 90 * 86_400;
 pub const RELEASES_KEPT: i64 = 30 * 86_400;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
+    // Waiting for a lock before anything takes one: a connection still
+    // writing (one about to close, a backup) mustn't fail the open.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     // One transaction (SQLite's DDL is transactional): a crash midway
-    // leaves the database as it was.
-    let tx = conn.unchecked_transaction()?;
+    // leaves the database as it was. It writes (user_version), so it takes
+    // the write lock at once, waiting for it: a read turned write could
+    // only be refused, not wait, once another connection wrote meanwhile.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
     tx.execute_batch(SCHEMA)?;
     if version >= 1 {
@@ -263,6 +287,19 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             }
         }
     }
+    // When a device last signed in with a code (row 630): added in place,
+    // NULL for devices signed in before, which counts as long ago.
+    let signed_in: bool =
+        tx.query_row("SELECT COUNT(*) > 0 FROM pragma_table_info('devices') WHERE name = 'signed_in'", [], |row| row.get(0))?;
+    if !signed_in {
+        tx.execute_batch("ALTER TABLE devices ADD COLUMN signed_in INTEGER")?;
+    }
+    // Keys signed in, or removed, before the service kept each key's
+    // account (row 671): theirs, so they don't sign in to another either.
+    tx.execute_batch(
+        "INSERT OR IGNORE INTO key_accounts (account_key, account_id) SELECT account_key, account_id FROM devices;
+         INSERT OR IGNORE INTO key_accounts (account_key, account_id) SELECT account_key, account_id FROM removed_devices;",
+    )?;
     tx.pragma_update(None, "user_version", 4)?;
     tx.commit()?;
     Ok(conn)
@@ -549,6 +586,11 @@ pub fn moved(
         params![id, backend_key, hash(token), name, version, platform],
     )?;
     Ok(true)
+}
+
+/// Reads a pair in column order, returning the first conversion error.
+fn row2<A: rusqlite::types::FromSql, B: rusqlite::types::FromSql>(row: &rusqlite::Row<'_>) -> rusqlite::Result<(A, B)> {
+    Ok((row.get(0)?, row.get(1)?))
 }
 
 /// Collects an already prepared query, returning the first row error.
@@ -919,11 +961,7 @@ pub fn record_release(conn: &Connection, id: &str, now: i64, ip: &str, epoch: u6
 
 /// A Claktory's kept releases, newest first: (time, IP).
 pub fn releases(conn: &Connection, id: &str, most: u32) -> rusqlite::Result<Vec<(i64, String)>> {
-    query(
-        conn.prepare("SELECT time, ip FROM share_releases WHERE claktory_id = ?1 ORDER BY time DESC LIMIT ?2")?,
-        params![id, most],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
+    query(conn.prepare("SELECT time, ip FROM share_releases WHERE claktory_id = ?1 ORDER BY time DESC LIMIT ?2")?, params![id, most], row2)
 }
 
 /// Replaces a Claktory's endpoints; whether they changed.
@@ -936,9 +974,7 @@ pub fn set_endpoints(conn: &mut Connection, id: &str, backend: &str, devices: &[
         }
     }
     let mut had: Vec<(String, String)> =
-        query(tx.prepare("SELECT endpoint, kind FROM endpoints WHERE claktory_id = ?1")?, params![id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
+        query(tx.prepare("SELECT endpoint, kind FROM endpoints WHERE claktory_id = ?1")?, params![id], row2)?;
     let mut new: Vec<(String, String)> = wanted.iter().map(|(endpoint, kind)| (endpoint.clone(), (*kind).to_owned())).collect();
     had.sort();
     new.sort();
@@ -1041,6 +1077,8 @@ pub fn delete_account(conn: &mut Connection, account: &Account, apps: bool, now:
     )?;
     tx.execute("DELETE FROM devices WHERE account_id = ?1", params![account.id])?;
     tx.execute("DELETE FROM removed_devices WHERE account_id = ?1", params![account.id])?;
+    tx.execute("DELETE FROM key_accounts WHERE account_id = ?1", params![account.id])?;
+    tx.execute("DELETE FROM apps_sign_outs WHERE account_id = ?1", params![account.id])?;
     tx.execute("DELETE FROM requests WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM sessions WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM accounts WHERE id = ?1", params![account.id])?;
@@ -1060,7 +1098,7 @@ pub fn apps_purges_due(conn: &Connection, now: i64, limit: u32) -> rusqlite::Res
     query(
         conn.prepare("SELECT account_id, tries FROM apps_purges WHERE next_try <= ?1 ORDER BY next_try LIMIT ?2")?,
         params![now, limit],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        row2,
     )
 }
 
@@ -1142,9 +1180,7 @@ pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Va
             &["day", "version", "rolled_back", "crashes"],
         )?;
         let setup: (Option<i64>, Option<i64>) =
-            conn.query_row("SELECT model_connected, first_run FROM claktories WHERE id = ?1", params![claktory.id], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?;
+            conn.query_row("SELECT model_connected, first_run FROM claktories WHERE id = ?1", params![claktory.id], row2)?;
         let days: Vec<String> =
             query(conn.prepare("SELECT day FROM seen_days WHERE claktory_id = ?1 ORDER BY day")?, params![claktory.id], |row| row.get(0))?;
         claktories_out.push(json!({
@@ -1194,11 +1230,19 @@ pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Va
         params![account.id],
         |row| Ok(json!({"account_key": row.get::<_, String>(0)?, "removed": row.get::<_, i64>(1)?})),
     )?;
+    // Every device key that last signed in to this account, signed out
+    // since or not: none of them signs in to another (row 671).
+    let keys_out: Vec<String> = query(
+        conn.prepare("SELECT account_key FROM key_accounts WHERE account_id = ?1 ORDER BY account_key")?,
+        params![account.id],
+        |row| row.get(0),
+    )?;
     Ok(json!({
         "account": {"id": account.id, "email": account.email, "created": account.created, "last_sign_in": account.last_sign_in},
         "claktories": claktories_out,
         "devices": devices_out,
         "removed_devices": removed_out,
+        "device_keys": keys_out,
     }))
 }
 
@@ -1212,10 +1256,7 @@ pub fn insert_session(conn: &Connection, token: &str, email: &str, csrf: &str, e
 
 /// A web session's (email, CSRF token), while it lasts.
 pub fn session(conn: &Connection, token: &str, now: i64) -> rusqlite::Result<Option<(String, String)>> {
-    conn.query_row("SELECT email, csrf FROM sessions WHERE token_hash = ?1 AND expires > ?2", params![hash(token), now], |row| {
-        Ok((row.get(0)?, row.get(1)?))
-    })
-    .optional()
+    conn.query_row("SELECT email, csrf FROM sessions WHERE token_hash = ?1 AND expires > ?2", params![hash(token), now], row2).optional()
 }
 
 pub fn delete_session(conn: &Connection, token: &str) -> rusqlite::Result<()> {
@@ -1258,9 +1299,12 @@ pub struct Device {
     /// When it signed in.
     pub created: i64,
     pub last_seen: i64,
+    /// When it last signed in with a code, the first time or again; None
+    /// before the service kept it.
+    pub signed_in: Option<i64>,
 }
 
-const DEVICE: &str = "SELECT account_key, account_id, name, platform, version, created, last_seen FROM devices";
+const DEVICE: &str = "SELECT account_key, account_id, name, platform, version, created, last_seen, signed_in FROM devices";
 
 fn device_row(row: &rusqlite::Row) -> rusqlite::Result<Device> {
     Ok(Device {
@@ -1271,6 +1315,7 @@ fn device_row(row: &rusqlite::Row) -> rusqlite::Result<Device> {
         version: row.get(4)?,
         created: row.get(5)?,
         last_seen: row.get(6)?,
+        signed_in: row.get(7)?,
     })
 }
 
@@ -1298,6 +1343,8 @@ pub enum Bound {
     TooMany,
     /// This key was removed from the account.
     Removed,
+    /// This key was last signed in to another account (row 671).
+    OtherAccount,
 }
 
 /// Signs a device in from a request whose code was right: makes the
@@ -1314,6 +1361,11 @@ pub fn bind_device(conn: &mut Connection, request: &Request, now: i64) -> rusqli
         tx.execute("DELETE FROM requests WHERE id = ?1", params![request.id])?;
         tx.commit()?;
         return Ok(Bound::Removed);
+    }
+    if key_of_another_account(&tx, &request.email, account_key)? {
+        tx.execute("DELETE FROM requests WHERE id = ?1", params![request.id])?;
+        tx.commit()?;
+        return Ok(Bound::OtherAccount);
     }
     let account_id = account_for(&tx, &request.email, now)?;
     let others: u32 = tx.query_row(
@@ -1337,9 +1389,15 @@ pub fn bind_device(conn: &mut Connection, request: &Request, now: i64) -> rusqli
         bump_allowlist(&tx)?;
     }
     tx.execute(
-        "INSERT INTO devices (account_key, account_id, name, platform, version, created, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT (account_key) DO UPDATE SET account_id = ?2, name = ?3, platform = ?4, version = ?5, created = ?6, last_seen = ?7",
+        "INSERT INTO devices (account_key, account_id, name, platform, version, created, last_seen, signed_in)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+         ON CONFLICT (account_key) DO UPDATE SET account_id = ?2, name = ?3, platform = ?4, version = ?5, created = ?6, last_seen = ?7,
+         signed_in = ?7",
         params![account_key, account_id, name, platform, version, created, now],
+    )?;
+    tx.execute(
+        "INSERT INTO key_accounts (account_key, account_id) VALUES (?1, ?2) ON CONFLICT (account_key) DO UPDATE SET account_id = ?2",
+        params![account_key, account_id],
     )?;
     tx.execute("UPDATE accounts SET last_sign_in = ?2 WHERE id = ?1", params![account_id, now])?;
     tx.execute("DELETE FROM requests WHERE id = ?1", params![request.id])?;
@@ -1348,28 +1406,53 @@ pub fn bind_device(conn: &mut Connection, request: &Request, now: i64) -> rusqli
 }
 
 /// Signs a device out: its account key is unbound, and the keys it got
-/// assertions for leave the allowlist. False when it wasn't signed in, or
-/// (given `account_id`) isn't that account's.
-pub fn unbind_device(conn: &mut Connection, account_key: &str, account_id: Option<&str>) -> rusqlite::Result<bool> {
+/// assertions for leave the allowlist. The account it was signed in to;
+/// none when it wasn't signed in, or (given `account_id`) isn't that
+/// account's. With `apps`, the user-apps worker is to hear of it
+/// (`apps_sign_outs`).
+pub fn unbind_device(conn: &mut Connection, account_key: &str, account_id: Option<&str>, apps: bool, now: i64) -> rusqlite::Result<Option<String>> {
     let tx = conn.transaction()?;
-    let removed = unbind(&tx, account_key, account_id)?;
+    let unbound = unbind(&tx, account_key, account_id, apps.then_some(now))?;
     tx.commit()?;
-    Ok(removed)
+    Ok(unbound)
 }
 
 /// Removes a device from an account for good (another of its devices, or
 /// the account page, asks): the key is unbound (if it's the account's) and
 /// remembered, so it never signs in to that account again. Remembered also when it isn't
 /// bound now (signed out already, say). False when it wasn't the account's.
-pub fn remove_device(conn: &mut Connection, account_key: &str, account_id: &str, now: i64) -> rusqlite::Result<bool> {
+pub fn remove_device(conn: &mut Connection, account_key: &str, account_id: &str, apps: bool, now: i64) -> rusqlite::Result<bool> {
     let tx = conn.transaction()?;
     tx.execute(
         "INSERT INTO removed_devices (account_id, account_key, removed) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
         params![account_id, account_key, now],
     )?;
-    let removed = unbind(&tx, account_key, Some(account_id))?;
+    let removed = unbind(&tx, account_key, Some(account_id), apps.then_some(now))?.is_some();
     tx.commit()?;
     Ok(removed)
+}
+
+/// The device keys removed from an account, for the user-apps worker.
+pub fn removed_devices(conn: &Connection, account_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare("SELECT account_key FROM removed_devices WHERE account_id = ?1 ORDER BY account_key")?;
+    statement.query_map([account_id], |row| row.get(0))?.collect()
+}
+
+/// Whether this key was removed from any account (exactly this key: the
+/// column compares bytes).
+pub fn key_removed(conn: &Connection, account_key: &str) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT EXISTS (SELECT 1 FROM removed_devices WHERE account_key = ?1)", params![account_key], |row| row.get(0))
+}
+
+/// Whether this key was last signed in to an account other than the one
+/// with this email, or than a new one (row 671): signed in there now or
+/// signed out since, it never signs in anywhere else.
+pub fn key_of_another_account(conn: &Connection, email: &str, account_key: &str) -> rusqlite::Result<bool> {
+    let last: Option<String> =
+        conn.query_row("SELECT account_id FROM key_accounts WHERE account_key = ?1", params![account_key], |row| row.get(0)).optional()?;
+    let Some(last) = last else { return Ok(false) };
+    let this: Option<String> = conn.query_row("SELECT id FROM accounts WHERE email = ?1", params![email], |row| row.get(0)).optional()?;
+    Ok(this.as_deref() != Some(last.as_str()))
 }
 
 /// Whether this key was removed from the account with this email.
@@ -1382,17 +1465,49 @@ pub fn device_removed(conn: &Connection, email: &str, account_key: &str) -> rusq
     )
 }
 
-fn unbind(tx: &Connection, account_key: &str, account_id: Option<&str>) -> rusqlite::Result<bool> {
-    let removed = match account_id {
-        Some(account_id) => {
-            tx.execute("DELETE FROM devices WHERE account_key = ?1 AND account_id = ?2", params![account_key, account_id])?
-        }
-        None => tx.execute("DELETE FROM devices WHERE account_key = ?1", params![account_key])?,
-    };
-    if removed > 0 && tx.execute("DELETE FROM device_keys WHERE account_key = ?1", params![account_key])? > 0 {
+fn unbind(tx: &Connection, account_key: &str, account_id: Option<&str>, apps: Option<i64>) -> rusqlite::Result<Option<String>> {
+    let bound = device(tx, account_key)?.map(|device| device.account_id).filter(|bound| account_id.is_none_or(|account_id| account_id == bound));
+    let Some(bound) = bound else { return Ok(None) };
+    tx.execute("DELETE FROM devices WHERE account_key = ?1", params![account_key])?;
+    if tx.execute("DELETE FROM device_keys WHERE account_key = ?1", params![account_key])? > 0 {
         bump_allowlist(tx)?;
     }
-    Ok(removed > 0)
+    if let Some(now) = apps {
+        tx.execute(
+            "INSERT INTO apps_sign_outs (account_id, account_key, signed_out, tries, next_try) VALUES (?1, ?2, ?3, 0, ?3)
+             ON CONFLICT (account_id, account_key) DO UPDATE SET signed_out = ?3, tries = 0, next_try = ?3",
+            params![bound, account_key, now],
+        )?;
+    }
+    Ok(Some(bound))
+}
+
+/// Signed-out devices due to be told to the user-apps worker at `now` (at
+/// most `limit`): account, key, when, and how often it was asked already.
+pub fn apps_sign_outs_due(conn: &Connection, now: i64, limit: u32) -> rusqlite::Result<Vec<(String, String, i64, i64)>> {
+    let mut statement = conn.prepare(
+        "SELECT account_id, account_key, signed_out, tries FROM apps_sign_outs WHERE next_try <= ?1 ORDER BY next_try LIMIT ?2",
+    )?;
+    statement.query_map(params![now, limit], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?.collect()
+}
+
+/// The worker heard of that sign-out: done, unless the device signed out
+/// again since (signed back in meanwhile), which it's still to hear of.
+pub fn apps_signed_out(conn: &Connection, account_id: &str, account_key: &str, signed_out: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM apps_sign_outs WHERE account_id = ?1 AND account_key = ?2 AND signed_out = ?3",
+        params![account_id, account_key, signed_out],
+    )?;
+    Ok(())
+}
+
+/// The worker didn't hear of it: asked again at `next_try`.
+pub fn apps_sign_out_failed(conn: &Connection, account_id: &str, account_key: &str, next_try: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE apps_sign_outs SET tries = tries + 1, next_try = ?3 WHERE account_id = ?1 AND account_key = ?2",
+        params![account_id, account_key, next_try],
+    )?;
+    Ok(())
 }
 
 /// Records that a device got an assertion for `device_key`, which puts the

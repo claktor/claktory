@@ -20,7 +20,7 @@ use claktory_dm_crypto::device_list::{DeviceList, Listed};
 use claktory_dm_crypto::content::{self, ByAgent, Content};
 use claktory_dm_crypto::envelope::Envelope;
 use claktory_dm_crypto::group::{Group, Incoming, LeafKey, Me, Outgoing};
-use claktory_dm_crypto::identity::IdentityKey;
+use claktory_dm_crypto::identity::{IdentityKey, IdentityPublic};
 use claktory_dm_crypto::provider::{Crypto, Provider};
 use claktory_dm_crypto::storage::{SCHEMA, SealKey};
 use claktory_dm_crypto::validation::{GroupKind, Pins};
@@ -120,15 +120,21 @@ impl Device {
     async fn call_apps(&self, method: &str, route: &str, body: Value) -> (u16, Value) {
         let uid = std::fs::metadata(&self.dir).expect("the folder").uid();
         let (path, query) = route.split_once('?').unwrap_or((route, ""));
+        // One reading of the clock: signed in "now" must never be a second
+        // after the request's own time.
+        let now = factoryd::transcript::now_ms() / 1000;
         let request = AppRequest::Call {
             method: method.into(),
             path: format!("/v1/apps/{path}"),
             query: query.into(),
-            time: factoryd::transcript::now_ms() / 1000,
+            time: now,
             caller: Caller::Device {
                 account_id: self.account.clone(),
                 device_key: self.device_key.clone(),
                 registrations: self.registrations(),
+                removed_devices: Vec::new(),
+                signed_in_at: Some(now),
+                bound_devices: None,
             },
         };
         let bytes = if body.is_null() { Vec::new() } else { body.to_string().into_bytes() };
@@ -233,6 +239,61 @@ impl Device {
         assert_eq!(status, 200, "{answer}");
     }
 
+    /// The person's device `seed` lost every key and starts over on it (row
+    /// 630): the same account key (leaf id), a new leaf key and identity, the
+    /// account's keys before (`retired`, oldest first: the one it lost and
+    /// any it replaced, as the worker showed them) retired in its pins, and
+    /// a version-1 list naming only itself sent with `me/keys/rotate`. It's
+    /// in no group yet.
+    pub async fn start_over(dir: &Path, account: &str, seed: u8, retired: &[IdentityPublic]) -> Device {
+        let mut fresh = Device::new(dir, account, seed);
+        let mut pins = Pins::default();
+        let (first, rest) = retired.split_first().expect("a key before");
+        pins.first_contact(account, *first).expect("the first key");
+        for key in rest {
+            pins.key_changed(account, *key).expect("a key since");
+        }
+        pins.key_changed(account, fresh.identity.public()).expect("its new key");
+        pins.seen(account);
+        fresh.pins = pins;
+        fresh.version = 1;
+        let list = DeviceList { account_id: account.to_owned(), version: 1, created_ms: 1, leaves: fresh.listed.clone() };
+        let bytes = list.sign(&fresh.identity).expect("signed").to_bytes().expect("bytes");
+        fresh.pins.accept_list(account, &bytes).expect("its own list");
+        fresh.signed_list = bytes.clone();
+        let body = json!({"identity_key": b64(&fresh.identity.public().0), "device_list": b64(&bytes), "version": 1});
+        let (status, answer) = fresh.call("POST", "me/keys/rotate", body).await;
+        assert_eq!(status, 200, "{answer}");
+        fresh
+    }
+
+    /// Rejoins `group_id` by external commit from the worker's GroupInfo,
+    /// then takes out its account's dead leaves in its next commit, as a
+    /// device that started over does: the seqs of the two commits.
+    pub async fn rejoin(&mut self, group_id: &str, kind: GroupKind) -> (i64, Option<i64>) {
+        let (status, info) = self.call("GET", &format!("groups/{group_id}/group-info"), Value::Null).await;
+        assert_eq!(status, 200, "{info}");
+        let bytes = unenvelope(&info["group_info"]);
+        let id = URL_SAFE_NO_PAD.decode(group_id).expect("an id");
+        let out = self.with(|provider, me| Group::rejoin(provider, me, &self.pins, kind.clone(), &id, &bytes).expect("rejoined").1);
+        self.groups.insert(group_id.to_owned(), kind);
+        let body = json!({"commit": envelope(out.commit), "group_info": envelope(out.group_info.expect("a GroupInfo"))});
+        let (status, taken) = self.call("POST", &format!("groups/{group_id}/commits"), body).await;
+        assert_eq!(status, 200, "{taken}");
+        let joined = taken["seq"].as_i64().expect("a seq");
+        self.positions.insert(group_id.to_owned(), joined);
+        self.with(|provider, _| self.load(provider, group_id).merge_pending(provider).expect("merged"));
+        let dead = self.with(|provider, me| self.load(provider, group_id).remove_dead(provider, me, &self.pins).expect("made"));
+        let Some(out) = dead else { return (joined, None) };
+        let body = json!({"commit": envelope(out.commit), "group_info": envelope(out.group_info.expect("a GroupInfo"))});
+        let (status, taken) = self.call("POST", &format!("groups/{group_id}/commits"), body).await;
+        assert_eq!(status, 200, "{taken}");
+        let removed = taken["seq"].as_i64().expect("a seq");
+        self.positions.insert(group_id.to_owned(), removed);
+        self.with(|provider, _| self.load(provider, group_id).merge_pending(provider).expect("merged"));
+        (joined, Some(removed))
+    }
+
     /// Takes in `friend`'s new security key, as a friend's device does once
     /// it fetched their keys: the old one retired for good.
     pub fn key_changed(&mut self, friend: &Device) {
@@ -323,7 +384,7 @@ impl Device {
 
     /// Says `content` in a self group or channel: its seq.
     pub async fn say(&self, group_id: &str, content: &Content) -> i64 {
-        let bytes = self.with(|provider, me| self.load(provider, group_id).send(provider, me, &content.encode().expect("encoded")).expect("sent"));
+        let bytes = self.with(|provider, me| self.load(provider, group_id).send(provider, me, &self.pins, &content.encode().expect("encoded")).expect("sent"));
         let body = json!({"client_message_id": content.client_message_id, "envelope": envelope(bytes)});
         let (status, said) = self.call("POST", &format!("groups/{group_id}/messages"), body).await;
         assert_eq!(status, 200, "{said}");
@@ -335,7 +396,7 @@ impl Device {
     pub async fn post(&self, group_id: &str, conversation: &str, generation: i64, n: u32, text: &str) -> i64 {
         let id = format!("message-{}-{n:014}", &self.device_key[..6]);
         let content = Content::text(&id, text);
-        let bytes = self.with(|provider, me| self.load(provider, group_id).send(provider, me, &content.encode().expect("encoded")).expect("sent"));
+        let bytes = self.with(|provider, me| self.load(provider, group_id).send(provider, me, &self.pins, &content.encode().expect("encoded")).expect("sent"));
         let body = json!({"client_message_id": id, "contact_generation": generation, "envelope": envelope(bytes)});
         let (status, sent) = self.call("POST", &format!("conversations/{conversation}/messages"), body).await;
         assert_eq!(status, 200, "{sent}");
@@ -494,7 +555,7 @@ impl Device {
         message.by_agent =
             Some(ByAgent { claktory_id, agent_id: text("agent_id"), incarnation: text("incarnation"), name: text("agent_name") });
         let bytes = self.with(|provider, me| {
-            self.load(provider, conversation_group).send(provider, me, &message.encode().expect("encoded")).expect("sealed")
+            self.load(provider, conversation_group).send(provider, me, &self.pins, &message.encode().expect("encoded")).expect("sealed")
         });
         let digest: String =
             Envelope::from_json(&opened.shown["envelope"]).expect("an envelope").digest().iter().map(|byte| format!("{byte:02x}")).collect();

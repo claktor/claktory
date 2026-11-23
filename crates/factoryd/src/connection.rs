@@ -728,6 +728,15 @@ async fn handle(
         Some(Request::AddPipeLiaison(request)) => crate::pipes::add_liaison(factory, &request).await,
         Some(Request::DismissPipeStart(request)) => crate::pipes::start::dismiss(factory, &request),
         Some(Request::DecideAppGrant(request)) => crate::user_apps::decide(factory, &request).await,
+        Some(Request::DecideAppAccess(request)) => crate::apps::access::decide(factory, &request).await,
+        Some(Request::UndoAppAccessChange(request)) => {
+            return match crate::apps::changes::undo(factory, &request).await {
+                Ok(undone) => Body::AppAccessUndone(undone),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::UndoModelChange(request)) => crate::extensions::models::undo(factory, &request).await,
+        Some(Request::ListAppFiles(request)) => return answer(crate::apps::data::list_files(factory, &request).await, Body::AppFiles),
         // Browser control: each binds to this connection itself, never to
         // anything the message says about who sent it.
         Some(Request::BrowserCapability(request)) => connection.browser.capability(&request),
@@ -774,6 +783,13 @@ async fn handle(
         Some(Request::TranscribeAudio(request)) => crate::speech::dictation::request(factory, &request, &connection.dictations),
         Some(Request::AnswerAsk(request)) => crate::extensions::ask::answer(factory, &request).await,
         Some(Request::SetSpendCap(request)) => crate::pipes::spend::set_caps(factory, &request),
+        Some(Request::TryAgainNow(request)) => factory.try_again_now(&request.agent_id).await,
+        Some(Request::ContinueOnAlternative(request)) => {
+            crate::usage_switch::continue_on(factory, &request.agent_id, request.all_waiting, request.expected_others).await
+        }
+        Some(Request::SwitchBack(request)) => {
+            crate::usage_switch::switch_back(factory, &request.agent_id, request.all, request.expected_others).await
+        }
         Some(Request::ReportReply(request)) => return answer(crate::account::reports::report(factory, request).await, Body::ReplyReport),
         Some(Request::SetAccountService(request)) => crate::account::set_service(factory, &request.url).await,
         Some(Request::ShowRecoveryKey(_)) => return answer(vault::show_recovery_key(factory, vault_session), Body::RecoveryKey),

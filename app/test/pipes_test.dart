@@ -1,11 +1,16 @@
+import 'package:factory_app/devices.dart' show QrCode;
 import 'package:factory_app/controls.dart' show Field, Toggle;
 import 'package:factory_app/decision.dart';
+import 'package:factory_app/inbox.dart' show InboxView;
 import 'package:factory_app/map.dart';
 import 'package:factory_app/map_layout.dart';
 import 'package:factory_app/pipe_timeline.dart' show pipeItemKey;
+import 'package:factory_app/pipe_start.dart' show inviteLifetime;
 import 'package:factory_app/pipes.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/scanner.dart' show CameraAccess;
 import 'package:factory_app/scope.dart';
+import 'package:factory_app/sidebar.dart' show Sidebar;
 import 'package:factory_app/taint_label.dart';
 import 'package:factory_app/update.dart';
 import 'package:fixnum/fixnum.dart';
@@ -14,6 +19,9 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+import 'phone_test.dart' show menuButton, phone;
+import 'secret_clipboard_fake.dart';
+import 'selection_test.dart' show watchClipboard;
 
 Agent _agent(
   String id,
@@ -139,6 +147,49 @@ void main() {
     await tester.tap(find.text('Acme launch'));
     await settle(tester);
     expect(harness.last.selectPipe.pipeId, 'pipe1');
+  });
+
+  testWidgets("on a Mac, Needs you opens from a pipe's view in its place, "
+      "not out of sight beside the agent last chosen; again goes back to the "
+      "pipe (Abbacchio's row 638)", (tester) async {
+    final harness = await show(
+      tester,
+      _workspace([
+        _pipe(waiting: [4]),
+      ], selected: 'pipe1'),
+    );
+    expect(find.byType(PipeView), findsOneWidget);
+    final row = find.descendant(
+      of: find.byType(Sidebar),
+      matching: find.text('Needs you'),
+    );
+    await tester.tap(row);
+    await settle(tester);
+    expect(harness.page.value, AppPage.inbox);
+    expect(find.byType(InboxView), findsOneWidget);
+    expect(find.byType(PipeView), findsNothing);
+    expect(
+      harness.backend.sent.where((m) => m.hasSetLayout()),
+      isEmpty,
+      reason: "nothing put in the agent's layout",
+    );
+
+    await tester.tap(row);
+    await settle(tester);
+    expect(harness.page.value, AppPage.agent);
+    expect(find.byType(PipeView), findsOneWidget);
+  });
+
+  testWidgets("an open pipe with no lead and nothing yet says no agent hears "
+      "what comes in (Abbacchio's row 638)", (tester) async {
+    await show(tester, _workspace([_pipe()], selected: 'pipe1'));
+    expect(
+      find.text(
+        'Nothing here yet. No agent hears what comes in until you choose a '
+        'lead in the pipe’s settings. You can write here too.',
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets('an open pipe shows its chat in place of the agent: their '
@@ -447,6 +498,27 @@ void main() {
           "Claktory confirmed this pipe is with ana@acme.example's Claktory.",
         ),
         findsOneWidget,
+      );
+    });
+
+    testWidgets("an invite not used yet: the settings' sentences start "
+        "capitalized, \"The other side\" (Zucchero's row 175)", (tester) async {
+      final pipe = _pipe(state: PipeState.PIPE_STATE_INVITED)
+        ..peer = PipePeer();
+      await show(tester, _workspace([pipe], selected: 'pipe1'));
+      await tester.tap(find.text('Acme launch').last);
+      await settle(tester);
+      expect(find.text('Pipe settings'), findsOneWidget);
+      expect(find.text('The other side sees this.'), findsOneWidget);
+      expect(
+        find.textContaining('own safety rules. The other side never sees it.'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('. the other side'), findsNothing);
+      expect(pipeStatus(pipe), 'Waiting for your invite to be used');
+      expect(
+        pipeOfflineText(pipe..online = false),
+        startsWith('The other side’s Claktory is offline.'),
       );
     });
 
@@ -824,6 +896,160 @@ void main() {
     expect(invite.projectId, 'p1');
     expect(invite.name, 'Factory ⇄');
     expect(find.text('claktory-pipe://?w=x&s=y'), findsOneWidget);
+    // To scan in person, the code as a QR code, once asked for (friend
+    // bug #2).
+    expect(find.byType(QrCode), findsNothing);
+    await tester.tap(find.text('Show QR code'));
+    await settle(tester);
+    expect(
+      tester.widget<QrCode>(find.byType(QrCode)).text,
+      'claktory-pipe://?w=x&s=y',
+    );
+    expect(find.text('Show QR code'), findsNothing);
+    expect(find.textContaining('can scan it in Claktory'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('on a phone, a second tap where Make invite was copies the '
+      "code rather than closing it unseen; Done opens the pipe (Zucchero's "
+      'row 157)', (tester) async {
+    final harness = await show(tester, _workspace([]), size: phone);
+    harness.backend.pipeInvite = PipeInvite(
+      pipeId: 'swap',
+      code: 'claktory-pipe://?w=x&s=y',
+    );
+    final clipboard = FakeSecretClipboard.install();
+    await tester.tap(menuButton());
+    await pumpFrames(tester);
+    await tester.longPress(find.text('Factory').first);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Project settings'));
+    await pumpFrames(tester);
+    await tester.ensureVisible(find.text('Connect a pipe…'));
+    await tester.tap(find.text('Connect a pipe…'));
+    await pumpFrames(tester);
+    await tester.tap(find.text('Make an invite'));
+    await settle(tester);
+    final where = tester.getCenter(find.text('Make invite'));
+    await tester.tapAt(where);
+    harness.backend.workspace.apply(
+      harness.backend.workspace.workspace.deepCopy()
+        ..pipes.add(
+          Pipe(
+            id: 'swap',
+            projectId: 'p1',
+            name: 'Factory ⇄',
+            state: PipeState.PIPE_STATE_INVITED,
+          ),
+        ),
+    );
+    await settle(tester);
+    expect(find.text('Send this code'), findsOneWidget);
+    expect(find.text('claktory-pipe://?w=x&s=y'), findsOneWidget);
+
+    // Tapped again where Make invite was: the code is copied, and stays.
+    expect(tester.getCenter(find.text('Copy code')).dx, closeTo(where.dx, 40));
+    await tester.tapAt(tester.getCenter(find.text('Copy code')));
+    await settle(tester);
+    expect(clipboard.copies.single.$1, 'claktory-pipe://?w=x&s=y');
+    expect(find.text('Copied'), findsOneWidget);
+    expect(find.text('claktory-pipe://?w=x&s=y'), findsOneWidget);
+    expect(harness.backend.sent.where((m) => m.hasSelectPipe()), isEmpty);
+
+    await tester.tap(find.text('Done'));
+    await pumpFrames(tester);
+    expect(find.text('Send this code'), findsNothing);
+    expect(
+      harness.backend.sent
+          .lastWhere((m) => m.hasSelectPipe())
+          .selectPipe
+          .pipeId,
+      'swap',
+    );
+    // Cleared once dead.
+    await tester.pump(inviteLifetime);
+    expect(clipboard.cleared, [1]);
+  });
+
+  testWidgets("an invite's code is copied marked sensitive, for as long as "
+      "it works, and cleared once it's dead (Fugo's row 166)", (tester) async {
+    final clipboard = FakeSecretClipboard.install();
+    final expires = DateTime.now().add(const Duration(minutes: 10));
+    final harness = await show(tester, _workspace([]));
+    harness.backend.pipeInvite = PipeInvite(
+      pipeId: 'swap',
+      code: 'claktory-pipe://?w=x&s=y',
+    );
+    final copied = watchClipboard(tester);
+    await tester.tap(find.text('Factory'), buttons: kSecondaryButton);
+    await settle(tester);
+    await tester.ensureVisible(find.text('Connect a pipe…'));
+    await tester.tap(find.text('Connect a pipe…'));
+    await settle(tester);
+    await tester.tap(find.text('Make an invite'));
+    await settle(tester);
+    await tester.tap(find.text('Make invite'));
+    harness.backend.workspace.apply(
+      harness.backend.workspace.workspace.deepCopy()
+        ..pipes.add(
+          Pipe(
+            id: 'swap',
+            projectId: 'p1',
+            name: 'Factory ⇄',
+            state: PipeState.PIPE_STATE_INVITED,
+            inviteExpiresMs: Int64(expires.millisecondsSinceEpoch),
+          ),
+        ),
+    );
+    await settle(tester);
+    await tester.tap(find.text('Copy code'));
+    await settle(tester);
+    expect(clipboard.copies.single.$1, 'claktory-pipe://?w=x&s=y');
+    expect(clipboard.copies.single.$2, inInclusiveRange(590, 600));
+    expect(copied, isEmpty, reason: 'never on the plain clipboard');
+    expect(find.text('Copied'), findsOneWidget);
+    // Kept while it works, even with the form closed; cleared once dead.
+    await tester.tap(find.text('Done'));
+    await settle(tester);
+    await tester.pump(const Duration(minutes: 9));
+    expect(clipboard.cleared, isEmpty);
+    await tester.pump(const Duration(minutes: 1, seconds: 1));
+    expect(clipboard.cleared, [1]);
+  });
+
+  testWidgets('I have a code scans it where there is a camera, then shows '
+      'its preview, to Connect (friend bug #2)', (tester) async {
+    final harness = Harness(_workspace([]));
+    harness.camera.state = CameraAccess.denied;
+    harness.backend.pipeInvitePreview = PipeInvitePreview(
+      code: 'claktory-pipe://?w=a',
+      name: 'Acme launch',
+      peer: PipePeer(ownerName: 'Ana', projectName: 'Acme Site'),
+    );
+    await harness.show(tester, size: const Size(1200, 900));
+    await settle(tester);
+    await tester.tap(find.text('Factory'), buttons: kSecondaryButton);
+    await settle(tester);
+    await tester.ensureVisible(find.text('Connect a pipe…'));
+    await tester.tap(find.text('Connect a pipe…'));
+    await settle(tester);
+    await tester.tap(find.text('I have a code'));
+    await settle(tester);
+    // A camera refused so far still offers Scan: the scanner says how to
+    // allow it.
+    expect(
+      find.text('Paste the code you were sent, or scan it.'),
+      findsOneWidget,
+    );
+    harness.camera.state = CameraAccess.granted;
+    await tester.tap(find.text('Scan code'));
+    await pumpFrames(tester);
+    harness.camera.scan('claktory-pipe://?w=a');
+    await pumpFrames(tester);
+    await settle(tester);
+    expect(harness.last.readPipeInvite.code, 'claktory-pipe://?w=a');
+    expect(find.text('Connect Factory with Acme Site?'), findsOneWidget);
+    expect(harness.backend.sent.where((m) => m.hasAcceptPipeInvite()), isEmpty);
   });
 
   testWidgets('a code from someone else: its preview, then Connect', (
@@ -1056,12 +1282,9 @@ void main() {
         find.text('Let Omar run commands on this computer?'),
         findsOneWidget,
       );
+      // Having read the pipe means nothing any more (#346).
       expect(
-        find.text(
-          'It will be able to reach your files, secrets and network. It has '
-          "read messages from Ana's Claktory, so clear its conversation "
-          'first to start it afresh.',
-        ),
+        find.text('It will be able to reach your files, secrets and network.'),
         findsOneWidget,
       );
       // Cancel keeps it limited.
@@ -1103,23 +1326,15 @@ void main() {
       expect(harness.last.updatePipe.quarantined.agentIds, ['june']);
     });
 
-    testWidgets('the pipe lists the agents that read it, to clear on '
-        'purpose', (tester) async {
-      final harness = await show(tester, limits());
-      harness.backend.pipeChat.load(PipeTranscript(pipeId: 'pipe1'));
-      await settle(tester);
-      expect(find.text('Has read this pipe', findRichText: true), findsNothing);
+    testWidgets('the pipe no longer lists who read it (#346, Matt)', (
+      tester,
+    ) async {
+      // An older backend's mark, as Omar's here.
+      await show(tester, limits());
       expect(
         find.textContaining('Has read this pipe', findRichText: true),
-        findsOneWidget,
+        findsNothing,
       );
-      await tester.tap(find.text('Clear conversation…'));
-      await settle(tester);
-      expect(find.text("Clear Omar's conversation?"), findsOneWidget);
-      await tester.tap(find.text('Clear conversation'));
-      await settle(tester);
-      final clear = harness.last.runCommand;
-      expect((clear.agentId, clear.name), ('omar', 'clear'));
     });
 
     testWidgets("a limited agent's mark names its pipes", (tester) async {
@@ -1154,73 +1369,30 @@ void main() {
   });
 
   group('taint label', () {
-    final pipes = [_pipe()];
-    PipeTaint read(List<String> via, {String pipe = 'pipe1'}) =>
-        PipeTaint(pipeId: pipe, pipeName: 'Acme launch', viaNames: via);
-
-    test('who read which pipe, and through whom', () {
-      expect(taintLines([read(const [])], agent: 'June', pipes: pipes), [
-        "from June, which reads the pipe with Ana's Claktory",
-      ]);
+    test('only web pages count, in one line (#346, Matt)', () {
+      PipeTaint page(String site) => PipeTaint(kind: 'browser', pipeName: site);
+      final pipe = PipeTaint(pipeId: 'pipe1', pipeName: 'Acme launch');
+      final dm = PipeTaint(
+        kind: 'dm',
+        pipeName: 'Direct messages with Ana · K7QF2M',
+      );
+      expect(taintLine([pipe, dm], agent: 'June'), isNull);
       expect(
-        taintLines(
-          [
-            read(const ['Liaison']),
-          ],
-          agent: 'June',
-          pipes: pipes,
-        ),
-        ["from Liaison, which reads the pipe with Ana's Claktory"],
+        taintLine([pipe, page('https://docs.example.com')], agent: 'Ada'),
+        'from Ada, which read a page on https://docs.example.com',
       );
       expect(
-        taintLines(
-          [
-            read(const ['Liaison', 'Bruno', 'Lea']),
-          ],
-          agent: 'June',
-          pipes: pipes,
-        ),
-        [
-          "from Lea, which heard from the pipe with Ana's Claktory via "
-              'Liaison → Bruno',
-        ],
-      );
-      // A pipe that's gone, by its name.
-      expect(
-        taintLines(
-          [read(const [], pipe: 'gone')],
-          agent: 'June',
-          pipes: pipes,
-        ),
-        ['from June, which reads the pipe “Acme launch”'],
+        taintLine([
+          page('https://a.example'),
+          page('https://b.example'),
+          page('https://a.example'),
+          page('https://c.example'),
+        ], agent: 'Ada'),
+        'from Ada, which read 3 pages',
       );
     });
 
-    test('a site, direct messages, and a kind still to come', () {
-      expect(
-        taintLines(
-          [
-            PipeTaint(kind: 'browser', pipeName: 'https://docs.example.com'),
-            PipeTaint(
-              kind: 'dm',
-              pipeName: 'Direct messages with Ana · K7QF2M',
-              viaNames: ['Ada', 'Lea'],
-            ),
-            PipeTaint(kind: 'later', pipeName: 'something new'),
-          ],
-          agent: 'Ada',
-          pipes: pipes,
-        ),
-        [
-          'from Ada, which read a page on https://docs.example.com',
-          'from Lea, which heard from direct messages with Ana · K7QF2M '
-              'via Ada',
-          'from Ada, which read something new',
-        ],
-      );
-    });
-
-    testWidgets('a line per pipe; nothing when none', (tester) async {
+    testWidgets('one line after a globe; nothing for pipes', (tester) async {
       final harness = Harness(_workspace([_pipe()]));
       await harness.show(
         tester,
@@ -1228,24 +1400,23 @@ void main() {
           children: [
             TaintLabel(
               taint: [
-                read(const ['Liaison']),
-                read(const [], pipe: 'gone'),
+                PipeTaint(pipeId: 'pipe1', pipeName: 'Acme launch'),
+                PipeTaint(kind: 'browser', pipeName: 'https://a.example'),
+                PipeTaint(kind: 'browser', pipeName: 'https://b.example'),
               ],
               agent: 'June',
             ),
-            const TaintLabel(taint: [], agent: 'June'),
+            TaintLabel(
+              taint: [PipeTaint(pipeId: 'pipe1', pipeName: 'Acme launch')],
+              agent: 'Omar',
+            ),
           ],
         ),
       );
-      expect(
-        find.text("from Liaison, which reads the pipe with Ana's Claktory"),
-        findsOneWidget,
-      );
-      expect(
-        find.text('from June, which reads the pipe “Acme launch”'),
-        findsOneWidget,
-      );
-      expect(find.byType(PortalGlyph), findsNWidgets(2));
+      expect(find.text('from June, which read 2 pages'), findsOneWidget);
+      expect(find.textContaining('Omar'), findsNothing);
+      expect(find.textContaining('the pipe'), findsNothing);
+      expect(find.byType(PortalGlyph), findsNothing);
     });
   });
 

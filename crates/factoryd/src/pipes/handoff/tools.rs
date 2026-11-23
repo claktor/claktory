@@ -243,12 +243,11 @@ struct ReadArgs {
     file: Option<usize>,
 }
 
-/// Opens a report's file for its reader: it has then read the pipe.
+/// Opens a report's file for its reader.
 fn open_file(factory: &Arc<Factory>, agent: &str, report: i64, index: usize) -> Result<ToolResult, String> {
     let found = super::readable(factory, agent, "id = ?2", &[&report]).into_iter().next();
     let report = found.filter(|report| report.read.is_some() || super::deliverable(factory, report)).ok_or_else(|| format!("You have no report {report}."))?;
     let (file, bytes) = super::attachments::open(factory, &report.pipe, report.id, index)?;
-    crate::pipes::agents::taint_with(factory, &report.liaison, agent, &report.taint);
     let pipe = factory.pipes.get(&report.pipe).map_or_else(|| format!("pipe {}", report.pipe), |record| super::label(&record));
     let about = format!("File {index} of report {} ({pipe} #{}), from the other side: \"{}\", {} bytes.", report.id, report.number, escape(&file.name), file.size);
     if let Some(mime) = file.image.filter(|_| factory.takes_images(agent)) {
@@ -387,11 +386,6 @@ fn read(factory: &Arc<Factory>, agent: &str, args: ReadArgs) -> Result<ToolResul
                 }
             }
         }
-        // What the liaison had read reaches the reader through it, its pipe first.
-        for report in &reports {
-            crate::pipes::agents::taint_with(factory, &report.liaison, agent, &report.taint);
-        }
-        factory.broadcast_workspace(&factory.lock());
     }
     let last = reports.last().map_or(0, |report| report.id);
     let _ = write!(text, "Next: handoff_read {{\"since\": {last}}}.");

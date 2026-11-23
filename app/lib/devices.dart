@@ -13,12 +13,15 @@ import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
 import 'links.dart' show confirmPairing, pairingFingerprint;
+import 'pasted_code.dart';
 import 'mobile/device.dart' show deviceCapabilities;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/metrics.dart' show TypeScale;
 import 'mobile/input.dart' show InputKind;
 import 'protocol/factory/v1/factory.pb.dart';
+import 'phone.dart' show pairingProblem;
 import 'rail.dart' show ClaktoriesScope;
+import 'scan_code.dart';
 import 'scope.dart';
 import 'tunnel_client.dart';
 import 'settings_view.dart';
@@ -173,9 +176,10 @@ class _DeviceRowState extends State<_DeviceRow> with SettingRequests {
         : DateTime.fromMillisecondsSinceEpoch(device.confirmByMs.toInt());
     final late = confirmBy != null && !confirmBy.isAfter(widget.now);
     // On a phone two buttons don't fit beside the words: they go under them,
-    // as one does at large text sizes.
+    // as they do on any device at large text sizes (an iPad's left the
+    // words a sliver, Zucchero's row 133).
     final stacked =
-        isPhoneLayout(context) && (largeText(context) || confirmBy != null);
+        largeText(context) || (isPhoneLayout(context) && confirmBy != null);
     final actions = [
       if (confirmBy != null)
         Button(
@@ -868,6 +872,35 @@ class FactoryChooser extends StatefulWidget {
 class _FactoryChooserState extends State<FactoryChooser> {
   final _code = TextEditingController();
 
+  /// Whether Scan code shows beside the field: where there's a camera
+  /// (friend bug #2).
+  var _canScan = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      final can = await canOfferScan(context);
+      if (mounted && can != _canScan) setState(() => _canScan = can);
+    });
+  }
+
+  /// Scans the other Claktory's code, which then connects as a pasted one
+  /// does, once the person says so.
+  Future<void> _scan() async {
+    final scanned = await scanCode(
+      context,
+      title: 'Scan code',
+      check: (text) => pairingProblem(text, scanned: true),
+    );
+    if (scanned == null || !mounted) return;
+    _code.text = scanned;
+    if (pastedPairingCode(scanned) case final target?) {
+      await _connectPasted(target);
+    }
+  }
+
   @override
   void dispose() {
     _code.dispose();
@@ -910,12 +943,21 @@ class _FactoryChooserState extends State<FactoryChooser> {
       listenable: Listenable.merge([connections, _code]),
       builder: (context, _) {
         final pasted = _code.text.trim();
-        final target = parsePairingCode(pasted);
+        final target = pastedPairingCode(pasted);
         final current = connections.current;
         return FormFrame(
           title: 'Your Claktories',
           error: pasted.isNotEmpty && target == null
-              ? "That isn't a Claktory code."
+              ? otherCodeProblem(
+                      pasted,
+                      device: thisDeviceKind,
+                      // An iPhone's or iPad's Claktory is on a Mac, as the phone's
+                      // pairing screen says (Zucchero's row 219).
+                      where: defaultTargetPlatform == TargetPlatform.iOS
+                          ? onMac
+                          : whereItRuns,
+                    ) ??
+                    "That isn't a Claktory code."
               : null,
           submitLabel: 'Connect',
           onSubmit: target == null
@@ -960,18 +1002,36 @@ class _FactoryChooserState extends State<FactoryChooser> {
             const SizedBox(height: Space.l),
             Field(
               label: 'Connect to another Claktory',
-              note:
-                  "Paste the code from that Claktory's Settings → Devices, "
-                  'or the one `factoryd pair` prints on a server.',
-              child: TextField(
-                controller: _code,
-                placeholder: 'Paste code',
-                autocorrect: false,
-                textCapitalization: TextCapitalization.none,
-                autofocus: true,
-                onSubmitted: (_) {
-                  if (target != null) unawaited(_connectPasted(target));
-                },
+              note: _canScan
+                  ? "Scan or paste the code from that Claktory's Settings → "
+                        'Devices, or the one `factoryd pair` prints on a '
+                        'server.'
+                  : "Paste the code from that Claktory's Settings → Devices, "
+                        'or the one `factoryd pair` prints on a server.',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  TextField(
+                    controller: _code,
+                    placeholder: 'Paste code',
+                    autocorrect: false,
+                    textCapitalization: TextCapitalization.none,
+                    autofocus: true,
+                    onSubmitted: (_) {
+                      if (target != null) unawaited(_connectPasted(target));
+                    },
+                  ),
+                  if (_canScan) ...[
+                    const SizedBox(height: Space.s),
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: Button(
+                        label: 'Scan code',
+                        onPressed: () => unawaited(_scan()),
+                      ),
+                    ),
+                  ],
+                ],
               ),
             ),
           ],

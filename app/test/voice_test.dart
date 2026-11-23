@@ -30,6 +30,9 @@ class FakeRecorder implements VoiceRecorder {
   final requests = <bool>[];
   String? recordingInto;
   var cancelled = 0;
+
+  /// How long what it records lasts.
+  Duration duration = const Duration(seconds: 42);
   RecordingFailure? failure;
   final _events = StreamController<RecorderEvent>.broadcast();
 
@@ -68,9 +71,7 @@ class FakeRecorder implements VoiceRecorder {
   Future<Recording?> stop() async {
     final path = recordingInto;
     recordingInto = null;
-    return path == null
-        ? null
-        : Recording(path: path, duration: const Duration(seconds: 42));
+    return path == null ? null : Recording(path: path, duration: duration);
   }
 
   @override

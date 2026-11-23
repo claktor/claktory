@@ -6,10 +6,15 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/tool_views.dart';
 import 'package:factory_app/transcript.dart' show TranscriptView;
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+import 'ipad/as_ipad.dart';
+import 'ipad/window_fixtures.dart' show TextFactor;
+import 'panes_test.dart' show beside, snapshot;
+import 'phone_sizes_test.dart' show loadGeist;
 import 'rivet_test.dart' show admin;
 
 Workspace _workspace({ViewNode? layout}) => Workspace(
@@ -888,6 +893,52 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
     });
 
+    // Zucchero's row 136: a later show in place of the oldest pane kept
+    // its id for another page, and a click brought that forward.
+    testWidgets('a pane that shows something else now is passed by: the '
+        'click goes to the file', (tester) async {
+      final reused = ViewNode(
+        id: 'root',
+        split: ViewSplit(
+          axis: ViewAxis.VIEW_AXIS_ROW,
+          children: [
+            ViewNode(
+              id: 'chat',
+              leaf: ViewLeaf(kind: 'chat'),
+            ),
+            ViewNode(
+              id: 'v1',
+              leaf: ViewLeaf(kind: 'inbox'),
+            ),
+            ViewNode(
+              id: 'v2',
+              leaf: ViewLeaf(kind: 'text', path: '/tmp/notes.md'),
+            ),
+          ],
+        ),
+      );
+      final harness = await showing(tester, [
+        call(
+          'show',
+          {'path': '/tmp/notes.md'},
+          details: {
+            'path': '/tmp/notes.md',
+            'kind': 'text',
+            'pane': 'v1',
+            'agent': 'a1',
+          },
+        ),
+      ], layout: reused);
+      await tester.tap(inTranscript(find.text('notes.md')));
+      await tester.pump();
+      expect(harness.backend.highlights.pointedAt.value?.keys, ['pane:a1:v2']);
+      expect(
+        harness.backend.highlights.glows.map((glow) => glow.key),
+        isNot(contains('pane:a1:v1')),
+      );
+      await tester.pump(const Duration(seconds: 2));
+    });
+
     testWidgets('once its pane is closed, a click opens it again', (
       tester,
     ) async {
@@ -1198,5 +1249,134 @@ void main() {
       'when src/, a.csv change',
     );
     expect(describeWhen({'watch': 'tail -F x'}), 'when tail -F x prints');
+  });
+
+  // Abbacchio's rows 544 and 552: in a conversation narrowed to about 200
+  // px by a pane beside it, a tool's name ran over how long it took, and
+  // the show card's folder left its file no room.
+  group('with the app\'s font', () {
+    setUpAll(loadGeist);
+    for (final width in [700.0, 800.0]) {
+      testWidgets('in a narrow conversation a call keeps its name, and the '
+          'show card its file ($width)', (tester) async {
+        final harness = Harness(snapshot(layout: beside()));
+        harness.backend.transcript.load(
+          Transcript(
+            agentId: 'a1',
+            entries: [
+              call('secrets_collect', {'name': 'Cloudflare token for deploys'}),
+              call(
+                'show',
+                {'path': 'docs/notes-on-the-spring-survey.md'},
+                seq: 2,
+                details: {
+                  'path':
+                      '/Users/me/factory/docs/notes-on-the-spring-survey.md',
+                  'kind': 'text',
+                  'pane': 'v1',
+                  'agent': 'a1',
+                },
+              ),
+            ],
+          ),
+        );
+        await harness.show(tester, size: Size(width, 800));
+        await settle(tester);
+        expect(tester.takeException(), isNull);
+        expect(
+          tester.getSize(inTranscript(find.text('secrets_collect'))).width,
+          greaterThan(40),
+        );
+        expect(
+          tester
+              .getSize(inTranscript(find.text('notes-on-the-spring-survey.md')))
+              .width,
+          greaterThan(40),
+        );
+      });
+    }
+  });
+
+  // Zucchero's row 140: on an iPad at AX5, rows of a fixed height cut their
+  // text at the top and bottom.
+  group('on an iPad at AX5', () {
+    Future<void> show(WidgetTester tester, List<Entry> entries) async {
+      asIPad();
+      tester.platformDispatcher.textScaleFactorTestValue = TextFactor.ax5;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final harness = Harness(_workspace());
+      harness.backend.transcript.load(
+        Transcript(agentId: 'a1', entries: entries),
+      );
+      await harness.show(tester, size: const Size(1032, 1376));
+      await settle(tester);
+    }
+
+    testWidgets('Talk to Sam grows with its name, never cut', (tester) async {
+      await show(tester, [
+        call(
+          'agents_suggest_talk',
+          {'agent': 'Sam', 'message': 'Hi.', 'reason': 'Sam knows.'},
+          output: 'Suggested.',
+          details: {
+            'agent_id': 'builder',
+            'agent_name': 'Sam',
+            'agent_role': 'Backend',
+            'message': 'Hi.',
+            'reason': 'Sam knows.',
+          },
+        ),
+      ]);
+      final label = find.text('Talk to Sam');
+      await tester.ensureVisible(label);
+      await settle(tester);
+      final paragraph = tester.renderObject<RenderParagraph>(label);
+      final whole = paragraph.getDryLayout(
+        BoxConstraints(maxWidth: paragraph.size.width),
+      );
+      expect(paragraph.size.height, greaterThanOrEqualTo(whole.height - 0.5));
+      final button = tester.getRect(
+        find
+            .ancestor(of: label, matching: find.byType(AnimatedContainer))
+            .first,
+      );
+      final text = tester.getRect(label);
+      expect(text.top, greaterThanOrEqualTo(button.top));
+      expect(text.bottom, lessThanOrEqualTo(button.bottom));
+    });
+
+    testWidgets("a database call's three lines of SQL show whole, not folded", (
+      tester,
+    ) async {
+      await show(tester, [
+        call(
+          'db_query',
+          {'sql': 'SELECT name\nFROM leads\nWHERE won'},
+          details: {
+            'instance': '',
+            'columns': ['name'],
+            'rows': 2,
+            'more': 0,
+          },
+        ),
+      ]);
+      expect(find.text('Show more'), findsNothing);
+    });
+
+    testWidgets('four lines and more fold under Show more', (tester) async {
+      await show(tester, [
+        call(
+          'db_query',
+          {'sql': 'SELECT name\nFROM leads\nWHERE won\nORDER BY name'},
+          details: {
+            'instance': '',
+            'columns': ['name'],
+            'rows': 2,
+            'more': 0,
+          },
+        ),
+      ]);
+      expect(find.text('Show more'), findsOneWidget);
+    });
   });
 }

@@ -425,8 +425,14 @@ fn check_values(values: &[Value]) -> Result<(), VaultError> {
         if !seen.insert(value.variable.as_str()) {
             return Err(VaultError::Invalid(format!("{} is there twice.", value.variable)));
         }
-        // A binary file's base64 is a third longer than the file.
-        let size = if value.binary { value.value.len() / 4 * 3 } else { value.value.len() };
+        // A binary file's base64 is a third longer than the file: its size
+        // is what the base64 decodes to, padding left out.
+        let size = if value.binary {
+            let padding = value.value.bytes().rev().take_while(|byte| *byte == b'=').count().min(2);
+            (value.value.len() / 4 * 3).saturating_sub(padding)
+        } else {
+            value.value.len()
+        };
         if size > MAX_VALUE {
             return Err(VaultError::Invalid(format!("{}'s value is over 1 MB.", value.variable)));
         }

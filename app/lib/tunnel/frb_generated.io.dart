@@ -157,6 +157,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DmByAgent dco_decode_box_autoadd_dm_by_agent(dynamic raw);
 
   @protected
+  DmCommit dco_decode_box_autoadd_dm_commit(dynamic raw);
+
+  @protected
   DmContent dco_decode_box_autoadd_dm_content(dynamic raw);
 
   @protected
@@ -164,6 +167,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DmGroupKind dco_decode_box_autoadd_dm_group_kind(dynamic raw);
+
+  @protected
+  DmJoining dco_decode_box_autoadd_dm_joining(dynamic raw);
 
   @protected
   DmMembers dco_decode_box_autoadd_dm_members(dynamic raw);
@@ -215,6 +221,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DmHandoffSealed dco_decode_dm_handoff_sealed(dynamic raw);
+
+  @protected
+  DmJoining dco_decode_dm_joining(dynamic raw);
 
   @protected
   DmLeafKind dco_decode_dm_leaf_kind(dynamic raw);
@@ -304,6 +313,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<DmUnsent> dco_decode_list_dm_unsent(dynamic raw);
 
   @protected
+  List<Uint8List> dco_decode_list_list_prim_u_8_strict(dynamic raw);
+
+  @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
 
   @protected
@@ -322,7 +334,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DmByAgent? dco_decode_opt_box_autoadd_dm_by_agent(dynamic raw);
 
   @protected
+  DmCommit? dco_decode_opt_box_autoadd_dm_commit(dynamic raw);
+
+  @protected
   DmDeviceList? dco_decode_opt_box_autoadd_dm_device_list(dynamic raw);
+
+  @protected
+  DmJoining? dco_decode_opt_box_autoadd_dm_joining(dynamic raw);
 
   @protected
   DmMembers? dco_decode_opt_box_autoadd_dm_members(dynamic raw);
@@ -499,6 +517,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DmByAgent sse_decode_box_autoadd_dm_by_agent(SseDeserializer deserializer);
 
   @protected
+  DmCommit sse_decode_box_autoadd_dm_commit(SseDeserializer deserializer);
+
+  @protected
   DmContent sse_decode_box_autoadd_dm_content(SseDeserializer deserializer);
 
   @protected
@@ -510,6 +531,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DmGroupKind sse_decode_box_autoadd_dm_group_kind(
     SseDeserializer deserializer,
   );
+
+  @protected
+  DmJoining sse_decode_box_autoadd_dm_joining(SseDeserializer deserializer);
 
   @protected
   DmMembers sse_decode_box_autoadd_dm_members(SseDeserializer deserializer);
@@ -565,6 +589,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DmHandoffSealed sse_decode_dm_handoff_sealed(SseDeserializer deserializer);
+
+  @protected
+  DmJoining sse_decode_dm_joining(SseDeserializer deserializer);
 
   @protected
   DmLeafKind sse_decode_dm_leaf_kind(SseDeserializer deserializer);
@@ -658,6 +685,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<DmUnsent> sse_decode_list_dm_unsent(SseDeserializer deserializer);
 
   @protected
+  List<Uint8List> sse_decode_list_list_prim_u_8_strict(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
 
   @protected
@@ -678,7 +710,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  DmCommit? sse_decode_opt_box_autoadd_dm_commit(SseDeserializer deserializer);
+
+  @protected
   DmDeviceList? sse_decode_opt_box_autoadd_dm_device_list(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DmJoining? sse_decode_opt_box_autoadd_dm_joining(
     SseDeserializer deserializer,
   );
 
@@ -891,6 +931,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_dm_commit(
+    DmCommit self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_dm_content(
     DmContent self,
     SseSerializer serializer,
@@ -905,6 +951,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_dm_group_kind(
     DmGroupKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_dm_joining(
+    DmJoining self,
     SseSerializer serializer,
   );
 
@@ -982,6 +1034,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     DmHandoffSealed self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_dm_joining(DmJoining self, SseSerializer serializer);
 
   @protected
   void sse_encode_dm_leaf_kind(DmLeafKind self, SseSerializer serializer);
@@ -1083,6 +1138,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_list_dm_unsent(List<DmUnsent> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_list_prim_u_8_strict(
+    List<Uint8List> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
 
   @protected
@@ -1108,8 +1169,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_dm_commit(
+    DmCommit? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_dm_device_list(
     DmDeviceList? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_joining(
+    DmJoining? self,
     SseSerializer serializer,
   );
 

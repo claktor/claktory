@@ -90,7 +90,7 @@ impl Host for Stand {
 
     fn data_sources(&mut self) -> Vec<DataSource> {
         vec![
-            DataSource { id: RECORDS.into(), label: "Claktory's records".into(), granted: self.records },
+            DataSource { id: ACTIVITY.into(), label: "Activity".into(), granted: self.records },
             DataSource { id: AGENT_DB.into(), label: "Rivet's database".into(), granted: self.rivet },
         ]
     }
@@ -98,7 +98,7 @@ impl Host for Stand {
     fn data_query(&mut self, source: &str, sql: &str, params: &Value) -> Result<Value, DataError> {
         self.queries.push((source.to_owned(), sql.to_owned(), params.clone()));
         let granted = match source {
-            RECORDS => self.records,
+            ACTIVITY => self.records,
             AGENT_DB => self.rivet,
             _ => return Err(DataError::UnknownSource),
         };
@@ -179,7 +179,7 @@ fn records() -> rusqlite::Connection {
          CREATE TABLE messages (id INTEGER PRIMARY KEY, agent TEXT NOT NULL, created INTEGER NOT NULL);
          CREATE TABLE checklist_items (agent TEXT NOT NULL, id INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL);
          CREATE TABLE agent_usage (hour INTEGER NOT NULL, agent TEXT NOT NULL, agent_name TEXT NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL);
-         CREATE TABLE tasks (id INTEGER PRIMARY KEY, agent TEXT NOT NULL, task TEXT NOT NULL, command TEXT NOT NULL, started INTEGER NOT NULL, ended INTEGER);
+         CREATE TABLE tasks (id INTEGER PRIMARY KEY, agent TEXT NOT NULL, task TEXT NOT NULL, started INTEGER NOT NULL, ended INTEGER);
          CREATE TABLE notes (id INTEGER PRIMARY KEY, text TEXT);",
     )
     .unwrap();
@@ -198,8 +198,8 @@ fn records() -> rusqlite::Connection {
     db.execute("INSERT INTO agent_usage VALUES (?1, 'chat:1', 'The chat', 100, 20)", [(NOW / HOUR - 5) * 3600]).unwrap();
     db.execute("INSERT INTO checklist_items VALUES ('rivet', 1, 'a', 'done', 0, ?1)", [NOW - 3 * HOUR]).unwrap();
     db.execute("INSERT INTO checklist_items VALUES ('rivet', 2, 'b', 'open', 0, ?1)", [NOW - 3 * HOUR]).unwrap();
-    db.execute("INSERT INTO tasks (agent, task, command, started) VALUES ('builder', 'task-1', 'cargo test', ?1)", [NOW - HOUR]).unwrap();
-    db.execute("INSERT INTO tasks (agent, task, command, started, ended) VALUES ('rivet', 'task-1', 'ls', 1, 2)", []).unwrap();
+    db.execute("INSERT INTO tasks (agent, task, started) VALUES ('builder', 'task-1', ?1)", [NOW - HOUR]).unwrap();
+    db.execute("INSERT INTO tasks (agent, task, started, ended) VALUES ('rivet', 'task-1', 1, 2)", []).unwrap();
     db.execute("INSERT INTO notes (text) VALUES ('first'), ('second')", []).unwrap();
     db
 }
@@ -444,7 +444,7 @@ fn a_definition_is_checked_and_says_where_its_problems_are() {
     dashboard.variables.push(model::Variable {
         name: "from".into(),
         label: String::new(),
-        query: Query { source: RECORDS.into(), sql: "SELECT 1".into() },
+        query: Query { source: ACTIVITY.into(), sql: "SELECT 1".into() },
         default: String::new(),
     });
     dashboard.panels[0].viz.kind = "radar".into();
@@ -460,7 +460,7 @@ fn a_definition_is_checked_and_says_where_its_problems_are() {
         "refresh_s: 10 to 86400",
         "variables[1].name: lowercase letters",
         "panels[0].viz.kind: one of stat, timeseries",
-        "panels[1].query.source: \"elsewhere\" isn't a source Charts reads; it reads factory-records, agent:rivet",
+        "panels[1].query.source: \"elsewhere\" isn't a source Charts reads; it reads activity, agent:rivet",
         "panels[2].query.sql: $who isn't a variable",
         "panels[3].grid: w is 1 to 12",
         "panels[5].id: \"runs_by_agent\" is there twice",
@@ -498,7 +498,7 @@ fn the_default_dashboard_shows_what_the_records_say() {
     // Bars over time are labelled with local times, which charts read.
     assert!(rows.iter().all(|row| row[0].as_str().is_some_and(|time| time.len() == 16 && time.as_bytes()[10] == b' ')), "{rows:?}");
     assert!(!host.shows("s1", "The chat"));
-    assert_eq!(data["panels"][6]["data"]["rows"], json!([["builder", "task-1", "cargo test", NOW - HOUR]]));
+    assert_eq!(data["panels"][6]["data"]["rows"], json!([["builder", "task-1", NOW - HOUR]]));
     // Every query is bound: no value is in its text.
     for (_, sql, params) in &host.queries {
         assert!(!sql.contains('$'), "{sql}");
@@ -571,8 +571,8 @@ fn refreshing_pushes_only_what_changed_and_stops_when_the_last_view_closes() {
 fn ungranted_it_reads_nothing_and_says_how_then_shows_the_charts_once_granted() {
     let (mut app, mut host) = opened(false);
     assert!(host.queries.is_empty());
-    assert!(host.shows("s1", "Charts can't read anything yet"));
-    assert!(host.shows("s1", "Settings → Apps"));
+    assert!(host.shows("s1", "Charts has nothing to show yet"));
+    assert!(host.shows("s1", "Tell Rivet what you'd like to see, and it sets Charts up for you."));
     assert_eq!(host.timers[REFRESH], ASK_AGAIN_MS);
     host.now += 3_000;
     app.on_timer(&mut host, REFRESH);
@@ -589,7 +589,7 @@ fn ungranted_it_reads_nothing_and_says_how_then_shows_the_charts_once_granted() 
     host.records = false;
     host.now += 3_000;
     app.on_timer(&mut host, REFRESH);
-    assert!(host.shows("s1", "Charts can't read anything yet"));
+    assert!(host.shows("s1", "Charts has nothing to show yet"));
 }
 
 #[test]
@@ -600,7 +600,7 @@ fn a_panel_whose_source_isnt_granted_says_so_while_the_others_show() {
     model::save(&mut host, dashboard, None, "rivet").unwrap();
     host.now += 30_000;
     app.on_timer(&mut host, REFRESH);
-    assert_eq!(host.surface("s1").data["panels"][7]["error"], "To see this panel, turn on Rivet's database for Charts in Settings → Apps.");
+    assert_eq!(host.surface("s1").data["panels"][7]["error"], "To see this panel, Charts needs to read Rivet's database. Ask Rivet to set it up.");
     assert_eq!(host.timers[REFRESH], ASK_AGAIN_MS, "it looks again soon");
     assert!(!host.queries.iter().any(|(source, _, _)| source == AGENT_DB));
 
@@ -631,7 +631,7 @@ fn the_person_adds_a_panel_with_a_run_preview_first() {
     host.press(&mut app, "s1", "Edit");
     host.press(&mut app, "s1", "Add panel");
     assert!(host.shows("s1", "New panel"));
-    assert_eq!(host.surface("s1").data["editor"]["source"], json!([RECORDS]));
+    assert_eq!(host.surface("s1").data["editor"]["source"], json!([ACTIVITY]));
 
     // A query that can't run says why, and keeps nothing.
     host.enter("s1", "/editor/sql", json!("SELECT agent FROM runs WHERE agent = $who"));
@@ -770,7 +770,7 @@ fn an_agent_with_the_edit_grant_adds_a_panel_and_open_views_show_it() {
     dashboard["panels"].as_array_mut().unwrap().push(json!({
         "id": "failed_runs", "title": "Failed runs",
         "grid": {"x": 0, "y": 3, "w": 12, "h": 4},
-        "query": {"source": "factory-records", "sql": "SELECT agent, COUNT(*) AS n FROM runs WHERE outcome = 'failed' AND started >= $from GROUP BY agent"},
+        "query": {"source": "activity", "sql": "SELECT agent, COUNT(*) AS n FROM runs WHERE outcome = 'failed' AND started >= $from GROUP BY agent"},
         "viz": {"kind": "table"},
     }));
     let put = app.call(&mut host, "charts_put", &json!({"dashboard": dashboard}).to_string(), "rivet");
@@ -800,7 +800,7 @@ fn an_agent_with_the_edit_grant_adds_a_panel_and_open_views_show_it() {
 fn a_put_says_what_to_fix_and_which_panels_fail() {
     let (mut app, mut host) = opened(true);
     let wrong = json!({"dashboard": {"id": "x", "name": "X", "panels": [
-        {"id": "a", "title": "A", "query": {"source": "factory-records", "sql": "SELECT $nope"}, "viz": {"kind": "pie"}},
+        {"id": "a", "title": "A", "query": {"source": "activity", "sql": "SELECT $nope"}, "viz": {"kind": "pie"}},
         {"id": "a", "title": "B", "query": {"source": "nowhere", "sql": "SELECT 1"}, "viz": {"kind": "gauge"}},
     ]}});
     let refused = app.call(&mut host, "charts_put", &wrong.to_string(), "rivet");
@@ -823,7 +823,7 @@ fn a_put_says_what_to_fix_and_which_panels_fail() {
         &mut host,
         "charts_put",
         &json!({"id": "notes", "name": "Notes", "panels": [
-            {"id": "broken", "title": "Broken", "query": {"source": "factory-records", "sql": "SELECT x FROM nowhere"}, "viz": {"kind": "table"}},
+            {"id": "broken", "title": "Broken", "query": {"source": "activity", "sql": "SELECT x FROM nowhere"}, "viz": {"kind": "table"}},
             {"id": "mine", "title": "Mine", "query": {"source": "agent:rivet", "sql": "SELECT COUNT(*) FROM notes"}, "viz": {"kind": "stat"}},
         ]})
         .to_string(),
@@ -831,7 +831,7 @@ fn a_put_says_what_to_fix_and_which_panels_fail() {
     );
     assert!(!kept.is_error, "{}", kept.text);
     assert!(kept.text.contains("Panel broken's query failed: no such table: nowhere"), "{}", kept.text);
-    assert!(kept.text.contains("Panel mine shows nothing until the person turns on Rivet's database"), "{}", kept.text);
+    assert!(kept.text.contains("Panel mine shows nothing until the person gives Charts Rivet's database"), "{}", kept.text);
     assert_eq!(model::ids(&mut host), vec!["claktory", "notes"]);
 }
 
@@ -841,18 +841,18 @@ fn an_agent_deletes_and_queries() {
     let queried = app.call(
         &mut host,
         "charts_query",
-        r#"{"source": "factory-records", "sql": "SELECT agent, COUNT(*) AS n FROM runs WHERE started >= $from AND agent != $skip GROUP BY agent", "from": "now-24h", "variables": {"skip": "nobody"}}"#,
+        r#"{"source": "activity", "sql": "SELECT agent, COUNT(*) AS n FROM runs WHERE started >= $from AND agent != $skip GROUP BY agent", "from": "now-24h", "variables": {"skip": "nobody"}}"#,
         "rivet",
     );
     assert!(!queried.is_error, "{}", queried.text);
     assert_eq!(queried.text, "agent\tn\nbuilder\t1\nrivet\t1\n(2 rows)");
     for (args, why) in [
-        (r#"{"source": "factory-records", "sql": "SELECT ?1"}"#, "not ?"),
-        (r#"{"source": "factory-records", "sql": "SELECT $who"}"#, "$who isn't a variable"),
-        (r#"{"source": "agent:rivet", "sql": "SELECT 1"}"#, "hasn't turned on Rivet's database"),
+        (r#"{"source": "activity", "sql": "SELECT ?1"}"#, "not ?"),
+        (r#"{"source": "activity", "sql": "SELECT $who"}"#, "$who isn't a variable"),
+        (r#"{"source": "agent:rivet", "sql": "SELECT 1"}"#, "hasn't given Charts Rivet's database"),
         (r#"{"source": "elsewhere", "sql": "SELECT 1"}"#, "doesn't read \"elsewhere\""),
-        (r#"{"source": "factory-records", "sql": "SELECT 1", "from": "later"}"#, "from and to are"),
-        (r#"{"source": "factory-records", "sql": "SELECT $from", "variables": {"from": 1}}"#, "is built in"),
+        (r#"{"source": "activity", "sql": "SELECT 1", "from": "later"}"#, "from and to are"),
+        (r#"{"source": "activity", "sql": "SELECT $from", "variables": {"from": 1}}"#, "is built in"),
     ] {
         let refused = app.call(&mut host, "charts_query", args, "rivet");
         assert!(refused.is_error && refused.text.contains(why), "{why} in {}", refused.text);
@@ -860,7 +860,7 @@ fn an_agent_deletes_and_queries() {
     // A panel's SQL as it is, its variables at their defaults, or given.
     let panel = r#"SELECT COUNT(*) AS n FROM runs WHERE started >= $from AND ($agent = '' OR agent = $agent)"#;
     let args = |extra: Value| {
-        let mut args = json!({"source": "factory-records", "sql": panel});
+        let mut args = json!({"source": "activity", "sql": panel});
         args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         args.to_string()
     };
@@ -869,7 +869,7 @@ fn an_agent_deletes_and_queries() {
     assert_eq!(app.call(&mut host, "charts_query", &args(json!({"dashboard": "claktory"})), "rivet").text, "n\n4\n(1 row)");
     let rivet = app.call(&mut host, "charts_query", &args(json!({"dashboard": "claktory", "variables": {"agent": "rivet"}})), "rivet");
     assert_eq!(rivet.text, "n\n2\n(1 row)");
-    let many = app.call(&mut host, "charts_query", r#"{"source": "factory-records", "sql": "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 500) SELECT i FROM n"}"#, "rivet");
+    let many = app.call(&mut host, "charts_query", r#"{"source": "activity", "sql": "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 500) SELECT i FROM n"}"#, "rivet");
     assert!(many.text.ends_with("(the first 200 rows; there are more)"), "{}", &many.text[many.text.len() - 60..]);
 
     let deleted = app.call(&mut host, "charts_delete", r#"{"id": "claktory"}"#, "rivet");
@@ -894,4 +894,13 @@ fn long_answers_are_held_to_their_bounds() {
     assert_eq!((cut["rows"].as_array().unwrap().len(), cut["more"].clone()), (200, json!(true)));
     let small = json!({"columns": ["t"], "rows": [[1], [2]], "more": false});
     assert_eq!(view::downsample(&small, 2_000, None), small);
+}
+
+#[test]
+fn a_dashboard_made_for_all_of_claktorys_records_reads_activity_where_charts_no_longer_has_them() {
+    let activity = vec![DataSource { id: ACTIVITY.into(), label: "Activity".into(), granted: true }];
+    assert_eq!(source_for(RECORDS, &activity), ACTIVITY);
+    assert_eq!(source_for("agent:rivet", &activity), "agent:rivet");
+    let records = vec![DataSource { id: RECORDS.into(), label: "All of Claktory's records".into(), granted: true }];
+    assert_eq!(source_for(RECORDS, &records), RECORDS, "kept where it was given before");
 }

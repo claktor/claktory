@@ -144,6 +144,9 @@ pub struct Scripted {
     pub requests: Arc<Mutex<Vec<Request>>>,
     /// Lists `LONG_MODEL` too.
     long: bool,
+    /// Its usage read is refused, as a provider refuses a sign-in it
+    /// won't take any more (after a move, say).
+    refuses_usage: bool,
 }
 
 /// What a model request was sent with.
@@ -175,6 +178,7 @@ impl Scripted {
             compacted: Arc::default(),
             requests: Arc::default(),
             long: false,
+            refuses_usage: false,
         }
     }
 
@@ -187,6 +191,7 @@ impl Scripted {
             compacted: Arc::default(),
             requests: Arc::default(),
             long: false,
+            refuses_usage: false,
         }
     }
 
@@ -198,12 +203,19 @@ impl Scripted {
             compacted: Arc::default(),
             requests: Arc::default(),
             long: false,
+            refuses_usage: false,
         }
     }
 
     /// Lists `LONG_MODEL` too.
     pub fn with_long_model(mut self) -> Scripted {
         self.long = true;
+        self
+    }
+
+    /// Its usage read is refused: the provider won't take the sign-in.
+    pub fn refusing_usage(mut self) -> Scripted {
+        self.refuses_usage = true;
         self
     }
 
@@ -301,7 +313,11 @@ impl Models for Scripted {
 
     fn usage<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<Option<v1::ProviderUsage>, Error>> {
         let subscribed = self.current() == Some(ACCOUNT);
+        let refused = self.refuses_usage;
         Box::pin(async move {
+            if refused {
+                return Err(factory_agent::auth::refusal(true, "Scripted refused this sign-in: sign in again.".into()));
+            }
             Ok(subscribed.then(|| v1::ProviderUsage {
                 windows: vec![
                     v1::UsageWindow { id: "weekly".into(), label: "Weekly".into(), used_percent: 40.0, resets_at: 1_795_554_000_000 },
@@ -802,6 +818,7 @@ pub fn describe(entries: &[v1::Entry]) -> Vec<String> {
             Some(Kind::AppGrant(proposal)) => {
                 format!("app grant {} ({:?}): {} for {}", proposal.id, proposal.state(), proposal.app_id, proposal.agent_id)
             }
+            Some(Kind::AppAccess(proposal)) => format!("app access {} ({:?}): {}", proposal.id, proposal.state(), proposal.app_id),
             None => "empty".into(),
         });
     }

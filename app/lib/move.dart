@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
+import 'claktory_identity.dart' show claktoryName;
 import 'controls.dart';
 import 'forms.dart' show FormFrame;
 import 'identity.dart';
@@ -11,6 +12,7 @@ import 'mobile/input.dart' show InputKind;
 import 'mobile/metrics.dart';
 import 'protocol/factory/v1/factory.pb.dart' as pb;
 import 'resources.dart' show formatBytes;
+import 'scan_code.dart';
 import 'scope.dart' show AppScope;
 
 /// Moving this Claktory to another computer (#217, docs/MOVE.md, "The
@@ -349,6 +351,33 @@ class _MoveFormState extends State<MoveForm> {
   var _busy = false;
   String? _error;
 
+  /// Whether Scan code shows under the field: where there's a camera to
+  /// read the QR code the other computer shows (friend bug #2).
+  var _canScan = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      final can = await canOfferScan(context);
+      if (mounted && can != _canScan) setState(() => _canScan = can);
+    });
+  }
+
+  /// Scans the other computer's code into the field, where Connect starts
+  /// the move as for a pasted one.
+  Future<void> _scan() async {
+    final scanned = await scanCode(
+      context,
+      title: "Scan the other computer's code",
+      check: (text) => parseReceiveCode(text) == null
+          ? "This isn't the code the other computer shows."
+          : null,
+    );
+    if (scanned != null && mounted) _code.text = scanned;
+  }
+
   @override
   void dispose() {
     _code.dispose();
@@ -601,8 +630,8 @@ class _MoveFormState extends State<MoveForm> {
                 context,
                 'Everything moves, and your agents keep working while it '
                 'copies. On the other computer, paste this in a terminal: it '
-                'installs Claktory there and shows a code. Paste that code '
-                'here.',
+                'installs Claktory there and shows a code. '
+                '${_canScan ? 'Paste that code here, or scan its QR code.' : 'Paste that code here.'}',
               ),
               const SizedBox(height: Space.s),
               const _Command(receiveCommand),
@@ -618,6 +647,13 @@ class _MoveFormState extends State<MoveForm> {
                 autofillHints: const [],
                 onSubmitted: (_) => _connect(),
               ),
+              if (_canScan) ...[
+                const SizedBox(height: Space.s),
+                Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: Button(label: 'Scan code', onPressed: _scan),
+                ),
+              ],
               const SizedBox(height: Space.xs),
               if (code != null)
                 Text(
@@ -701,14 +737,38 @@ class MovingProgress extends StatelessWidget {
   }
 }
 
+/// Who started [move], when an agent did (Rivet's move_claktory): its
+/// name, or "An agent" for one no longer listed; null when the person did.
+String? moveStartedBy(BuildContext context, MoveStatus move) {
+  final id = move.startedByAgentId;
+  if (id.isEmpty) return null;
+  final agent = AppScope.of(context).workspace.workspace.agents
+      .where((agent) => agent.id == id)
+      .firstOrNull;
+  return agent?.name ?? 'An agent';
+}
+
 /// The whole window while the agents are stopped for the move (the backend
 /// then serves nothing else): "Moving to cloud-box…", how far, Cancel while
-/// it can be, and once moved, where Claktory runs now.
+/// it can be, and once moved, where Claktory runs now. Not [connected] to
+/// [from] (a device over the tunnel, whose source stops it at the
+/// hand-over), it says so in place of the step it last heard, without
+/// Cancel: nothing could take it.
 class MovingScreen extends StatelessWidget {
-  const MovingScreen({super.key, required this.move, required this.actions});
+  const MovingScreen({
+    super.key,
+    required this.move,
+    required this.actions,
+    this.connected = true,
+    this.from = '',
+  });
 
   final MoveStatus move;
   final MoveActions actions;
+  final bool connected;
+
+  /// The Claktory moving, as this device names it ("Home").
+  final String from;
 
   @override
   Widget build(BuildContext context) {
@@ -716,6 +776,9 @@ class MovingScreen extends StatelessWidget {
     final type = TypeScale.of(context);
     final done = move.phase == MovePhase.done;
     final failed = move.phase == MovePhase.failed;
+    final lost = !connected && !done && !failed;
+    // An agent's move (Rivet's move_claktory) says so.
+    final who = moveStartedBy(context, move);
     return ColoredBox(
       color: palette.canvas,
       child: SafeArea(
@@ -728,7 +791,7 @@ class MovingScreen extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  if (!done && !failed) ...[
+                  if (!done && !failed && !lost) ...[
                     const Align(
                       alignment: Alignment.centerLeft,
                       child: LiveDot(),
@@ -748,6 +811,13 @@ class MovingScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: Space.s),
                   if (failed) ...[
+                    if (who != null) ...[
+                      Text(
+                        "$who's move to ${move.target} didn't finish.",
+                        style: type.body.copyWith(color: palette.textMuted),
+                      ),
+                      const SizedBox(height: Space.s),
+                    ],
                     if (move.error.isNotEmpty) ...[
                       Text(
                         move.error,
@@ -768,14 +838,23 @@ class MovingScreen extends StatelessWidget {
                     )
                   else ...[
                     Text(
+                      '${who == null ? '' : '$who started this move. '}'
                       'Your agents are paused until Claktory starts on '
                       '${move.target}.',
                       style: type.body.copyWith(color: palette.textMuted),
                     ),
                     const SizedBox(height: Space.m),
-                    MovingProgress(move: move),
+                    if (lost)
+                      Text(
+                        "Can't connect to ${from.isEmpty ? 'this Claktory' : from} "
+                        'right now. If the move finished, this device '
+                        'connects to ${move.target} by itself.',
+                        style: type.body.copyWith(color: palette.textMuted),
+                      )
+                    else
+                      MovingProgress(move: move),
                   ],
-                  if (move.canCancel) ...[
+                  if (move.canCancel && connected) ...[
                     const SizedBox(height: Space.xl),
                     Align(
                       alignment: Alignment.centerRight,
@@ -829,6 +908,13 @@ class _CancelMoveState extends State<_CancelMove> {
 /// in the app ([BackendMove]), a fake in tests.
 abstract interface class MoveSource implements MoveActions {
   ValueListenable<MoveStatus> get status;
+
+  /// Whether this device is connected to the Claktory now: its move's
+  /// status is the last it heard while not.
+  ValueListenable<bool> get connected;
+
+  /// The Claktory, as this device names it ("Home").
+  String get name;
 
   /// This Claktory moved away from this computer (Error.moved): where and
   /// when; null otherwise.
@@ -892,6 +978,12 @@ class BackendMove implements MoveSource {
 
   @override
   ValueListenable<MoveStatus> get status => _MoveStatusOf(backend.move);
+
+  @override
+  ValueListenable<bool> get connected => backend.connected;
+
+  @override
+  String get name => claktoryName(backend);
 
   @override
   Future<void> start(String code) => backend.startMove(code);
@@ -1011,7 +1103,17 @@ class _MoveGateState extends State<MoveGate> {
             ],
           );
         }
-        return _withRail(MovingScreen(move: move, actions: widget.source));
+        return _withRail(
+          ValueListenableBuilder<bool>(
+            valueListenable: widget.source.connected,
+            builder: (context, connected, _) => MovingScreen(
+              move: move,
+              actions: widget.source,
+              connected: connected,
+              from: widget.source.name,
+            ),
+          ),
+        );
       },
       child: widget.child,
     ),
@@ -1308,33 +1410,46 @@ class MoveSettingRow extends StatelessWidget {
     final type = TypeScale.of(context);
     return ValueListenableBuilder<MoveStatus>(
       valueListenable: source.status,
-      builder: (context, move, _) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Button(
-            label: move.active ? 'Show progress…' : 'Move to another computer…',
-            onPressed: () => showMove(context, source),
-          ),
-          const SizedBox(height: Space.xs),
-          Text(
-            switch (move.phase) {
-              MovePhase.none =>
-                'Moves Claktory and everything in it to another computer: '
-                    'agents, conversations, folders, secrets and sign-ins. '
-                    'Your agents pause only for a moment.',
-              MovePhase.copying when move.bytesTotal > 0 =>
-                'Copying to ${move.target}: ${moveBytes(move)}.',
-              MovePhase.failed => "Couldn't move to ${move.target}.",
-              _ => 'Moving to ${move.target}.',
-            },
-            style: type.caption.copyWith(
-              color: move.phase == MovePhase.failed
-                  ? palette.danger
-                  : palette.textFaint,
+      builder: (context, move, _) {
+        // An agent's move (Rivet's move_claktory) says so.
+        final who = moveStartedBy(context, move);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Button(
+              label: move.active
+                  ? 'Show progress…'
+                  : 'Move to another computer…',
+              onPressed: () => showMove(context, source),
             ),
-          ),
-        ],
-      ),
+            const SizedBox(height: Space.xs),
+            Text(
+              switch (move.phase) {
+                MovePhase.none =>
+                  'Moves Claktory and everything in it to another computer: '
+                      'agents, conversations, folders, secrets and sign-ins. '
+                      'Your agents pause only for a moment.',
+                MovePhase.copying when move.bytesTotal > 0 && who != null =>
+                  '$who is copying Claktory to ${move.target}: '
+                      '${moveBytes(move)}.',
+                MovePhase.failed when who != null =>
+                  "$who couldn't move Claktory to ${move.target}.",
+                _ when who != null =>
+                  '$who is moving Claktory to ${move.target}.',
+                MovePhase.copying when move.bytesTotal > 0 =>
+                  'Copying to ${move.target}: ${moveBytes(move)}.',
+                MovePhase.failed => "Couldn't move to ${move.target}.",
+                _ => 'Moving to ${move.target}.',
+              },
+              style: type.caption.copyWith(
+                color: move.phase == MovePhase.failed
+                    ? palette.danger
+                    : palette.textFaint,
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }

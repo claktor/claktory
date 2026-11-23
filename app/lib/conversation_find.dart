@@ -3,7 +3,8 @@
 // what the app holds, and answers the entries a query is in, newest first,
 // a page at a time (SearchConversation). In a pipe's timeline the liaison's
 // conversation and the pipe's own messages are searched both, and their
-// matches merged by time.
+// matches merged by time. The messages still queued at its end, shown but
+// not yet in it, are matched here, the newest of all.
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -13,8 +14,13 @@ import 'find.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 
 /// A match gone to: an entry of the conversation by its seq, or, with
-/// [pipe], one of the pipe's messages.
-typedef FoundAt = ({bool pipe, int seq});
+/// [pipe], one of the pipe's messages; or, with [queued], a message
+/// still queued at the conversation's end (that key of [QueuedFind]'s).
+typedef FoundAt = ({bool pipe, int seq, Object? queued});
+
+/// The messages queued at a conversation's end, top to bottom: each one's
+/// key and the words it shows.
+typedef QueuedFind = List<(Object key, String text)> Function();
 
 /// What the conversation marks: [query]'s occurrences, and the match gone
 /// to ([at]), if any.
@@ -50,17 +56,36 @@ class _Log {
   int get horizon => matches.isEmpty ? 0 : matches.last.timestampMs.toInt();
 }
 
-/// An occurrence of the query: in [match] of [log], the [nth] of its hits
+/// An occurrence of the query: where it is, the [nth] of the [hits] there
 /// counted from its end (the next one goes up the screen).
-typedef _Occurrence = ({_Log log, ConversationMatch match, int nth});
+typedef _Occurrence = ({FoundAt at, int nth, int hits});
+
+/// How many times [query] is in [text], as Claktory counts: matched
+/// case-insensitively, one after another.
+int _hits(String text, String query) {
+  final lower = text.toLowerCase();
+  final needle = query.toLowerCase();
+  if (needle.isEmpty) return 0;
+  var hits = 0;
+  for (var at = lower.indexOf(needle); at >= 0;) {
+    hits++;
+    at = lower.indexOf(needle, at + needle.length);
+  }
+  return hits;
+}
 
 class ConversationFind extends FindTarget {
   ConversationFind({
     required MatchSearch search,
     this.pipe = false,
     this.conversation = true,
+    this.queued,
     required this.go,
   }) : _searchLog = search;
+
+  /// The messages queued at the conversation's end, matched here as they
+  /// show; none when null.
+  final QueuedFind? queued;
 
   /// Whether a pipe's messages are searched too.
   final bool pipe;
@@ -86,6 +111,10 @@ class ConversationFind extends FindTarget {
   var _generation = 0;
   var _query = '';
   var _logs = <_Log>[];
+
+  /// The queued messages' occurrences as the search found them, newest
+  /// first: above every log's.
+  var _queued = <_Occurrence>[];
   var _occurrences = <_Occurrence>[];
   var _current = -1;
   var _searching = false;
@@ -100,7 +129,7 @@ class ConversationFind extends FindTarget {
 
   @override
   int get count {
-    final total = _logs.fold(0, (sum, log) => sum + log.total);
+    final total = _logs.fold(_queued.length, (sum, log) => sum + log.total);
     // Past a capped count, as many as have been found.
     return total < _occurrences.length ? _occurrences.length : total;
   }
@@ -125,6 +154,12 @@ class ConversationFind extends FindTarget {
     final generation = ++_generation;
     _query = query;
     _logs = [if (conversation) _Log(false), if (pipe) _Log(true)];
+    _queued = [
+      for (final (key, text) in (queued?.call() ?? const []).reversed)
+        if (_hits(text, query) case final hits when hits > 0)
+          for (var nth = 0; nth < hits; nth++)
+            (at: (pipe: false, seq: -1, queued: key), nth: nth, hits: hits),
+    ];
     _occurrences = [];
     _current = -1;
     _failed = null;
@@ -209,6 +244,7 @@ class ConversationFind extends FindTarget {
     _generation++;
     _query = '';
     _logs = [];
+    _queued = [];
     _occurrences = [];
     _current = -1;
     _searching = false;
@@ -300,9 +336,14 @@ class ConversationFind extends FindTarget {
       return a.log.pipe ? -1 : 1;
     });
     _occurrences = [
+      ..._queued,
       for (final (:log, :match) in found)
         for (var nth = 0; nth < (match.hits < 1 ? 1 : match.hits); nth++)
-          (log: log, match: match, nth: nth),
+          (
+            at: (pipe: log.pipe, seq: match.seq.toInt(), queued: null),
+            nth: nth,
+            hits: match.hits,
+          ),
     ];
   }
 
@@ -310,12 +351,12 @@ class ConversationFind extends FindTarget {
   void _go() {
     if (_current < 0 || _current >= _occurrences.length) return;
     final occurrence = _occurrences[_current];
-    final at = (pipe: occurrence.log.pipe, seq: occurrence.match.seq.toInt());
+    final at = occurrence.at;
     // Another occurrence in the same entry is marked already, but may be
     // out of sight in a long one.
     if (_marks.value.at != at || _marks.value.query != _query) {
       _marks.value = (query: _query, at: at);
     }
-    go(at, occurrence.nth, occurrence.match.hits);
+    go(at, occurrence.nth, occurrence.hits);
   }
 }

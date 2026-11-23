@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use factory_agent::{Tool, ToolResult};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
-use super::{Extension, Manifest, PromptKind, PromptSection};
+use super::{Extension, Manifest, PromptKind, PromptSection, async_tool};
 use crate::browser::Mode;
 use crate::browser::schema::{self, Direction, Op};
 use crate::config::AgentConfig;
@@ -257,31 +257,4 @@ async fn command(factory: &Arc<Factory>, agent: &str, session: &str, op: Op) -> 
 /// An error as the agent reads it: its word first.
 fn failure(error: &str, why: &str) -> String {
     if why.is_empty() { format!("{error}.") } else { format!("{error}: {why}") }
-}
-
-/// Binds an asynchronous tool to an agent without keeping Factory alive.
-fn async_tool<A, F>(
-    factory: &Arc<Factory>,
-    agent: &str,
-    name: &'static str,
-    label: &'static str,
-    description: &'static str,
-    parameters: Value,
-    run: fn(Arc<Factory>, String, A) -> F,
-) -> Tool
-where
-    A: serde::de::DeserializeOwned + Send + 'static,
-    F: Future<Output = Result<ToolResult, String>> + Send + 'static,
-{
-    super::tool(
-        name,
-        label,
-        description,
-        parameters,
-        super::agent_handler(factory, agent, move |factory, agent, args| async move {
-            let args: A = serde_json::from_value(args)?;
-            let factory = super::live(factory)?;
-            run(factory, agent, args).await.map_err(factory_agent::Error::Other)
-        }),
-    )
 }

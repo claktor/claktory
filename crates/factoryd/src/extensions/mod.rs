@@ -26,6 +26,7 @@ pub(crate) mod devices;
 pub(crate) mod handoff;
 pub(crate) mod highlight;
 pub(crate) mod memory;
+pub(crate) mod models;
 pub(crate) mod monitors;
 pub(crate) mod moving;
 pub(crate) mod nudge;
@@ -218,7 +219,7 @@ pub(crate) fn view(factory: &Factory, inner: &Inner, agent: &str, key: &str) -> 
 
 /// Every extension, sorted by id, which is also the order of their prompt
 /// sections and tools.
-pub(crate) const ALL: [&dyn Extension; 22] = [
+pub(crate) const ALL: [&dyn Extension; 23] = [
     &agents::Agents,
     &app_grants::AppGrants,
     &ask::Ask,
@@ -231,6 +232,7 @@ pub(crate) const ALL: [&dyn Extension; 22] = [
     &handoff::Handoff,
     &highlight::Highlight,
     &memory::Memory,
+    &models::Models,
     &monitors::Monitors,
     &moving::Move,
     &pipes::Pipes,
@@ -295,6 +297,33 @@ pub(crate) fn typed_handler<A: serde::de::DeserializeOwned + 'static>(
         let factory = live(factory)?;
         run(&factory, &agent, args).map_err(factory_agent::Error::Other)
     })
+}
+
+/// Binds an asynchronous tool to an agent without keeping Factory alive.
+pub(crate) fn async_tool<A, F>(
+    factory: &Arc<Factory>,
+    agent: &str,
+    name: &'static str,
+    label: &'static str,
+    description: &'static str,
+    parameters: Value,
+    run: fn(Arc<Factory>, String, A) -> F,
+) -> Tool
+where
+    A: serde::de::DeserializeOwned + Send + 'static,
+    F: std::future::Future<Output = Result<ToolResult, String>> + Send + 'static,
+{
+    tool(
+        name,
+        label,
+        description,
+        parameters,
+        agent_handler(factory, agent, move |factory, agent, args| async move {
+            let args: A = serde_json::from_value(args)?;
+            let factory = live(factory)?;
+            run(factory, agent, args).await.map_err(factory_agent::Error::Other)
+        }),
+    )
 }
 
 /// What a tool's handler returns: its text alone, or a whole result, with

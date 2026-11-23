@@ -20,7 +20,6 @@ import 'mobile/metrics.dart' show TypeScale;
 import 'mobile/presentation.dart' show showPanel;
 import 'mobile/input.dart' show InputKind;
 import 'markdown.dart';
-import 'pipes.dart' show PortalGlyph, pipeColor;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart';
@@ -2079,7 +2078,10 @@ String secretRequestSummary(
   if (request.imports.isNotEmpty) {
     return 'Asks to import ${importKind(request)}';
   }
-  if (request.state == SecretRequestState.SECRET_REQUEST_STATE_APPROVED) {
+  // Approved with an admin agent finding it; handed back to the person
+  // (its admin cleared or deleted), it asks them again, as its card does.
+  if (request.state == SecretRequestState.SECRET_REQUEST_STATE_APPROVED &&
+      request.adminAgentId.isNotEmpty) {
     final admin = [
       for (final agent in workspace.agents)
         if (agent.id == request.adminAgentId) agent.name,
@@ -2205,7 +2207,14 @@ class SecretRequestCard extends StatefulWidget {
   State<SecretRequestCard> createState() => _SecretRequestCardState();
 }
 
-class _SecretRequestCardState extends State<SecretRequestCard> {
+class _SecretRequestCardState extends State<SecretRequestCard>
+    with AutomaticKeepAliveClientMixin {
+  /// While it waits, what the person chose or typed here (a length, a
+  /// name, a value) stays when the card scrolls out of view and back
+  /// (Zucchero's row 189); it goes with the conversation, as before.
+  @override
+  bool get wantKeepAlive => _waiting;
+
   late final _name = TextEditingController(text: widget.request.newSecret.name);
   late final _description = TextEditingController(
     text: widget.request.newSecret.description,
@@ -2234,6 +2243,8 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
   @override
   void didUpdateWidget(SecretRequestCard old) {
     super.didUpdateWidget(old);
+    // Decided, it scrolls away like any entry.
+    updateKeepAlive();
     // The agent changed what it asks for: the form starts from that.
     if (old.request.updatedMs != widget.request.updatedMs) {
       final wanted = widget.request.newSecret;
@@ -2463,6 +2474,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     final store = AppScope.of(context).workspace;
     return ListenableBuilder(
       listenable: store,
@@ -2823,7 +2835,7 @@ class _SecretRequestCardState extends State<SecretRequestCard> {
         lead: Text(
           _error ??
               (_password
-                  ? 'No one ever sees it, $agent included.'
+                  ? 'No agent ever sees it, $agent included.'
                   : 'No one ever sees its private half, $agent included.'),
           style: type.caption.copyWith(
             color: _error == null ? palette.textFaint : palette.danger,
@@ -3359,9 +3371,10 @@ class _ImportFile extends StatelessWidget {
   }
 }
 
-/// The agent that asks had read another's words (a pipe, a direct
-/// message or a web page) when it asked: what it asks for may come from
-/// them. After a portal, as cards say where a request may come from.
+/// The agent that asks had read a web page when it asked (asker_read_pipes:
+/// since #346 only a page read through browser control marks an agent):
+/// what it asks for may come from whoever wrote it. After a globe, as cards
+/// say where a request may come from.
 class _ReadOutside extends StatelessWidget {
   const _ReadOutside({required this.agent});
 
@@ -3374,18 +3387,23 @@ class _ReadOutside extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Padding(
-          padding: EdgeInsets.only(top: 2),
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
           child: ExcludeSemantics(
-            child: PortalGlyph(color: pipeColor, size: 12),
+            child: ExtensionGlyph(
+              icon: 'globe',
+              name: '',
+              color: palette.textMuted,
+              size: 12,
+            ),
           ),
         ),
         const SizedBox(width: Space.xs + 2),
         Expanded(
           child: Text(
-            '$agent had read messages from another Claktory, a direct '
-            'message or a web page when it asked. Whoever wrote them could '
-            'have led it to ask for this. Import only if you expected it.',
+            '$agent had read a web page when it asked. Whoever wrote it '
+            'could have led it to ask for this. Import only if you expected '
+            'it.',
             style: type.body.copyWith(
               color: palette.text,
               fontWeight: FontWeight.w500,

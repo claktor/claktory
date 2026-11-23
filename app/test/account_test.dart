@@ -525,4 +525,58 @@ void main() {
     await reveal(tester, find.text('Sign out…'));
     expect(tester.takeException(), isNull);
   });
+
+  // Zucchero's row 126: at AX XXXL on an iPhone SE the sheet overflowed by
+  // 2487 px and couldn't scroll, so the key couldn't be seen.
+  testWidgets('on an iPhone SE at the largest text, the recovery key sheet '
+      'scrolls to the key and Done', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.platformDispatcher.textScaleFactorTestValue = 53 / 17;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final harness = await showAccount(
+      tester,
+      signedIn,
+      size: const Size(320, 568),
+    );
+    await openSettings(tester, harness);
+    await reveal(tester, find.text('Account'));
+    await tester.tap(find.text('Account'));
+    await pumpFrames(tester);
+    await reveal(tester, find.text('Show recovery key…'));
+    await tester.tap(find.text('Show recovery key…'));
+    await pumpFrames(tester);
+    expect(tester.takeException(), isNull);
+    expect(find.text('Your recovery key'), findsOneWidget);
+
+    final sheet = find
+        .ancestor(
+          of: find.text('Your recovery key'),
+          matching: find.byType(Scrollable),
+        )
+        .first;
+    for (final target in [
+      find.text('ABCD-EFGH-IJKL-MNOP'),
+      find.text('Done'),
+    ]) {
+      await tester.scrollUntilVisible(target, 200, scrollable: sheet);
+      await pumpFrames(tester);
+      final rect = tester.getRect(target);
+      expect(rect.top, greaterThanOrEqualTo(0));
+      expect(rect.bottom, lessThanOrEqualTo(568));
+    }
+    // The key wraps at its blocks, all of it in sight (Zucchero's row 131),
+    // rather than scrolling sideways.
+    final key = find.text('ABCD-EFGH-IJKL-MNOP');
+    await tester.scrollUntilVisible(key, 200, scrollable: sheet);
+    await pumpFrames(tester);
+    expect(tester.getRect(key).right, lessThanOrEqualTo(320));
+    expect(tester.getRect(key).height, greaterThan(80), reason: 'wrapped');
+    await tester.scrollUntilVisible(find.text('Done'), 200, scrollable: sheet);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Done'));
+    await pumpFrames(tester);
+    expect(find.text('Your recovery key'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 }

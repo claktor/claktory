@@ -107,6 +107,10 @@ pub(crate) struct ScopeSpec {
     pub label: String,
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Whether its tools can hand an agent what the app reads from its
+    /// sources. Left out, they're taken to, when the app asks for any data.
+    #[serde(default)]
+    pub reads_data: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -136,7 +140,10 @@ pub(crate) struct ViewSpec {
 /// A `[[data]]` source an app asks to read.
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct DataSpec {
-    /// "factory-records" (factory.db) or "agent-database" (an agent's own).
+    /// "activity" or "conversations" (from factory.db), "agent-database"
+    /// (an agent's own), "file" (CSV or TSV files the person chooses), or
+    /// "factory-records" (all of factory.db: still read, so apps made for
+    /// it work, but a new grant of it is refused).
     pub kind: String,
     /// For "agent-database": an agent's id, or "*" for any the person
     /// chooses.
@@ -163,7 +170,12 @@ fn plain(text: &str, what: &str) -> Result<(), String> {
 
 /// The kinds of `[[data]]`.
 pub(crate) const FACTORY_RECORDS: &str = "factory-records";
+pub(crate) const ACTIVITY: &str = "activity";
+pub(crate) const CONVERSATIONS: &str = "conversations";
 pub(crate) const AGENT_DATABASE: &str = "agent-database";
+/// Files the person (or Rivet, on a card) chooses: a CSV or TSV each
+/// (`super::files`).
+pub(crate) const FILE: &str = "file";
 
 fn no_parameters() -> serde_json::Value {
     serde_json::json!({"type": "object", "properties": {}})
@@ -211,11 +223,11 @@ impl Manifest {
         let mut sources = BTreeSet::new();
         for data in &self.data {
             match data.kind.as_str() {
-                FACTORY_RECORDS if data.agent.is_empty() => {}
-                FACTORY_RECORDS => return bad("factory-records names no agent".to_owned()),
+                FACTORY_RECORDS | ACTIVITY | CONVERSATIONS | FILE if data.agent.is_empty() => {}
+                FACTORY_RECORDS | ACTIVITY | CONVERSATIONS | FILE => return bad(format!("{} names no agent", data.kind)),
                 AGENT_DATABASE if data.agent == "*" || (!data.agent.is_empty() && data.agent.len() <= 64) => {}
                 AGENT_DATABASE => return bad("agent-database needs agent = \"*\" or an agent's id".to_owned()),
-                other => return bad(format!("the data kind \"{other}\" isn't factory-records or agent-database")),
+                other => return bad(format!("the data kind \"{other}\" isn't activity, conversations, agent-database or file")),
             }
             if !sources.insert((data.kind.as_str(), data.agent.as_str())) {
                 return bad(format!("the data \"{}\" is there twice", data.kind));
@@ -308,6 +320,12 @@ impl Manifest {
 
     pub(crate) fn scope(&self, id: &str) -> Option<&ScopeSpec> {
         self.scopes.iter().find(|scope| scope.id == id)
+    }
+
+    /// Whether scope `scope`'s tools can hand an agent what the app reads
+    /// (its manifest says, or else: it asks to read anything at all).
+    pub(crate) fn reads_data(&self, scope: &ScopeSpec) -> bool {
+        scope.reads_data.unwrap_or(!self.data.is_empty())
     }
 
     pub(crate) fn event(&self, kind: &str) -> Option<&EventSpec> {
@@ -550,7 +568,9 @@ parameters = { type = "object", required = ["text"], properties = { text = { typ
             ("kind = \"agent-database\"\n", "needs agent = \"*\" or an agent's id"),
             ("kind = \"factory-records\"\nagent = \"lea\"\n", "factory-records"),
             ("kind = \"factory-records\"\n", "is there twice"),
-            ("kind = \"files\"\n", "isn't factory-records or agent-database"),
+            ("kind = \"files\"\n", "isn't activity, conversations, agent-database or file"),
+            ("kind = \"file\"\nagent = \"lea\"\n", "file names no agent"),
+            ("kind = \"activity\"\nagent = \"lea\"\n", "activity names no agent"),
         ] {
             let error = Manifest::parse(&format!("{views}{data}\n[[data]]\n{wrong}")).unwrap_err();
             assert!(error.contains(why), "{wrong}: {error}");

@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'account.dart';
-import 'apps.dart' show AppsSettings;
 import 'avatar.dart';
 import 'backend.dart';
 import 'browser/browser_log.dart'
@@ -261,15 +260,6 @@ List<SettingsSection> settingsSectionsOf(
       glyph: lucide('key-round'),
       children: const [SecretsSettings()],
     ),
-    // Apps shows only where the backend offers them
-    // (Workspace.apps_available).
-    if (workspace.appsAvailable)
-      SettingsSection(
-        title: 'Apps',
-        group: 2,
-        glyph: lucide('panels-top-left'),
-        children: const [AppsSettings()],
-      ),
     // The kinds of report pipes forward, where Claktory has them as data
     // (Workspace.report_type_rules).
     if (reportTypesAvailable(workspace))
@@ -860,7 +850,9 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
               _Line(
                 children: [
                   SizedBox(
-                    width: isPhoneLayout(context) ? 120 : 96,
+                    width: isPhoneLayout(context)
+                        ? 120 * _textScale(context)
+                        : 96 * _textScale(context),
                     child: TextField(
                       controller: _compactAt,
                       // "400k": digits first, the letters a tap away.
@@ -1253,7 +1245,8 @@ class _ThresholdState extends State<_Threshold> {
           Text(widget.lead, style: words),
           for (var i = 0; i < _fields.length; i++) ...[
             SizedBox(
-              width: 56,
+              // Its number whole at any text size (Zucchero's row 133).
+              width: 56 * _textScale(context),
               child: TextField(
                 controller: _fields[i],
                 // Digits, with Return to save (a number pad has none).
@@ -1361,7 +1354,8 @@ class _YourNameState extends State<_YourName> with SettingRequests {
             builder: (context, constraints) {
               // On a phone or in a narrow pane, the field as wide as
               // there's room for, Save or the note under it.
-              if (phone || constraints.maxWidth < _besideWidth) {
+              if (phone ||
+                  constraints.maxWidth < _besideWidth * _textScale(context)) {
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -1513,7 +1507,7 @@ class _AvatarState extends State<_Avatar> with SettingRequests {
               // beside it, and so does a narrow pane (an iPad's, at its
               // finger sizes, overflowed): they go under.
               if (isPhoneLayout(context) ||
-                  constraints.maxWidth < _besideWidth) {
+                  constraints.maxWidth < _besideWidth * _textScale(context)) {
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -1776,8 +1770,11 @@ class SettingRow extends StatelessWidget {
     Palette palette,
     BoxConstraints constraints,
   ) {
-    // On a phone, or in a narrow pane beside a conversation.
-    if (isPhoneLayout(context) || constraints.maxWidth < 440) {
+    // On a phone, or in a narrow pane beside a conversation, or one that
+    // larger text makes narrow: what's narrow grows with the text, so a
+    // word never has to break in the label's column (Sorbet's row 103).
+    final scale = _textScale(context);
+    if (isPhoneLayout(context) || constraints.maxWidth < 440 * scale) {
       // No room beside it: the label over the control.
       return Padding(
         padding: const EdgeInsets.only(bottom: Space.m),
@@ -1803,7 +1800,7 @@ class SettingRow extends StatelessWidget {
             : CrossAxisAlignment.center,
         children: [
           SizedBox(
-            width: 160,
+            width: 160 * scale,
             child: Text(
               label,
               style: TypeScale.of(context).body
@@ -1822,14 +1819,24 @@ class SettingRow extends StatelessWidget {
   }
 }
 
-/// How wide a control in Settings is: [width] on a Mac, the screen's width
+/// How much larger than standard the person reads text, never less than 1:
+/// Settings' rows put things beside each other only when the room left is
+/// as wide, at that size, as it is at the standard one.
+double _textScale(BuildContext context) {
+  final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+  return scale < 1 ? 1 : scale;
+}
+
+/// How wide a control in Settings is: [width] on a Mac, grown with a
+/// larger text size (an iPad's) so what it holds fits; the screen's width
 /// on a phone.
 double controlWidth(BuildContext context, double width) =>
-    isPhoneLayout(context) ? double.infinity : width;
+    isPhoneLayout(context) ? double.infinity : width * _textScale(context);
 
 /// Controls in a line: a field, its unit, Save. A Mac keeps them on one
-/// line, with [Space.s] then [Space.m] before the last; a phone wraps them
-/// onto more lines when the text is large.
+/// line, with [Space.s] then [Space.m] before the last; a phone, and any
+/// device at a larger text size, wraps them onto more lines when they
+/// don't fit.
 class _Line extends StatelessWidget {
   const _Line({required this.children});
 
@@ -1837,7 +1844,7 @@ class _Line extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (isPhoneLayout(context)) {
+    if (isPhoneLayout(context) || _textScale(context) > 1) {
       return Wrap(
         spacing: Space.s,
         runSpacing: Space.s,

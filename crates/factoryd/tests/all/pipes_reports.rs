@@ -147,11 +147,11 @@ async fn a_liaison_forwards_a_report_and_only_its_reader_reads_its_words() {
     assert!(!facts.contains(MARKER) && !facts.contains("Crash on Settings") && !facts.contains("Tap Settings"), "{facts}");
     assert_eq!(pipes::taint_of_for_test(&factory, "ingrid"), "{}");
 
-    // Its words, fenced: now it has read the pipe, through the liaison.
+    // Its words, fenced as untrusted; reading them marks her with nothing
+    // (#346).
     let words = call(&mut client, &mut view, "ingrid", "handoff_read", "{}").await;
     assert!(words.contains(&format!("{MARKER}-words")) && words.contains("2. Tap Settings") && words.contains("untrusted"), "{words}");
-    let taint: serde_json::Value = serde_json::from_str(&pipes::taint_of_for_test(&factory, "ingrid")).expect("json");
-    assert_eq!(taint[&pipe], serde_json::json!(["liaison"]), "{taint}");
+    assert_eq!(pipes::taint_of_for_test(&factory, "ingrid"), "{}");
 
     // Marked known: the pipe's side hears its own alias, never the issue key.
     let id = list(&mut client, &mut view, &pipe, "").await.reports.iter().find(|report| report.number == 1).expect("#1").id;
@@ -226,8 +226,7 @@ async fn a_changed_forward_makes_unread_reports_wait_for_the_person() {
         [
             "You set this pipe's reports to go to Ingrid",
             "You set this pipe's reports to go to no one instead of Ingrid",
-            // A new forward turns its types on: "Bug report" unless chosen.
-            "You let this pipe forward “Bug report”",
+            // Its types stay as the app showed them: "Bug report", so no row.
             "You set this pipe's reports to go to Ingrid",
             "You let Ingrid read reports, starting a fresh conversation",
         ]
@@ -318,9 +317,9 @@ async fn only_an_untainted_admin_agent_forwards_reports_and_never_away_from_cont
     assert!(said.contains("Lea is in a pipe"), "{said}");
 
     // Tainted, Rivet is refused, whatever it asks.
-    pipes::taint_with_for_test(&factory, "liaison", "rivet", &format!(r#"{{"{pipe}": []}}"#));
+    pipes::taint_for_test(&factory, "rivet", "browser:https://example.com");
     let said = call(&mut client, &mut view, "rivet", "pipes_forward", &format!(r#"{{"pipe": "{pipe}", "to": ""}}"#)).await;
-    assert!(said.starts_with("Not while you've read a pipe"), "{said}");
+    assert!(said.starts_with("Not while you've read a page on https://example.com"), "{said}");
     assert_eq!(shown(&view, &pipe).and_then(|pipe| pipe.forward).map(|forward| forward.recipient_id), Some("ingrid".to_owned()));
 
     // History says who did it, and that Ingrid kept her conversation.
@@ -337,7 +336,27 @@ async fn only_an_untainted_admin_agent_forwards_reports_and_never_away_from_cont
 
     // Only the person lets a reader go, and not while reports go to it.
     let said = refused(&mut client, &mut view, Request::SetReportReader(v1::SetReportReader { agent_id: "ingrid".into(), reads: false, fresh: true })).await;
-    assert!(said.contains("Reports are still forwarded"), "{said}");
+    // It says where, in the app's words (Abbacchio's row 645, A).
+    assert_eq!(said, "Ingrid still gets reports from Docs, Website ⇄ Marketing and Site's new pipes. Choose who reads them there first.");
+}
+
+/// A closed pipe forwards nothing, so it doesn't keep its reader from being
+/// let go; and a reader let go with a fresh start isn't told that what it
+/// read is still in its conversation (Abbacchio's row 645, B).
+#[tokio::test]
+async fn a_closed_pipe_doesnt_hold_its_reader_and_a_fresh_start_says_so() {
+    let (_dir, _factory, mut client, mut view, pipe) = setup().await;
+    apply_request(&mut client, &mut view, forward(&pipe, "ingrid", true)).await;
+    view.follow(&mut client, |view| view.agent("ingrid").reads_reports).await;
+    let close = v1::SetPipeState { pipe_id: pipe.clone(), action: v1::PipeAction::Close as i32 };
+    apply_request(&mut client, &mut view, Request::SetPipeState(close)).await;
+    let release = v1::SetReportReader { agent_id: "ingrid".into(), reads: false, fresh: true };
+    apply_request(&mut client, &mut view, Request::SetReportReader(release)).await;
+    view.follow(&mut client, |view| !view.agent("ingrid").reads_reports).await;
+    apply_request(&mut client, &mut view, select("ingrid")).await;
+    view.follow(&mut client, |view| host_events(view).iter().any(|text| text.contains("no longer limits you to reading reports"))).await;
+    let told = host_events(&view).into_iter().find(|text| text.contains("no longer limits you")).expect("told");
+    assert!(told.ends_with("Your conversation started fresh, so nothing you read is in it."), "{told}");
 }
 
 #[tokio::test]
@@ -384,7 +403,7 @@ async fn a_reports_files_are_copied_out_of_the_inbox_and_open_only_for_its_reade
     }
     assert!(!files.iter().any(|file| file.path.contains("site/")));
 
-    // Facts say how many; opening one is reading the pipe.
+    // Facts say how many; opening one shows it, fenced, and marks no one.
     apply_request(&mut client, &mut view, select("ingrid")).await;
     view.follow(&mut client, |view| idle(view, "ingrid")).await;
     let facts = call(&mut client, &mut view, "ingrid", "handoff_read", r#"{"text": false, "since": 0}"#).await;
@@ -393,8 +412,7 @@ async fn a_reports_files_are_copied_out_of_the_inbox_and_open_only_for_its_reade
     let id = page.reports.iter().find(|report| report.number == 1).expect("#1").id;
     let log = call(&mut client, &mut view, "ingrid", "handoff_read", &format!(r#"{{"report": {id}, "file": 2}}"#)).await;
     assert!(log.contains(&format!("{MARKER}-log")) && log.contains("untrusted"), "{log}");
-    let taint: serde_json::Value = serde_json::from_str(&pipes::taint_of_for_test(&factory, "ingrid")).expect("json");
-    assert!(taint.get(&pipe).is_some(), "{taint}");
+    assert_eq!(pipes::taint_of_for_test(&factory, "ingrid"), "{}");
     let shot = call(&mut client, &mut view, "ingrid", "handoff_read", &format!(r#"{{"report": {id}, "file": 1}}"#)).await;
     assert!(shot.contains("An image") && shot.contains("shotgnp.png"), "{shot}");
     // Not another agent's: Lea has no report tools at all.

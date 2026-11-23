@@ -245,6 +245,14 @@ impl Schema {
         self.fields.iter().find(|field| field.name == name)
     }
 
+    /// Whether it lets more of the other side's words through than the
+    /// version before: a widened field that carries words. More choices, a
+    /// wider range or another fact widen what crosses (`widened`), but no
+    /// words of theirs.
+    pub(crate) fn widens_words(&self) -> bool {
+        self.widened.iter().any(|name| self.field(name).is_some_and(|field| field.kind.words()))
+    }
+
     /// Its files' field, if it has one (at most one).
     pub(crate) fn attachments(&self) -> Option<&Field> {
         self.fields.iter().find(|field| field.kind == Kind::Attachments)

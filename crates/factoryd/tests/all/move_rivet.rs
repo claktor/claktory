@@ -2,7 +2,7 @@
 //! target's code and returns the digits; only the person confirms them, in
 //! Claktory's own confirm (ConfirmMove), never through a question Rivet
 //! words (Fugo's review); move_status follows it; move_cancel calls it off.
-//! Rivet can't start one once it has read a pipe.
+//! Rivet can't start one once it has read a web page.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -152,6 +152,10 @@ async fn rivet_moves_a_claktory_but_confirms_the_digits_only_with_the_persons_ye
     .await;
     let status = call(&mut client, &mut view, "move_status", "{}").await;
     assert!(status.contains(&format!("The digits: {digits}.")), "{status}");
+    // Kept with the move, so frozen mode and a failure after it still say
+    // Rivet started it.
+    let saved = factoryd::move_run::saved(&home).expect("the move's state");
+    assert_eq!(saved.started_by_agent_id, "rivet");
 
     // Called off: nothing kept.
     let off = call(&mut client, &mut view, "move_cancel", "{}").await;
@@ -170,9 +174,9 @@ async fn rivet_starts_no_move_once_it_has_read_a_pipe() {
     let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(rivet)).await;
     apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
-    factoryd::pipes::taint_with_for_test(&factory, "lea", "rivet", r#"{"p1":[]}"#);
+    factoryd::pipes::taint_for_test(&factory, "rivet", "browser:https://example.com");
     let refused = call(&mut client, &mut view, "move_claktory", r#"{"code":"claktory-move://x"}"#).await;
-    assert!(refused.starts_with("You've read a pipe, so you can't start a move") && refused.contains("Settings → Move"), "{refused}");
+    assert!(refused.starts_with("You've read a page on https://example.com, so you can't start a move") && refused.contains("Settings → Move"), "{refused}");
     assert!(view.workspace.r#move.is_none());
 }
 
@@ -242,6 +246,38 @@ async fn rivet_reports_how_the_move_went_on_the_new_computer() {
     std::fs::remove_dir_all(&site).expect("gone");
     let report = call(&mut client, &mut view, "move_report", "{}").await;
     assert!(report.contains(&format!("\nFolders: 1 of 1 isn't here: Site ({}).", site.display())), "{report}");
+}
+
+/// A sign-in the provider refuses on the new computer (#243 S8, row 627):
+/// move_report's usage read finds it refused and says so on its own line,
+/// in words that say what to do, and the others still report.
+#[tokio::test(flavor = "multi_thread")]
+async fn rivet_reports_a_sign_in_refused_after_the_move() {
+    let dir = temp_dir();
+    let (addr, _factory) = start_with(&dir, Scripted::subscribed().refusing_usage()).await;
+    let home = home_of(addr);
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(rivet)).await;
+    apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    let db = rusqlite::Connection::open(home.db_path()).expect("the records");
+    let moved = factoryd::transcript::now_ms() - 60_000;
+    db.execute(
+        "INSERT INTO moves (export_id, machine, version, epoch, map, imported, told, finished) VALUES ('x1', 'Old Mac', 'v0.1.16', 1, '[]', ?1, ?1, ?1)",
+        [moved],
+    )
+    .expect("a move");
+    drop(db);
+
+    let report = call(&mut client, &mut view, "move_report", "{}").await;
+    assert!(report.starts_with("Claktory moved here from Old Mac (v0.1.16) at "), "{report}");
+    assert!(
+        report.contains("\nSign-in: Scripted was refused here: sign in again in Settings → Providers (Needs you shows it too).\n"),
+        "{report}"
+    );
+    assert!(!report.contains("works here"), "{report}");
+    assert!(report.contains("\n\nFor most projects this just works"), "{report}");
 }
 
 /// A folder outside the home folder doesn't stop a move (Abbacchio's S8):

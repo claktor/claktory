@@ -829,6 +829,9 @@ pub(super) mod tests {
                 account_id: account.into(),
                 device_key: format!("{account}-k"),
                 registrations: Vec::<Registration>::new(),
+                removed_devices: Vec::new(),
+                signed_in_at: None,
+                bound_devices: None,
             };
             let bytes = if body.is_null() { Vec::new() } else { body.to_string().into_bytes() };
             identity::route(&mut self.db, &self.keys, method, route, &caller, &bytes, self.now).expect("a route")

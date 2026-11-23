@@ -388,7 +388,15 @@ async fn an_app_is_reviewed_installed_set_up_given_to_agents_and_heard_from() {
         "{:?}",
         describe(&view.entries)
     );
-    assert_eq!(app(&view).expect("app").grants, [v1::AppGrant { agent_id: "builder".into(), scopes: vec!["send".into(), "read".into()] }]);
+    let grants = app(&view).expect("app").grants.clone();
+    assert_eq!(
+        grants.iter().map(|grant| (grant.agent_id.as_str(), grant.scopes.clone())).collect::<Vec<_>>(),
+        [("builder", vec!["send".to_owned(), "read".to_owned()])]
+    );
+    // The person's own change, the last that touched Builder (hearing).
+    let given = grants[0].given.clone().expect("given");
+    assert_eq!((given.by_agent_id.as_str(), given.by_card), ("", false));
+    assert!(!given.change_id.is_empty() && given.at_ms > 0);
     // On the Map: the app, what Builder was given and hears, and its secret.
     let map = view.workspace.map.clone().expect("map");
     let node = map.nodes.iter().find(|node| node.id == "app:telegram").expect("the app's node");
@@ -635,6 +643,22 @@ async fn an_installed_app_keeps_updating_with_its_own_key_and_no_other() {
     assert_eq!(app(&view).expect("app").version, "0.2.0");
 }
 
+/// The version of Charts the release ships (apps/dist/charts.clapp), from
+/// its manifest: the signed file can lag behind apps/charts' source.
+fn shipped_version(clapp: &[u8]) -> String {
+    let mut archive = tar::Archive::new(clapp);
+    for entry in archive.entries().expect("a tar") {
+        let mut entry = entry.expect("an entry");
+        if entry.path().expect("a path").to_str() == Some("manifest.toml") {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut entry, &mut text).expect("read");
+            let line = text.lines().find(|line| line.starts_with("version")).expect("a version");
+            return line.split('"').nth(1).expect("quoted").to_owned();
+        }
+    }
+    panic!("no manifest.toml in charts.clapp");
+}
+
 /// Claktory's own apps ship with the release (#201): the real signed
 /// Charts in its folder is offered, reviewed and installed like any file;
 /// a file that isn't signed by Claktory, or was changed, isn't offered or
@@ -647,6 +671,8 @@ async fn claktorys_own_apps_are_offered_checked_and_installed_from_the_release()
     std::fs::create_dir_all(&shipped).expect("folder");
     let charts = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../apps/dist/charts.clapp")).expect("Charts, signed");
     std::fs::write(shipped.join("charts.clapp"), &charts).expect("written");
+    let version = shipped_version(&charts);
+    let version = version.as_str();
     // Signed, but not by Claktory; and Charts with a byte changed.
     let local = clapp(MANIFEST, b"\0asm\x01\0\0\0", &SigningKey::from_bytes(&[7; 32]));
     std::fs::write(shipped.join("telegram.clapp"), &local).expect("written");
@@ -662,13 +688,35 @@ async fn claktorys_own_apps_are_offered_checked_and_installed_from_the_release()
     assert!(workspace.bundled_apps.is_empty());
     drop(client);
 
+    // Where they are, Charts installs by itself, as Claktory's, given
+    // nothing: no data, no agent.
     let stand = Stand::new();
     factory.set_apps_host(stand.launcher());
+    factoryd::apps::bundled::set_folder_for_test(&factory, shipped.clone());
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
-    let offered: Vec<_> =
-        view.workspace.bundled_apps.iter().map(|app| (app.id.as_str(), app.version.as_str(), app.installed_version.as_str())).collect();
-    assert_eq!(offered, [("charts", "0.2.1", "")]);
+    view.follow(&mut client, |view| view.workspace.apps.iter().any(|app| app.id == "charts")).await;
+    let installed = view.workspace.apps.iter().find(|app| app.id == "charts").expect("installed").clone();
+    assert_eq!((installed.version.as_str(), installed.tier(), installed.bundled), (version, v1::AppTier::Claktory, true));
+    assert!(installed.grants.is_empty() && installed.sources.iter().all(|source| !source.granted), "{installed:?}");
+    view.follow(&mut client, |view| view.workspace.bundled_apps.is_empty()).await;
+
+    // Uninstalled, it stays so: offered, and said to be the person's choice.
+    let uninstall = v1::UninstallApp { id: "charts".into(), keep_data: false };
+    apply_request(&mut client, &mut view, Request::UninstallApp(uninstall)).await;
+    view.follow(&mut client, |view| view.workspace.bundled_apps.iter().any(|app| app.id == "charts" && app.uninstalled)).await;
+    factoryd::apps::bundled::set_folder_for_test(&factory, shipped.clone());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    assert!(view.workspace.apps.iter().all(|app| app.id != "charts"), "not put back");
+    let offered: Vec<_> = view
+        .workspace
+        .bundled_apps
+        .iter()
+        .map(|app| (app.id.as_str(), app.version.as_str(), app.installed_version.as_str(), app.uninstalled))
+        .collect();
+    assert_eq!(offered, [("charts", version, "", true)]);
     let listed = view.workspace.bundled_apps[0].clone();
     assert_eq!((listed.name.as_str(), listed.publisher.as_str(), listed.icon.as_str()), ("Charts", "claktory", "chart-column"));
 
@@ -701,6 +749,12 @@ async fn claktorys_own_apps_are_offered_checked_and_installed_from_the_release()
     assert!(matches!(reply, Body::Ack(_)), "{reply:?}");
     view.follow(&mut client, |view| view.workspace.apps.iter().any(|app| app.id == "charts")).await;
     let installed = view.workspace.apps.iter().find(|app| app.id == "charts").expect("installed").clone();
-    assert_eq!((installed.version.as_str(), installed.tier()), ("0.2.1", v1::AppTier::Claktory));
+    assert_eq!((installed.version.as_str(), installed.tier()), (version, v1::AppTier::Claktory));
+    // Installed again: no longer the person's uninstall.
     view.follow(&mut client, |view| view.workspace.bundled_apps.is_empty()).await;
+    let kept: i64 = rusqlite::Connection::open(crate::common::home_of(addr).db_path())
+        .expect("factory.db")
+        .query_row("SELECT count(*) FROM app_uninstalled", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(kept, 0);
 }

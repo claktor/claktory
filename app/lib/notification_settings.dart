@@ -161,8 +161,8 @@ class _NotificationSettingsViewState extends State<NotificationSettingsView>
               ],
               const SizedBox(height: Space.xs),
               Text(
-                'If an agent has read messages from another Claktory, what '
-                'it says stays in the app.',
+                'If an agent has read a web page or answers a pipe, what it '
+                'says stays in the app.',
                 style: caption,
               ),
             ],

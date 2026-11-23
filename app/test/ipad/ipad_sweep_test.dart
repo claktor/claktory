@@ -13,9 +13,11 @@ import 'package:factory_app/ipad/columns.dart' show WorkbenchTier;
 import 'package:factory_app/your_claktories.dart' show showConfirmSignIn;
 import 'package:factory_app/ipad/workbench.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/rail.dart' show ClaktoryRail;
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/shell.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -121,6 +123,92 @@ final _windows = [
     ],
 ];
 
+final _letter = RegExp(r'\p{L}', unicode: true);
+
+/// The longest word every column should hold whole, at any text size:
+/// "conversations".
+const _everydayWord = 13;
+
+/// A column narrower than this share of the window sits beside something
+/// (a label column, a grid): it could stack instead of breaking words.
+const _sideColumn = 0.6;
+
+/// The everyday words laid out on screen broken across two lines between
+/// two letters, as "Clakto|ry": text squeezed into a column narrower than
+/// a word at its size. Each line after a paragraph's first starts where
+/// [RenderParagraph.getPositionForOffset] finds it at its left edge; a
+/// single-line paragraph (cut with an ellipsis) is left out, and so are a
+/// word longer than [_everydayWord] letters (a long name) and a paragraph
+/// as wide as most of the window ([_sideColumn]).
+List<String> midWordBreaks(WidgetTester tester) {
+  final found = <String>[];
+  final window = tester.view.physicalSize.width / tester.view.devicePixelRatio;
+  for (final element in find.byType(RichText).evaluate()) {
+    final paragraph = element.renderObject;
+    if (paragraph is! RenderParagraph ||
+        !paragraph.hasSize ||
+        !paragraph.attached ||
+        paragraph.maxLines == 1 ||
+        // Most of the window's width and still too narrow for a word at
+        // this size (a title in Slide Over): nothing could hold it whole.
+        paragraph.size.width >= window * _sideColumn) {
+      continue;
+    }
+    final text = paragraph.text.toPlainText(includeSemanticsLabels: false);
+    if (text.length < 2) continue;
+    final boxes = paragraph.getBoxesForSelection(
+      TextSelection(baseOffset: 0, extentOffset: text.length),
+    );
+    // The lines, top to bottom: boxes that overlap down the page are one
+    // line (a bold word, an emoji), its left edge the leftmost.
+    final sorted = [...boxes]..sort((a, b) => a.top.compareTo(b.top));
+    final lines = <({double top, double bottom, double left})>[];
+    for (final box in sorted) {
+      final last = lines.isEmpty ? null : lines.last;
+      if (last != null && box.top < last.bottom - 1) {
+        lines.last = (
+          top: last.top,
+          bottom: box.bottom > last.bottom ? box.bottom : last.bottom,
+          left: box.left < last.left ? box.left : last.left,
+        );
+      } else {
+        lines.add((top: box.top, bottom: box.bottom, left: box.left));
+      }
+    }
+    for (final line in lines.skip(1)) {
+      final at = paragraph
+          .getPositionForOffset(
+            Offset(line.left + 0.5, (line.top + line.bottom) / 2),
+          )
+          .offset;
+      if (at <= 0 || at >= text.length) continue;
+      if (!_letter.hasMatch(text[at - 1]) || !_letter.hasMatch(text[at])) {
+        continue;
+      }
+      // A word longer than any line could hold at this size (a long name)
+      // breaks wherever the text goes; an everyday word must not.
+      var start = at, end = at;
+      while (start > 0 && _letter.hasMatch(text[start - 1])) {
+        start--;
+      }
+      while (end < text.length && _letter.hasMatch(text[end])) {
+        end++;
+      }
+      if (end - start <= _everydayWord) {
+        final from = (at - 12).clamp(0, text.length);
+        final to = (at + 12).clamp(0, text.length);
+        found.add(
+          '${text.substring(from, at)}|${text.substring(at, to)}'.replaceAll(
+            '\n',
+            ' ',
+          ),
+        );
+      }
+    }
+  }
+  return found;
+}
+
 void main() {
   setUpAll(loadGeist);
 
@@ -168,11 +256,24 @@ void main() {
       await harness.show(
         tester,
         size: fixture.size,
-        home: WorkbenchScope(focus: focus, child: const Shell()),
+        home: WorkbenchScope(
+          focus: focus,
+          child: const Shell(rail: ClaktoryRail()),
+        ),
       );
       await pumpFrames(tester);
 
+      // A word broken across lines in the middle ("Clakto / ry"): text
+      // squeezed narrower than a word at this size.
+      void checkWords() {
+        for (final broken in midWordBreaks(tester)) {
+          final line = '$name, $screen: breaks mid-word "$broken"';
+          if (!problems.contains(line)) problems.add(line);
+        }
+      }
+
       Future<void> scrollAll() async {
+        checkWords();
         for (var i = 0; i < 12; i++) {
           final scrollables = find.byType(Scrollable);
           if (scrollables.evaluate().isEmpty) break;
@@ -182,9 +283,13 @@ void main() {
             warnIfMissed: false,
           );
           await tester.pump(const Duration(milliseconds: 50));
+          checkWords();
         }
         await pumpFrames(tester);
+        checkWords();
       }
+
+      checkWords();
 
       // The sidebar where it opens over the window.
       final toggle = find.byKey(const ValueKey('workbench-sidebar'));
@@ -271,7 +376,10 @@ void main() {
           await harness.show(
             tester,
             size: fixture.size,
-            home: WorkbenchScope(focus: focus, child: const Shell()),
+            home: WorkbenchScope(
+              focus: focus,
+              child: const Shell(rail: ClaktoryRail()),
+            ),
           );
           await pumpFrames(tester);
         }

@@ -12,6 +12,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'app_access_card.dart' show AppAccessCard, appAccessSummary;
 import 'app_grant_card.dart' show AppGrantCard, appGrantSummary;
 import 'ask_card.dart';
 import 'backend.dart';
@@ -1398,7 +1399,7 @@ class _Bubble extends StatelessWidget {
       case NeedsYouKind.pipeApproval:
         return pipe == null
             ? 'Waiting for your approval'
-            : '${pipePeerName(pipe)} wants to connect';
+            : '${pipePeerName(pipe, start: true)} wants to connect';
       case NeedsYouKind.pipeLoop:
         return 'Paused: agents kept talking on their own';
       case NeedsYouKind.pipeHeld:
@@ -1550,6 +1551,10 @@ String _waitingLine(Entry entry, Backend backend, {String? agentId}) =>
         entry.appGrant,
         backend.workspace.workspace,
       ),
+      Entry_Kind.appAccess => appAccessSummary(
+        entry.appAccess,
+        backend.workspace.workspace,
+      ),
       _ => 'Waiting for your answer',
     };
 
@@ -1599,6 +1604,12 @@ Widget? waitingCard(
   Entry_Kind.appGrant => AppGrantCard(
     key: ValueKey(entry.appGrant.id),
     entry.appGrant,
+    agentId: agentId,
+    seq: entry.seq.toInt(),
+  ),
+  Entry_Kind.appAccess => AppAccessCard(
+    key: ValueKey(entry.appAccess.id),
+    entry.appAccess,
     agentId: agentId,
     seq: entry.seq.toInt(),
   ),

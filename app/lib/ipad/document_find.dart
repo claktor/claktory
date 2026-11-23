@@ -65,10 +65,14 @@ class _DocumentFindPanelState extends State<DocumentFindPanel> {
     super.dispose();
   }
 
+  /// Shows [page] at [region]: a search's match marked apart from the
+  /// others, high in the view. A panel covering the page closes to show
+  /// it, keeping the search's marks: Search, lit, opens on it again.
   void _go(int index, int page, {Rect? region}) {
+    final searching = surface.panel == DocumentPanel.search;
     setState(() => _current = index);
-    surface.goTo(page, region: region);
-    if (widget.covers) surface.closePanel();
+    surface.goTo(page, region: region, match: searching);
+    if (widget.covers) surface.closePanel(keepSearch: searching);
   }
 
   @override

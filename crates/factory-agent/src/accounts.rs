@@ -183,17 +183,22 @@ pub fn exhausted_message(noun: &str, accounts: usize, first: Option<(&str, u64)>
     }
 }
 
-/// "Tue 14:05 (in 2 h 10 min)", in this machine's time zone.
+/// "Tue 14:05", in this machine's time zone; "in 2 h 10 min" only when
+/// its time can't be read. Never both: the message is kept (a transcript's
+/// notice, an error), and a time from now would be wrong once read later.
 pub fn when(at: u64) -> String {
-    let minutes = at.saturating_sub(now_ms()).div_ceil(60_000);
-    let left = match (minutes / 60, minutes % 60) {
+    local_time(at).unwrap_or_else(|| format!("in {}", left(at.saturating_sub(now_ms()))))
+}
+
+/// "2 h 10 min": `ms` to the nearest minute, at least 1. Not rounded up:
+/// a reset given to the second, set 10 minutes ahead, is a little over 10
+/// minutes away when it's read, and reads "10 min", not 11.
+fn left(ms: u64) -> String {
+    let minutes = (ms.saturating_add(30_000) / 60_000).max(1);
+    match (minutes / 60, minutes % 60) {
         (0, minutes) => format!("{minutes} min"),
         (hours, 0) => format!("{hours} h"),
         (hours, minutes) => format!("{hours} h {minutes} min"),
-    };
-    match local_time(at) {
-        Some(time) => format!("{time} (in {left})"),
-        None => format!("in {left}"),
     }
 }
 
@@ -212,5 +217,27 @@ pub fn local_time(at: u64) -> Option<String> {
         let mut buffer = [0u8; 32];
         let written = libc::strftime(buffer.as_mut_ptr().cast(), buffer.len(), c"%a %H:%M".as_ptr(), &parts);
         (written > 0).then(|| String::from_utf8_lossy(&buffer[..written]).into_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_time_left_reads_to_the_nearest_minute() {
+        // A 10-minute limit's reset, rounded up to the second, read at once.
+        assert_eq!(left(600_900), "10 min");
+        assert_eq!(left(120_999), "2 min");
+        assert_eq!(left(569_000), "9 min");
+        assert_eq!(left(571_000), "10 min");
+        assert_eq!(left(20_000), "1 min");
+        assert_eq!(left(0), "1 min");
+        assert_eq!(left(3_600_400), "1 h");
+        assert_eq!(left((2 * 60 + 10) * 60_000 + 700), "2 h 10 min");
+        // Only the time itself, which stays true once kept.
+        let at = now_ms() + 600_900;
+        assert_eq!(when(at), local_time(at).expect("a time here"));
+        assert!(!when(at).contains("(in"));
     }
 }

@@ -18,11 +18,14 @@ import 'controls.dart';
 import 'device_account.dart';
 import 'device_kind.dart' show thisDeviceName;
 import 'devices.dart' show thisDeviceKind;
+import 'forms.dart' show FormFrame;
 import 'identity.dart';
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/input.dart' show InputKind;
 import 'mobile/metrics.dart' show Touch, TypeScale;
 import 'name_step.dart' show StepButtons, stepFieldScrollPadding;
+import 'people/e2ee.dart' show DmSignOut, E2ee, e2eeFor, e2eeOf, startedE2ee;
+import 'people/people_view.dart' show peopleAvailable;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart' show Claktories, ClaktoriesScope, claktoryInitials;
 import 'scope.dart';
@@ -94,12 +97,154 @@ String accountProblem(Object error, String service) {
   return error.message.isNotEmpty ? error.message : 'Something went wrong.';
 }
 
+/// Signs this device out of the Claktory account. Where it has messages,
+/// it asks first, saying what happens to them (row 671, Fugo; Trish's
+/// words): deleted here when the person's other devices have them, kept
+/// here, locked, when it's the only one, unless the person deletes them.
+Future<void> signOutOfAccount(
+  BuildContext context,
+  DeviceAccount account,
+) async {
+  final e2ee = _messagesOf(context, account);
+  final plan = e2ee == null ? DmSignOut.none : await e2ee.signOutPlan();
+  if (plan == DmSignOut.none || e2ee == null) return account.signOut();
+  if (!context.mounted) return;
+  await showModal(
+    context,
+    (context, close) => _SignOutDevice(
+      account: account,
+      e2ee: e2ee,
+      alone: plan == DmSignOut.alone,
+      close: close,
+    ),
+  );
+}
+
+/// This device's messages for [account]: its engine if it runs, or one
+/// started where the Claktory shown offers People; null otherwise.
+E2ee? _messagesOf(BuildContext context, DeviceAccount account) {
+  if (e2eeFor case final hook?) return hook(context);
+  if (startedE2ee(account) case final known?) return known;
+  final workspace = AppScope.scope(context).backend.workspace.workspace;
+  return peopleAvailable(workspace) ? e2eeOf(context) : null;
+}
+
+class _SignOutDevice extends StatefulWidget {
+  const _SignOutDevice({
+    required this.account,
+    required this.e2ee,
+    required this.alone,
+    required this.close,
+  });
+
+  final DeviceAccount account;
+  final E2ee e2ee;
+
+  /// The only device with the person's messages: they stay, unless
+  /// deleted.
+  final bool alone;
+  final VoidCallback close;
+
+  @override
+  State<_SignOutDevice> createState() => _SignOutDeviceState();
+}
+
+class _SignOutDeviceState extends State<_SignOutDevice> {
+  var _delete = false;
+  var _busy = false;
+
+  Future<void> _signOut() async {
+    setState(() => _busy = true);
+    try {
+      if (!widget.alone) {
+        await widget.e2ee.leave();
+      } else if (_delete) {
+        await widget.e2ee.deleteHere();
+      }
+    } finally {
+      // Signed out in any case: what's here went, or stays locked. Gone
+      // from the person's messages, its key goes too: their other devices
+      // take it out of the account, so it comes back as a new device.
+      await widget.account.signOut(newKey: !widget.alone);
+      widget.close();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final kind = thisDeviceKind;
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    void choose(bool on) => setState(() => _delete = on);
+    final label = 'Delete messages from this $kind';
+    return FormFrame(
+      title: 'Sign out of your Claktory account?',
+      body: widget.alone
+          ? 'This is the only device with your messages. They stay on this '
+                '$kind, locked, until you sign in again with this account.'
+          : 'Your messages will be deleted from this $kind. Your other '
+                'devices keep them, and you can add this $kind again from '
+                'one of them.',
+      fields: [
+        if (widget.alone)
+          ToggleTap(
+            value: _delete,
+            onChanged: _busy ? null : choose,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Toggle(
+                    value: _delete,
+                    label: label,
+                    onChanged: _busy ? null : choose,
+                  ),
+                ),
+                const SizedBox(width: Space.m),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        label,
+                        style: type.body.copyWith(color: palette.text),
+                      ),
+                      if (_delete)
+                        Text(
+                          "Your security key is deleted too. Next time you'll "
+                          'start over, and your friends will see your '
+                          'security key change.',
+                          style: type.caption.copyWith(
+                            color: palette.textMuted,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+      error: null,
+      submitLabel: _delete ? 'Sign out and delete' : 'Sign out',
+      onSubmit: _busy ? null : () => unawaited(_signOut()),
+      onCancel: widget.close,
+    );
+  }
+}
+
 /// Signs this device in with an emailed code: its email, then the code.
 /// [intro] says why, above the email field.
 class DeviceSignInForm extends StatefulWidget {
-  const DeviceSignInForm({super.key, required this.intro});
+  const DeviceSignInForm({super.key, required this.intro, this.email});
 
   final String intro;
+
+  /// Signs in again only with this address (the account this device is
+  /// signed in to), shown rather than typed, so a mistyped one can't sign
+  /// it in to another account (Abbacchio's row 644). Null: any address.
+  final String? email;
 
   @override
   State<DeviceSignInForm> createState() => _DeviceSignInFormState();
@@ -176,7 +321,7 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
   }
 
   Future<void> _sendCode() async {
-    final email = _email.text.trim();
+    final email = widget.email ?? _email.text.trim();
     if (!looksLikeEmail(email)) {
       setState(() => _error = 'Enter an email address, like you@example.com.');
       return;
@@ -236,7 +381,10 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
         final send = Button(
           label: 'Send code',
           primary: true,
-          onPressed: _email.text.trim().isEmpty || _busy ? null : _sendCode,
+          onPressed:
+              (widget.email == null && _email.text.trim().isEmpty) || _busy
+              ? null
+              : _sendCode,
         );
         return Column(
           mainAxisSize: MainAxisSize.min,
@@ -247,14 +395,21 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
               style: type.body.copyWith(color: palette.textMuted),
             ),
             const SizedBox(height: Space.l),
-            TextField(
-              key: const ValueKey('device-email'),
-              controller: _email,
-              placeholder: 'Email address',
-              kind: InputKind.email,
-              scrollPadding: stepFieldScrollPadding(context),
-              onSubmitted: (_) => _sendCode(),
-            ),
+            if (widget.email case final email?)
+              Text(
+                email,
+                key: const ValueKey('device-email-fixed'),
+                style: type.body.copyWith(color: palette.text),
+              )
+            else
+              TextField(
+                key: const ValueKey('device-email'),
+                controller: _email,
+                placeholder: 'Email address',
+                kind: InputKind.email,
+                scrollPadding: stepFieldScrollPadding(context),
+                onSubmitted: (_) => _sendCode(),
+              ),
             _errorLine(context),
             const SizedBox(height: Space.l),
             if (isPhoneLayout(context))
@@ -286,17 +441,19 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
                       },
               )
             : null;
-        final different = Button(
-          label: 'Use a different email',
-          onPressed: () {
-            _email.text = waiting.email;
-            setState(() {
-              _error = null;
-              _offerNewCode = false;
-            });
-            _account.cancelSignIn();
-          },
-        );
+        final different = widget.email != null
+            ? null
+            : Button(
+                label: 'Use a different email',
+                onPressed: () {
+                  _email.text = waiting.email;
+                  setState(() {
+                    _error = null;
+                    _offerNewCode = false;
+                  });
+                  _account.cancelSignIn();
+                },
+              );
         final continueButton = Button(
           label: 'Continue',
           primary: true,
@@ -332,7 +489,7 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
             ),
             const SizedBox(height: Space.l),
             if (isPhoneLayout(context))
-              StepButtons(children: [continueButton, ?newCode, different])
+              StepButtons(children: [continueButton, ?newCode, ?different])
             else
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -341,7 +498,7 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
                     child: Wrap(
                       spacing: Space.xs,
                       runSpacing: Space.xs,
-                      children: [?newCode, different],
+                      children: [?newCode, ?different],
                     ),
                   ),
                   const SizedBox(width: Space.s),
@@ -532,7 +689,7 @@ class _YourClaktoriesState extends State<YourClaktories> {
     final now = DateTime.now();
     final signOut = Button(
       label: 'Sign out',
-      onPressed: () => account.signOut(),
+      onPressed: () => unawaited(signOutOfAccount(context, account)),
     );
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -968,7 +1125,7 @@ class _SignInRequiredViewState extends State<SignInRequiredView> {
         final said = backend.signInRequired.value ?? '';
         final signOut = Button(
           label: 'Sign out',
-          onPressed: () => account.signOut(),
+          onPressed: () => unawaited(signOutOfAccount(context, account)),
         );
         final retry = Button(
           label: 'Try again',

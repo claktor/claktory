@@ -113,26 +113,156 @@ pub struct Secrets {
 /// bytes, raw, line by line (PEM keys), in base64 (standard and URL-safe, at
 /// each of the 3 alignments it can have inside longer data, without
 /// padding), hex (lower and upper case), percent-encoded and JSON-escaped,
-/// becomes "[secret AWS/AWS_SECRET_ACCESS_KEY]".
-#[derive(Default)]
+/// becomes "[secret AWS/AWS_SECRET_ACCESS_KEY]". Forms of `LONG` bytes or
+/// more (a large file's) are found by their pieces instead: any part of one
+/// at least 2 × `PIECE` long is hidden, the whole of it too.
+#[derive(Clone, Default)]
 pub struct Redactor {
     /// What it was built from, so it can be extended (`with`): each value's
     /// label, bytes, and whether they're text.
-    values: Vec<(Arc<str>, Zeroizing<Vec<u8>>, bool)>,
-    /// None when there's nothing to hide.
+    values: Arc<Vec<Hidden>>,
+    /// The short forms; None when there are none.
     automaton: Option<AhoCorasick>,
     /// Each pattern's replacement.
-    replacements: Vec<Arc<str>>,
+    replacements: Arc<Vec<Arc<str>>>,
     /// The same patterns, to tell whether the end of a stream could still
     /// become one (`undecided`).
-    prefixes: Option<aho_corasick::nfa::contiguous::NFA>,
+    prefixes: Option<Arc<aho_corasick::nfa::contiguous::NFA>>,
+    /// The long forms.
+    pieces: Arc<Pieces>,
     /// The longest pattern, in bytes.
     longest: usize,
 }
 
 impl fmt::Debug for Redactor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Redactor").field("values", &self.values.len()).field("patterns", &self.replacements.len()).finish()
+        f.debug_struct("Redactor")
+            .field("values", &self.values.len())
+            .field("patterns", &self.replacements.len())
+            .field("long", &self.pieces.forms.len())
+            .finish()
+    }
+}
+
+/// Forms at least this long aren't patterns of the automaton, whose size
+/// grows with every byte of every pattern (a 1 MB file's forms took GBs and
+/// tens of seconds to build): they're found by their pieces.
+const LONG: usize = 4096;
+
+/// A long form is indexed by its pieces this long, at each multiple of it,
+/// so any part of it at least 2 × PIECE − 1 long holds a whole one.
+const PIECE: usize = 32;
+
+/// Pieces with fewer different bytes than this (zeros, "AAAA…") aren't
+/// indexed: they'd hide the same bytes anywhere.
+const PLAIN: usize = 8;
+
+/// The rolling hash's base.
+const BASE: u64 = 0x0100_0000_01b3;
+
+/// A piece's hash: the polynomial of its bytes (each + 1) in `BASE`.
+fn piece_hash(piece: &[u8]) -> u64 {
+    piece.iter().fold(0u64, |hash, &byte| hash.wrapping_mul(BASE).wrapping_add(u64::from(byte) + 1))
+}
+
+/// The forms of `LONG` bytes or more, and an index of their pieces.
+#[derive(Default)]
+struct Pieces {
+    forms: Vec<(Zeroizing<Vec<u8>>, Arc<str>)>,
+    /// (the piece's hash, its form, its offset in it), sorted.
+    index: Vec<(u64, u32, u32)>,
+}
+
+/// A stretch of text to hide.
+struct Span<'r> {
+    start: usize,
+    end: usize,
+    replacement: &'r str,
+    /// A long form's part that reaches the end of the text before the
+    /// form's own end: more of it may follow in a stream.
+    open: bool,
+}
+
+impl Pieces {
+    /// Indexes `form`, or gives it back when every piece of it is plain.
+    fn add(&mut self, form: Zeroizing<Vec<u8>>, replacement: Arc<str>) -> Option<(Zeroizing<Vec<u8>>, Arc<str>)> {
+        let id = self.forms.len() as u32;
+        let before = self.index.len();
+        for offset in (0..=form.len() - PIECE).step_by(PIECE) {
+            let piece = &form[offset..offset + PIECE];
+            let mut seen = [false; 256];
+            let distinct = piece.iter().filter(|&&byte| !std::mem::replace(&mut seen[usize::from(byte)], true)).count();
+            if distinct >= PLAIN {
+                self.index.push((piece_hash(piece), id, offset as u32));
+            }
+        }
+        if self.index.len() == before {
+            return Some((form, replacement));
+        }
+        self.forms.push((form, replacement));
+        None
+    }
+
+    fn is_empty(&self) -> bool {
+        self.forms.is_empty()
+    }
+
+    /// Each stretch of `bytes` that's part of a long form and holds one of
+    /// its indexed pieces, as long as it goes.
+    fn runs<'r>(&'r self, bytes: &[u8]) -> Vec<Span<'r>> {
+        let mut runs = Vec::new();
+        if self.forms.is_empty() || bytes.len() < PIECE {
+            return runs;
+        }
+        let power = (1..PIECE).fold(1u64, |power, _| power.wrapping_mul(BASE));
+        let mut hash = piece_hash(&bytes[..PIECE]);
+        // The run being read through, and its form: that form's pieces in
+        // it are the same run.
+        let mut current: Option<(usize, u32)> = None;
+        for at in 0..=bytes.len() - PIECE {
+            if at > 0 {
+                let gone = (u64::from(bytes[at - 1]) + 1).wrapping_mul(power);
+                hash = hash.wrapping_sub(gone).wrapping_mul(BASE).wrapping_add(u64::from(bytes[at + PIECE - 1]) + 1);
+            }
+            let first = self.index.partition_point(|entry| entry.0 < hash);
+            let mut best: Option<(Span<'r>, u32)> = None;
+            for &(_, id, offset) in self.index[first..].iter().take_while(|entry| entry.0 == hash) {
+                if current.is_some_and(|(end, form)| at < end && form == id) {
+                    continue;
+                }
+                let (form, replacement) = &self.forms[id as usize];
+                let offset = offset as usize;
+                if form[offset..offset + PIECE] != bytes[at..at + PIECE] {
+                    continue;
+                }
+                let (mut start, mut from) = (at, offset);
+                while start > 0 && from > 0 && bytes[start - 1] == form[from - 1] {
+                    start -= 1;
+                    from -= 1;
+                }
+                let (mut end, mut to) = (at + PIECE, offset + PIECE);
+                while end < bytes.len() && to < form.len() && bytes[end] == form[to] {
+                    end += 1;
+                    to += 1;
+                }
+                let open = end == bytes.len() && to < form.len();
+                if best.as_ref().is_none_or(|(span, _)| end - start > span.end - span.start) {
+                    best = Some((Span { start, end, replacement, open }, id));
+                }
+            }
+            if let Some((span, id)) = best {
+                if current.is_none_or(|(end, _)| span.end > end) {
+                    current = Some((span.end, id));
+                }
+                runs.push(span);
+            }
+        }
+        runs
+    }
+
+    /// Whether `bytes` is, whole, part of a long form.
+    fn covers(&self, bytes: &[u8]) -> bool {
+        self.runs(bytes).iter().any(|run| run.start == 0 && run.end == bytes.len())
     }
 }
 
@@ -141,40 +271,40 @@ impl Redactor {
     /// not only those an agent was given, so a value it found some other way
     /// is hidden too.
     pub fn new(variables: &[SecretVariable]) -> Redactor {
-        Redactor::build(
-            variables
-                .iter()
-                .filter(|variable| !variable.public)
-                .map(|variable| (format!("{}/{}", variable.secret, variable.variable).into(), variable.bytes(), !variable.binary))
-                .collect(),
-        )
+        Redactor::build(variables.iter().filter(|variable| !variable.public).map(entry).collect())
     }
 
-    /// This redactor, also hiding `variables`.
+    /// This redactor, also hiding `variables`: itself when it hides them
+    /// already.
     pub fn with(&self, variables: &[SecretVariable]) -> Redactor {
-        if variables.is_empty() {
-            return Redactor::build(self.values.clone());
+        let new: Vec<_> = variables
+            .iter()
+            .filter(|variable| !variable.public)
+            .map(entry)
+            .filter(|new| !self.values.iter().any(|known| known.0 == new.0 && known.2 == new.2 && *known.1 == *new.1))
+            .collect();
+        if new.is_empty() {
+            return self.clone();
         }
-        let mut values = self.values.clone();
-        values.extend(
-            variables
-                .iter()
-                .filter(|variable| !variable.public)
-                .map(|variable| (format!("{}/{}", variable.secret, variable.variable).into(), variable.bytes(), !variable.binary)),
-        );
+        let mut values = (*self.values).clone();
+        values.extend(new);
         Redactor::build(values)
     }
 
-    fn build(values: Vec<(Arc<str>, Zeroizing<Vec<u8>>, bool)>) -> Redactor {
-        let mut patterns: Vec<Zeroizing<Vec<u8>>> = Vec::new();
-        let mut replacements: Vec<Arc<str>> = Vec::new();
+    fn build(values: Vec<Hidden>) -> Redactor {
+        let mut short: Vec<(Zeroizing<Vec<u8>>, Arc<str>)> = Vec::new();
+        let mut pieces = Pieces::default();
         let mut seen = hashbrown::HashSet::new();
         for (label, value, text) in &values {
             let replacement: Arc<str> = format!("[secret {label}]").into();
             for form in forms(value, *text) {
-                if form.len() >= MIN_REDACTED && seen.insert(form.to_vec()) {
-                    patterns.push(form);
-                    replacements.push(replacement.clone());
+                if form.len() < MIN_REDACTED || !seen.insert(form.to_vec()) {
+                    continue;
+                }
+                if form.len() < LONG {
+                    short.push((form, replacement.clone()));
+                } else if let Some(plain) = pieces.add(form, replacement.clone()) {
+                    short.push(plain);
                 }
             }
         }
@@ -182,6 +312,13 @@ impl Redactor {
         for mut copy in seen.drain() {
             zeroize::Zeroize::zeroize(&mut copy);
         }
+        pieces.index.sort_unstable();
+        // What the pieces find whole anyway (a long value's lines) needn't
+        // be a pattern too.
+        if !pieces.is_empty() {
+            short.retain(|(form, _)| form.len() < 2 * PIECE - 1 || !pieces.covers(form));
+        }
+        let (patterns, replacements): (Vec<Zeroizing<Vec<u8>>>, Vec<Arc<str>>) = short.into_iter().unzip();
         let longest = patterns.iter().map(|pattern| pattern.len()).max().unwrap_or(0);
         let automaton = if patterns.is_empty() {
             None
@@ -197,20 +334,24 @@ impl Redactor {
         let prefixes = if patterns.is_empty() {
             None
         } else {
-            aho_corasick::nfa::contiguous::NFA::new(patterns.iter().map(|pattern| pattern.as_slice())).ok()
+            aho_corasick::nfa::contiguous::NFA::new(patterns.iter().map(|pattern| pattern.as_slice())).ok().map(Arc::new)
         };
-        Redactor { values, automaton, replacements, prefixes, longest }
+        Redactor { values: Arc::new(values), automaton, replacements: Arc::new(replacements), prefixes, pieces: Arc::new(pieces), longest }
     }
 
     /// Where the end of `bytes` could still turn into a value it hides,
     /// once more comes: the start of the longest end that's the beginning of
     /// one of its patterns, or `bytes.len()` when there's none. A stream
-    /// holds back only that.
+    /// holds back only that, and with long forms its last 2 × `PIECE`
+    /// bytes, which could be the start of one.
     fn undecided(&self, bytes: &[u8]) -> usize {
         use aho_corasick::Anchored;
         use aho_corasick::automaton::Automaton;
-        let Some(prefixes) = &self.prefixes else { return bytes.len() };
-        let Ok(start) = prefixes.start_state(Anchored::Yes) else { return bytes.len().saturating_sub(self.longest.saturating_sub(1)) };
+        let held = if self.pieces.is_empty() { bytes.len() } else { bytes.len().saturating_sub(2 * PIECE) };
+        let Some(prefixes) = &self.prefixes else { return held };
+        let Ok(start) = prefixes.start_state(Anchored::Yes) else {
+            return held.min(bytes.len().saturating_sub(self.longest.saturating_sub(1)));
+        };
         let earliest = bytes.len().saturating_sub(self.longest.saturating_sub(1));
         (earliest..bytes.len())
             .find(|&from| {
@@ -221,25 +362,76 @@ impl Redactor {
                 })
             })
             .unwrap_or(bytes.len())
+            .min(held)
     }
 
     /// Whether it hides anything.
     pub fn is_empty(&self) -> bool {
-        self.automaton.is_none()
+        self.automaton.is_none() && self.pieces.is_empty()
+    }
+
+    /// What to hide in `bytes`, in order and apart. `text`: `bytes` is
+    /// UTF-8, and each stretch is widened to whole characters.
+    fn spans(&self, bytes: &[u8], text: bool) -> Vec<Span<'_>> {
+        let mut spans: Vec<Span<'_>> = match &self.automaton {
+            Some(automaton) => automaton
+                .find_iter(bytes)
+                .map(|found| Span {
+                    start: found.start(),
+                    end: found.end(),
+                    replacement: &self.replacements[found.pattern().as_usize()],
+                    open: false,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        if self.pieces.is_empty() && !text {
+            return spans;
+        }
+        spans.extend(self.pieces.runs(bytes));
+        if text {
+            for span in &mut spans {
+                while span.start > 0 && bytes[span.start] & 0xC0 == 0x80 {
+                    span.start -= 1;
+                }
+                while span.end < bytes.len() && bytes[span.end] & 0xC0 == 0x80 {
+                    span.end += 1;
+                }
+            }
+        }
+        spans.sort_by_key(|span| (span.start, std::cmp::Reverse(span.end)));
+        let mut merged: Vec<Span<'_>> = Vec::with_capacity(spans.len());
+        for span in spans {
+            match merged.last_mut() {
+                Some(last) if span.start < last.end => {
+                    if span.end > last.end {
+                        last.end = span.end;
+                        last.open = span.open;
+                    } else if span.end == last.end {
+                        last.open |= span.open;
+                    }
+                }
+                _ => merged.push(span),
+            }
+        }
+        merged
     }
 
     /// `text` with every value hidden; borrowed when there was none.
     pub fn redact<'a>(&self, text: &'a str) -> Cow<'a, str> {
-        let Some(automaton) = &self.automaton else { return Cow::Borrowed(text) };
-        let mut out = String::new();
-        let mut last = 0;
-        for found in automaton.find_iter(text.as_bytes()) {
-            out.push_str(&text[last..found.start()]);
-            out.push_str(&self.replacements[found.pattern().as_usize()]);
-            last = found.end();
-        }
-        if last == 0 && out.is_empty() {
+        if self.is_empty() {
             return Cow::Borrowed(text);
+        }
+        let spans = self.spans(text.as_bytes(), true);
+        if spans.is_empty() {
+            return Cow::Borrowed(text);
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut last = 0;
+        for span in spans {
+            out.push_str(&text[last..span.start]);
+            out.push_str(span.replacement);
+            last = span.end;
         }
         out.push_str(&text[last..]);
         Cow::Owned(out)
@@ -247,16 +439,19 @@ impl Redactor {
 
     /// `bytes` with every value hidden; borrowed when there was none.
     pub fn redact_bytes<'a>(&self, bytes: &'a [u8]) -> Cow<'a, [u8]> {
-        let Some(automaton) = &self.automaton else { return Cow::Borrowed(bytes) };
-        let mut out = Vec::new();
-        let mut last = 0;
-        for found in automaton.find_iter(bytes) {
-            out.extend_from_slice(&bytes[last..found.start()]);
-            out.extend_from_slice(self.replacements[found.pattern().as_usize()].as_bytes());
-            last = found.end();
-        }
-        if last == 0 {
+        if self.is_empty() {
             return Cow::Borrowed(bytes);
+        }
+        let spans = self.spans(bytes, false);
+        if spans.is_empty() {
+            return Cow::Borrowed(bytes);
+        }
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut last = 0;
+        for span in spans {
+            out.extend_from_slice(&bytes[last..span.start]);
+            out.extend_from_slice(span.replacement.as_bytes());
+            last = span.end;
         }
         out.extend_from_slice(&bytes[last..]);
         Cow::Owned(out)
@@ -294,8 +489,17 @@ impl Redactor {
     /// The longest form of a value it hides, in bytes: a stream holds back
     /// one less, so a value split across chunks is still caught.
     pub fn longest(&self) -> usize {
-        self.longest
+        if self.pieces.is_empty() { self.longest } else { self.longest.max(2 * PIECE) }
     }
+}
+
+/// A value as the redactor keeps it: its label, bytes, and whether they're
+/// text.
+type Hidden = (Arc<str>, Zeroizing<Vec<u8>>, bool);
+
+/// A variable as the redactor keeps it.
+fn entry(variable: &SecretVariable) -> Hidden {
+    (format!("{}/{}", variable.secret, variable.variable).into(), variable.bytes(), !variable.binary)
 }
 
 /// Every form of a value the redactor hides, short ones included (the
@@ -322,9 +526,8 @@ fn forms(value: &[u8], text: bool) -> Vec<Zeroizing<Vec<u8>>> {
                     }
                 }
             }
-            let hex = Zeroizing::new(value.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
-            forms.push(Zeroizing::new(hex.to_ascii_uppercase().into_bytes()));
-            forms.push(Zeroizing::new(hex.as_bytes().to_vec()));
+            forms.push(hex_of(value, true));
+            forms.push(hex_of(value, false));
         }
         return forms;
     }
@@ -351,9 +554,8 @@ fn forms(value: &[u8], text: bool) -> Vec<Zeroizing<Vec<u8>>> {
                 forms.push(base64_aligned(engine, base, offset));
             }
         }
-        let hex = Zeroizing::new(base.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
-        forms.push(Zeroizing::new(hex.to_ascii_uppercase().into_bytes()));
-        forms.push(Zeroizing::new(hex.as_bytes().to_vec()));
+        forms.push(hex_of(base, true));
+        forms.push(hex_of(base, false));
         if !base.iter().all(|byte| unreserved(*byte)) {
             forms.push(percent_encoded(base, true));
             forms.push(percent_encoded(base, false));
@@ -368,6 +570,17 @@ fn forms(value: &[u8], text: bool) -> Vec<Zeroizing<Vec<u8>>> {
         }
     }
     forms
+}
+
+/// `value` in hex, upper or lower case.
+fn hex_of(value: &[u8], upper: bool) -> Zeroizing<Vec<u8>> {
+    let digits: &[u8; 16] = if upper { b"0123456789ABCDEF" } else { b"0123456789abcdef" };
+    let mut out = Zeroizing::new(Vec::with_capacity(value.len() * 2));
+    for byte in value {
+        out.push(digits[usize::from(byte >> 4)]);
+        out.push(digits[usize::from(byte & 15)]);
+    }
+    out
 }
 
 /// A PEM armor line: "-----BEGIN …-----" or "-----END …-----".
@@ -414,16 +627,19 @@ fn percent_encoded(value: &[u8], upper: bool) -> Zeroizing<Vec<u8>> {
 pub struct StreamRedactor {
     redactor: Arc<Redactor>,
     pending: Vec<u8>,
+    /// What it holds is the end of a long form's part whose replacement
+    /// went out already.
+    inside: bool,
 }
 
 impl StreamRedactor {
     pub fn new(redactor: Arc<Redactor>) -> StreamRedactor {
-        StreamRedactor { redactor, pending: Vec::new() }
+        StreamRedactor { redactor, pending: Vec::new(), inside: false }
     }
 
     /// What can be shown of the text so far, redacted.
     pub fn push(&mut self, text: &str) -> String {
-        if self.redactor.automaton.is_none() {
+        if self.redactor.is_empty() {
             return text.to_owned();
         }
         self.pending.extend_from_slice(text.as_bytes());
@@ -433,7 +649,7 @@ impl StreamRedactor {
 
     /// What can be written of the bytes so far, redacted.
     pub fn push_bytes(&mut self, bytes: &[u8]) -> Vec<u8> {
-        if self.redactor.automaton.is_none() {
+        if self.redactor.is_empty() {
             return bytes.to_vec();
         }
         self.pending.extend_from_slice(bytes);
@@ -444,36 +660,75 @@ impl StreamRedactor {
     /// become a value, and never part of a value it found. `text`: cut only
     /// between characters.
     fn advance(&mut self, text: bool) -> Vec<u8> {
-        let Some(automaton) = &self.redactor.automaton else { return std::mem::take(&mut self.pending) };
+        if self.redactor.is_empty() {
+            return std::mem::take(&mut self.pending);
+        }
         let mut cut = self.redactor.undecided(&self.pending);
         while text && cut > 0 && cut < self.pending.len() && self.pending[cut] & 0xC0 == 0x80 {
             cut -= 1;
         }
+        self.take(cut, text)
+    }
+
+    /// Takes off what's before `cut` (and any value it found that starts
+    /// there), redacted. A long form's part that may go on is hidden at
+    /// once, and only its last 2 × `PIECE` bytes are held, so what comes
+    /// next is still known for what it is; the replacement isn't repeated
+    /// as the part goes on.
+    fn take(&mut self, mut cut: usize, text: bool) -> Vec<u8> {
         let mut out = Vec::new();
         let mut last = 0;
-        for found in automaton.find_iter(self.pending.as_slice()) {
-            if found.start() >= cut {
+        let mut inside = false;
+        for (index, span) in self.redactor.spans(&self.pending, text).into_iter().enumerate() {
+            if span.start >= cut {
                 break;
             }
-            out.extend_from_slice(&self.pending[last..found.start()]);
-            out.extend_from_slice(self.redactor.replacements[found.pattern().as_usize()].as_bytes());
-            last = found.end();
-            cut = cut.max(found.end());
+            out.extend_from_slice(&self.pending[last..span.start]);
+            let shown = index == 0 && span.start == 0 && self.inside;
+            if span.open && cut < self.pending.len() {
+                let mut held = span.end.saturating_sub(2 * PIECE);
+                while text && held > span.start && self.pending[held] & 0xC0 == 0x80 {
+                    held -= 1;
+                }
+                if held <= span.start {
+                    cut = span.start;
+                    inside = shown;
+                    break;
+                }
+                if !shown {
+                    out.extend_from_slice(span.replacement.as_bytes());
+                }
+                last = held;
+                cut = held;
+                inside = true;
+                break;
+            }
+            if !shown {
+                out.extend_from_slice(span.replacement.as_bytes());
+            }
+            last = span.end;
+            cut = cut.max(span.end);
         }
-        out.extend_from_slice(&self.pending[last..cut]);
-        self.pending.drain(..cut);
+        out.extend_from_slice(&self.pending[last..cut.max(last)]);
+        self.pending.drain(..cut.max(last));
+        self.inside = inside;
         out
     }
 
     /// The rest, at the end of the stream, redacted.
     pub fn finish(&mut self) -> String {
-        utf8(self.finish_bytes())
+        if self.redactor.is_empty() {
+            return utf8(std::mem::take(&mut self.pending));
+        }
+        utf8(self.take(self.pending.len(), true))
     }
 
     /// The rest, at the end of a stream of bytes, redacted.
     pub fn finish_bytes(&mut self) -> Vec<u8> {
-        let rest = std::mem::take(&mut self.pending);
-        self.redactor.redact_bytes(&rest).into_owned()
+        if self.redactor.is_empty() {
+            return std::mem::take(&mut self.pending);
+        }
+        self.take(self.pending.len(), false)
     }
 
     /// What it's holding back, unredacted, in bytes.
@@ -788,6 +1043,115 @@ mod tests {
         let mut output = Vec::new();
         filter(Trickle(hex.into_bytes(), 3), &mut output, &values).unwrap();
         assert_eq!(output, hidden);
+    }
+
+    /// Bytes that look random (xorshift).
+    fn noise(length: usize, mut seed: u64) -> Vec<u8> {
+        (0..length)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed >> 24) as u8
+            })
+            .collect()
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// What's between `before` and `after` is only `hidden`, once or more.
+    fn only_hidden(shown: &[u8], before: &[u8], after: &[u8], hidden: &[u8]) -> bool {
+        let Some(middle) = shown.strip_prefix(before).and_then(|rest| rest.strip_suffix(after)) else { return false };
+        !middle.is_empty() && middle.len() % hidden.len() == 0 && middle.chunks(hidden.len()).all(|chunk| chunk == hidden)
+    }
+
+    #[test]
+    fn a_large_file_is_quick_to_take_in_and_hidden_every_way() {
+        let bytes = noise(1024 * 1024 - 1, 0x9e37_79b9_7f4a_7c15);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let blob = SecretVariable { file: true, binary: true, ..variable("Big", "BLOB", &encoded) };
+        let redactor = Redactor::new(std::slice::from_ref(&blob));
+        // Its forms aren't the automaton's patterns, which took GBs: only
+        // a wrapped encoding's short last line is.
+        let automaton = redactor.automaton.as_ref().map_or(0, AhoCorasick::memory_usage);
+        assert!(automaton < 64 * 1024, "{automaton} bytes");
+        assert!(redactor.replacements.len() <= 2, "{redactor:?}");
+        // Another value taken in, or the same again, costs no rebuild of it.
+        let again = redactor.with(std::slice::from_ref(&blob));
+        assert!(Arc::ptr_eq(&again.pieces, &redactor.pieces));
+        let hidden = "[secret Big/BLOB]";
+
+        // Raw, whole and in part (head -c, a hexdump's slice).
+        let raw = [&b"before "[..], &bytes, b" after"].concat();
+        assert_eq!(redactor.redact_bytes(&raw).as_ref(), b"before [secret Big/BLOB] after");
+        let part = [&b"x"[..], &bytes[5000..5100], b"y"].concat();
+        assert_eq!(redactor.redact_bytes(&part).as_ref(), b"x[secret Big/BLOB]y");
+        // Hex, base64 at each alignment, and wrapped as openssl and base64 print it.
+        let hexed = hex(&bytes);
+        assert_eq!(redactor.redact(&format!("{hexed}\n")), format!("{hidden}\n"));
+        assert_eq!(redactor.redact(&hexed.to_uppercase()), hidden);
+        assert_eq!(redactor.redact(&format!("= {} =", &hexed[999..1999])), format!("= {hidden} ="));
+        for prefix in [&b""[..], b"x", b"xy"] {
+            for engine in [&STANDARD_NO_PAD, &URL_SAFE_NO_PAD] {
+                let data = engine.encode([prefix, &bytes].concat());
+                let shown = redactor.redact(&data).into_owned();
+                assert!(shown.contains(hidden) && shown.len() < 100, "{prefix:?}: {}", &shown[..shown.len().min(200)]);
+            }
+        }
+        for width in [64, 76] {
+            let lines: Vec<&str> = encoded.as_bytes().chunks(width).map(|line| std::str::from_utf8(line).unwrap()).collect();
+            let shown = redactor.redact(&lines.join("\n")).into_owned();
+            assert!(!lines.iter().any(|line| line.len() >= MIN_REDACTED && shown.contains(line)), "{width}");
+        }
+        // Plain stretches of it don't hide the same bytes elsewhere.
+        let zeros = format!("{} 0000000000000000000000000000000000000000000000000000000000000000", "A".repeat(80));
+        assert!(matches!(redactor.redact(&zeros), Cow::Borrowed(_)));
+
+        // Streamed, as a command prints it, at any pace: nothing of it shows,
+        // and what's around it does (a smaller file, as long a form all the same).
+        let bytes = noise(100 * 1024, 7);
+        let blob = SecretVariable {
+            file: true,
+            binary: true,
+            ..variable("Big", "BLOB", &base64::engine::general_purpose::STANDARD.encode(&bytes))
+        };
+        let redactor = Redactor::new(std::slice::from_ref(&blob));
+        let raw = [&b"before "[..], &bytes, b" after"].concat();
+        let values = filter_values(std::slice::from_ref(&blob));
+        for step in [7, 1000, 64 * 1024] {
+            let mut output = Vec::new();
+            filter(Trickle(raw.clone(), step), &mut output, &values).unwrap();
+            assert!(
+                only_hidden(&output, b"before ", b" after", hidden.as_bytes()),
+                "{step}: {}",
+                String::from_utf8_lossy(&output[..output.len().min(300)])
+            );
+            assert!(output.len() < 200, "{step}: {} bytes", output.len());
+        }
+        let text = format!("hex: {} done\n", hex(&bytes));
+        let mut stream = StreamRedactor::new(Arc::new(redactor.clone()));
+        let mut shown = String::new();
+        for chunk in text.as_bytes().chunks(333) {
+            shown.push_str(&stream.push(std::str::from_utf8(chunk).unwrap()));
+            assert!(stream.held() < 4 * 1024, "{} held", stream.held());
+        }
+        shown.push_str(&stream.finish());
+        assert_eq!(shown, format!("hex: {hidden} done\n"));
+    }
+
+    #[test]
+    fn a_large_text_value_hides_its_lines_and_any_long_part() {
+        let lines: Vec<String> = (0..400).map(|line| hex(&noise(20, line + 1))).collect();
+        let value = lines.join("\n");
+        assert!(value.len() >= LONG);
+        let redactor = Redactor::new(&[variable("Creds", "JSON", &value)]);
+        let hidden = "[secret Creds/JSON]";
+        assert_eq!(redactor.redact(&format!("{value}\n")), format!("{hidden}\n"));
+        assert_eq!(redactor.redact(&format!(": {} :", lines[123])), format!(": {hidden} :"));
+        let middle = &value[1000..3000];
+        assert_eq!(redactor.redact(&format!("[{middle}]")), format!("[{hidden}]"));
     }
 
     #[test]

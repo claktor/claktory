@@ -203,8 +203,8 @@ async fn each_pipe_forwards_its_own_types_and_a_reader_answers_only_what_a_type_
     let forwards: Vec<_> = records.iter().filter(|record| record.kind() == v1::NeedsYouRecordKind::PipeForward && record.pipe_id == first).collect();
     let titles: Vec<&str> = forwards.iter().map(|record| record.title.as_str()).collect();
     assert!(titles.contains(&"You stopped this pipe forwarding \u{201C}Task request\u{201D}"), "{titles:?}");
-    let on = forwards.iter().find(|record| record.title == "You let this pipe forward \u{201C}Bug report\u{201D} and \u{201C}Task request\u{201D}").expect("on");
-    assert_eq!(on.report_types.iter().map(|schema| (schema.id.as_str(), schema.fields.len())).collect::<Vec<_>>(), [("bug_report", 11), ("task_request", 6)]);
+    let on = forwards.iter().find(|record| record.title == "You let this pipe forward \u{201C}Task request\u{201D}").expect("on");
+    assert_eq!(on.report_types.iter().map(|schema| (schema.id.as_str(), schema.fields.len())).collect::<Vec<_>>(), [("task_request", 6)]);
 }
 
 #[tokio::test]
@@ -254,7 +254,7 @@ async fn the_person_defines_a_type_and_its_old_reports_keep_their_version() {
 
     // Deleted only once nothing forwards it; its versions stay for its reports.
     let said = refused(&mut client, &mut view, Request::DeleteReportType(v1::DeleteReportType { id: "recipe".into() })).await;
-    assert!(said.contains("still on for \"Website\""), "{said}");
+    assert!(said.contains("“Recipe” is still forwarded by \"Website\". Turn it off there first."), "{said}");
     apply_request(&mut client, &mut view, forward(&first, "ingrid", &["bug_report"])).await;
     apply_request(&mut client, &mut view, Request::DeleteReportType(v1::DeleteReportType { id: "recipe".into() })).await;
     assert!(!view.workspace.report_schemas.iter().any(|schema| schema.id == "recipe"));
@@ -294,11 +294,11 @@ async fn rivet_defines_types_only_while_it_has_read_nothing_from_outside() {
     assert!(said.contains("of the types \"Recipe\" and \"Question\""), "{said}");
 
     // Tainted, it can still look, but change nothing.
-    pipes::taint_with_for_test(&factory, "liaison", "rivet", &format!(r#"{{"{first}": []}}"#));
+    pipes::taint_for_test(&factory, "rivet", "browser:https://example.com");
     let edit = r#"{"action": "edit", "id": "recipe", "name": "Recipe", "fields": [{"id": "dish", "label": "Dish", "kind": "text"}, {"label": "Send to", "kind": "text"}], "outcomes": ["accepted"]}"#;
     for args in [define, edit, r#"{"action": "delete", "id": "recipe"}"#] {
         let said = call(&mut client, &mut view, "rivet", "pipes_report_type", args).await;
-        assert!(said.starts_with("Not while you've read a pipe"), "{said}");
+        assert!(said.starts_with("Not while you've read a page on https://example.com"), "{said}");
     }
     let shown_types = call(&mut client, &mut view, "rivet", "pipes_report_type", r#"{"action": "show"}"#).await;
     assert!(shown_types.contains("\"Bug report\" (bug_report, version 1, built in)") && shown_types.contains("\"Recipe\" (recipe, version 1)"), "{shown_types}");
@@ -308,5 +308,30 @@ async fn rivet_defines_types_only_while_it_has_read_nothing_from_outside() {
     let made = records.iter().find(|record| record.kind() == v1::NeedsYouRecordKind::ReportType).expect("made");
     assert_eq!((made.agent_id.as_str(), made.title.as_str()), ("rivet", "Rivet made the report type \u{201C}Recipe\u{201D}"));
     let on = records.iter().find(|record| record.kind() == v1::NeedsYouRecordKind::PipeForward && record.title.contains("forward")).expect("on");
-    assert_eq!(on.title, "Rivet let this pipe forward \u{201C}Recipe\u{201D} and \u{201C}Question\u{201D}");
+    // Bug report was on as the app showed it, until Rivet chose others.
+    assert_eq!(on.title, "Rivet let this pipe forward \u{201C}Recipe\u{201D} and \u{201C}Question\u{201D} instead of \u{201C}Bug report\u{201D}");
+}
+
+/// A pipe's first save says only what the person changed from what the app
+/// showed (no one, Bug report), and an edit that only adds a choice widens
+/// what crosses but lets no more of their words through (Zucchero's T6).
+#[tokio::test]
+async fn a_first_save_and_a_new_choice_say_only_what_changed() {
+    let (_factory, mut client, mut view, first, _second) = setup().await;
+    apply_request(&mut client, &mut view, save(recipe("", Vec::new()), 0)).await;
+    assert!(shown(&view, &first).is_some_and(|pipe| pipe.forward.is_none()));
+    let tick = v1::SetPipeForward { pipe_id: first.clone(), type_ids: vec!["bug_report".into(), "recipe".into()], ..Default::default() };
+    apply_request(&mut client, &mut view, Request::SetPipeForward(tick)).await;
+    let mut more = recipe("recipe", Vec::new());
+    more.fields[2].choices.push("dessert".into());
+    apply_request(&mut client, &mut view, save(more, 1)).await;
+    let edited = view.workspace.report_schemas.iter().find(|schema| schema.id == "recipe").cloned().expect("recipe");
+    assert_eq!((edited.version, edited.widened_fields.clone()), (2, vec!["course".to_owned()]));
+
+    let records = history(&mut client, &mut view).await;
+    let forwards: Vec<&str> =
+        records.iter().filter(|record| record.kind() == v1::NeedsYouRecordKind::PipeForward).map(|record| record.title.as_str()).collect();
+    assert_eq!(forwards, ["You let this pipe forward \u{201C}Recipe\u{201D}"]);
+    let changed = records.iter().find(|record| record.title == "You changed the report type \u{201C}Recipe\u{201D}").expect("the edit");
+    assert!(!changed.widens, "a choice carries no words of theirs");
 }

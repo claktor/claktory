@@ -314,6 +314,34 @@ message ClientMessage {
     // sending it anywhere. Answered with Ack; the words come later in
     // AudioTranscribed, to the asker only.
     TranscribeAudio transcribe_audio = 187;
+    // Try now, beside an agent's or a chat's usage wait (Agent.usage_wait):
+    // it asks the provider again now. Answered with Ack.
+    TryAgainNow try_again_now = 188;
+    // The person decides on Rivet's proposal of what an app may read and
+    // which agents may use it (Entry.app_access): answered with Ack.
+    DecideAppAccess decide_app_access = 189;
+    // The person undoes a change to what an app reads or who uses it
+    // (NeedsYouRecord.app_change_id, AppAccessGiven.change_id): answered
+    // with AppAccessUndone. Only the person, from their device: no agent
+    // tool undoes.
+    UndoAppAccessChange undo_app_access_change = 191;
+    // Continue on another provider, beside an agent's or a chat's usage wait
+    // (Agent.usage_wait_alternative): it switches to that model now.
+    // Answered with Ack.
+    ContinueOnAlternative continue_on_alternative = 192;
+    // Back to the provider it was switched from, once that has room again
+    // (Agent.usage_switch.ready). Answered with Ack.
+    SwitchBack switch_back = 193;
+    // Undoes a model change an agent made with models_set
+    // (NeedsYouRecord.model_change_id): the agent goes back to the model and
+    // effort it had. Answered with Ack, or an Error saying why not ("Ingrid's
+    // model changed since, so it was left as it is.", "This was undone
+    // already.", "This change can't be found."). Only the person, from their
+    // device: no agent tool undoes.
+    UndoModelChange undo_model_change = 194;
+    // The files an app that reads files could be given, for "Add a file…".
+    // Answered with AppFiles.
+    ListAppFiles list_app_files = 195;
   }
 }
 
@@ -441,6 +469,10 @@ message ServerMessage {
     ConversationMatches conversation_matches = 67;
     // What a TranscribeAudio heard, to the connection that asked only.
     AudioTranscribed audio_transcribed = 68;
+    // The answer to UndoAppAccessChange, to the asker only.
+    AppAccessUndone app_access_undone = 69;
+    // The answer to ListAppFiles, to the asker only.
+    AppFiles app_files = 70;
   }
 }
 
@@ -2066,6 +2098,11 @@ message BundledApp {
   // The version installed, when an older one is: then it's an update.
   // Empty when it isn't installed.
   string installed_version = 7;
+  // The person uninstalled it, so Claktory doesn't install it again by
+  // itself: Install (InstallLocalApp with `bundled`) puts it back and
+  // clears this. A bundled app that's neither installed nor uninstalled is
+  // being installed, or couldn't be: Install works then too.
+  bool uninstalled = 8;
 }
 
 // Checks for a newer release now, as Claktory does on its own every half
@@ -3326,19 +3363,21 @@ message Agent {
   // at Fri 18:00". Empty when it isn't held up. Meanwhile `status` stays
   // WORKING (its run is open; messages queue as usual, and Stop ends it), and
   // its character sleeps. It asks again by itself at `usage_wait_until_ms`, or
-  // sooner when the person adds an account, uses a usage reset, tries a key
-  // again or changes its model. Unrelated to `waiting_seqs`, which are
-  // questions for the person.
+  // sooner when the person signs in (again) or out, adds an account, uses a
+  // usage reset, tries a key again, messages it, changes its model or
+  // chooses Try now (TryAgainNow), or the usage read sees room. Unrelated to
+  // `waiting_seqs`, which are questions for the person.
   string usage_wait = 34;
   // When the agent asks again by itself, in ms since 1970 (the first account's
   // reset plus a few seconds' margin is when it actually does); 0 when it
   // waits for the person (out of credit) or isn't held up.
   int64 usage_wait_until_ms = 35;
-  // The pipes whose messages it has read in its current context (as events,
-  // or with pipe_read), by Pipe.id: it's "tainted" until /clear, and using a
-  // secret needs the person's approval each time (SecretApproval). Empty when
-  // it has read none. Other things it read count the same, with a prefix:
-  // a web page read through browser control as "browser:<origin>".
+  // What it has read in its current context that may hold a stranger's
+  // instructions: it's "tainted" until /clear, and using a secret needs the
+  // person's approval each time (SecretApproval). Since #346 only a web page
+  // read through browser control counts, as "browser:<origin>"; reading a
+  // pipe or a direct message marks no one (pipe ids here came from older
+  // backends). Empty when it has read none.
   repeated string tainted_by_pipes = 36;
   // "<provider>/<model id>" a step this agent's model refused is retried on,
   // once per refused turn, the next step back on its own model; empty uses
@@ -3392,6 +3431,87 @@ message Agent {
   // only on its checklist (ChecklistItem). Before this, every such item
   // was here, and has_pending_ask told which had a card.
   repeated WaitingItem waiting_items = 42;
+  // Set while it waits on a usage limit or on credit (`usage_wait`, never a
+  // wait to sign in or for the secrets to unlock) and another signed-in
+  // provider with room can run its model, or the closest one: what
+  // ContinueOnAlternative would switch it to.
+  UsageWaitAlternative usage_wait_alternative = 48;
+  // It waits on a usage limit or on credit and no provider but its own is
+  // signed in: signing in to another (such as OpenRouter) would let it carry
+  // on now. False when another is signed in but can't run it.
+  bool usage_wait_no_other_provider = 49;
+  // It runs on another provider because of a ContinueOnAlternative: where
+  // it came from, and whether that has room again (SwitchBack). Cleared
+  // when it goes back, or when the person changes its model themselves.
+  UsageSwitch usage_switch = 50;
+}
+
+// What an agent (or a chat) waiting on its provider's usage could continue
+// on instead (Agent.usage_wait_alternative).
+message UsageWaitAlternative {
+  // The provider, for "Continue on OpenRouter".
+  string provider_name = 1;
+  // "<provider>/<model id>" it would run on, such as
+  // "openrouter/anthropic/claude-opus-4.8".
+  string model = 2;
+  // The model's name, without OpenRouter's maker prefix: "Claude Opus 4.8".
+  string model_name = 3;
+  // The same model it runs on now (matched across providers by name, the
+  // date left out); false when it's the closest one: the same family at the
+  // newest version not above it, or else the nearest above.
+  bool same_model = 4;
+  // The effort it would run at: its own when the model has it, otherwise
+  // the highest the model has below it, otherwise its lowest.
+  string effort = 5;
+  // `effort` isn't the one it runs at now.
+  bool effort_changed = 6;
+  // How many other agents and chats wait on the same provider and could
+  // continue elsewhere too (ContinueOnAlternative.all_waiting).
+  uint32 others_waiting = 7;
+}
+
+// Where an agent (or a chat) that continued on another provider came from
+// (Agent.usage_switch). Kept across restarts.
+message UsageSwitch {
+  // The provider as its wait named it, for "Back to Claude".
+  string provider_name = 1;
+  // "<provider>/<model id>" and the model's name it ran on before.
+  string model = 2;
+  string model_name = 3;
+  // That provider has an account with room again: SwitchBack can go.
+  bool ready = 4;
+  // How many other agents and chats switched from it are ready too
+  // (SwitchBack.all).
+  uint32 others_ready = 5;
+}
+
+// Continue on another provider: an agent (or a chat, by its id) waiting on
+// its provider's usage switches to its UsageWaitAlternative (model and
+// effort), and carries on there from its next model call, its conversation
+// kept, as with any model change. `all_waiting`: every agent and chat
+// waiting on that provider switches too, each to its own alternative.
+// INVALID_REQUEST, with a sentence to show, when it isn't waiting or there
+// is no alternative any more; NOT_FOUND for an unknown agent or chat.
+message ContinueOnAlternative {
+  string agent_id = 1;
+  bool all_waiting = 2;
+  // With `all_waiting`: how many others the person saw waiting
+  // (UsageWaitAlternative.others_waiting). When as many don't wait now,
+  // nothing switches: INVALID_REQUEST, saying how many wait now. 0 checks
+  // nothing (an app from before it).
+  uint32 expected_others = 3;
+}
+
+// Back to the model and effort an agent (or a chat) had before it continued
+// on another provider (Agent.usage_switch). `all`: every agent and chat
+// switched from that provider and ready goes back too. INVALID_REQUEST
+// when it wasn't switched; NOT_FOUND for an unknown agent or chat.
+message SwitchBack {
+  string agent_id = 1;
+  bool all = 2;
+  // With `all`: how many others the person saw ready to go back
+  // (UsageSwitch.others_ready); as ContinueOnAlternative.expected_others.
+  uint32 expected_others = 3;
 }
 
 // A checklist item that waits on the person (Agent.waiting_items).
@@ -3484,6 +3604,17 @@ message Transcript {
   repeated Entry entries = 2;
   // There are entries before the first of `entries`.
   bool has_earlier = 3;
+}
+
+// Try now: an agent (or a chat, by its id) waiting out its accounts' usage
+// limits (Agent.usage_wait) asks its provider again now, and so does every
+// other agent waiting on that provider. Claktory forgets that the
+// provider's accounts are spent and reads their usage again. If the
+// provider still refuses, the wait comes back with its fresh reset time,
+// for the cost of one refused request. INVALID_REQUEST when it isn't
+// waiting, NOT_FOUND for an unknown agent or chat.
+message TryAgainNow {
+  string agent_id = 1;
 }
 
 // Earlier entries of an agent's transcript, answered with EntryPage to the
@@ -3653,7 +3784,7 @@ message Entry {
     // An agent adds a device for the person (its devices_add tool): see
     // DevicePairing.
     DevicePairing device_pairing = 14;
-    // An agent that has read a pipe wants to use a secret (see
+    // An agent wants to use a secret that needs the person's approval (see
     // SecretApproval).
     SecretApproval secret_approval = 15;
     // An agent blocked on something only the person can give asks them
@@ -3666,6 +3797,10 @@ message Entry {
     // account, such as their direct messages (its apps_propose_grant
     // tool): see AppGrantProposal.
     AppGrantProposal app_grant = 19;
+    // Rivet proposes what one of Claktory's apps (Charts, say) may read and
+    // which agents may use it (its apps_propose_access tool): see
+    // AppAccessProposal.
+    AppAccessProposal app_access = 20;
   }
   // The model response it came from: the same for every entry one response
   // produced (its thinking, text and tool calls), the seq of the first of
@@ -3766,9 +3901,10 @@ message Proposal {
   string comment = 4;
   // When it was approved or dismissed, in ms since 1970; 0 while pending.
   int64 decided_at_ms = 5;
-  // The pipes the agent had read when it proposed (Agent.tainted_by_pipes),
-  // each with the agents it came through: what it proposes may come from
-  // the other side. Empty when it had read none.
+  // What the agent had read when it proposed (Agent.tainted_by_pipes): what
+  // it proposes may come from someone else. Since #346 only a web page
+  // (PipeTaint.kind "browser"); pipes on older proposals. Empty when it had
+  // read none.
   repeated PipeTaint taint = 6;
 }
 
@@ -3843,7 +3979,7 @@ message DismissPipeStart {
 // seq is in Rivet's Agent.waiting_seqs, so it shows in Needs you. Nothing
 // is given until the person approves it (DecideAppGrant); then the account
 // service makes the grant, and the entry is sent again with its state.
-// Only Rivet proposes, never one that has read a pipe, and only for an
+// Only Rivet proposes, never one that has read a web page, and only for an
 // agent of this Claktory, which is named by id and by the incarnation it
 // had when proposed: deleted and made again, it's another agent, and the
 // proposal fails.
@@ -3878,9 +4014,10 @@ message AppGrantProposal {
   // GRANTED: the account service's id for the grant, which revoking it
   // names.
   string grant_id = 14;
-  // The agent it would give access has read a pipe: messages from another
-  // Claktory, which may hold someone else's instructions. Set when proposed
-  // and again when decided. The card says so, loudest for dm.send.
+  // The agent it would give access has read something that may hold
+  // someone else's instructions (Agent.tainted_by_pipes: since #346 a web
+  // page; a pipe on older cards). Set when proposed and again when decided.
+  // The card says so, loudest for dm.send.
   bool grantee_read_pipes = 15;
 }
 
@@ -3927,6 +4064,87 @@ message DecideAppGrant {
   // The person's comment, told to Rivet as theirs ("Matt's note: …"),
   // with either answer; may be empty. 2,000 characters at most.
   string comment = 4;
+}
+
+// Rivet's proposal of what an installed app may read and which agents may
+// use it, for what the person wants (charted, say): shown in Rivet's
+// conversation after the call (apps_set_access, when what it gives needs
+// the person's approval; apps_propose_access before), and while PENDING its
+// seq is in Rivet's Agent.waiting_seqs, so it shows in Needs you. Nothing
+// is given until the person approves it (DecideAppAccess), and then
+// exactly what it shows: the sources are added to what the app reads, and
+// each agent gets its scopes, in place of those it had. Only Rivet
+// proposes; one that has read a web page always makes a card.
+message AppAccessProposal {
+  // Unique in this Claktory.
+  string id = 1;
+  string app_id = 2;
+  string app_name = 3;
+  // The data it would let the app read, each as the app asks for it
+  // (label, holds, private; granted false).
+  repeated AppDataSource sources = 4;
+  // The agents it would let use the app, each with its scopes
+  // (AppInfo.scopes' ids).
+  repeated AppGrant agents = 5;
+  // Why, in Rivet's words: what the person wants to see.
+  string reason = 6;
+  AppGrantState state = 7;
+  int64 created_ms = 8;
+  // When it was decided; 0 while PENDING.
+  int64 decided_ms = 9;
+  // The person's comment on deciding it, either way; may be empty.
+  string comment = 10;
+  // FAILED: why, in plain words (the app was uninstalled or changed, an
+  // agent was deleted).
+  string error = 11;
+  // The agents on it that have read something that may hold someone else's
+  // instructions (Agent.tainted_by_pipes: since #346 a web page; a pipe on
+  // older cards): the card warns.
+  repeated string agents_read_pipes = 12;
+  // What the person approves: DecideAppAccess sends it back, and an
+  // approval of anything else is refused.
+  string digest = 13;
+  // The app as proposed, so the card reads the same once it's gone: its
+  // publisher, tier and the hosts it may reach (none: no internet).
+  string publisher = 14;
+  AppTier tier = 15;
+  repeated string hosts = 16;
+  // Deprecated (#346): reading what an app reads marks no one, so this is
+  // always empty from new backends. Older cards may still have it: the
+  // agents that would read, through the app, messages another Claktory
+  // wrote.
+  repeated string agents_reading_pipes = 17;
+  // The app's events each agent on it would hear (apps_set_access's
+  // hears), in place of those it heard: one per event kind, with the
+  // agents on the card that would hear it. Unlisted agents keep theirs.
+  repeated AppSubscription subscriptions = 18;
+  // Why this needed the person's approval rather than Rivet applying it,
+  // each one of Claktory's sentences (never Rivet's words): "Charts can
+  // reach example.com on the internet, so giving it data or agents needs
+  // your approval." Show each one. When Rivet itself has read another
+  // Claktory's words, that sentence ("Rivet has read messages from another
+  // Claktory, which may hold someone else's instructions, …") is always the
+  // first, so the app can set it apart; the rest follow in Claktory's order
+  // (private data, the internet, then each agent). Empty on cards from
+  // before (apps_propose_access).
+  repeated string card_rules = 19;
+}
+
+// The person's decision on an AppAccessProposal in Rivet's conversation.
+// Answered with Ack once it's decided; the entry comes back decided. An
+// approval whose digest isn't the proposal's is refused and the card shown
+// again.
+message DecideAppAccess {
+  // Whose conversation shows it: Rivet's.
+  string agent_id = 1;
+  // The entry's seq.
+  uint64 seq = 2;
+  bool approve = 3;
+  // The person's comment, told to Rivet as theirs, with either answer; may
+  // be empty. 2,000 characters at most.
+  string comment = 4;
+  // With `approve`: AppAccessProposal.digest, as the card showed it.
+  string digest = 5;
 }
 
 message DevicePairing {
@@ -4731,9 +4949,9 @@ message SecretRequest {
   // itself, checks it's the same file, unchanged, and seals its bytes
   // straight into the vault (binary files too). Empty for other requests.
   repeated SecretImport imports = 20;
-  // The asking agent had read a pipe, a direct message or a web page when
-  // it asked (as AppGrantProposal.grantee_read_pipes): what it asks for may
-  // come from someone else.
+  // The asking agent had read a web page when it asked (a pipe or a direct
+  // message, before #346; as AppGrantProposal.grantee_read_pipes): what it
+  // asks for may come from someone else.
   bool asker_read_pipes = 21;
 }
 
@@ -4743,8 +4961,8 @@ message SecretImport {
   // The file variable it goes in.
   string variable = 1;
   // Its canonical absolute path, exactly as Claktory resolved it, not
-  // escaped: the card shows the home folder as ~/ and control, bidi and
-  // zero-width characters as visible \u{…}. Claktory refuses a path
+  // escaped: the card shows it in full, never shortened (no ~/), with
+  // control, bidi and zero-width characters as visible \u{…}. Claktory refuses a path
   // through a symbolic link, so this is the file itself.
   string path = 2;
   // In bytes.
@@ -5532,13 +5750,25 @@ message AppInfo {
   // Claktory's records, and an agent's own database for each agent it asks
   // for (every agent, when it asks for any).
   repeated AppDataSource sources = 20;
+  // One of Claktory's own apps that this release ships (BundledApp):
+  // Claktory installs it by itself, granting it nothing, and updates it
+  // when a newer one ships with nothing new to approve.
+  bool bundled = 21;
+  // Its manifest asks to read files the person chooses ([[data]] kind
+  // "file"): show "Add a file…", which gives one with GrantAppSource
+  // (APP_DATA_KIND_FILE says how a file's id reads). `sources` lists only
+  // the files given.
+  bool reads_files = 22;
 }
 
 // Data an app reads, only once the person grants it, and always read
 // only: SQL it runs in Claktory, one statement at a time. Agents' memory,
 // pipes and comments on files are never readable.
 message AppDataSource {
-  // "factory-records", or "agent:<agent id>"; GrantAppSource names it.
+  // "activity", "conversations", "agent:<agent id>", "file:<place>:<path>"
+  // (APP_DATA_KIND_FILE), or "factory-records" (all of Claktory's records:
+  // offered no more, and listed only where it was granted before);
+  // GrantAppSource names it.
   string id = 1;
   AppDataKind kind = 2;
   // AGENT_DATABASE: whose. In AppPermissions, "*" when the app asks for
@@ -5550,6 +5780,16 @@ message AppDataSource {
   string reason = 5;
   // Always false in AppPermissions: installing grants nothing.
   bool granted = 6;
+  // What it holds, a line for the person: "Runs, background tasks,
+  // monitors, checklist counts and token use. No message text."
+  string holds = 7;
+  // It holds people's words (what you and your agents wrote, or whatever an
+  // agent keeps in its database): conversations, an agent's database, and
+  // all of Claktory's records. Shown apart, and when the app can reach the
+  // internet, the card says this data could leave this computer.
+  bool private = 8;
+  // In AppInfo.sources, granted: who gave it and when (AppGrant.given).
+  AppAccessGiven given = 9;
 }
 
 enum AppDataKind {
@@ -5558,6 +5798,27 @@ enum AppDataKind {
   APP_DATA_KIND_FACTORY_RECORDS = 1;
   // An agent's own database (its Database extension's).
   APP_DATA_KIND_AGENT_DATABASE = 2;
+  // Activity: runs, background tasks, monitors, checklist items, messages
+  // and token use, as ids, agents, times, states and counts; never their
+  // text.
+  APP_DATA_KIND_ACTIVITY = 3;
+  // Conversations: the messages your agents got, from you, other agents
+  // and events, with their text.
+  APP_DATA_KIND_CONVERSATIONS = 4;
+  // A CSV or TSV file the person (or Rivet, on a card) chose, read as one
+  // table, `rows`, at every query. AppDataSource.id is
+  // "file:<place>:<path>": the place "workspace", a project's id or
+  // "<project id>/<folder id>", the path in that folder with "/" between
+  // names (no name starting with "."), such as
+  // "file:web-site:reports/bugs.csv"; label "reports/bugs.csv in Web Site",
+  // holds the file's full path. Another path is another source. In
+  // AppPermissions, one entry with id "file:*" says the app reads files
+  // the person chooses. Give one with GrantAppSource (source_id the id):
+  // it's refused, saying why, when the file can't be read by an app (a
+  // symbolic link or a hidden name in its path, inside Claktory's own
+  // folder but its workspace, not a regular file, several hard links, over
+  // 10 MB).
+  APP_DATA_KIND_FILE = 5;
 }
 
 // Grants the app the data source `source_id` (AppDataSource.id), or takes
@@ -5723,6 +5984,10 @@ message AppScopeSpec {
   string label = 2;
   // The tools it gives.
   repeated string tools = 3;
+  // Its tools can hand the agent what the app reads from the sources it's
+  // given (Charts' "Change dashboards", with charts_query): the agent reads
+  // that data too.
+  bool reads_data = 4;
 }
 
 message AppEventKind {
@@ -5736,6 +6001,79 @@ message AppEventKind {
 message AppGrant {
   string agent_id = 1;
   repeated string scopes = 2;
+  // In AppInfo.grants: who gave this agent its scopes as they are, and
+  // when; unset when that wasn't recorded (before Claktory kept it, or an
+  // edit of the settings file).
+  AppAccessGiven given = 3;
+}
+
+// Who changed an app's access to what it is, and when: the last recorded
+// change that set it (AppInfo's grants and sources).
+message AppAccessGiven {
+  // The admin agent that applied it (Rivet); empty when the person did,
+  // themselves or by approving Rivet's card (by_card).
+  string by_agent_id = 1;
+  int64 at_ms = 2;
+  // The change that set it: UndoAppAccessChange names it.
+  string change_id = 3;
+  // The person approved it on Rivet's card (AppAccessProposal).
+  bool by_card = 4;
+}
+
+// Undoes a recorded change to an app's access (AppAccessGiven.change_id,
+// NeedsYouRecord.app_change_id): each source, agent's scopes and events it
+// changed that are still as it left them go back to what they were before
+// it; any changed since is left as it is. The undo is a change of its own,
+// recorded, which can be undone in turn. Answered with AppAccessUndone.
+message UndoAppAccessChange {
+  string change_id = 1;
+}
+
+// See ClientMessage.undo_model_change.
+message UndoModelChange {
+  string change_id = 1;
+}
+
+// The CSV and TSV files in the workspace and in every project and project
+// folder that the app (AppInfo.reads_files) could be given, newest first,
+// at most 200: each place's files, never through a symbolic link, under a
+// name starting with ".", in node_modules or target, or (from the
+// workspace) in a project's own folder, which lists them itself. Refused
+// for an app that doesn't read files.
+message ListAppFiles {
+  string app_id = 1;
+  // Only those whose label has these words (any case); empty for all.
+  string query = 2;
+}
+
+message AppFiles {
+  repeated AppFileChoice files = 1;
+  // There were more than shown (past 200, or more than it looks through):
+  // say so, and let the person narrow it with the query.
+  bool truncated = 2;
+}
+
+// A file that could be given. Give it with GrantAppSource (source_id: id),
+// which checks it again.
+message AppFileChoice {
+  // "file:web-site:reports/bugs.csv" (APP_DATA_KIND_FILE).
+  string id = 1;
+  // "reports/bugs.csv in Web Site".
+  string label = 2;
+  int64 size_bytes = 3;
+  int64 modified_ms = 4;
+  // Set when it shows but can't be given, in Claktory's words ("It's over
+  // 10 MB, more than an app can read."); show it, and don't offer it.
+  string why = 5;
+}
+
+message AppAccessUndone {
+  // The undo's own change; empty when nothing was left to undo.
+  string change_id = 1;
+  // What was left as it is because it changed since, a sentence each for
+  // the person ("Ingrid's scopes on Charts changed since, so they were
+  // left as they are.").
+  repeated string kept = 2;
 }
 
 message AppSubscription {
@@ -6190,8 +6528,7 @@ message UpdatePipe {
   optional bool review_outgoing = 8;
   // The members quarantined for it (Pipe.quarantined_ids), all of them;
   // ids that aren't members are refused. A member left out is released:
-  // it gets its usual tools back, though it has read the pipe until its
-  // conversation is cleared (Agent.tainted_by_pipes). Only the person can
+  // it gets its usual tools back. Only the person can
   // send this: no agent tool reaches it.
   PipeMembers quarantined = 9;
   // Pipe.review_incoming. Turning it off lets nothing in: messages already
@@ -6284,14 +6621,17 @@ message AddPipeLiaison {
   string name = 2;
 }
 
-// An agent that has read a pipe (Agent.tainted_by_pipes) ran a command
-// with a secret: it didn't run, and waits for the person. Allowed, the
-// agent may use the secret in one command; it's told either way.
+// An agent ran a command with a secret that asks the person each time
+// (SecretInfo.ask_each_time), or after reading a web page
+// (Agent.tainted_by_pipes; a pipe, before #346): it didn't run, and waits for
+// the person. Allowed, the agent may use the secret in one command; it's
+// told either way.
 message SecretApproval {
   string agent_id = 1;
   // The secrets it named, by name.
   repeated string secret_names = 2;
-  // The pipes it has read, by name.
+  // What it has read, by name: since #346 a web page's site; pipes on
+  // older cards. Empty when only ask_each_time_names ask.
   repeated string pipe_names = 3;
   // The command it wanted to run.
   string command = 4;
@@ -6313,11 +6653,13 @@ message SecretApproval {
   bool keeps_running = 10;
 }
 
-// A pipe an agent has read, and how: `via_names` are the agents, by name
-// when it asked, that what it read came through, first the one that read
-// the pipe itself (each messaged the next); empty when the agent read the
-// pipe itself. "Website ⇄ Marketing" via ["Liaison", "Bruno"]: Liaison read
-// it, told Bruno, and Bruno told this agent.
+// What an agent has read that may hold someone else's instructions: since
+// #346 a web page (kind "browser"), read by the agent itself; a pipe on
+// older records. `via_names` are the agents, by name when it asked, that
+// what it read came through, first the one that read it (each messaged the
+// next); since #346 a mark never spreads, so it's empty on new records.
+// "Website ⇄ Marketing" via ["Liaison", "Bruno"]: Liaison read it, told
+// Bruno, and Bruno told this agent.
 message PipeTaint {
   string pipe_name = 1;
   repeated string via_names = 2;
@@ -6373,10 +6715,10 @@ message AskPerson {
   string answer = 6;
   // When it was answered or dismissed, in ms since 1970; 0 while pending.
   int64 decided_ms = 7;
-  // The pipes the agent had read when it asked (Agent.tainted_by_pipes),
-  // each with the agents it came through: what it asks may come from the
-  // other side ("from Liaison, which reads the pipe with Ana's Claktory").
-  // Empty when it had read none.
+  // What the agent had read when it asked (Agent.tainted_by_pipes): what it
+  // asks may come from someone else. Since #346 only a web page; pipes, with
+  // the agents they came through, on older asks. Empty when it had read
+  // none.
   repeated PipeTaint taint = 8;
   // A review ask (#275): the file the agent asks the person to review or
   // comment on, absolute; empty for an ordinary ask. It's one the agent may
@@ -6493,6 +6835,11 @@ message Chat {
   // account's usage to reset; StopChat ends the wait.
   string usage_wait = 11;
   int64 usage_wait_until_ms = 12;
+  // As Agent.usage_wait_alternative, usage_wait_no_other_provider and
+  // usage_switch.
+  UsageWaitAlternative usage_wait_alternative = 13;
+  bool usage_wait_no_other_provider = 14;
+  UsageSwitch usage_switch = 15;
 }
 
 // Makes a chat and selects it (Workspace.selected_chat_id, in the Workspace
@@ -6719,7 +7066,7 @@ message UpdateGoal {
 // from a computer too with `desktop_replies`). Nothing notifies while the
 // person is using Claktory on any device (SetActive). Each agent notifies at
 // most 6 times an hour; then one more says how many it held back. An agent
-// that has read a pipe never puts its own words in a notification: it says
+// that has read a web page never puts its own words in a notification: it says
 // only "<agent> has something for you".
 
 // Something the person should hear of, to every connected app. The backend
@@ -6925,18 +7272,35 @@ message NeedsYouRecord {
   string reply = 10;
   int64 asked_ms = 11;
   int64 decided_ms = 12;
-  // As on the card: the pipes the agent had read when it asked.
+  // As on the card: what the agent had read when it asked.
   repeated PipeTaint taint = 13;
   // REPORT_TYPE: the version made (for a deletion, its last), and the one
   // it replaced (unset for a new type).
   ReportSchema report_type = 14;
   ReportSchema report_type_before = 15;
-  // REPORT_TYPE: the edit widened what crosses (report_type's
-  // widened_fields says where).
+  // REPORT_TYPE: the edit lets more of the other side's words through: a
+  // field of text, a list or files that's new or widened (report_type's
+  // widened_fields says where, facts included: more choices or a wider
+  // range widen what crosses, but carry no words of theirs).
   bool widens = 16;
   // PIPE_FORWARD: the types the change turned on, at the version current
   // then, with every field and cap.
   repeated ReportSchema report_types = 17;
+  // APP_ACCESS: the change, for UndoAppAccessChange; empty when there's
+  // nothing to undo (a card declined, or one that failed).
+  string app_change_id = 18;
+  // APP_ACCESS: it was undone since (by a later change).
+  bool undone = 19;
+  // APP_ACCESS: the app's id.
+  string app_id = 20;
+  // APP_ACCESS: why, in Rivet's words (apps_set_access's reason): show it
+  // as Rivet's, under the title, never as Claktory's; empty for the
+  // person's own changes. MODEL: models_set's reason, the same way.
+  string agent_reason = 21;
+  // MODEL: the change, for UndoModelChange. `undone` says it was undone.
+  string model_change_id = 22;
+  // MODEL: the agent whose model or effort changed.
+  string subject_agent_id = 23;
 }
 
 enum NeedsYouRecordKind {
@@ -6979,6 +7343,26 @@ enum NeedsYouRecordKind {
   // Claktory's sentence; report_type and report_type_before are the
   // versions.
   NEEDS_YOU_RECORD_KIND_REPORT_TYPE = 12;
+  // A change to what an app reads, which agents use it and what they hear
+  // of it: CHANGED when Rivet applied it (agent_id Rivet) or the person
+  // did (agent_id empty), from their apps or by undoing another;
+  // APPROVED, DENIED or FAILED for Rivet's card (AppAccessProposal).
+  // title is Claktory's sentence ("Rivet gave Ingrid Change dashboards on
+  // Charts"); app_change_id undoes it; agent_reason is Rivet's why. seq is
+  // the apps_set_access call's entry in Rivet's conversation (or its
+  // card's); 0 for the person's own change or undo: open Marketplace →
+  // Apps at app_id then. One that changed what agents hear counts as a
+  // change of their grant (AppGrant.given).
+  NEEDS_YOU_RECORD_KIND_APP_ACCESS = 13;
+  // An agent (Rivet) put an agent on another model or effort with
+  // models_set, which changes what the person spends: outcome CHANGED,
+  // agent_id who did it, subject_agent_id whose model it was, title
+  // Claktory's sentence ("Rivet put Ingrid on Claude Opus 5, high", "Rivet
+  // changed Ingrid's effort to high"), agent_reason its why (models_set's
+  // reason; may be empty), model_change_id to undo it (UndoModelChange),
+  // undone once undone. seq is the models_set call's entry in its
+  // conversation.
+  NEEDS_YOU_RECORD_KIND_MODEL = 14;
 }
 
 enum NeedsYouOutcome {
@@ -7710,7 +8094,8 @@ message PipeReport {
   // Its recipient has read its words, and when.
   bool read = 15;
   int64 read_ms = 16;
-  // What its liaison had read when it wrote it: its pipe, at least.
+  // What its liaison had read when it wrote it. Since #346 reading a pipe
+  // marks no one, so it's empty on new reports; older ones name the pipe.
   repeated PipeTaint taint = 17;
   repeated ReportAttachment attachments = 18;
   // The version of its type (schema_id) it was checked against.

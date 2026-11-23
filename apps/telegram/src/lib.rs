@@ -66,7 +66,7 @@ pub trait Host {
     /// An event for the agents subscribed to `kind`.
     fn emit(&mut self, kind: &str, text: &str, data: Option<&Value>, dedupe: Option<&str>, scope: &str);
     fn set_timer(&mut self, name: &str, after_ms: u64);
-    /// One line the person sees under the app in Settings → Apps.
+    /// One line the person sees under the app in the Marketplace's Apps tab.
     fn set_status(&mut self, text: &str);
     fn log(&mut self, level: Level, message: &str);
     /// Calls the Bot API with the bot's token and waits for the answer.
@@ -266,7 +266,7 @@ impl App {
                         host,
                         token,
                         chat,
-                        "That code doesn't match. Use the link shown in Claktory, under Settings → Apps → Telegram.",
+                        "That code doesn't match. Use the link shown in Claktory, in the Marketplace, under Apps → Telegram.",
                     );
                 }
             }
@@ -403,7 +403,7 @@ pub fn link_code(host: &mut impl Host) -> String {
     code
 }
 
-/// Says in Settings → Apps whom it's linked to, or how to link it.
+/// Says in the Marketplace's Apps tab whom it's linked to, or how to link it.
 fn show_status(host: &mut impl Host) {
     if let Some(linked) = load::<Linked>(host, KEY_LINKED) {
         let who = if linked.username.is_empty() { linked.name } else { format!("{} (@{})", linked.name, linked.username) };

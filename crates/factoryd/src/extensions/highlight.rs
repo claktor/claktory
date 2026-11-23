@@ -38,25 +38,24 @@ The person sees Claktory in its app. `highlight` makes parts of the app glow for
 - settings, marketplace: the buttons at the bottom of the sidebar (no id)
 Add a short `text` to say what to look at. It changes nothing; use it sparingly.
 
-`show_screen` opens a screen in the app on the device the person is using right now, when you're helping them with it (\"Let's pair your phone\": Settings → Devices): `screen` settings (`id` a section: profile, general, account, providers, secrets, apps, pipes, defaults, voice, devices, resources, display, checklist; none for the top), map, usage, marketplace, changelog (What's new), agent (`id` an agent's id: its conversation) or agent_settings (`id` an agent's id). It never brings the app forward or opens on a device they aren't using; when nothing opened, tell them where to find it instead. It changes what they see, so open only what they need, when they need it.
+`show_screen` opens a screen in the app on the device the person is using right now, when you're helping them with it (\"Let's pair your phone\": Settings → Devices): `screen` settings (`id` a section: profile, general, account, providers, secrets, pipes, defaults, voice, devices, resources, display, checklist; none for the top), map, usage, marketplace (`id` a tab: templates, skills, extensions or apps; none for the first), changelog (What's new), agent (`id` an agent's id: its conversation) or agent_settings (`id` an agent's id). It never brings the app forward or opens on a device they aren't using; when nothing opened, tell them where to find it instead. It changes what they see, so open only what they need, when they need it.
 ";
 
 const DESCRIPTION: &str = "Make parts of the app glow for a moment so the person sees them. targets: [{kind, id}], kind agent, project, checklist_item (\"<agent>#<n>\"), extension (\"<agent>/<extension>\"), settings or marketplace (no id). text: an optional short caption.";
 
 const KINDS: [&str; 6] = ["agent", "project", "checklist_item", "extension", "settings", "marketplace"];
 
-const SCREEN_DESCRIPTION: &str = "Open a screen in the app on the device the person is using now (never another device, never bringing the app forward). screen: settings (id: a section, profile, general, account, providers, secrets, apps, pipes, defaults, voice, devices, resources, display or checklist; none for the top), map, usage, marketplace, changelog, agent (id: an agent's id, its conversation) or agent_settings (id: an agent's id). Says on which device it opened, or that none did.";
+const SCREEN_DESCRIPTION: &str = "Open a screen in the app on the device the person is using now (never another device, never bringing the app forward). screen: settings (id: a section, profile, general, account, providers, secrets, pipes, defaults, voice, devices, resources, display or checklist; none for the top), map, usage, marketplace (id: a tab, templates, skills, extensions or apps; none for the first), changelog, agent (id: an agent's id, its conversation) or agent_settings (id: an agent's id). Says on which device it opened, or that none did.";
 
 const SCREENS: [&str; 7] = ["settings", "map", "usage", "marketplace", "changelog", "agent", "agent_settings"];
 
 /// The sections of Settings an agent can open, as the app names them.
-const SECTIONS: [(&str, &str); 13] = [
+const SECTIONS: [(&str, &str); 12] = [
     ("profile", "Profile"),
     ("general", "General"),
     ("account", "Account"),
     ("providers", "Providers"),
     ("secrets", "Secrets"),
-    ("apps", "Apps"),
     ("pipes", "Pipes"),
     ("defaults", "Defaults"),
     ("voice", "Voice"),
@@ -65,6 +64,9 @@ const SECTIONS: [(&str, &str); 13] = [
     ("display", "Display"),
     ("checklist", "Checklist"),
 ];
+
+/// The Marketplace's tabs an agent can open, as the app names them.
+const TABS: [(&str, &str); 4] = [("templates", "Agent templates"), ("skills", "Skills"), ("extensions", "Extensions"), ("apps", "Apps")];
 
 /// How long `show_screen` waits for the apps to say whether they opened it.
 const SCREEN_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -148,8 +150,13 @@ pub(crate) fn screen_opened(id: &str, device: &str, opened: bool) {
 }
 
 /// Asks every app to open the screen, and says where it opened.
-async fn open_screen(factory: &Factory, agent: &str, args: ScreenArgs) -> Result<String, String> {
+async fn open_screen(factory: &Factory, agent: &str, mut args: ScreenArgs) -> Result<String, String> {
     let id = args.id.unwrap_or_default().trim().to_owned();
+    // Apps were in Settings before the Marketplace had a tab for them: the
+    // old way there lands on the tab.
+    if args.screen == "settings" && id == "apps" {
+        args.screen = "marketplace".to_owned();
+    }
     let (name, person, persons) = {
         let inner = factory.lock();
         let name = screen_name(factory, &inner.config, &args.screen, &id)?;
@@ -201,14 +208,21 @@ fn screen_name(factory: &Factory, config: &Config, screen: &str, id: &str) -> Re
             let Some((_, section)) = SECTIONS.iter().find(|(section, _)| *section == id) else {
                 return Err(format!("Settings has no section \"{id}\"; use one of {}.", ids()));
             };
-            if id == "apps" && !factory.apps_available() {
-                return Err("Settings has no Apps section in this Claktory.".to_owned());
-            }
             Ok(format!("Settings → {section}"))
+        }
+        "marketplace" if id.is_empty() => Ok("the Marketplace".to_owned()),
+        "marketplace" => {
+            let ids = || TABS.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(", ");
+            let Some((_, tab)) = TABS.iter().find(|(tab, _)| *tab == id) else {
+                return Err(format!("The Marketplace has no tab \"{id}\"; use one of {}.", ids()));
+            };
+            if id == "apps" && !factory.apps_available() {
+                return Err("The Marketplace has no Apps tab in this Claktory.".to_owned());
+            }
+            Ok(format!("Marketplace → {tab}"))
         }
         "map" => none("the Map"),
         "usage" => none("Usage"),
-        "marketplace" => none("the Marketplace"),
         "changelog" => none("What's new"),
         "agent" => Ok(format!("{}'s conversation", agent(id)?)),
         "agent_settings" => Ok(format!("{}'s settings", agent(id)?)),

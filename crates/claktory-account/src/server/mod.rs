@@ -242,7 +242,8 @@ impl Service {
     }
 
     /// Asks the user-apps worker every minute to purge the deleted accounts
-    /// it hasn't yet (it was down when they were deleted, say).
+    /// it hasn't yet (it was down when they were deleted, say), and tells it
+    /// of the devices' sign-outs it hasn't heard of.
     pub fn spawn_app_purges(self: &Arc<Self>) {
         if self.config.user_apps.is_none() {
             return;
@@ -254,6 +255,7 @@ impl Service {
                 every.tick().await;
                 let Some(service) = service.upgrade() else { return };
                 apps::retry_purges(&service).await;
+                apps::retry_sign_outs(&service).await;
             }
         });
     }
@@ -263,6 +265,13 @@ impl Service {
     /// every minute.
     pub async fn retry_app_purges(&self) -> usize {
         apps::retry_purges(self).await
+    }
+
+    /// Tells the user-apps worker, now, of the sign-outs due to be told
+    /// again: how many it heard. For tests; `spawn_app_purges` does it
+    /// every minute.
+    pub async fn retry_app_sign_outs(&self) -> usize {
+        apps::retry_sign_outs(self).await
     }
 
     /// The review account, when `email` (normalized) is its.
@@ -377,8 +386,8 @@ impl Service {
             (&Method::POST, "/v1/devices/sign-in/start") => devices::sign_in_start(self, call).await,
             (&Method::POST, "/v1/devices/sign-in/verify") => devices::sign_in_verify(self, call),
             (&Method::GET, "/v1/devices/me") => devices::me(self, call),
-            (&Method::POST, "/v1/devices/sign-out") => devices::sign_out(self, call),
-            (&Method::POST, "/v1/devices/remove") => devices::remove(self, call),
+            (&Method::POST, "/v1/devices/sign-out") => devices::sign_out(self, call).await,
+            (&Method::POST, "/v1/devices/remove") => devices::remove(self, call).await,
             (&Method::GET, "/v1/claktories") => devices::claktories(self, call),
             (&Method::POST, "/v1/devices/assertion") => devices::assertion(self, call),
             (&Method::POST, "/v1/pipe-identity") => pipes::identity(self, call),

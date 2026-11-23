@@ -1,8 +1,10 @@
 //! The App grants extension (U2): Rivet proposes giving an agent access to
 //! an app kept at the person's account, such as their direct messages, and
-//! the person decides on the card it opens (`crate::user_apps`). Only Rivet
+//! the person decides on the card it opens (`crate::user_apps`); and Rivet
+//! sets up the apps installed in this Claktory (`crate::apps::access`,
+//! #339), with a card only where Fugo's rules need the person. Only Rivet
 //! (`proposals::rivet`, the settings' admin agent, never a tool argument)
-//! can propose, never while it has read a pipe, and only for agents of this
+//! can propose, never while it has read a web page, and only for agents of this
 //! Claktory: never a chat. Nothing is ever given without the person's
 //! approval, and the account service enforces what was.
 
@@ -26,7 +28,7 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "App grants",
     icon: "key-round",
-    description: "Lets Rivet propose giving an agent access to an app at your account, such as your direct messages. Nothing is given until you approve it.",
+    description: "Lets Rivet set up what your apps can read and which agents can use them, such as Charts or your direct messages, when you ask. Rivet asks you first before anything private or anything that can reach the internet, and you can undo any change in Needs you's History.",
     default_enabled: false,
     options: &[],
 };
@@ -47,7 +49,7 @@ impl Extension for AppGrants {
     fn prompt(&self, _factory: &Factory, inner: &Inner, _agent: &AgentConfig) -> Vec<PromptSection> {
         let person = inner.config.person();
         let text = format!(
-            "## App grants\n\nSome of {person}'s apps live at their account rather than in this Claktory, such as their direct messages. An agent uses one only with a grant {person} approved. When they ask you to give an agent access, propose it with app_grants_propose: it opens a card for them to approve or decline. You never approve it yourself, and nothing is given by default.\n"
+            "## App grants\n\nSome of {person}'s apps live at their account rather than in this Claktory, such as their direct messages. An agent uses one only with a grant {person} approved. When they ask you to give an agent access, propose it with app_grants_propose: it opens a card for them to approve or decline. You never approve it yourself, and nothing is given by default.\n\nThe apps installed in this Claktory, such as Charts, start with nothing: no data to read and no agent to use them. {person} doesn't set them up: they tell you what they want (\"have Ingrid keep a chart of her bugs by severity\"), and you set it up with apps_list and apps_set_access, giving the least that does it: the sources it needs (activity, with no message text, for most charts; conversations or an agent's database only when what they want is in there) and the agents that make or keep up its dashboards, with their scopes; then tell those agents what to keep up. Taking away, and giving what isn't private to an app that reaches no site, is applied at once; private data, an app that reaches the internet, or agents (or you) that have read a web page go on a card for {person} to approve: apps_list says which, so tell them before. Every change shows in their History, where they can undo it. Change what apps read and who uses them only with these tools, never by editing config.json.\n"
         );
         vec![PromptSection { kind: PromptKind::Static, text }]
     }
@@ -73,7 +75,53 @@ impl Extension for AppGrants {
             },
             "additionalProperties": false,
         });
-        vec![super::tool(user_apps::TOOL, "Propose app access", PROPOSE, parameters, super::typed_handler(factory, agent, propose))]
+        let list = json!({
+            "type": "object",
+            "properties": {"app": {"type": "string"}},
+            "additionalProperties": false,
+        });
+        let set = json!({
+            "type": "object",
+            "required": ["app", "reason"],
+            "properties": {
+                "app": {"type": "string", "minLength": 1},
+                "sources": {"type": "object", "additionalProperties": {"type": "boolean"}},
+                "agents": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["agent", "scopes"],
+                        "properties": {
+                            "agent": {"type": "string", "minLength": 1},
+                            "scopes": {"type": "array", "items": {"type": "string"}},
+                            "hears": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "additionalProperties": false,
+                    },
+                },
+                "reason": {"type": "string", "minLength": 1},
+            },
+            "additionalProperties": false,
+        });
+        vec![
+            super::tool(user_apps::TOOL, "Propose app access", PROPOSE, parameters, super::typed_handler(factory, agent, propose)),
+            super::tool(
+                crate::apps::access::LIST_TOOL,
+                "Apps",
+                crate::apps::access::LIST_DESCRIPTION,
+                list,
+                super::typed_handler(factory, agent, list_apps),
+            ),
+            super::async_tool(
+                factory,
+                agent,
+                crate::apps::access::SET_TOOL,
+                "Set up an app",
+                crate::apps::access::SET_DESCRIPTION,
+                set,
+                set_access,
+            ),
+        ]
     }
 
     fn admin_default(&self) -> bool {
@@ -218,6 +266,30 @@ fn propose(factory: &Arc<Factory>, agent: &str, args: ProposeArgs) -> Result<Too
     Ok(ToolResult::text(text, details))
 }
 
+/// apps_list: only Rivet.
+fn list_apps(factory: &Arc<Factory>, agent: &str, args: crate::apps::access::ListArgs) -> Result<ToolResult, String> {
+    only_rivet_sets(factory, agent)?;
+    crate::apps::access::list(factory, agent, args)
+}
+
+/// apps_set_access: only Rivet. A tainted Rivet isn't refused: what it
+/// gives goes on a card (`crate::apps::access`).
+async fn set_access(factory: Arc<Factory>, agent: String, args: crate::apps::access::SetArgs) -> Result<ToolResult, String> {
+    only_rivet_sets(&factory, &agent)?;
+    crate::apps::access::set_access(&factory, &agent, args).await
+}
+
+/// Only Rivet sets apps up: the settings' admin agent, whoever calls.
+fn only_rivet_sets(factory: &Factory, agent: &str) -> Result<(), String> {
+    let inner = factory.lock();
+    super::caller(&inner.config, agent)?;
+    if crate::proposals::rivet(&inner.config).is_some_and(|rivet| rivet.id == agent) {
+        Ok(())
+    } else {
+        Err("Only Rivet, the admin agent, sets up the person's apps. Nothing was changed.".to_owned())
+    }
+}
+
 /// Only Rivet proposes: the settings' admin agent, whoever calls.
 fn only_rivet(factory: &Factory, agent: &str) -> Result<(), String> {
     let inner = factory.lock();
@@ -229,7 +301,7 @@ fn only_rivet(factory: &Factory, agent: &str) -> Result<(), String> {
     }
 }
 
-/// An agent that has read a pipe proposes nothing: what it read may be
+/// An agent that has read a web page proposes nothing: what it read may be
 /// someone else's instructions.
 fn untainted(factory: &Factory, agent: &str) -> Result<(), String> {
     if factory.pipes.tainted(agent).is_empty() {

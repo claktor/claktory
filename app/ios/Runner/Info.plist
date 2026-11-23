@@ -45,8 +45,15 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>ClaktoryPushKeychainGroup</key>
 	<string>$(AppIdentifierPrefix)com.claktory.app.notifications</string>
+	<!-- Export compliance: Claktory uses only standard encryption (TLS and
+	     the platform's own), no proprietary algorithms, so it's exempt from
+	     export documentation, and the App Store leaves France out until the
+	     ANSSI filing. NO answers that for every build as it arrives. YES
+	     would need a compliance code Apple issues only for uploaded
+	     documents, which this case has none of (ITMS-90592, see S4 in the
+	     store-launch plan). -->
 	<key>ITSAppUsesNonExemptEncryption</key>
-	<true/>
+	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
@@ -54,7 +61,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connect straight to your Claktory when it's on the same network as this iPhone, for a faster connection.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Record voice messages to your agents. Claktory turns them into text.</string>
+	<string>Speak your messages and answers to your agents. Claktory turns them into text.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

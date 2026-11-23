@@ -265,6 +265,11 @@ pub fn append(transaction: &Transaction<'_>, caller: &Caller, outgoing: &Outgoin
     let mut group = groups::of_conversation(transaction, conversation, generation)?
         .ok_or_else(|| Refusal(409, "not_set_up", "This conversation isn't set up for end-to-end encryption yet.".to_owned()))?;
     let epoch = groups::fits(&group, submitted)?;
+    // Nothing goes in that the friend can't read (row 676): refused before
+    // anything is counted or kept.
+    if !groups::both_in(transaction, &group, epoch)? {
+        return Err(groups::waiting_for_friend());
+    }
     if matches!(caller, Caller::Device { .. }) {
         take_as(transaction, &format!("messages:{account}"), 60, PER_MINUTE, now_ms, "Too many messages.")?;
         take_as(transaction, &format!("messages-hour:{account}"), 3600, PER_HOUR, now_ms, "Too many messages.")?;
@@ -767,7 +772,7 @@ pub(super) mod tests {
         let sending = {
             let (conversation, now) = (conversation.clone(), world.now);
             std::thread::spawn(move || {
-                let caller = Caller::Device { account_id: "ana".into(), device_key: "k".into(), registrations: Vec::new() };
+                let caller = Caller::Device { account_id: "ana".into(), device_key: "k".into(), registrations: Vec::new(), removed_devices: Vec::new(), signed_in_at: None, bound_devices: None };
                 let envelope = super::super::bodies::tests::sealed(&group, epoch, "racing");
                 let send = json!({"client_message_id": client_id(1), "contact_generation": generation, "envelope": envelope});
                 identity::route(

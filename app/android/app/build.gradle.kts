@@ -17,12 +17,19 @@ fun pin(key: String): String = requireNotNull(pins.getProperty(key)) { "toolchai
 /// or wherever -PclaktoryKeyProperties=FILE says, so the key can live
 /// outside the checkout. Without it a release build fails, unless it's asked to
 /// be signed with the debug key for a local test (-PclaktoryDebugSignedRelease=true,
-/// never for anything that leaves this Mac).
+/// never for anything that leaves this Mac). -PclaktoryKeyStore=FILE names
+/// the keystore itself, over key.properties' storeFile: the vault hands
+/// both files to a command at fresh temporary paths, so a storeFile written
+/// in key.properties can't point at its keystore.
 val keyProperties = Properties().apply {
     val file = providers.gradleProperty("claktoryKeyProperties").orNull?.let(::File)
         ?: rootProject.file("key.properties")
     require(file.exists() || file == rootProject.file("key.properties")) { "No key properties at $file" }
     if (file.exists()) file.inputStream().use { load(it) }
+    providers.gradleProperty("claktoryKeyStore").orNull?.takeIf { it.isNotEmpty() }?.let {
+        require(File(it).isFile) { "No keystore at $it" }
+        setProperty("storeFile", it)
+    }
 }
 val debugSignedRelease = providers.gradleProperty("claktoryDebugSignedRelease").orNull == "true"
 

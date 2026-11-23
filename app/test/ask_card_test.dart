@@ -247,17 +247,9 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('from an agent that read a pipe, it says where it may come '
-      'from, under who asks', (tester) async {
-    final workspace = _workspace()
-      ..pipes.add(
-        Pipe(
-          id: 'pp',
-          name: 'Acme launch',
-          peer: PipePeer(claktoryName: "Ana's Claktory"),
-        ),
-      );
-    final harness = Harness(workspace);
+  testWidgets('from an agent that read a web page, it says so under who '
+      'asks; a pipe it read says nothing (#346)', (tester) async {
+    final harness = Harness(_workspace());
     harness.backend.transcript.load(
       Transcript(
         agentId: 'june',
@@ -265,11 +257,7 @@ void main() {
           _entry()
             ..askPerson.taint.addAll([
               PipeTaint(pipeName: 'Acme launch', pipeId: 'pp'),
-              PipeTaint(
-                pipeName: 'Old pipe',
-                pipeId: 'gone',
-                viaNames: ['Liaison', 'Bruno'],
-              ),
+              PipeTaint(kind: 'browser', pipeName: 'https://example.com'),
             ]),
         ],
       ),
@@ -277,13 +265,10 @@ void main() {
     await harness.show(tester);
     await settle(tester);
     final read = find.text(
-      "from June, which reads the pipe with Ana's Claktory",
-    );
-    final heard = find.text(
-      'from Bruno, which heard from the pipe “Old pipe” via Liaison',
+      'from June, which read a page on https://example.com',
     );
     expect(read, findsOneWidget);
-    expect(heard, findsOneWidget);
+    expect(find.textContaining('the pipe'), findsNothing);
     final header = tester.getTopLeft(find.text('June needs your answer')).dy;
     final title = tester.getTopLeft(find.text('Restart the helper as root')).dy;
     expect(tester.getTopLeft(read).dy, inExclusiveRange(header, title));
@@ -654,4 +639,166 @@ void main() {
       );
     });
   });
+
+  group(
+    'what is typed stays when the card scrolls away and back (row 193)',
+    () {
+      /// [finder] in the middle of the conversation, clear of its header
+      /// and message box.
+      Future<void> center(WidgetTester tester, Finder finder) =>
+          Scrollable.ensureVisible(tester.element(finder), alignment: 0.5);
+
+      /// [ask] at seq 40 of a conversation of 80, in sight, typed into: the
+      /// conversation then goes to the top, back down to the newest, and
+      /// back to the card.
+      Future<Harness> typeAndScroll(
+        WidgetTester tester,
+        AskPerson ask,
+        String typed, {
+        String? open,
+      }) async {
+        final harness = Harness(
+          Workspace(
+            projects: [Project(id: 'p1', name: 'Factory')],
+            agents: [
+              Agent(
+                id: 'june',
+                name: 'June',
+                projectId: 'p1',
+                modelAvailable: true,
+                status: AgentStatus.AGENT_STATUS_IDLE,
+                waitingSeqs: [Int64(40)],
+              ),
+            ],
+            selectedAgentId: 'june',
+          ),
+        );
+        Entry said(int seq) => Entry(
+          seq: Int64(seq),
+          user: UserText(text: 'message $seq'),
+        );
+        harness.backend.transcript.load(
+          Transcript(
+            agentId: 'june',
+            entries: [
+              for (var i = 0; i < 40; i++) said(i),
+              Entry(seq: Int64(40), timestampMs: Int64(1000), askPerson: ask),
+              for (var i = 41; i < 80; i++) said(i),
+            ],
+          ),
+        );
+        // On a phone, as Zucchero found it: dragging the conversation puts
+        // the keyboard away, so nothing focused keeps the card.
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        await harness.show(tester, size: const Size(390, 844));
+        await pumpFrames(tester);
+        final conversation = find.byType(CustomScrollView).first;
+        final card = find.byType(AskPersonCard);
+        Finder field() =>
+            find.descendant(of: card, matching: find.byType(EditableText));
+        await tester.dragUntilVisible(
+          find.text(ask.title),
+          conversation,
+          const Offset(0, 300),
+        );
+        await tester.pump();
+        if (open != null) {
+          final button = find.descendant(of: card, matching: find.text(open));
+          await center(tester, button);
+          await tester.pump();
+          await tester.tap(button);
+          await pumpFrames(tester);
+        }
+        await center(tester, field());
+        await tester.pump();
+        await tester.enterText(field(), typed);
+        await tester.pump();
+        expect(tester.widget<EditableText>(field()).focusNode.hasFocus, isTrue);
+
+        for (var i = 0; i < 3; i++) {
+          await tester.drag(conversation, const Offset(0, 3000));
+          await tester.pump();
+        }
+        expect(card, findsNothing);
+        // The drag put the keyboard away.
+        for (final field
+            in find.byType(EditableText, skipOffstage: false).evaluate()) {
+          expect((field.widget as EditableText).focusNode.hasFocus, isFalse);
+        }
+        for (var i = 0; i < 6; i++) {
+          await tester.drag(conversation, const Offset(0, -3000));
+          await tester.pump();
+        }
+        expect(find.text('message 79'), findsOneWidget);
+        expect(card, findsNothing);
+        await tester.dragUntilVisible(
+          find.text(ask.title),
+          conversation,
+          const Offset(0, 300),
+        );
+        await pumpFrames(tester);
+        expect(
+          find.descendant(of: card, matching: find.text(typed)),
+          findsOneWidget,
+        );
+        return harness;
+      }
+
+      testWidgets('a written answer', (tester) async {
+        final harness = await typeAndScroll(
+          tester,
+          _ask()..wantsText = true,
+          'papaya',
+        );
+        await center(tester, find.text('Answer'));
+        await tester.pump();
+        await tester.tap(find.text('Answer'));
+        await settle(tester);
+        expect(harness.last.answerAsk.text, 'papaya');
+        expect(harness.last.answerAsk.dismiss, isFalse);
+      });
+
+      testWidgets("a step's what's in the way", (tester) async {
+        final harness = await typeAndScroll(
+          tester,
+          AskPerson(
+            id: 'ask9',
+            title: 'Sign the release',
+            state: AskPersonState.ASK_PERSON_STATE_PENDING,
+            steps: [
+              AskStep(text: 'Plug in the YubiKey'),
+              AskStep(text: 'Touch the key when it blinks'),
+            ],
+          ),
+          'The key is at home',
+          open: "Can't do this…",
+        );
+        await center(tester, find.text("Can't do this"));
+        await tester.pump();
+        await tester.tap(find.text("Can't do this"));
+        await settle(tester);
+        final answer = harness.last.answerAsk;
+        expect(
+          (answer.step, answer.dismiss, answer.text),
+          (0, true, 'The key is at home'),
+        );
+      });
+
+      testWidgets("an approval's comment", (tester) async {
+        final harness = await typeAndScroll(
+          tester,
+          _ask(),
+          'After the release',
+          open: 'Add a comment',
+        );
+        await center(tester, find.text('Approve'));
+        await tester.pump();
+        await tester.tap(find.text('Approve'));
+        await settle(tester);
+        expect(harness.last.answerAsk.text, 'After the release');
+        expect(harness.last.answerAsk.dismiss, isFalse);
+      });
+    },
+  );
 }

@@ -5,8 +5,6 @@ import '../identity.dart';
 import '../pipe_reports.dart' show pipesFeeding, readsReportsText, showReports;
 import '../pipes.dart' show PortalGlyph, pipeLimitText, pipesLimiting;
 import '../protocol/factory/v1/factory.pb.dart';
-import '../quiet_copies.dart'
-    show QuietCopiesChip, QuietWaitingChip, showsNewCopies;
 import '../scope.dart';
 import 'header.dart' show phoneTitleTextScale;
 import 'metrics.dart' show TypeScale;
@@ -22,22 +20,15 @@ const _underName = 28.0 + Space.s + 2;
 /// always in view) and "Reads reports from N pipes", which opens its
 /// Reports. The same words as the Mac's PipeLimitMark and ReadsReportsMark,
 /// but whole at any text size: a mark wraps onto more lines, and the two
-/// onto two rows, rather than cutting off. Beside them, its new quiet
-/// copies and the quiet messages waiting for it (QuietCopiesChip,
-/// QuietWaitingChip), which open Messaging: here rather than at the bar's
-/// end, which keeps two places, for Needs you and "…". Nothing for an agent
-/// with none of these.
+/// onto two rows, rather than cutting off. Nothing for an agent with
+/// neither.
 class PhoneAgentMarks extends StatelessWidget {
   const PhoneAgentMarks({super.key, required this.agent});
 
   final Agent agent;
 
   /// Whether [agent] has any mark to show.
-  static bool shows(Agent agent) =>
-      agent.quarantined ||
-      agent.readsReports ||
-      showsNewCopies(agent) ||
-      agent.quietWaiting > 0;
+  static bool shows(Agent agent) => agent.quarantined || agent.readsReports;
 
   @override
   Widget build(BuildContext context) {
@@ -71,10 +62,6 @@ class PhoneAgentMarks extends StatelessWidget {
                 ),
                 onTap: () => showReports(context, reader: agent),
               ),
-            if (showsNewCopies(agent))
-              QuietCopiesChip(agent: agent, phone: true),
-            if (agent.quietWaiting > 0)
-              QuietWaitingChip(agent: agent, phone: true),
           ],
         ),
       ),

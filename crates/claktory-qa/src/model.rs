@@ -26,6 +26,8 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::Failure;
 
+pub mod claude;
+
 /// The model a sandbox's agents use: in the OpenRouter catalog, without
 /// reasoning, with a context too large to compact in a test.
 pub const MODEL: &str = "openrouter/openai/gpt-4.1-mini";
@@ -189,7 +191,8 @@ fn pick(script: &Value, system: &str, last: &Last, used: &HashSet<String>) -> Op
         }
         let result = last.role == "tool";
         if let Some(tool) = text("after")
-            && !(result && (tool == "*" || tool == last.tool))
+            // Any case: Claude's sign-in names tools as Claude Code does (Bash).
+            && !(result && (tool == "*" || tool.eq_ignore_ascii_case(&last.tool)))
         {
             return None;
         }
@@ -239,15 +242,20 @@ fn built_in(script: &Value, last: &Last) -> Answer {
 struct Model {
     script: PathBuf,
     log: PathBuf,
+    /// With a fake Claude sign-in (`up --claude`): the file saying until
+    /// when it's at its usage limit (`limit`).
+    claude: Option<PathBuf>,
     used: Mutex<HashSet<String>>,
     count: Mutex<u64>,
 }
 
-/// Runs the model on `port` until it's stopped.
-pub async fn serve(port: u16, script: PathBuf, log: PathBuf) -> Result<(), Failure> {
+/// Runs the model on `port` until it's stopped; with `claude`, Anthropic's
+/// wire too, for the sandbox's fake Claude sign-in, at its usage limit while
+/// that file says so.
+pub async fn serve(port: u16, script: PathBuf, log: PathBuf, claude: Option<PathBuf>) -> Result<(), Failure> {
     let listener =
         TcpListener::bind(("127.0.0.1", port)).await.map_err(|error| Failure::failed(format!("Can't listen on {port}: {error}")))?;
-    let model = Arc::new(Model { script, log, used: Mutex::default(), count: Mutex::new(0) });
+    let model = Arc::new(Model { script, log, claude, used: Mutex::default(), count: Mutex::new(0) });
     loop {
         let Ok((stream, _)) = listener.accept().await else { continue };
         let model = model.clone();
@@ -257,8 +265,8 @@ pub async fn serve(port: u16, script: PathBuf, log: PathBuf) -> Result<(), Failu
     }
 }
 
-/// Reads one HTTP request: its first line and body.
-async fn read_http(stream: &mut TcpStream) -> std::io::Result<(String, Vec<u8>)> {
+/// Reads one HTTP request: its first line, its head (headers) and body.
+async fn read_http(stream: &mut TcpStream) -> std::io::Result<(String, String, Vec<u8>)> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 16 * 1024];
     let end = loop {
@@ -310,22 +318,45 @@ async fn read_http(stream: &mut TcpStream) -> std::io::Result<(String, Vec<u8>)>
             body.extend_from_slice(&chunk[..read]);
         }
     }
-    Ok((head.lines().next().unwrap_or_default().to_owned(), body))
+    Ok((head.lines().next().unwrap_or_default().to_owned(), head, body))
 }
 
 async fn handle(model: &Model, mut stream: TcpStream) -> std::io::Result<()> {
-    let (line, body) = read_http(&mut stream).await?;
-    if !(line.starts_with("POST ") && line.split(' ').nth(1).is_some_and(|path| path.ends_with("/chat/completions"))) {
-        let body = json!({"error": {"message": "qa-model answers only POST …/chat/completions"}}).to_string();
-        let head = format!(
-            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        stream.write_all(head.as_bytes()).await?;
-        return stream.write_all(body.as_bytes()).await;
+    let (line, head, body) = read_http(&mut stream).await?;
+    let mut words = line.split(' ');
+    let (method, path) = (words.next().unwrap_or_default(), words.next().unwrap_or_default());
+    if method == "POST" && path.ends_with("/chat/completions") {
+        return chat_completions(model, &mut stream, &body).await;
     }
-    let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let (system, last, tools) = read_request(&request);
+    if let Some(limit) = &model.claude {
+        return claude::handle(model, limit, &mut stream, method, path, &head, &body).await;
+    }
+    respond(&mut stream, 404, "", &json!({"error": {"message": "qa-model answers only POST …/chat/completions"}})).await
+}
+
+/// A whole JSON answer, with `extra` header lines (each ending in CRLF).
+async fn respond(stream: &mut TcpStream, status: u16, extra: &str, body: &Value) -> std::io::Result<()> {
+    let body = body.to_string();
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        429 => "Too Many Requests",
+        _ => "Error",
+    };
+    let head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body.as_bytes()).await?;
+    stream.shutdown().await
+}
+
+/// The script's answer to a conversation, and the log's line for it:
+/// the rule that fit (or "built-in"), or the script's mistake.
+fn answer(model: &Model, system: &str, last: &Last, tools: &[String], wire: &str, extra: Value) -> Result<(u64, Answer), String> {
     let script_text = std::fs::read_to_string(&model.script).unwrap_or_else(|_| "{}".to_owned());
     let checked = check_script(&script_text);
     let script: Value = serde_json::from_str(&script_text).unwrap_or(Value::Null);
@@ -338,39 +369,42 @@ async fn handle(model: &Model, mut stream: TcpStream) -> std::io::Result<()> {
         Err(_) => (Value::Null, Answer::default()),
         Ok(()) => {
             let mut used = model.used.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            match pick(&script, &system, &last, &used) {
+            match pick(&script, system, last, &used) {
                 Some((index, answer)) => {
                     used.insert(script["rules"][index].to_string());
                     (json!(index), answer)
                 }
-                None => (Value::from("built-in"), built_in(&script, &last)),
+                None => (Value::from("built-in"), built_in(&script, last)),
             }
         }
     };
-    log(
-        &model.log,
-        &json!({
-            "request": number,
-            "agent": agent_of(&system),
-            "last": { "role": last.role, "text": last.text, "tool": last.tool, "raw": last.raw },
-            "tools": tools,
-            "rule": rule,
-            "reply": answer.text,
-            "calls": answer.calls.iter().map(|(tool, args)| json!({"tool": tool, "args": args})).collect::<Vec<_>>(),
-            "error": checked.as_ref().err(),
-            "system": system,
-        }),
-    );
-    if let Err(problem) = checked {
-        // The agent shows it as the model's error, and the log has it.
-        let body = json!({"error": {"message": format!("qa-model: {problem}"), "code": 400}}).to_string();
-        let head = format!(
-            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        stream.write_all(head.as_bytes()).await?;
-        return stream.write_all(body.as_bytes()).await;
+    let mut line = json!({
+        "request": number,
+        "wire": wire,
+        "agent": agent_of(system),
+        "last": { "role": last.role, "text": last.text, "tool": last.tool, "raw": last.raw },
+        "tools": tools,
+        "rule": rule,
+        "reply": answer.text,
+        "calls": answer.calls.iter().map(|(tool, args)| json!({"tool": tool, "args": args})).collect::<Vec<_>>(),
+        "error": checked.as_ref().err(),
+        "system": system,
+    });
+    if let (Some(line), Value::Object(extra)) = (line.as_object_mut(), extra) {
+        line.extend(extra);
     }
+    log(&model.log, &line);
+    checked.map(|()| (number, answer))
+}
+
+async fn chat_completions(model: &Model, stream: &mut TcpStream, body: &[u8]) -> std::io::Result<()> {
+    let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let (system, last, tools) = read_request(&request);
+    let (number, answer) = match answer(model, &system, &last, &tools, "openrouter", json!({})) {
+        Ok(answered) => answered,
+        // The agent shows it as the model's error, and the log has it.
+        Err(problem) => return respond(stream, 400, "", &json!({"error": {"message": format!("qa-model: {problem}"), "code": 400}})).await,
+    };
     let model_id = request["model"].as_str().unwrap_or("qa-model").to_owned();
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").await?;
     for event in events(&answer, number, &model_id, body.len()) {

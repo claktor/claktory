@@ -49,13 +49,18 @@ struct Send {
     request_nonce: Option<String>,
 }
 
-fn send(transaction: &Transaction<'_>, account: &str, from: &str, send: Send, now_ms: i64) -> Result<Value, Refusal> {
+fn send(transaction: &Transaction<'_>, account: &str, from: &str, removed: &[String], send: Send, now_ms: i64) -> Result<Value, Refusal> {
     let sealed = unb64(&send.sealed, "sealed")?;
     if sealed.is_empty() || sealed.len() > SEALED_MOST {
         return Err(invalid(&format!("A hand-off is at most {} KiB sealed.", SEALED_MOST / 1024)));
     }
     if send.to == from {
         return Err(invalid("A device hands off to another device."));
+    }
+    // Never to a device removed from the account, even one a list still
+    // names (row 612): it may be in a thief's hands.
+    if removed.contains(&send.to) {
+        return Err(Refusal(409, "removed_device", "That device was removed from your account, so nothing is handed off to it.".to_owned()));
     }
     let Some(keys) = keys_of(transaction, account)? else {
         return Err(Refusal(409, "not_set_up", "Set up messages on one of your devices first.".to_owned()));
@@ -113,12 +118,12 @@ pub fn knows(method: &str, route: &str) -> bool {
 }
 
 pub fn answer(db: &mut Connection, method: &str, route: &str, caller: &Caller, bytes: &[u8], now_ms: i64) -> Result<(u16, Value), Refusal> {
-    let Caller::Device { account_id, device_key, .. } = caller else {
+    let Caller::Device { account_id, device_key, removed_devices, .. } = caller else {
         return Err(Refusal(403, "device_only", "Only your own signed-in devices can do this.".to_owned()));
     };
     let transaction = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let answer = match (method, route) {
-        ("POST", "me/handoffs") => (200, send(&transaction, account_id, device_key, body(bytes)?, now_ms)?),
+        ("POST", "me/handoffs") => (200, send(&transaction, account_id, device_key, removed_devices, body(bytes)?, now_ms)?),
         ("GET", "me/handoffs") => (200, waiting(&transaction, account_id, device_key, now_ms)?),
         ("DELETE", route) => {
             let id = &route["me/handoffs/".len()..];
@@ -142,6 +147,23 @@ mod tests {
     use super::super::contacts::tests::World;
     use super::super::leaves::tests::{Person, call, claktory, device, set_up};
     use super::*;
+
+    /// Row 612: nothing is handed off to a device removed from the account,
+    /// even while the list still names it.
+    #[test]
+    fn nothing_is_handed_off_to_a_removed_device() {
+        let mut world = World::new();
+        let mut ana = set_up(&mut world, "ana");
+        ana.add(device("ana", "ana-mac"));
+        assert_eq!(call(&mut world, &ana.caller(0), "PUT", "me/keys", ana.put(false)).0, 200);
+        let to_mac = json!({"to": "ana-mac", "sealed": b64(&[7; 64])});
+        let Caller::Device { removed_devices, .. } = &mut ana.leaves[0].0 else { unreachable!() };
+        removed_devices.push("ana-mac".into());
+        let (status, refused) = call(&mut world, &ana.caller(0), "POST", "me/handoffs", to_mac);
+        assert_eq!((status, &refused["error"]), (409, &json!("removed_device")), "{refused}");
+        let waiting: i64 = world.db.query_row("SELECT COUNT(*) FROM dm_handoffs", [], |row| row.get(0)).expect("counted");
+        assert_eq!(waiting, 0);
+    }
 
     /// A device of the account hands off to a device on its list, which
     /// alone reads it, for 30 minutes; a few at a time.

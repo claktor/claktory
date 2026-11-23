@@ -288,7 +288,9 @@ void main() {
   ) async {
     await _card(tester, _grant(readPipes: true));
     expect(
-      find.text('Mike has read messages from another Claktory.'),
+      find.text(
+        "Mike has read a web page, which may hold someone else's instructions.",
+      ),
       findsOneWidget,
     );
   });
@@ -299,9 +301,9 @@ void main() {
     await _card(tester, _grant(readPipes: true, sends: true));
     expect(
       find.text(
-        'Mike has read messages from another Claktory. Whoever wrote them '
-        'could try to get Mike to send messages as you. Approve only if '
-        'you trust them.',
+        "Mike has read a web page, which may hold someone else's "
+        'instructions. Whoever wrote it could try to get Mike to send '
+        'messages as you. Approve only if you expected this.',
       ),
       findsOneWidget,
     );

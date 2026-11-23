@@ -35,8 +35,12 @@ id = "main"
 title = "Charts"
 
 [[data]]
-kind = "factory-records"
+kind = "activity"
 reason = "Charts of how your agents work"
+
+[[data]]
+kind = "conversations"
+reason = "Charts of what your agents are told"
 
 [[data]]
 kind = "agent-database"
@@ -76,7 +80,7 @@ impl Stand {
     }
 
     /// Sends factoryd `body` as the app, without waiting: its frame's id.
-    fn send(&self, body: Host) -> u64 {
+    pub(crate) fn send(&self, body: Host) -> u64 {
         let id = {
             let mut next = self.next.lock().expect("next");
             *next += 1;
@@ -97,7 +101,7 @@ impl Stand {
         panic!("factoryd never answered {id}");
     }
 
-    async fn query(&self, source: &str, sql: &str, params: &str) -> wire::DataAnswer {
+    pub(crate) async fn query(&self, source: &str, sql: &str, params: &str) -> wire::DataAnswer {
         let asked = wire::DataQuery { app_id: "charts".into(), source: source.into(), sql: sql.into(), params: params.into() };
         match self.ask(Host::DataQuery(asked)).await {
             Host::DataAnswer(answer) => answer,
@@ -178,6 +182,11 @@ impl Stand {
                     self.log.lock().expect("log").push(format!("closed {}", closed.surface));
                     done("")
                 }
+                Host::Call(call) => {
+                    self.log.lock().expect("log").push(format!("call {} by {}", call.tool, call.caller));
+                    let result = wire::CallResult { text: "Read it.".into(), data: String::new(), is_error: false };
+                    Frame { id: 0, reply_to: frame.id, body: Some(Host::CallResult(result)) }
+                }
                 other => panic!("the stand-in host got {other:?}"),
             };
             if out.send(reply).is_err() {
@@ -228,7 +237,13 @@ async fn an_app_reads_only_what_the_person_granted_and_only_to_read() {
     // The review says what it asks to read, and why.
     let bundle = clapp(MANIFEST, b"\0asm\x01\0\0\0 data", &SigningKey::from_bytes(&[11; 32]));
     let install = |approve: bool, sha256: &str| {
-        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: bundle.clone(), ..Default::default() })
+        Request::InstallLocalApp(v1::InstallLocalApp {
+            path: String::new(),
+            approve,
+            sha256: sha256.into(),
+            content: bundle.clone(),
+            ..Default::default()
+        })
     };
     let Body::AppPermissions(permissions) = client.request(install(false, "")).await.body else { panic!("permissions") };
     let asked: Vec<(&str, &str, &str)> =
@@ -236,56 +251,92 @@ async fn an_app_reads_only_what_the_person_granted_and_only_to_read() {
     assert_eq!(
         asked,
         [
-            ("factory-records", "Claktory's records", "Charts of how your agents work"),
+            ("activity", "Activity", "Charts of how your agents work"),
+            ("conversations", "Conversations", "Charts of what your agents are told"),
             ("agent:*", "Agents' own databases (you choose which)", "Charts of what your agents keep"),
         ]
     );
+    // Only Activity holds no one's words.
+    let private: Vec<bool> = permissions.sources.iter().map(|source| source.private).collect();
+    assert_eq!(private, [false, true, true]);
+    assert!(permissions.sources[0].holds.contains("never what was written"), "{}", permissions.sources[0].holds);
     client.ok(install(true, &permissions.sha256)).await;
     let info = running(&mut client).await;
     let offered: Vec<(&str, v1::AppDataKind, &str, bool)> =
         info.sources.iter().map(|source| (source.id.as_str(), source.kind(), source.agent_id.as_str(), source.granted)).collect();
     assert_eq!(
         offered,
-        [("factory-records", v1::AppDataKind::FactoryRecords, "", false), ("agent:rivet", v1::AppDataKind::AgentDatabase, "rivet", false)]
+        [
+            ("activity", v1::AppDataKind::Activity, "", false),
+            ("conversations", v1::AppDataKind::Conversations, "", false),
+            ("agent:rivet", v1::AppDataKind::AgentDatabase, "rivet", false)
+        ]
     );
-    assert_eq!(info.sources[1].label, "Rivet's database");
+    assert_eq!(info.sources[2].label, "Rivet's database");
     stand.wait_for("start charts").await;
 
     // Nothing granted: nothing read.
     assert_eq!(
         stand.sources().await,
-        [("factory-records".into(), "Claktory's records".into(), false), ("agent:rivet".into(), "Rivet's database".into(), false)]
+        [
+            ("activity".into(), "Activity".into(), false),
+            ("conversations".into(), "Conversations".into(), false),
+            ("agent:rivet".into(), "Rivet's database".into(), false)
+        ]
     );
-    assert_eq!(stand.query("factory-records", "SELECT 1", "").await.error(), DataError::NotGranted);
+    assert_eq!(stand.query("activity", "SELECT 1", "").await.error(), DataError::NotGranted);
+    assert_eq!(stand.query("factory-records", "SELECT 1", "").await.error(), DataError::UnknownSource);
     assert_eq!(stand.query("agent:rivet", "SELECT 1", "").await.error(), DataError::NotGranted);
     assert_eq!(stand.query("agent:nobody", "SELECT 1", "").await.error(), DataError::UnknownSource);
 
-    // Only sources it asks for can be granted.
-    let refused = client.request(grant("agent:nobody", true)).await.body;
-    assert!(
-        matches!(&refused, Body::Error(error) if error.code() == v1::ErrorCode::InvalidRequest && error.message.contains("doesn't ask to read")),
-        "{refused:?}"
-    );
+    // Only sources it asks for can be granted, and all of Claktory's
+    // records never again.
+    for source in ["agent:nobody", "factory-records"] {
+        let refused = client.request(grant(source, true)).await.body;
+        assert!(
+            matches!(&refused, Body::Error(error) if error.code() == v1::ErrorCode::InvalidRequest && error.message.contains("doesn't ask to read")),
+            "{source}: {refused:?}"
+        );
+    }
 
-    // Claktory's records, granted: read, but never memory, pipes or comments, and never written.
-    let events = client.ok(grant("factory-records", true)).await;
+    // Activity, granted: when and how much, never what was written, nor
+    // memory, pipes or comments, and never written to.
+    let events = client.ok(grant("activity", true)).await;
     let info = &last_workspace(&events).expect("the workspace, before the answer").apps[0];
-    assert!(info.sources[0].granted && !info.sources[1].granted);
-    assert_eq!(rows(&stand.query("factory-records", "SELECT ?1 + 1, 'a'", "[41]").await), json!([[42, "a"]]));
-    assert_eq!(rows(&stand.query("factory-records", "SELECT count(*) > 0 FROM sqlite_master WHERE name = 'runs'", "").await), json!([[1]]));
-    for private in ["SELECT * FROM pipes", "SELECT * FROM threads", "SELECT * FROM memory_notes"] {
-        let answer = stand.query("factory-records", private, "").await;
-        assert!(answer.error() == DataError::Invalid && answer.message.contains("can't be read"), "{private}: {answer:?}");
+    assert!(info.sources[0].granted && !info.sources[1].granted && !info.sources[2].granted);
+    assert_eq!(rows(&stand.query("activity", "SELECT ?1 + 1, 'a'", "[41]").await), json!([[42, "a"]]));
+    assert_eq!(rows(&stand.query("activity", "SELECT count(*) >= 0 FROM runs", "").await), json!([[1]]));
+    for refused in [
+        "SELECT text FROM messages",
+        "SELECT summary FROM messages",
+        "SELECT command FROM tasks",
+        "SELECT prompt FROM monitors",
+        "SELECT text FROM checklist_items",
+        "SELECT * FROM pipes",
+        "SELECT * FROM threads",
+        "SELECT * FROM memory_notes",
+        "SELECT name FROM sqlite_master",
+    ] {
+        let answer = stand.query("activity", refused, "").await;
+        assert!(answer.error() == DataError::Invalid && answer.message.contains("isn't in this source"), "{refused}: {answer:?}");
     }
     for (write, why) in [
         ("DELETE FROM runs", "Only a SELECT"),
-        ("SELECT 1; DELETE FROM runs", "One statement at a time"),
+        // Refused as it's read: a write is nothing this source holds.
+        ("SELECT 1; DELETE FROM runs", "isn't in this source"),
         ("ATTACH 'x.db' AS x", "Only a SELECT"),
-        ("WITH d AS (SELECT 1) INSERT INTO runs SELECT * FROM runs", "Only statements that read"),
+        ("WITH d AS (SELECT 1) INSERT INTO runs SELECT * FROM runs", "isn't in this source"),
     ] {
-        let answer = stand.query("factory-records", write, "").await;
+        let answer = stand.query("activity", write, "").await;
         assert!(answer.error() == DataError::Invalid && answer.message.contains(why), "{write}: {answer:?}");
     }
+
+    // Conversations, granted: the messages, with their text, and nothing else.
+    client.ok(grant("conversations", true)).await;
+    assert_eq!(rows(&stand.query("conversations", "SELECT count(text) >= 0 FROM messages", "").await), json!([[1]]));
+    let runs = stand.query("conversations", "SELECT count(*) FROM runs", "").await;
+    assert_eq!(runs.error(), DataError::Invalid, "{runs:?}");
+    client.ok(grant("conversations", false)).await;
 
     // An agent's own database, granted, then taken back: refused at once.
     client.ok(grant("agent:rivet", true)).await;
@@ -315,11 +366,65 @@ async fn an_app_reads_only_what_the_person_granted_and_only_to_read() {
     assert_eq!(kept, 2, "nothing was written");
     assert_eq!(
         stand.sources().await,
-        [("factory-records".into(), "Claktory's records".into(), true), ("agent:rivet".into(), "Rivet's database".into(), false)]
+        [
+            ("activity".into(), "Activity".into(), true),
+            ("conversations".into(), "Conversations".into(), false),
+            ("agent:rivet".into(), "Rivet's database".into(), false)
+        ]
     );
     let config = std::fs::read_to_string(home_of(addr).config_path()).expect("config.json");
     let config: Value = serde_json::from_str(&config).expect("JSON");
-    assert_eq!(config["apps"][0]["sources"], json!(["factory-records"]));
+    assert_eq!(config["apps"][0]["sources"], json!(["activity"]));
+}
+
+/// An app given all of Claktory's records before it was split keeps them,
+/// shown for what they are, until the person takes them back; then they
+/// can't be given again.
+#[tokio::test]
+async fn an_app_given_all_of_claktorys_records_before_keeps_them() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    let stand = Stand::default();
+    factory.set_apps_host(stand.launcher());
+    let (mut client, _, _) = Client::connect(addr).await;
+    let bundle = clapp(MANIFEST, b"\0asm\x01\0\0\0 data", &SigningKey::from_bytes(&[11; 32]));
+    let install = |approve: bool, sha256: &str| {
+        Request::InstallLocalApp(v1::InstallLocalApp { approve, sha256: sha256.into(), content: bundle.clone(), ..Default::default() })
+    };
+    let Body::AppPermissions(permissions) = client.request(install(false, "")).await.body else { panic!("permissions") };
+    client.ok(install(true, &permissions.sha256)).await;
+    running(&mut client).await;
+    stand.wait_for("start charts").await;
+
+    // As a Claktory from before has it: granted in config.json.
+    let path = home_of(addr).config_path();
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).expect("config")).expect("JSON");
+    config["apps"][0]["sources"] = json!(["factory-records"]);
+    std::fs::write(&path, serde_json::to_vec_pretty(&config).expect("JSON")).expect("written");
+    let info = client
+        .wait_for(|body| match body {
+            Body::Workspace(workspace) => {
+                workspace.apps.first().filter(|app| app.sources.iter().any(|source| source.id == "factory-records")).cloned()
+            }
+            _ => None,
+        })
+        .await;
+    let records = info.sources.iter().find(|source| source.id == "factory-records").expect("listed");
+    assert!(records.granted && records.private && records.kind() == v1::AppDataKind::FactoryRecords);
+    assert_eq!(records.label, "Everything Claktory keeps");
+    assert!(records.holds.contains("with their text"), "{}", records.holds);
+    assert_eq!(
+        rows(&stand.query("factory-records", "SELECT count(*) > 0 FROM sqlite_master WHERE name = 'messages'", "").await),
+        json!([[1]])
+    );
+    let private = stand.query("factory-records", "SELECT * FROM memory_notes", "").await;
+    assert_eq!(private.error(), DataError::Invalid, "{private:?}");
+
+    // Taken back: gone from the list, and not given again.
+    client.ok(grant("factory-records", false)).await;
+    assert_eq!(stand.query("factory-records", "SELECT 1", "").await.error(), DataError::UnknownSource);
+    let refused = client.request(grant("factory-records", true)).await.body;
+    assert!(matches!(&refused, Body::Error(error) if error.message.contains("doesn't ask to read")), "{refused:?}");
 }
 
 #[tokio::test]
@@ -331,7 +436,13 @@ async fn an_app_that_pushes_too_much_fails_its_views() {
     let (mut client, _, _) = Client::connect(addr).await;
     let bundle = clapp(MANIFEST, b"\0asm\x01\0\0\0 data", &SigningKey::from_bytes(&[11; 32]));
     let install = |approve: bool, sha256: &str| {
-        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: bundle.clone(), ..Default::default() })
+        Request::InstallLocalApp(v1::InstallLocalApp {
+            path: String::new(),
+            approve,
+            sha256: sha256.into(),
+            content: bundle.clone(),
+            ..Default::default()
+        })
     };
     let Body::AppPermissions(permissions) = client.request(install(false, "")).await.body else { panic!("permissions") };
     client.ok(install(true, &permissions.sha256)).await;

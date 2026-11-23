@@ -111,10 +111,10 @@ async fn a_quiet_message_waits_for_the_next_wake_and_comes_with_it() {
 }
 
 #[tokio::test]
-async fn a_quiet_message_carries_the_senders_taint_at_once() {
+async fn a_quiet_message_from_a_marked_sender_marks_no_one() {
     let (_dir, factory, mut client, mut view) = setup().await;
-    pipes::taint_with_for_test(&factory, "max", "bo", r#"{"p-secret": []}"#);
-    let sent = call(&mut client, &mut view, "bo", "agents_send", r#"{"to": "max", "text": "From the pipe.", "quiet": true}"#).await;
+    pipes::taint_for_test(&factory, "bo", "browser:https://example.com");
+    let sent = call(&mut client, &mut view, "bo", "agents_send", r#"{"to": "max", "text": "From the page.", "quiet": true}"#).await;
     assert!(sent.starts_with("Sent quietly to Max"), "{sent}");
-    assert!(pipes::taint_of_for_test(&factory, "max").contains("p-secret"), "{}", pipes::taint_of_for_test(&factory, "max"));
+    assert_eq!(pipes::taint_of_for_test(&factory, "max"), "{}");
 }

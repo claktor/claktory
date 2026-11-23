@@ -11,6 +11,7 @@ import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
 import 'markdown.dart';
+import 'recovery_key.dart' show RecoveryKeyBox;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/input.dart' show InputKind;
 import 'mobile/metrics.dart' show Metrics, Touch, TypeScale;
@@ -1182,47 +1183,75 @@ class _RecoveryKeyState extends State<_RecoveryKey> {
             },
           );
     final done = Button(label: 'Done', primary: true, onPressed: widget.close);
+    // On a phone at the largest text, one under another, Done first, each
+    // the sheet's width.
+    final stacked = isPhoneLayout(context) && largeText(context);
+    final words = [
+      Text(
+        'Your recovery key',
+        style: type.emphasis.copyWith(color: palette.text),
+      ),
+      const SizedBox(height: Space.s),
+      Text(
+        'Your secrets open with two halves together: one on the computer '
+        'Claktory runs on and one at claktory.com. Neither can open them '
+        'alone. This key opens them by itself, if claktory.com can\'t be '
+        'reached, your account is gone or that computer\'s half is lost.\n\n'
+        'Keep it in a password manager, such as Passwords or 1Password, or '
+        'on paper kept somewhere safe. Never share it: anyone with it can '
+        'open your secrets.',
+        style: type.body.copyWith(color: palette.textMuted),
+      ),
+      const SizedBox(height: Space.xl),
+      if (key != null)
+        // Wrapped at its blocks, all of it in sight to copy down by hand
+        // (Zucchero's row 131).
+        RecoveryKeyBox(key)
+      else if (_error case final error?)
+        Text(error, style: type.caption.copyWith(color: palette.danger))
+      else
+        // Asked for; it comes in a moment.
+        const SizedBox(height: 40),
+    ];
+    final buttons = [
+      const SizedBox(height: Space.xl),
+      if (stacked)
+        StepButtons(children: [done, ?copy])
+      else
+        Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            ?copy,
+            const SizedBox(width: Space.s),
+            done,
+          ],
+        ),
+    ];
+    // Taller than the sheet or the window (the largest text on a small
+    // phone, Zucchero's row 126), it scrolls, as a form does: the words
+    // and the key over the buttons, or, stacked, all of it together, since
+    // even the buttons may not fit.
+    if (stacked) {
+      return SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [...words, ...buttons],
+        ),
+      );
+    }
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
-          'Your recovery key',
-          style: type.emphasis.copyWith(color: palette.text),
-        ),
-        const SizedBox(height: Space.s),
-        Text(
-          'Your secrets open with two halves together: one on the computer '
-          'Claktory runs on and one at claktory.com. Neither can open them '
-          'alone. This key opens them by itself, if claktory.com can\'t be '
-          'reached, your account is gone or that computer\'s half is lost.\n\n'
-          'Keep it in a password manager, such as Passwords or 1Password, or '
-          'on paper kept somewhere safe. Never share it: anyone with it can '
-          'open your secrets.',
-          style: type.body.copyWith(color: palette.textMuted),
-        ),
-        const SizedBox(height: Space.xl),
-        if (key != null)
-          CodeBlock(key)
-        else if (_error case final error?)
-          Text(error, style: type.caption.copyWith(color: palette.danger))
-        else
-          // Asked for; it comes in a moment.
-          const SizedBox(height: 40),
-        const SizedBox(height: Space.xl),
-        // On a phone at the largest text, one under another, Done first,
-        // each the sheet's width.
-        if (isPhoneLayout(context) && largeText(context))
-          StepButtons(children: [done, ?copy])
-        else
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              ?copy,
-              const SizedBox(width: Space.s),
-              done,
-            ],
+        Flexible(
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: words,
+            ),
           ),
+        ),
+        ...buttons,
       ],
     );
   }

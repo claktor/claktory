@@ -987,7 +987,7 @@ impl Factory {
             session_id: Some(id.to_owned()),
             transform_context: None,
             should_stop_after_turn: None,
-            // Once it has read a pipe, its secrets wait for the person.
+            // Once it has read a web page, its secrets wait for the person.
             before_tool_call: Some(crate::pipes::agents::gate(self, id)),
             compact_at: Some(job.compact_at),
             inbox: Some(self.inbox(id, job.epoch)),
@@ -1153,6 +1153,9 @@ impl Factory {
     /// tools kept (they come first in the cache); effort goes into the next
     /// request as it is. What stays the same is None.
     async fn settings_now(self: &Arc<Self>, id: &str, epoch: u64) -> factory_agent::Settings {
+        if crate::chats::is_chat(id) {
+            return crate::chats::settings_now(self, id, epoch);
+        }
         let mut settings = factory_agent::Settings::default();
         let (agent, frame, listed) = {
             let inner = self.lock();

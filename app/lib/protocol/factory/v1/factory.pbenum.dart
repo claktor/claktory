@@ -1510,14 +1510,44 @@ class AppDataKind extends $pb.ProtobufEnum {
   static const AppDataKind APP_DATA_KIND_AGENT_DATABASE =
       AppDataKind._(2, _omitEnumNames ? '' : 'APP_DATA_KIND_AGENT_DATABASE');
 
+  /// Activity: runs, background tasks, monitors, checklist items, messages
+  /// and token use, as ids, agents, times, states and counts; never their
+  /// text.
+  static const AppDataKind APP_DATA_KIND_ACTIVITY =
+      AppDataKind._(3, _omitEnumNames ? '' : 'APP_DATA_KIND_ACTIVITY');
+
+  /// Conversations: the messages your agents got, from you, other agents
+  /// and events, with their text.
+  static const AppDataKind APP_DATA_KIND_CONVERSATIONS =
+      AppDataKind._(4, _omitEnumNames ? '' : 'APP_DATA_KIND_CONVERSATIONS');
+
+  /// A CSV or TSV file the person (or Rivet, on a card) chose, read as one
+  /// table, `rows`, at every query. AppDataSource.id is
+  /// "file:<place>:<path>": the place "workspace", a project's id or
+  /// "<project id>/<folder id>", the path in that folder with "/" between
+  /// names (no name starting with "."), such as
+  /// "file:web-site:reports/bugs.csv"; label "reports/bugs.csv in Web Site",
+  /// holds the file's full path. Another path is another source. In
+  /// AppPermissions, one entry with id "file:*" says the app reads files
+  /// the person chooses. Give one with GrantAppSource (source_id the id):
+  /// it's refused, saying why, when the file can't be read by an app (a
+  /// symbolic link or a hidden name in its path, inside Claktory's own
+  /// folder but its workspace, not a regular file, several hard links, over
+  /// 10 MB).
+  static const AppDataKind APP_DATA_KIND_FILE =
+      AppDataKind._(5, _omitEnumNames ? '' : 'APP_DATA_KIND_FILE');
+
   static const $core.List<AppDataKind> values = <AppDataKind>[
     APP_DATA_KIND_UNSPECIFIED,
     APP_DATA_KIND_FACTORY_RECORDS,
     APP_DATA_KIND_AGENT_DATABASE,
+    APP_DATA_KIND_ACTIVITY,
+    APP_DATA_KIND_CONVERSATIONS,
+    APP_DATA_KIND_FILE,
   ];
 
   static final $core.List<AppDataKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 2);
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
   static AppDataKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -2285,6 +2315,32 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
       NeedsYouRecordKind._(
           12, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_REPORT_TYPE');
 
+  /// A change to what an app reads, which agents use it and what they hear
+  /// of it: CHANGED when Rivet applied it (agent_id Rivet) or the person
+  /// did (agent_id empty), from their apps or by undoing another;
+  /// APPROVED, DENIED or FAILED for Rivet's card (AppAccessProposal).
+  /// title is Claktory's sentence ("Rivet gave Ingrid Change dashboards on
+  /// Charts"); app_change_id undoes it; agent_reason is Rivet's why. seq is
+  /// the apps_set_access call's entry in Rivet's conversation (or its
+  /// card's); 0 for the person's own change or undo: open Marketplace →
+  /// Apps at app_id then. One that changed what agents hear counts as a
+  /// change of their grant (AppGrant.given).
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_APP_ACCESS =
+      NeedsYouRecordKind._(
+          13, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_APP_ACCESS');
+
+  /// An agent (Rivet) put an agent on another model or effort with
+  /// models_set, which changes what the person spends: outcome CHANGED,
+  /// agent_id who did it, subject_agent_id whose model it was, title
+  /// Claktory's sentence ("Rivet put Ingrid on Claude Opus 5, high", "Rivet
+  /// changed Ingrid's effort to high"), agent_reason its why (models_set's
+  /// reason; may be empty), model_change_id to undo it (UndoModelChange),
+  /// undone once undone. seq is the models_set call's entry in its
+  /// conversation.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_MODEL =
+      NeedsYouRecordKind._(
+          14, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_MODEL');
+
   static const $core.List<NeedsYouRecordKind> values = <NeedsYouRecordKind>[
     NEEDS_YOU_RECORD_KIND_UNSPECIFIED,
     NEEDS_YOU_RECORD_KIND_QUESTION,
@@ -2299,10 +2355,12 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
     NEEDS_YOU_RECORD_KIND_APP_GRANT,
     NEEDS_YOU_RECORD_KIND_PIPE_FORWARD,
     NEEDS_YOU_RECORD_KIND_REPORT_TYPE,
+    NEEDS_YOU_RECORD_KIND_APP_ACCESS,
+    NEEDS_YOU_RECORD_KIND_MODEL,
   ];
 
   static final $core.List<NeedsYouRecordKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 12);
+      $pb.ProtobufEnum.$_initByValueList(values, 14);
   static NeedsYouRecordKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 

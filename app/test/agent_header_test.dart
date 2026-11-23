@@ -9,6 +9,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'app_test.dart' show workspace;
 import 'harness.dart';
 
 Workspace _workspace() => Workspace(
@@ -59,4 +60,35 @@ void main() {
       expect(bar.bottom, greaterThanOrEqualTo(name.bottom));
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
   }
+
+  // A 600-point window beside the sidebar leaves the conversation about 312
+  // points: the header gives way (the context meter's bar, then its words
+  // cut) rather than overflow (Polnareff).
+  testWidgets('in a 600-point window, the header fits: the context meter '
+      'drops its bar and keeps its words', (tester) async {
+    final harness = Harness(workspace());
+    await harness.show(tester, size: const Size(600, 800));
+    await settle(tester);
+    expect(tester.takeException(), isNull);
+    expect(find.textContaining('123k'), findsOneWidget);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+  testWidgets('in a wide window, the meter shows its bar beside its words', (
+    tester,
+  ) async {
+    final harness = Harness(workspace());
+    await harness.show(tester, size: const Size(1400, 900));
+    await settle(tester);
+    expect(find.text('123k / 400k'), findsOneWidget);
+    // The bar: 40 by 4.
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Container &&
+            widget.constraints?.maxWidth == 40 &&
+            widget.constraints?.maxHeight == 4,
+      ),
+      findsOneWidget,
+    );
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 }

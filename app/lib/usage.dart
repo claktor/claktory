@@ -70,20 +70,79 @@ List<UsageMeter> usageMeters(List<Provider> providers) => [
 /// hover card gives who it is, its plan and every limit's numbers. Accounts
 /// without limits (API keys) show the mark alone, which doesn't read as a
 /// meter.
+///
+/// With [onAdd], a + after them, a circle's size, to add another provider
+/// (a friend with one couldn't find where to add a second).
 class ProviderUsageCircles extends StatelessWidget {
-  const ProviderUsageCircles({super.key, required this.providers});
+  const ProviderUsageCircles({super.key, required this.providers, this.onAdd});
 
   final List<Provider> providers;
+  final VoidCallback? onAdd;
 
   @override
   Widget build(BuildContext context) {
+    final onAdd = this.onAdd;
     // Their own row, wrapping onto more as they multiply.
     return Wrap(
       spacing: Space.xs,
       runSpacing: Space.xs,
       children: [
         for (final meter in usageMeters(providers)) UsageCircle(meter: meter),
+        if (onAdd != null) AddProviderButton(onTap: onAdd),
       ],
+    );
+  }
+}
+
+/// What the + after the usage circles says, on hover and to VoiceOver.
+const addProviderLabel = 'Add an AI provider';
+
+/// A + in a usage circle's 24px cell: a faint ring, the + inside, the
+/// ring's color on hover. It opens Settings at Providers.
+class AddProviderButton extends StatelessWidget {
+  const AddProviderButton({super.key, required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Semantics(
+      container: true,
+      button: true,
+      label: addProviderLabel,
+      excludeSemantics: true,
+      child: HoverCard(
+        card: (context) => const Text(addProviderLabel),
+        child: Pressable(
+          onTap: onTap,
+          builder: (context, hovered) => SizedBox.square(
+            dimension: 24,
+            child: Center(
+              child: AnimatedContainer(
+                duration: Motion.fast,
+                width: 20,
+                height: 20,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: hovered ? palette.hover : null,
+                  border: Border.all(
+                    color: hovered ? palette.textMuted : palette.hairline,
+                    width: 1.5,
+                  ),
+                ),
+                child: ExtensionGlyph(
+                  icon: 'plus',
+                  name: '+',
+                  size: 12,
+                  color: hovered ? palette.text : palette.textMuted,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

@@ -67,6 +67,9 @@ pub struct Saved {
     pub target_os: String,
     pub target_arch: String,
     pub target_version: String,
+    /// The agent that started the move (Rivet's move_claktory), or empty
+    /// when the person did (`Move.started_by_agent_id`).
+    pub started_by_agent_id: String,
     pub map: Vec<(String, String)>,
     /// Project folders left out of the move, as the person asked Rivet.
     pub skip: Vec<String>,
@@ -104,12 +107,23 @@ struct Failed {
     at_ms: i64,
     why: String,
     target_machine: String,
+    // Since #243 S5 (Abbacchio's row 625): files from before read as empty.
+    target_os: String,
+    target_arch: String,
+    started_by_agent_id: String,
 }
 
-/// Keeps why the move failed, so the app shows it after a restart too,
-/// until it's dismissed.
-fn remember_failed(home: &Home, why: &str, target_machine: &str) {
-    let failed = Failed { at_ms: crate::transcript::now_ms(), why: why.to_owned(), target_machine: target_machine.to_owned() };
+/// Keeps why the move failed, and what `shown` said of it, so the app shows
+/// it after a restart too, until it's dismissed.
+fn remember_failed(home: &Home, why: &str, shown: &v1::Move) {
+    let failed = Failed {
+        at_ms: crate::transcript::now_ms(),
+        why: why.to_owned(),
+        target_machine: shown.target_machine.clone(),
+        target_os: shown.target_os.clone(),
+        target_arch: shown.target_arch.clone(),
+        started_by_agent_id: shown.started_by_agent_id.clone(),
+    };
     let written = serde_json::to_vec_pretty(&failed)
         .map_err(|error| error.to_string())
         .and_then(|json| crate::remote::write_private(&failed_path(home), &json).map_err(|error| error.to_string()));
@@ -161,6 +175,9 @@ impl Moving {
         let view = failed.map(|failed| v1::Move {
             phase: Phase::Failed.into(),
             target_machine: failed.target_machine,
+            target_os: failed.target_os,
+            target_arch: failed.target_arch,
+            started_by_agent_id: failed.started_by_agent_id,
             error: failed.why,
             can_cancel: true,
             updated_ms: failed.at_ms,
@@ -274,8 +291,9 @@ fn begin(factory: &Arc<Factory>, code: ReceiveCode, resumed: Option<Saved>, agen
     });
     factory.broadcast_workspace(&factory.lock());
     let weak = Arc::downgrade(factory);
+    let agent = agent.to_owned();
     tokio::spawn(async move {
-        drive(weak, code, resumed, skip, controls).await;
+        drive(weak, code, resumed, skip, agent, controls).await;
     });
 }
 
@@ -304,6 +322,7 @@ fn shown(view: &mut v1::Move, saved: &Saved) {
     view.target_os.clone_from(&saved.target_os);
     view.target_arch.clone_from(&saved.target_arch);
     view.target_version.clone_from(&saved.target_version);
+    view.started_by_agent_id.clone_from(&saved.started_by_agent_id);
     view.map = saved.map.iter().map(|(from, to)| v1::MovePath { from: from.clone(), to: to.clone() }).collect();
     view.missing_tools.clone_from(&saved.missing);
     view.plan_bytes = saved.plan_bytes;
@@ -483,6 +502,7 @@ async fn drive(
     code: ReceiveCode,
     resumed: Option<Saved>,
     skip: Vec<String>,
+    started_by_agent_id: String,
     mut controls: mpsc::UnboundedReceiver<Control>,
 ) {
     let Some(factory) = weak.upgrade() else { return };
@@ -493,13 +513,13 @@ async fn drive(
         move_source::forget(&home);
         let Some(factory) = weak.upgrade() else { return };
         *locked(&factory.moving.control) = None;
-        let mut machine = String::new();
+        let mut shown = v1::Move::default();
         factory.moving.set(|view| {
             view.phase = Phase::Failed.into();
             view.error.clone_from(&why);
-            machine.clone_from(&view.target_machine);
+            shown.clone_from(view);
         });
-        remember_failed(&home, &why, &machine);
+        remember_failed(&home, &why, &shown);
         factory.broadcast_workspace(&factory.lock());
     };
     let called_off = || {
@@ -550,8 +570,14 @@ async fn drive(
         link.fail(&why).await;
         return fail(why);
     }
-    let mut saved =
-        resumed.unwrap_or_else(|| Saved { code: code.text(), export_id: move_export::new_export_id(), round: 1, skip, ..Saved::default() });
+    let mut saved = resumed.unwrap_or_else(|| Saved {
+        code: code.text(),
+        export_id: move_export::new_export_id(),
+        round: 1,
+        skip,
+        started_by_agent_id,
+        ..Saved::default()
+    });
     saved.target_machine.clone_from(&machine);
     saved.target_os.clone_from(&target.os);
     saved.target_arch.clone_from(&target.arch);
@@ -703,7 +729,7 @@ pub async fn serve_frozen(listener: TcpListener, home: &Home, saved: Saved, hand
     let outcome = finish_frozen(home, saved.clone(), &shown_tx, cancel_rx).await;
     let unfreeze = |why: Option<String>| {
         if let Some(why) = why {
-            remember_failed(home, &why, &saved.target_machine);
+            remember_failed(home, &why, &shown_tx.borrow());
         }
         move_source::forget(home);
         // The Claktory starts again here: its vault's key goes back to the

@@ -193,18 +193,24 @@ async fn an_assertion_vouches_for_a_tunnel_key_and_lets_it_through_relays_for_a_
     assert!(list.endpoints.is_empty(), "{list:?}");
 }
 
+/// Row 671: a key signed in to one account never signs in to another
+/// while it's signed in there (its direct-message leaf would span both);
+/// it stays where it is. An account has at most 30 devices.
 #[tokio::test]
-async fn a_key_signed_in_to_another_account_moves_and_an_account_has_30_devices() {
+async fn a_key_signed_in_to_one_account_stays_there_and_an_account_has_30_devices() {
     let instance = start().await;
     let phone = Device::new("192.0.2.85");
-    instance.sign_in_device(&phone, "matt@example.com", "iPhone").await;
+    let matt = instance.sign_in_device(&phone, "matt@example.com", "iPhone").await;
     instance.device_signed(&phone, "POST", "/v1/devices/assertion", Some(&json!({"device_key": "e".repeat(64)})), None).await;
-    let moved = instance.sign_in_device(&phone, "ana@example.com", "Ana's iPhone").await;
-    assert_eq!(moved.email, "ana@example.com");
+    let started: SignInStarted = instance.start_device_sign_in(&phone, "ana@example.com", "Ana's iPhone").await.json();
+    let verify = json!({"request_id": started.request_id, "code": instance.last_code("ana@example.com")});
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/sign-in/verify", Some(&verify), None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "key_of_another_account"), "{}", answer.text());
     let me: DeviceAccount = instance.device_signed(&phone, "GET", "/v1/devices/me", None, None).await.json();
-    assert_eq!(me, moved);
+    assert_eq!(me, matt, "still Matt's");
     let list: Allowlist = instance.relay_allowlist(None, &instance.relay_bearer).await.json();
-    assert!(list.endpoints.is_empty(), "the old account's assertions stop counting: {list:?}");
+    assert_eq!(list.endpoints.len(), 1, "its assertion still counts: {list:?}");
+    let moved = instance.sign_in_device(&Device::new("192.0.2.87"), "ana@example.com", "Ana's iPhone").await;
 
     {
         let conn = rusqlite::Connection::open(&instance.db).unwrap();
@@ -222,8 +228,6 @@ async fn a_key_signed_in_to_another_account_moves_and_an_account_has_30_devices(
     let verify = json!({"request_id": started.request_id, "code": instance.last_code("ana@example.com")});
     let answer = instance.device_signed(&tablet, "POST", "/v1/devices/sign-in/verify", Some(&verify), None).await;
     assert_eq!((answer.status, answer.error().as_str()), (403, "too_many_devices"));
-    instance.advance(1);
-    instance.sign_in_device(&phone, "ana@example.com", "Ana's iPhone").await;
 }
 
 #[tokio::test]
@@ -255,7 +259,7 @@ async fn the_account_page_lists_devices_and_removes_one() {
     let done = post_form(&instance, "/account/remove-device", &cookie, &format!("csrf={csrf}&device={device}&confirm=yes")).await;
     assert_eq!(done.status, 303);
     instance.advance(1);
-    assert_eq!(instance.device_signed(&phone, "GET", "/v1/devices/me", None, None).await.error(), "unauthorized");
+    assert_eq!(instance.device_signed(&phone, "GET", "/v1/devices/me", None, None).await.error(), "device_removed");
     assert!(instance.relay_allowlist(None, &instance.relay_bearer).await.json::<Allowlist>().endpoints.is_empty());
     assert!(!get(&instance, "/account", &cookie).await.text().contains("Devices signed in"));
 
@@ -327,7 +331,7 @@ async fn a_device_removes_another_of_the_account_s_devices() {
         ("POST", "/v1/devices/remove", Some(remove(&phone))),
     ] {
         let answer = instance.device_signed(&stolen, method, path, body.as_ref(), None).await;
-        assert_eq!((answer.status, answer.error().as_str()), (401, "unauthorized"), "{path}");
+        assert_eq!((answer.status, answer.error().as_str()), (403, "device_removed"), "{path}");
     }
     assert!(instance.relay_allowlist(None, &instance.relay_bearer).await.json::<Allowlist>().endpoints.is_empty());
     assert_eq!(instance.device_signed(&phone, "GET", "/v1/devices/me", None, None).await.status, 200, "the phone stays");
@@ -343,6 +347,71 @@ async fn a_device_removes_another_of_the_account_s_devices() {
         assert_eq!(answer.status, 200, "{number}");
     }
     let answer = instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&remove(&theirs)), None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (429, "rate_limited"));
+}
+
+/// A removed key's signed call is told it was removed (`403
+/// device_removed`, and nothing more), so its app can start over; but only
+/// once its signature, time and limits passed, exactly as a signed-in
+/// device's would: a bad, stale or replayed signature under it is a plain
+/// `401`, as is a key that was never signed in or signed itself out.
+#[tokio::test]
+async fn only_a_removed_keys_own_signed_call_learns_it_was_removed() {
+    let instance = start().await;
+    let phone = Device::new("192.0.2.130");
+    instance.sign_in_device(&phone, "matt@example.com", "iPhone").await;
+    let stolen = Device::new("192.0.2.131");
+    instance.sign_in_device(&stolen, "matt@example.com", "Mac").await;
+    let quitter = Device::new("192.0.2.132");
+    instance.sign_in_device(&quitter, "matt@example.com", "iPad").await;
+    let answer =
+        instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&json!({"account_key": stolen.account_key()})), None).await;
+    assert_eq!(answer.json::<DeviceRemoved>(), DeviceRemoved { removed: true });
+    instance.device_signed(&quitter, "POST", "/v1/devices/sign-out", Some(&json!({})), None).await;
+    instance.advance(60 - instance.now().rem_euclid(60));
+
+    // Its own signed call: removed, with the usual message and nothing else.
+    let answer = instance.device_signed(&stolen, "GET", "/v1/devices/me", None, None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "device_removed"), "{}", answer.text());
+    let fields: Vec<String> = answer.value().as_object().expect("an object").keys().cloned().collect();
+    assert_eq!(fields, ["error", "message"], "no account, name or time");
+    assert_eq!(answer.value()["message"], "This device was removed from your account. Sign in again to start over as a new device.");
+
+    // Never signed in, or signed itself out: 401.
+    let stranger = Device::new("192.0.2.133");
+    assert_eq!(instance.device_signed(&stranger, "GET", "/v1/devices/me", None, None).await.error(), "unauthorized");
+    assert_eq!(instance.device_signed(&quitter, "GET", "/v1/devices/me", None, None).await.error(), "unauthorized");
+
+    // Under the removed key, a signature by another key, one too old, and
+    // one already seen are what they always were.
+    let time = instance.now() - 1;
+    let headers = |signer: &Device| {
+        [
+            ("authorization", format!("Device {}", stolen.account_key())),
+            (TIME_HEADER, time.to_string()),
+            (SIGNATURE_HEADER, sign_request(&signer.key, "GET", "/v1/devices/me", time, b"")),
+        ]
+    };
+    let forged = instance.send("GET", "/v1/devices/me", Vec::new(), &headers(&stranger)).await;
+    assert_eq!((forged.status, forged.error().as_str()), (401, "unauthorized"), "{}", forged.text());
+    let stale = instance.device_signed(&stolen, "GET", "/v1/devices/me", None, Some(instance.now() - 301)).await;
+    assert_eq!((stale.status, stale.error().as_str()), (401, "clock_skew"));
+    let first = instance.send("GET", "/v1/devices/me", Vec::new(), &headers(&stolen)).await;
+    assert_eq!(first.error(), "device_removed");
+    let replayed = instance.send("GET", "/v1/devices/me", Vec::new(), &headers(&stolen)).await;
+    assert_eq!((replayed.status, replayed.error().as_str()), (401, "replayed"));
+
+    // And it counts against the key's 240 a minute, as a signed-in one's would (2 so far).
+    let ago = std::cell::Cell::new(1);
+    let at = || {
+        ago.set(ago.get() + 1);
+        Some(instance.now() - ago.get())
+    };
+    for number in 2..240 {
+        let stolen = Device { key: stolen.key.clone(), ip: format!("198.51.110.{}", 2 + number % 3) };
+        assert_eq!(instance.device_signed(&stolen, "GET", "/v1/devices/me", None, at()).await.error(), "device_removed", "{number}");
+    }
+    let answer = instance.device_signed(&stolen, "GET", "/v1/devices/me", None, at()).await;
     assert_eq!((answer.status, answer.error().as_str()), (429, "rate_limited"));
 }
 
@@ -372,7 +441,7 @@ async fn a_removed_device_never_signs_in_to_the_account_again() {
     instance.advance(1);
     let answer = instance.device_signed(&stolen, "POST", "/v1/devices/sign-in/verify", Some(&verify), None).await;
     assert_eq!(answer.error(), "code_expired");
-    assert_eq!(instance.device_signed(&stolen, "GET", "/v1/devices/me", None, None).await.error(), "unauthorized");
+    assert_eq!(instance.device_signed(&stolen, "GET", "/v1/devices/me", None, None).await.error(), "device_removed");
 
     // Asking for a new code is refused, and no mail goes out.
     let mails = instance.mail.sent().len();
@@ -380,8 +449,11 @@ async fn a_removed_device_never_signs_in_to_the_account_again() {
     assert_eq!((answer.status, answer.error().as_str()), (403, "device_removed"));
     assert_eq!(instance.mail.sent().len(), mails);
 
-    // Another account is another matter.
-    instance.sign_in_device(&stolen, "ana@example.com", "Ana's Mac").await;
+    // Nor another account (row 671): the key is still Matt's.
+    let started: SignInStarted = instance.start_device_sign_in(&stolen, "ana@example.com", "Ana's Mac").await.json();
+    let verify = json!({"request_id": started.request_id, "code": instance.last_code("ana@example.com")});
+    let answer = instance.device_signed(&stolen, "POST", "/v1/devices/sign-in/verify", Some(&verify), None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "key_of_another_account"));
 
     // Removed after signing itself out: still never again. (An hour on:
     // refused starts count towards an email's 5 an hour.)
@@ -397,11 +469,18 @@ async fn a_removed_device_never_signs_in_to_the_account_again() {
     let data = get(&instance, "/account/data", &cookie).await.value();
     let removed: Vec<&str> = data["removed_devices"].as_array().unwrap().iter().map(|key| key["account_key"].as_str().unwrap()).collect();
     assert_eq!(removed, [stolen.account_key().as_str(), quitter.account_key().as_str()]);
+    let mut kept: Vec<String> = data["device_keys"].as_array().unwrap().iter().map(|key| key.as_str().unwrap().to_owned()).collect();
+    kept.sort();
+    let mut keys = vec![phone.account_key(), stolen.account_key(), quitter.account_key()];
+    keys.sort();
+    assert_eq!(kept, keys, "every key that last signed in here");
     let csrf = field(&get(&instance, "/account", &cookie).await.text(), "csrf");
     post_form(&instance, "/account/delete", &cookie, &format!("csrf={csrf}&confirm=yes")).await;
     let conn = rusqlite::Connection::open(&instance.db).unwrap();
     let count: i64 = conn.query_row("SELECT count(*) FROM removed_devices", [], |row| row.get(0)).unwrap();
     assert_eq!(count, 0);
+    let count: i64 = conn.query_row("SELECT count(*) FROM key_accounts", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 0, "the keys go with the account");
 }
 
 #[test]
@@ -437,4 +516,114 @@ fn a_database_from_before_devices_gains_their_tables_and_columns() {
     let conn = db::open(&path).expect("opens after a rollback");
     assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), 4);
     assert_eq!(db::claktory(&conn, "claktory-0123456789").unwrap().expect("kept").display_name.as_deref(), Some("Studio"));
+}
+
+/// Row 630: devices signed in before the service kept when (no
+/// `signed_in` column) open as never signed in recently, and opening again
+/// doesn't add it twice.
+#[test]
+fn devices_from_before_sign_in_times_open_as_signed_in_long_ago() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("account.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE devices (account_key TEXT PRIMARY KEY, account_id TEXT NOT NULL, name TEXT NOT NULL, platform TEXT NOT NULL,
+             version TEXT NOT NULL, created INTEGER NOT NULL, last_seen INTEGER NOT NULL);
+             INSERT INTO devices VALUES ('key-1', 'a', 'Phone', 'ios', 'v0.1.40', 5, 6);
+             PRAGMA user_version = 4;",
+        )
+        .unwrap();
+    }
+    let conn = db::open(&path).unwrap();
+    let device = db::device(&conn, "key-1").unwrap().expect("kept");
+    assert_eq!((device.created, device.last_seen, device.signed_in), (5, 6, None));
+    drop(conn);
+    let conn = db::open(&path).expect("opens again");
+    assert_eq!(db::device(&conn, "key-1").unwrap().expect("kept").signed_in, None);
+}
+
+/// Row 671 (Fugo's 1A): a key last signed in to Matt's account, signed out
+/// since, never signs in to another: Ana's, or a new one's. It signs back
+/// in to Matt's as before; a new key signs in to Ana's. A start signed by
+/// the key it names is told before a code goes out; an unsigned one (an
+/// older app) only at verify, so a public key alone tells nobody which
+/// account it's in. Deleting Matt's account frees it.
+#[tokio::test]
+async fn a_device_key_never_spans_two_accounts() {
+    let instance = start().await;
+    let phone = Device::new("192.0.2.140");
+    let matt = instance.sign_in_device(&phone, "matt@example.com", "iPhone").await;
+    instance.device_signed(&phone, "POST", "/v1/devices/sign-out", Some(&json!({})), None).await;
+    let start_for = |email: &str| {
+        json!({"email": email, "account_key": phone.account_key(), "name": "iPhone", "platform": "ios", "version": "v0.1.13"})
+    };
+
+    // Signed: refused at start, and no code is sent.
+    let mails = instance.mail.sent().len();
+    for email in ["ana@example.com", "new@example.com"] {
+        let answer = instance.device_signed(&phone, "POST", "/v1/devices/sign-in/start", Some(&start_for(email)), None).await;
+        assert_eq!((answer.status, answer.error().as_str()), (403, "key_of_another_account"), "{email}: {}", answer.text());
+        assert_eq!(
+            answer.value()["message"],
+            "This device was used with another account. Sign in again to start over as a new device."
+        );
+    }
+    assert_eq!(instance.mail.sent().len(), mails);
+    // Signed by another key than the one it names: not its to ask.
+    let other = Device::new("192.0.2.141");
+    let answer = instance.device_signed(&other, "POST", "/v1/devices/sign-in/start", Some(&start_for("ana@example.com")), None).await;
+    assert_eq!(answer.status, 401);
+
+    // Unsigned: a code goes out as for any key, and verify refuses it.
+    let answer = instance.start_device_sign_in(&phone, "ana@example.com", "iPhone").await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+    let started: SignInStarted = answer.json();
+    let verify = json!({"request_id": started.request_id, "code": instance.last_code("ana@example.com")});
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/sign-in/verify", Some(&verify), None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "key_of_another_account"));
+    instance.advance(1);
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/sign-in/verify", Some(&verify), None).await;
+    assert_eq!(answer.error(), "code_expired", "the code is spent");
+
+    // Back to Matt's: as before, signed or not.
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/sign-in/start", Some(&start_for("Matt@Example.com")), None).await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+    assert_eq!(instance.sign_in_device(&phone, "matt@example.com", "iPhone").await, matt);
+
+    // A new key signs in to Ana's.
+    let fresh = Device::new("192.0.2.142");
+    assert_eq!(instance.sign_in_device(&fresh, "ana@example.com", "iPhone").await.email, "ana@example.com");
+
+    // Matt's account deleted, the key is no one's.
+    let cookie = web_sign_in(&instance, "matt@example.com", "192.0.2.143").await;
+    let csrf = field(&get(&instance, "/account", &cookie).await.text(), "csrf");
+    post_form(&instance, "/account/delete", &cookie, &format!("csrf={csrf}&confirm=yes")).await;
+    instance.advance(3600);
+    assert_eq!(instance.sign_in_device(&phone, "ana@example.com", "iPhone").await.email, "ana@example.com");
+}
+
+/// Row 671: keys signed in, or removed, before the service kept each key's
+/// account are kept as their account's, so they don't sign in to another.
+#[test]
+fn keys_from_before_are_kept_as_their_accounts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("account.db");
+    {
+        let conn = db::open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO accounts (id, email, created, last_sign_in) VALUES ('a', 'a@example.com', 1, 1), ('b', 'b@example.com', 1, 1);
+             INSERT INTO devices (account_key, account_id, name, platform, version, created, last_seen) VALUES ('key-1', 'a', 'Phone', 'ios', 'v1', 5, 6);
+             INSERT INTO removed_devices (account_id, account_key, removed) VALUES ('a', 'key-2', 7);
+             DROP TABLE key_accounts;",
+        )
+        .unwrap();
+    }
+    let conn = db::open(&path).unwrap();
+    for key in ["key-1", "key-2"] {
+        assert!(db::key_of_another_account(&conn, "b@example.com", key).unwrap(), "{key}");
+        assert!(db::key_of_another_account(&conn, "new@example.com", key).unwrap(), "{key}");
+        assert!(!db::key_of_another_account(&conn, "a@example.com", key).unwrap(), "{key}");
+    }
+    assert!(!db::key_of_another_account(&conn, "b@example.com", "key-3").unwrap(), "a key never seen");
 }

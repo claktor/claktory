@@ -8,6 +8,7 @@ import 'package:factory_app/find.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/transcript.dart' show EntryView;
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -151,6 +152,60 @@ void main() {
       hasLength(3),
     );
     expect(_washes(tester, 1).every((wash) => wash.$2), isTrue);
+  }, variant: _mac);
+
+  testWidgets('a match far along a long line scrolls its block sideways '
+      "to it, in the input and the output (Zucchero's row 121)", (
+    tester,
+  ) async {
+    final path =
+        '/private/var/folders/y8/${'q' * 60}/T/claktory-qa/sandboxes/zx/'
+        'home/workspace/quagga-missing.txt';
+    final harness = _harness([
+      _call(1, 'read_file', {
+        'path': path,
+      }, output: "ENOENT: no such file or directory, open '$path'"),
+    ]);
+    _answer(harness, [1]);
+    await harness.show(tester);
+    await settle(tester);
+    await _find(tester, 'quagga');
+    expect(_open(tester, 1), isTrue);
+    // Both blocks scrolled sideways, each to its match, which shows.
+    final blocks = [
+      for (final element
+          in find
+              .descendant(
+                of: _entry(1),
+                matching: find.byWidgetPredicate(
+                  (widget) =>
+                      widget is Scrollable &&
+                      widget.axisDirection == AxisDirection.right,
+                ),
+              )
+              .evaluate())
+        (element as StatefulElement).state as ScrollableState,
+    ];
+    expect(blocks, hasLength(2));
+    for (final block in blocks) {
+      expect(block.position.pixels, greaterThan(0));
+      final view = tester.getRect(find.byWidget(block.widget));
+      final paragraph = tester.renderObject<RenderParagraph>(
+        find.descendant(
+          of: find.byWidget(block.widget),
+          matching: find.byType(RichText),
+        ),
+      );
+      final start = paragraph.text.toPlainText().indexOf('quagga');
+      final boxes = paragraph.getBoxesForSelection(
+        TextSelection(baseOffset: start, extentOffset: start + 6),
+      );
+      final at = boxes.first.toRect().shift(
+        paragraph.localToGlobal(Offset.zero),
+      );
+      expect(at.left, greaterThanOrEqualTo(view.left));
+      expect(at.right, lessThanOrEqualTo(view.right));
+    }
   }, variant: _mac);
 
   testWidgets("the person's own close wins: a find doesn't fold or reopen "

@@ -3,6 +3,7 @@ import 'package:factory_app/layout.dart' show chatKind, leaves;
 import 'package:factory_app/panes.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -169,7 +170,7 @@ void main() {
     expect(_labeled('All apps'), findsNothing);
   });
 
-  testWidgets('a pinned app opens its view as a pane, then glows', (
+  testWidgets('a pinned app\'s view fills the window; the layout stays', (
     tester,
   ) async {
     final harness = await _show(tester, _workspace());
@@ -177,17 +178,51 @@ void main() {
     expect(_labeled('Notes, Needs setup'), findsOneWidget);
     await tester.tap(_labeled('Charts, Running'));
     await settle(tester);
-    final sent = harness.backend.sent.where((m) => m.hasSetLayout()).toList();
-    expect(sent, hasLength(1));
-    final app = appPane(sent.single.setLayout.root, 'charts', '', 'main')!;
-    expect(app.leaf.title, 'Charts');
-    // Its tile shows it's open.
-    final tile = tester.widget<Semantics>(_labeled('Charts, Running'));
-    expect(tile.properties.selected, isTrue);
-    // Again: it's open already, so nothing more is sent.
+    // Expanded, as a pane's Expand does: the band's way back, and the
+    // view's header with Collapse.
+    expect(find.byType(ExpandedPane), findsOneWidget);
+    expect(_labeled('Back to June'), findsOneWidget);
+    expect(_labeled('Collapse Charts'), findsOneWidget);
+    expect(find.byType(AppPane), findsOneWidget);
+    // June's layout isn't touched.
+    expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
+    // Esc goes back.
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await settle(tester);
+    expect(find.byType(ExpandedPane), findsNothing);
+    // So do Collapse and Back to June.
     await tester.tap(_labeled('Charts, Running'));
     await settle(tester);
-    expect(harness.backend.sent.where((m) => m.hasSetLayout()), hasLength(1));
+    await tester.tap(_labeled('Collapse Charts'));
+    await settle(tester);
+    expect(find.byType(ExpandedPane), findsNothing);
+    await tester.tap(_labeled('Charts, Running'));
+    await settle(tester);
+    await tester.tap(_labeled('Back to June'));
+    await settle(tester);
+    expect(find.byType(ExpandedPane), findsNothing);
+    expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
+    expect(
+      harness.backend.workspace.workspace.agents.single.layout,
+      _workspace().agents.single.layout,
+    );
+  });
+
+  testWidgets('another app opened meanwhile takes its place', (tester) async {
+    await _show(tester, _workspace());
+    final element = tester.element(_labeled('Charts, Running'));
+    openApp(element, _charts);
+    await settle(tester);
+    openApp(element, _charts);
+    await settle(tester);
+    expect(find.byType(ExpandedPane), findsOneWidget);
+    openApp(element, _notes);
+    await settle(tester);
+    expect(find.byType(ExpandedPane), findsOneWidget);
+    expect(_labeled('Collapse Notes'), findsOneWidget);
+    await tester.tap(_labeled('Back to June'));
+    await settle(tester);
+    expect(find.byType(ExpandedPane), findsNothing);
   });
 
   testWidgets('the launcher lists every app; pins and unpins', (tester) async {
@@ -215,18 +250,20 @@ void main() {
     expect(find.byKey(const ValueKey('dock-charts')), findsNothing);
   });
 
-  testWidgets('an app with no views opens Settings → Apps', (tester) async {
+  testWidgets('an app with no views opens the Marketplace\'s Apps', (
+    tester,
+  ) async {
     final harness = await _show(tester, _workspace());
     await tester.tap(_labeled('All apps'));
     await settle(tester);
     await tester.tap(find.text('Telegram'));
     await settle(tester);
-    expect(harness.backend.settingsSection.value, 'apps');
+    expect(harness.backend.marketplaceTab.value, 'apps');
     final layout = harness.backend.sent.lastWhere((m) => m.hasSetLayout());
     expect(
-      pagePane(layout.setLayout.root, AppPage.settings),
+      pagePane(layout.setLayout.root, AppPage.marketplace),
       isNotNull,
-      reason: 'Settings opens beside June',
+      reason: 'the Marketplace opens beside June',
     );
     // The launcher closed.
     expect(find.text('Manage apps…'), findsNothing);
@@ -267,7 +304,7 @@ void main() {
     expect(find.text('Manage apps…'), findsOneWidget);
     await tester.tap(find.text('Telegram'));
     await pumpFrames(tester, const Duration(seconds: 1));
-    expect(harness.backend.settingsSection.value, 'apps');
+    expect(harness.backend.marketplaceTab.value, 'apps');
     expect(tester.takeException(), isNull);
   });
 }

@@ -70,6 +70,10 @@ pub const KEY_PACKAGES_MOST: i64 = 100;
 /// Claims per claiming device an hour, and identity rotations per account a day.
 const CLAIMS_AN_HOUR: i64 = 60;
 const ROTATIONS_A_DAY: i64 = 3;
+/// How recently the device must have signed in with an emailed code to make
+/// a new security key (row 630, Fugo): a device that lost every key starts
+/// over this way, so a session alone, stolen or left open, can't.
+const FRESH_SIGN_IN_MS: i64 = 15 * 60_000;
 /// How long a claim is remembered, for its Welcome.
 pub const CLAIM_KEEP_MS: i64 = 30 * 86_400_000;
 
@@ -264,10 +268,31 @@ struct PutKeys {
     request_nonce: Option<String>,
 }
 
+/// Refuses a list naming a device removed from the account (lost, stolen,
+/// given away): a used add code, or an app that's behind, never brings one
+/// back to be trusted again (Abbacchio's row 612, Fugo).
+fn none_removed(list: &SignedDeviceList, removed: &[String]) -> Result<(), Refusal> {
+    if list.list.leaves.iter().any(|leaf| leaf.kind == LeafKind::Device && removed.contains(&leaf.leaf_id)) {
+        return Err(Refusal(
+            409,
+            "removed_device",
+            "A device that was removed from your account can't come back on your list. Sign it in again as a new device.".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// The account's keys as stored now; or, inner `Err`, the 409 answer for a
 /// device whose `previous_version` is stale, with the keys as they are.
-fn put_keys(transaction: &Transaction<'_>, account: &str, put: PutKeys, now_ms: i64) -> Result<Result<Value, Value>, Refusal> {
+fn put_keys(
+    transaction: &Transaction<'_>,
+    account: &str,
+    removed: &[String],
+    put: PutKeys,
+    now_ms: i64,
+) -> Result<Result<Value, Value>, Refusal> {
     let (list, raw) = list_for(account, &put.device_list)?;
+    none_removed(&list, removed)?;
     if list.list.version != put.version || put.version == 0 {
         return Err(invalid("version is the device list's own, from 1."));
     }
@@ -325,10 +350,43 @@ struct Rotate {
     request_nonce: Option<String>,
 }
 
-fn rotate(transaction: &Transaction<'_>, account: &str, rotate: Rotate, now_ms: i64) -> Result<Value, Refusal> {
+/// Whether a device that signed in at `signed_in_at` (Unix seconds) did
+/// so recently enough to make a new security key.
+fn fresh(signed_in_at: Option<i64>, now_ms: i64) -> bool {
+    signed_in_at.is_some_and(|at| (0..FRESH_SIGN_IN_MS).contains(&now_ms.saturating_sub(at.saturating_mul(1000))))
+}
+
+/// The security keys `account` had and replaced, oldest first, those
+/// replaced in the same millisecond in key order (base64url):
+/// for a device behind across more than one new key, which retires one only
+/// when a commit it holds proves it (row 654, Fugo).
+fn replaced_keys(db: &Connection, account: &str) -> rusqlite::Result<Vec<String>> {
+    let mut statement =
+        db.prepare("SELECT identity_key FROM dm_retired_identities WHERE account_id = ?1 ORDER BY retired, identity_key")?;
+    statement.query_map([account], |row| row.get::<_, Vec<u8>>(0))?.map(|key| key.map(|key| b64(&key))).collect()
+}
+
+fn rotate(
+    transaction: &Transaction<'_>,
+    account: &str,
+    removed: &[String],
+    signed_in_at: Option<i64>,
+    rotate: Rotate,
+    now_ms: i64,
+) -> Result<Value, Refusal> {
+    // Every new key, with a device to hand it over or none: the service
+    // can't tell them apart (anyone can list an old leaf's public key).
+    if !fresh(signed_in_at, now_ms) {
+        return Err(Refusal(
+            403,
+            "sign_in_again",
+            "For your security, sign in again on this device before making a new security key.".to_owned(),
+        ));
+    }
     let identity = IdentityPublic::from_slice(&unb64(&rotate.identity_key, "identity_key")?)
         .map_err(|_| invalid("identity_key isn't an Ed25519 key."))?;
     let (list, raw) = list_for(account, &rotate.device_list)?;
+    none_removed(&list, removed)?;
     if list.list.version != rotate.version || rotate.version != 1 {
         return Err(invalid("A new security key's device list starts at version 1."));
     }
@@ -413,6 +471,7 @@ fn supply(db: &Connection, leaf: &Leaf) -> rusqlite::Result<Value> {
 fn upload(transaction: &Transaction<'_>, leaf: &Leaf, upload: Upload, now_ms: i64) -> Result<Value, Refusal> {
     let keys = keys_of(transaction, &leaf.account)?.ok_or_else(not_set_up)?;
     let mut packages = Vec::new();
+    let mut certificates: Vec<LeafCertificate> = Vec::new();
     let all = upload.key_packages.iter().map(|value| (value, false)).chain(upload.last_resort.iter().map(|value| (value, true)));
     for (value, last_resort) in all {
         let envelope = Envelope::from_json(value).map_err(|error| invalid(&format!("A KeyPackage isn't an envelope: {error}.")))?;
@@ -426,7 +485,13 @@ fn upload(transaction: &Transaction<'_>, leaf: &Leaf, upload: Upload, now_ms: i6
         if !keys.list.names(&certificate) {
             return Err(invalid("That leaf isn't on the account's device list."));
         }
+        if !certificates.contains(&certificate) {
+            certificates.push(certificate);
+        }
         packages.push((reference, envelope.into_bytes(), last_resort));
+    }
+    if !certificates.is_empty() {
+        drop_former(transaction, leaf, &certificates)?;
     }
     let held: i64 = transaction.query_row(
         "SELECT COUNT(*) FROM dm_key_packages WHERE account_id = ?1 AND leaf_id = ?2 AND last_resort = 0",
@@ -457,6 +522,26 @@ fn upload(transaction: &Transaction<'_>, leaf: &Leaf, upload: Upload, now_ms: i6
     Ok(supply(transaction, leaf)?)
 }
 
+/// Drops the leaf's KeyPackages under any certificate but those it uploads
+/// under now. A leaf's packages all carry its current certificate; others
+/// are a former install's (a reinstalled device keeps its leaf id, and
+/// maybe its key: row 202), whose private keys went with its store, so
+/// handing them out would make Welcomes nobody can open. Only the leaf's own
+/// device uploads for it.
+fn drop_former(transaction: &Transaction<'_>, leaf: &Leaf, certificates: &[LeafCertificate]) -> Result<(), Refusal> {
+    let held: Vec<(Vec<u8>, Vec<u8>)> = {
+        let mut statement = transaction.prepare("SELECT ref, key_package FROM dm_key_packages WHERE account_id = ?1 AND leaf_id = ?2")?;
+        statement.query_map(params![leaf.account, leaf.leaf_id], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?
+    };
+    for (reference, bytes) in held {
+        let current = key_package(&bytes).ok().and_then(|(package, _)| certificate(&package).ok()).is_some_and(|held| certificates.contains(&held));
+        if !current {
+            transaction.execute("DELETE FROM dm_key_packages WHERE ref = ?1", [reference])?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Claim {
@@ -475,8 +560,30 @@ fn claim(transaction: &Transaction<'_>, caller: &Caller, claim: Claim, now_ms: i
     }
     take(transaction, &format!("claim:{device_key}"), 3600, CLAIMS_AN_HOUR, now_ms)?;
     let keys = keys_of(transaction, &claim.account_id)?.ok_or_else(not_found)?;
+    // The person's own devices know which of their devices and Claktories
+    // are signed in now (from a service that says): a leaf that isn't, a
+    // device signed out or a Claktory signed out, moved to another account
+    // or signed in again since (a new leaf), is added nowhere, and what it
+    // left here goes (row 671).
+    let now_in = match caller {
+        Caller::Device { bound_devices: Some(bound), registrations, .. } if own => Some((bound, registrations)),
+        _ => None,
+    };
     let mut answer = Vec::new();
     for listed in &keys.list.list.leaves {
+        if let Some((bound, registrations)) = now_in {
+            let signed_in = match listed.kind {
+                LeafKind::Device => bound.contains(&listed.leaf_id),
+                LeafKind::Claktory => registrations.iter().any(|now| claktory_leaf_id(&now.claktory_id, now.epoch) == listed.leaf_id),
+            };
+            if !signed_in {
+                transaction.execute(
+                    "DELETE FROM dm_key_packages WHERE account_id = ?1 AND leaf_id = ?2",
+                    params![claim.account_id, listed.leaf_id],
+                )?;
+                continue;
+            }
+        }
         // A friend gets only the person's devices, never a Claktory's leaf.
         if !own && listed.kind != LeafKind::Device {
             continue;
@@ -532,18 +639,31 @@ pub fn answer(db: &mut Connection, method: &str, route: &str, caller: &Caller, b
                 return Err(not_found());
             }
             let keys = keys_of(&transaction, account)?.ok_or_else(not_found)?;
-            shown(account, &keys)
+            let mut shown = shown(account, &keys);
+            shown["replaced_identity_keys"] = json!(replaced_keys(&transaction, account)?);
+            // To the account's own devices: which of its listed devices
+            // aren't signed in now (row 671).
+            if let Caller::Device { account_id, bound_devices: Some(bound), .. } = caller
+                && account_id == account
+            {
+                let out = unbound(&keys.list, bound);
+                for leaf in &out {
+                    signed_out(&transaction, account, leaf, i64::MAX)?;
+                }
+                shown["signed_out"] = json!(out);
+            }
+            shown
         }
         ("PUT", "me/keys") => {
-            let Caller::Device { account_id, .. } = caller else { return Err(device_only()) };
-            match put_keys(&transaction, account_id, body(bytes)?, now_ms)? {
+            let Caller::Device { account_id, removed_devices, .. } = caller else { return Err(device_only()) };
+            match put_keys(&transaction, account_id, removed_devices, body(bytes)?, now_ms)? {
                 Ok(value) => value,
                 Err(stale) => return Ok((409, stale)),
             }
         }
         ("POST", "me/keys/rotate") => {
-            let Caller::Device { account_id, .. } = caller else { return Err(device_only()) };
-            rotate(&transaction, account_id, body(bytes)?, now_ms)?
+            let Caller::Device { account_id, removed_devices, signed_in_at, .. } = caller else { return Err(device_only()) };
+            rotate(&transaction, account_id, removed_devices, *signed_in_at, body(bytes)?, now_ms)?
         }
         ("POST", "key-packages") => upload(&transaction, &leaf_of(caller)?, body(bytes)?, now_ms)?,
         ("GET", "key-packages") => supply(&transaction, &leaf_of(caller)?)?,
@@ -552,6 +672,24 @@ pub fn answer(db: &mut Connection, method: &str, route: &str, caller: &Caller, b
     };
     transaction.commit()?;
     Ok((200, answered))
+}
+
+/// The device leaves `list` names whose key isn't one of `bound`, the
+/// account's device keys signed in now (row 671): signed out, or removed
+/// and not yet off the list. In the list's order.
+fn unbound(list: &SignedDeviceList, bound: &[String]) -> Vec<String> {
+    list.list.leaves.iter().filter(|leaf| leaf.kind == LeafKind::Device && !bound.contains(&leaf.leaf_id)).map(|leaf| leaf.leaf_id.clone()).collect()
+}
+
+/// A device signed out of `account`, or was removed from it (row 671): its
+/// KeyPackages put up until `until_ms` go, so nobody adds it to a group
+/// meanwhile; it puts new ones up when it signs back in, which a late
+/// notice leaves alone. How many went.
+pub fn signed_out(db: &Connection, account: &str, leaf_id: &str, until_ms: i64) -> rusqlite::Result<usize> {
+    db.execute(
+        "DELETE FROM dm_key_packages WHERE account_id = ?1 AND leaf_id = ?2 AND kind = 'device' AND uploaded <= ?3",
+        params![account, leaf_id, until_ms],
+    )
 }
 
 /// Deleting an account: its keys and KeyPackages go.
@@ -579,7 +717,7 @@ pub(super) mod tests {
     use claktory_dm_crypto::storage::{self as mls_storage, SealKey};
 
     pub(in crate::dms) fn device(account: &str, key: &str) -> Caller {
-        Caller::Device { account_id: account.into(), device_key: key.into(), registrations: Vec::<Registration>::new() }
+        Caller::Device { account_id: account.into(), device_key: key.into(), registrations: Vec::<Registration>::new(), removed_devices: Vec::new(), signed_in_at: Some(NOW / 1000), bound_devices: None }
     }
 
     pub(in crate::dms) fn claktory(account: &str, id: &str) -> Caller {
@@ -633,11 +771,20 @@ pub(super) mod tests {
         pub(in crate::dms) fn add(&mut self, caller: Caller) -> usize {
             let me = self.certify(&caller, LeafKey::generate().expect("a key"));
             self.leaves.push((caller, me));
+            self.stores.push(Self::store());
+            self.leaves.len() - 1
+        }
+
+        /// A leaf's MLS store as a new install's: empty.
+        pub(in crate::dms) fn wipe(&mut self, leaf: usize) {
+            self.stores[leaf] = Self::store();
+        }
+
+        fn store() -> Connection {
             let store = Connection::open_in_memory().expect("db");
             store.pragma_update(None, "secure_delete", "ON").expect("secure_delete");
             store.execute_batch(mls_storage::SCHEMA).expect("schema");
-            self.stores.push(store);
-            self.leaves.len() - 1
+            store
         }
 
         /// The list naming every leaf, at the next version.
@@ -689,6 +836,84 @@ pub(super) mod tests {
     }
 
     pub(in crate::dms) const NOW: i64 = super::super::contacts::tests::NOW;
+
+    /// Row 612: once the service removed a device (Lost or stolen, given
+    /// away), no list names it again, under the account's key or a new one:
+    /// a used add code can't bring it back.
+    #[test]
+    fn a_removed_device_never_comes_back_on_the_list() {
+        let mut world = World::new();
+        let mut ana = set_up(&mut world, "ana");
+        let tablet = ana.add(device("ana", "ana-tablet"));
+        assert_eq!(call(&mut world, &ana.caller(0), "PUT", "me/keys", ana.put(false)).0, 200);
+
+        // Locked out: the service tombstoned its key; the phone lists Ana
+        // without it.
+        let Caller::Device { removed_devices, .. } = &mut ana.leaves[0].0 else { unreachable!() };
+        removed_devices.push("ana-tablet".into());
+        let gone = ana.leaves.remove(tablet);
+        assert_eq!(call(&mut world, &ana.caller(0), "PUT", "me/keys", ana.put(false)).0, 200);
+
+        // The same code pasted again: the list naming it is refused, and
+        // the list stays as it was.
+        ana.leaves.push(gone);
+        let (status, refused) = call(&mut world, &ana.caller(0), "PUT", "me/keys", ana.put(false));
+        assert_eq!((status, &refused["error"]), (409, &json!("removed_device")), "{refused}");
+        ana.version -= 1;
+        let kept = keys_of(&world.db, "ana").ok().flatten().expect("keys");
+        assert_eq!(kept.list.list.version, ana.version);
+        assert!(!kept.list.list.leaves.iter().any(|leaf| leaf.leaf_id == "ana-tablet"));
+
+        // Nor under a new security key.
+        ana.identity = IdentityKey::generate().expect("a key");
+        ana.version = 0;
+        let list = ana.list();
+        let rotate = json!({"identity_key": b64(&ana.identity.public().0), "device_list": list, "version": 1});
+        let (status, refused) = call(&mut world, &ana.caller(0), "POST", "me/keys/rotate", rotate);
+        assert_eq!((status, &refused["error"]), (409, &json!("removed_device")), "{refused}");
+
+        // Another device that was never removed goes on as ever.
+        ana.leaves.pop();
+        ana.add(device("ana", "ana-mac"));
+        ana.version = 0;
+        let list = ana.list();
+        let rotate = json!({"identity_key": b64(&ana.identity.public().0), "device_list": list, "version": 1});
+        let (status, rotated) = call(&mut world, &ana.caller(0), "POST", "me/keys/rotate", rotate);
+        assert_eq!(status, 200, "{rotated}");
+    }
+
+    /// Row 630 (Fugo): a new security key needs a sign-in with an emailed
+    /// code in the last 15 minutes on the device making it, so a session
+    /// alone (stolen, or left open) can't start an account over. Refused,
+    /// it changes nothing and counts nothing.
+    #[test]
+    fn a_new_security_key_needs_a_fresh_sign_in() {
+        let mut world = World::new();
+        let mut ana = set_up(&mut world, "ana");
+        ana.identity = IdentityKey::generate().expect("a key");
+        let rotate = |ana: &mut Person| {
+            ana.version = 0;
+            let list = ana.list();
+            json!({"identity_key": b64(&ana.identity.public().0), "device_list": list, "version": 1})
+        };
+        for stale in [None, Some(NOW / 1000 - 16 * 60), Some(NOW / 1000 + 60)] {
+            let Caller::Device { signed_in_at, .. } = &mut ana.leaves[0].0 else { unreachable!() };
+            *signed_in_at = stale;
+            let body = rotate(&mut ana);
+            let (status, refused) = call(&mut world, &ana.caller(0), "POST", "me/keys/rotate", body);
+            assert_eq!((status, &refused["error"]), (403, &json!("sign_in_again")), "{stale:?}: {refused}");
+        }
+        let kept = keys_of(&world.db, "ana").ok().flatten().expect("keys");
+        assert_ne!(kept.identity, ana.identity.public(), "nothing changed");
+
+        // Signed in again a few minutes ago: the new key is taken.
+        let Caller::Device { signed_in_at, .. } = &mut ana.leaves[0].0 else { unreachable!() };
+        *signed_in_at = Some(NOW / 1000 - 14 * 60);
+        let body = rotate(&mut ana);
+        let (status, rotated) = call(&mut world, &ana.caller(0), "POST", "me/keys/rotate", body);
+        assert_eq!(status, 200, "{rotated}");
+        assert_eq!(keys_of(&world.db, "ana").ok().flatten().expect("keys").identity, ana.identity.public());
+    }
 
     /// Ana with a device on her list, set up at the worker.
     pub(in crate::dms) fn set_up(world: &mut World, account: &str) -> Person {
@@ -770,6 +995,8 @@ pub(super) mod tests {
 
         // Who reads them: Ana's devices and her friends, not a stranger,
         // not an account page.
+        let mut now = now;
+        now["replaced_identity_keys"] = json!([]);
         assert_eq!(call(&mut world, &device("bo", "bo-phone"), "GET", "keys/ana", Value::Null), (200, now.clone()));
         assert_eq!(call(&mut world, &phone, "GET", "keys/ana", Value::Null), (200, now));
         assert_eq!(call(&mut world, &device("cy", "cy-phone"), "GET", "keys/ana", Value::Null).0, 404);
@@ -870,6 +1097,183 @@ pub(super) mod tests {
         assert_eq!(call(&mut world, &claktory("bo", "mac"), "POST", "key-packages/claim", json!({"account_id": "ana"})).0, 403);
     }
 
+    /// What Bo is handed for Ana's phone, claim after claim: each one's
+    /// certificate, until there's only the last-resort one.
+    fn claimed_certificates(world: &mut World, account: &str) -> Vec<(LeafCertificate, bool)> {
+        let bo = device("bo", "bo-phone");
+        let mut claimed = Vec::new();
+        loop {
+            let (status, answer) = call(world, &bo, "POST", "key-packages/claim", json!({"account_id": account}));
+            assert_eq!(status, 200, "{answer}");
+            let Some(one) = answer["key_packages"].as_array().and_then(|all| all.first().cloned()) else { break };
+            let package = Envelope::from_json(&one["key_package"]).expect("an envelope");
+            let (package, _) = key_package(package.bytes()).ok().expect("a KeyPackage");
+            let last_resort = one["last_resort"].as_bool().expect("bool");
+            claimed.push((certificate(&package).ok().expect("certified"), last_resort));
+            if last_resort {
+                break;
+            }
+        }
+        claimed
+    }
+
+    /// Row 202: Ana's phone is reinstalled. Its leaf key survived in the
+    /// keychain, so it comes back under the same leaf id and key, with a new
+    /// certificate and a new store: what the wiped install put up is still
+    /// named by the list, but nobody can open a Welcome to it. Its first
+    /// upload drops them, so the next claim hands out the new install's.
+    #[test]
+    fn a_reinstalled_device_s_first_upload_drops_what_the_wiped_install_put_up() {
+        let mut world = World::new();
+        friends(&mut world, "ana", "bo");
+        let mut ana = Person::new("ana");
+        ana.add(device("ana", "ana-phone"));
+        let phone = ana.caller(0);
+        assert_eq!(call(&mut world, &phone, "PUT", "me/keys", ana.put(true)).0, 200);
+        let wiped = ana.key_packages(0, 4);
+        assert_eq!(upload(&mut world, &phone, wiped[..3].to_vec(), Some(wiped[3].clone())).0, 200);
+
+        // The same key, certified again when the person's other device adds
+        // it back, over a new store.
+        let key = LeafKey::from_secret(&ana.leaves[0].1.key.secret());
+        let mut leaf = ana.leaves[0].1.certificate.leaf.clone();
+        leaf.created_ms += 60_000;
+        let again = LeafCertificate::issue(&ana.identity, leaf).expect("issued");
+        assert_ne!(again, ana.leaves[0].1.certificate);
+        ana.leaves[0].1 = Me::new(key, again.clone()).expect("me");
+        ana.wipe(0);
+        assert_eq!(call(&mut world, &phone, "PUT", "me/keys", ana.put(false)).0, 200);
+
+        let fresh = ana.key_packages(0, 3);
+        let (status, supply) = upload(&mut world, &phone, fresh[..2].to_vec(), Some(fresh[2].clone()));
+        assert_eq!((status, supply.clone()), (200, json!({"remaining": 2, "last_resort": true})), "{supply}");
+        let claimed = claimed_certificates(&mut world, "ana");
+        assert_eq!(claimed.len(), 3, "two one-time ones, then the last-resort one");
+        assert!(claimed.iter().all(|(certificate, _)| *certificate == again), "never one from the wiped install");
+        assert_eq!(claimed.iter().map(|(_, last_resort)| *last_resort).collect::<Vec<_>>(), [false, false, true]);
+    }
+
+    /// Row 202: back under a new key (a fresh store makes a fresh leaf key),
+    /// the list that names it drops every KeyPackage under the old one at
+    /// once, before the new install puts any up.
+    #[test]
+    fn a_device_back_under_a_new_key_has_its_old_key_packages_dropped_with_the_list() {
+        let mut world = World::new();
+        friends(&mut world, "ana", "bo");
+        let mut ana = Person::new("ana");
+        ana.add(device("ana", "ana-phone"));
+        let phone = ana.caller(0);
+        assert_eq!(call(&mut world, &phone, "PUT", "me/keys", ana.put(true)).0, 200);
+        let wiped = ana.key_packages(0, 4);
+        assert_eq!(upload(&mut world, &phone, wiped[..3].to_vec(), Some(wiped[3].clone())).0, 200);
+
+        ana.leaves[0].1 = ana.certify(&phone, LeafKey::generate().expect("a key"));
+        ana.wipe(0);
+        assert_eq!(call(&mut world, &phone, "PUT", "me/keys", ana.put(false)).0, 200);
+        assert_eq!(call(&mut world, &phone, "GET", "key-packages", Value::Null).1, json!({"remaining": 0, "last_resort": false}));
+        assert!(claimed_certificates(&mut world, "ana").is_empty(), "nothing to hand out until the new install puts some up");
+
+        let fresh = ana.key_packages(0, 2);
+        assert_eq!(upload(&mut world, &phone, fresh[..1].to_vec(), Some(fresh[1].clone())).0, 200);
+        let claimed = claimed_certificates(&mut world, "ana");
+        assert!(claimed.iter().all(|(certificate, _)| *certificate == ana.leaves[0].1.certificate), "{claimed:?}");
+        assert_eq!(claimed.len(), 2);
+    }
+
+    /// `account`'s device `key`, as the service says it now: with the
+    /// account's device keys signed in (row 671).
+    fn device_among(account: &str, key: &str, bound: &[&str]) -> Caller {
+        let Caller::Device { account_id, device_key, registrations, removed_devices, signed_in_at, .. } = device(account, key) else {
+            unreachable!()
+        };
+        let bound_devices = Some(bound.iter().map(|key| (*key).to_owned()).collect());
+        Caller::Device { account_id, device_key, registrations, removed_devices, signed_in_at, bound_devices }
+    }
+
+    /// Row 671: Ana's Mac signs out. The service tells the worker, and its
+    /// KeyPackages go at once; her phone sees it signed out in her keys (her
+    /// friends never do), adds it nowhere, and drops any it still has (put
+    /// up meanwhile, or the worker never heard). Signed back in, it's
+    /// claimed again.
+    #[test]
+    fn a_signed_out_device_is_added_nowhere_and_its_own_devices_see_it_signed_out() {
+        let mut world = World::new();
+        friends(&mut world, "ana", "bo");
+        let mut ana = Person::new("ana");
+        ana.add(device("ana", "ana-phone"));
+        let mac = ana.add(device("ana", "ana-mac"));
+        let phone = ana.caller(0);
+        assert_eq!(call(&mut world, &phone, "PUT", "me/keys", ana.put(true)).0, 200);
+        for leaf in [0, mac] {
+            let packages = ana.key_packages(leaf, 3);
+            assert_eq!(upload(&mut world, &ana.caller(leaf), packages[..2].to_vec(), Some(packages[2].clone())).0, 200);
+        }
+        let held = |world: &World, leaf: &str| -> i64 {
+            world.db.query_row("SELECT COUNT(*) FROM dm_key_packages WHERE leaf_id = ?1", [leaf], |row| row.get(0)).expect("count")
+        };
+
+        assert_eq!(signed_out(&world.db, "ana", "ana-mac", world.now).expect("dropped"), 3);
+        assert_eq!((held(&world, "ana-mac"), held(&world, "ana-phone")), (0, 3));
+        let both = device_among("ana", "ana-phone", &["ana-phone", "ana-mac"]);
+        let alone = device_among("ana", "ana-phone", &["ana-phone"]);
+        assert_eq!(call(&mut world, &both, "GET", "keys/ana", Value::Null).1["signed_out"], json!([]));
+        assert_eq!(call(&mut world, &alone, "GET", "keys/ana", Value::Null).1["signed_out"], json!(["ana-mac"]));
+        // Not from an older service, which doesn't say; never to a friend.
+        assert!(call(&mut world, &phone, "GET", "keys/ana", Value::Null).1.get("signed_out").is_none());
+        let bo = device_among("bo", "bo-phone", &["bo-phone"]);
+        assert!(call(&mut world, &bo, "GET", "keys/ana", Value::Null).1.get("signed_out").is_none());
+
+        // Put up again (the worker never heard): her phone's look drops them,
+        // and claims none for it meanwhile.
+        let packages = ana.key_packages(mac, 2);
+        assert_eq!(upload(&mut world, &ana.caller(mac), packages, None).0, 200);
+        let (status, claimed) = call(&mut world, &alone, "POST", "key-packages/claim", json!({"account_id": "ana"}));
+        assert_eq!(status, 200, "{claimed}");
+        let leaves: Vec<&str> = claimed["key_packages"].as_array().expect("claimed").iter().map(|one| one["leaf_id"].as_str().expect("a leaf")).collect();
+        assert_eq!(leaves, ["ana-phone"]);
+        call(&mut world, &alone, "GET", "keys/ana", Value::Null);
+        assert_eq!(held(&world, "ana-mac"), 0);
+
+        // Signed back in: it puts some up, and it's claimed again.
+        let packages = ana.key_packages(mac, 1);
+        assert_eq!(upload(&mut world, &ana.caller(mac), packages, None).0, 200);
+        let (_, claimed) = call(&mut world, &both, "POST", "key-packages/claim", json!({"account_id": "ana", "leaf_ids": ["ana-mac"]}));
+        assert_eq!(claimed["key_packages"][0]["leaf_id"], "ana-mac", "{claimed}");
+    }
+
+    /// Row 671 (Fugo): Ana's Mac mini moves to another account, or signs in
+    /// again (a new leaf). Her devices, told which of her Claktories are
+    /// signed in now, claim nothing for its old leaf, so it's added to no
+    /// channel of hers again, and what it left goes.
+    #[test]
+    fn a_claktory_no_longer_signed_in_under_its_leaf_is_added_nowhere() {
+        let mut world = World::new();
+        let mut ana = Person::new("ana");
+        ana.add(device("ana", "ana-phone"));
+        let mac = ana.add(claktory("ana", "mac"));
+        assert_eq!(call(&mut world, &ana.caller(0), "PUT", "me/keys", ana.put(true)).0, 200);
+        let packages = ana.key_packages(mac, 2);
+        assert_eq!(upload(&mut world, &ana.caller(mac), packages[..1].to_vec(), Some(packages[1].clone())).0, 200);
+        let with = |registrations: Vec<Registration>| {
+            let Caller::Device { account_id, device_key, removed_devices, signed_in_at, .. } = device("ana", "ana-phone") else {
+                unreachable!()
+            };
+            let bound_devices = Some(vec!["ana-phone".to_owned()]);
+            Caller::Device { account_id, device_key, registrations, removed_devices, signed_in_at, bound_devices }
+        };
+        let held = |world: &World| -> i64 {
+            world.db.query_row("SELECT COUNT(*) FROM dm_key_packages WHERE leaf_id = 'mac#1'", [], |row| row.get(0)).expect("count")
+        };
+
+        let now = with(vec![Registration { claktory_id: "mac".into(), epoch: 1 }]);
+        assert_eq!(claim(&mut world, &now, "ana"), vec![("mac#1".to_owned(), false)]);
+        assert_eq!(held(&world), 1, "the last-resort one stays");
+        for since in [vec![], vec![Registration { claktory_id: "mac".into(), epoch: 2 }]] {
+            assert_eq!(claim(&mut world, &with(since), "ana"), Vec::<(String, bool)>::new());
+            assert_eq!(held(&world), 0);
+        }
+    }
+
     /// A friend gets KeyPackages for the person's devices only, never for
     /// their Claktories; the person's own devices get both. A Claktory
     /// uploads for itself, not for an agent.
@@ -952,6 +1356,9 @@ pub(super) mod tests {
         assert_eq!((status, &shown["version"]), (200, &json!(1)), "{shown}");
         assert_eq!(shown["identity_key"], b64(&ana.identity.public().0));
         assert_eq!(held(&world), 0, "the old identity's KeyPackages are no use");
+        // The keys show the one it replaced, for a device behind (row 654).
+        let (status, keys) = call(&mut world, &phone, "GET", "keys/ana", Value::Null);
+        assert_eq!((status, &keys["replaced_identity_keys"]), (200, &json!([b64(&old.0)])), "{keys}");
         assert_eq!(call(&mut world, &phone, "POST", "me/keys/rotate", rotate(&ana.identity.public(), 1)).0, 400, "the same key");
 
         // Three a day.

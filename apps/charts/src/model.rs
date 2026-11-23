@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::sql::{self, BUILTINS};
-use crate::{DataSource, Host, RECORDS};
+use crate::{ACTIVITY, DataSource, Host};
 
 /// Where the list of dashboards is kept, in order.
 pub const INDEX_KEY: &str = "dashboards";
@@ -372,7 +372,7 @@ fn tokens_sql(at: &str) -> String {
 }
 
 /// The dashboard Charts starts with: what your agents did over the last
-/// week, from Claktory's records.
+/// week, from your agents' activity.
 pub fn default_dashboard() -> Dashboard {
     let buckets = BUCKETS;
     let counted = |table: &str, time: &str, filter: &str, column: &str| {
@@ -382,7 +382,7 @@ pub fn default_dashboard() -> Dashboard {
              SELECT t.at AS time, COALESCE(c.n, 0) AS {column} FROM t LEFT JOIN c USING (at) ORDER BY t.at"
         )
     };
-    let records = |sql: String| Query { source: RECORDS.into(), sql };
+    let records = |sql: String| Query { source: ACTIVITY.into(), sql };
     let stat = |id: &str, title: &str, x: u32, unit: &str, sql: String| Panel {
         id: id.into(),
         title: title.into(),
@@ -455,7 +455,7 @@ pub fn default_dashboard() -> Dashboard {
                 title: "Background tasks running now".into(),
                 grid: Grid { x: 6, y: 2, w: 6, h: 4 },
                 query: records(
-                    "SELECT agent, task, command, started FROM tasks WHERE ended IS NULL AND ($agent = '' OR agent = $agent) \
+                    "SELECT agent, task, started FROM tasks WHERE ended IS NULL AND ($agent = '' OR agent = $agent) \
                      ORDER BY started DESC"
                         .into(),
                 ),
@@ -464,7 +464,6 @@ pub fn default_dashboard() -> Dashboard {
                     columns: vec![
                         Column { name: "agent".into(), title: Some("Agent".into()), format: None },
                         Column { name: "task".into(), title: Some("Task".into()), format: None },
-                        Column { name: "command".into(), title: Some("Command".into()), format: None },
                         Column { name: "started".into(), title: Some("Started".into()), format: Some("time".into()) },
                     ],
                     ..Viz::default()

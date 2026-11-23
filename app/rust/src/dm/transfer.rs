@@ -625,10 +625,10 @@ fn checked(messages: Vec<DmMessage>, from: i64) -> anyhow::Result<Vec<DmMessage>
                 }
             }
             if let Some(members) = &message.members {
-                if members.added.len() + members.removed.len() > MAX_MEMBERS {
+                if members.added.len() + members.removed.len() + members.set_up_again.len() > MAX_MEMBERS {
                     bail!("a change of too many members");
                 }
-                for member in members.added.iter().chain(&members.removed) {
+                for member in members.added.iter().chain(&members.removed).chain(&members.set_up_again) {
                     if !ascii(&member.account, MAX_ACCOUNT_ID) || !ascii(&member.leaf_id, MAX_LEAF_ID) || !one_line(&member.name, MAX_NAME)
                     {
                         bail!("a member that isn't named in one line");
@@ -1280,9 +1280,21 @@ mod tests {
             since_ms: 0,
         };
         let mut added = good();
-        added.members = Some(DmMembers { added: vec![member("Ana's iPad")], removed: vec![], key_changed: vec![] });
+        added.members = Some(DmMembers {
+            added: vec![member("Ana's iPad")],
+            removed: vec![],
+            key_changed: vec![],
+            skipped: None,
+            set_up_again: vec![],
+        });
         assert!(checked(vec![added.clone()], 0).is_ok());
-        added.members = Some(DmMembers { added: vec![member("iPad\u{202e}")], removed: vec![], key_changed: vec![] });
+        added.members = Some(DmMembers {
+            added: vec![member("iPad\u{202e}")],
+            removed: vec![],
+            key_changed: vec![],
+            skipped: None,
+            set_up_again: vec![],
+        });
         assert!(checked(vec![added], 0).is_err(), "a hidden character in a name");
         assert!(!checked(vec![good()], 0).unwrap()[0].mine);
     }

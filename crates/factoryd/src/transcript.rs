@@ -394,6 +394,7 @@ impl Transcript {
             (Some(Kind::AskPerson(shown)), Kind::AskPerson(updated)) => shown.id == updated.id,
             (Some(Kind::PipeStart(shown)), Kind::PipeStart(updated)) => shown.id == updated.id,
             (Some(Kind::AppGrant(shown)), Kind::AppGrant(updated)) => shown.id == updated.id,
+            (Some(Kind::AppAccess(shown)), Kind::AppAccess(updated)) => shown.id == updated.id,
             _ => false,
         })?;
         entry.kind = Some(kind);
@@ -467,6 +468,13 @@ impl Transcript {
     /// doesn't show it.
     pub fn set_app_grant(&mut self, proposal: v1::AppGrantProposal) -> Option<Entry> {
         self.replace_shown(Kind::AppGrant(proposal))
+    }
+
+    /// Shows Rivet's proposal of what an app reads and who uses it as it is
+    /// now (decided, say); the changed entry, or None if the conversation
+    /// doesn't show it.
+    pub fn set_app_access(&mut self, proposal: v1::AppAccessProposal) -> Option<Entry> {
+        self.replace_shown(Kind::AppAccess(proposal))
     }
 
     /// Shows a pipe secret approval as decided; None if it isn't shown.
@@ -680,6 +688,10 @@ impl Transcript {
                 // And Rivet's proposal to give an agent access to an app.
                 if let Some(proposal) = crate::user_apps::proposed(&result.tool_name, result.is_error, &result.details) {
                     changed.push(self.push(result.timestamp as i64, Kind::AppGrant(proposal)));
+                }
+                // And its proposal of what one of Claktory's apps reads.
+                if let Some(proposal) = crate::apps::access::proposed(&result.tool_name, result.is_error, &result.details) {
+                    changed.push(self.push(result.timestamp as i64, Kind::AppAccess(proposal)));
                 }
                 changed
             }
@@ -965,6 +977,7 @@ fn waits(kind: Option<&Kind>, owner: &str) -> bool {
         }
         Some(Kind::PipeStart(start)) => start.state() == v1::PipeStartState::Waiting,
         Some(Kind::AppGrant(proposal)) => proposal.state() == v1::AppGrantState::Pending,
+        Some(Kind::AppAccess(proposal)) => proposal.state() == v1::AppGrantState::Pending,
         _ => false,
     }
 }

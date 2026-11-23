@@ -1,6 +1,8 @@
 import 'package:factory_app/backend.dart' show RequestFailure;
+import 'package:factory_app/controls.dart' show LiveDot;
 import 'package:factory_app/move.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart' as pb;
+import 'package:factory_app/scanner.dart' show CameraAccess;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -33,6 +35,11 @@ class _FakeMove implements MoveSource {
   Future<void> freeze() => _ask('freeze');
 
   @override
+  final ValueNotifier<bool> connected = ValueNotifier(true);
+  @override
+  String name = 'Home';
+
+  @override
   final ValueNotifier<pb.MovedAway?> movedAway = ValueNotifier(null);
   @override
   bool canDeleteMovedCopy = true;
@@ -51,6 +58,7 @@ MoveStatus _at(
   List<String> problems = const [],
   String error = '',
   String step = '',
+  String startedBy = '',
 }) => MoveStatus(
   phase: phase,
   targetMachine: 'cloud-box',
@@ -67,11 +75,16 @@ MoveStatus _at(
   problems: problems,
   error: error,
   stepText: step,
+  startedByAgentId: startedBy,
 );
 
-Future<_FakeMove> _open(WidgetTester tester) async {
+Future<_FakeMove> _open(
+  WidgetTester tester, {
+  CameraAccess camera = CameraAccess.unavailable,
+}) async {
   final move = _FakeMove();
-  final harness = Harness(pb.Workspace());
+  final harness = Harness(pb.Workspace())..camera.state = camera;
+  _harness = harness;
   await harness.show(
     tester,
     home: Center(child: MoveSettingRow(source: move)),
@@ -80,6 +93,8 @@ Future<_FakeMove> _open(WidgetTester tester) async {
   await tester.pump();
   return move;
 }
+
+late Harness _harness;
 
 void main() {
   test('a receive code says what it is from; anything else is none', () {
@@ -116,6 +131,43 @@ void main() {
     await tester.tap(find.text('Connect'));
     await tester.pump();
     expect(move.asked, ['start $_code']);
+  });
+
+  testWidgets('where there is a camera, Scan code reads the QR code the other '
+      'computer shows into the field; Connect is still the person\'s (friend '
+      'bug #2)', (tester) async {
+    final move = await _open(tester, camera: CameraAccess.granted);
+    await pumpFrames(tester);
+    expect(
+      find.textContaining('Paste that code here, or scan its QR code.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Scan code'));
+    await pumpFrames(tester);
+    expect(find.text("Scan the other computer's code"), findsOneWidget);
+    _harness.camera.scan('hello');
+    await pumpFrames(tester);
+    expect(
+      find.text("This isn't the code the other computer shows."),
+      findsOneWidget,
+    );
+    _harness.camera.scan(_code);
+    await pumpFrames(tester);
+    expect(
+      find.text('cloud-box · Linux x86_64 · Claktory v0.1.15'),
+      findsOneWidget,
+    );
+    expect(move.asked, isEmpty);
+    await tester.tap(find.text('Connect'));
+    await tester.pump();
+    expect(move.asked, ['start $_code']);
+  });
+
+  testWidgets('without a camera, no Scan code', (tester) async {
+    await _open(tester);
+    await pumpFrames(tester);
+    expect(find.text('Scan code'), findsNothing);
+    expect(find.textContaining('Paste that code here.'), findsOneWidget);
   });
 
   testWidgets('a refused start says why, in the form', (tester) async {
@@ -225,6 +277,95 @@ void main() {
     expect(find.text('Cancel move'), findsNothing);
   });
 
+  group('a move an agent started', () {
+    final rivet = pb.Workspace(
+      agents: [pb.Agent(id: 'rivet', name: 'Rivet', role: 'Admin')],
+    );
+
+    testWidgets('the moving screen says who started it, and when it fails', (
+      tester,
+    ) async {
+      final move = _FakeMove();
+      move.set(_at(MovePhase.frozen, startedBy: 'rivet'));
+      await Harness(rivet).show(
+        tester,
+        home: ValueListenableBuilder<MoveStatus>(
+          valueListenable: move.status,
+          builder: (context, status, _) =>
+              MovingScreen(move: status, actions: move),
+        ),
+      );
+      expect(
+        find.text(
+          'Rivet started this move. Your agents are paused until Claktory '
+          'starts on cloud-box.',
+        ),
+        findsOneWidget,
+      );
+
+      move.set(_at(MovePhase.failed, startedBy: 'rivet', error: 'Lost it.'));
+      await tester.pump();
+      expect(
+        find.text("Rivet's move to cloud-box didn't finish."),
+        findsOneWidget,
+      );
+      expect(find.text('Lost it.'), findsOneWidget);
+
+      // The person's own move: as before.
+      move.set(_at(MovePhase.frozen));
+      await tester.pump();
+      expect(
+        find.text('Your agents are paused until Claktory starts on cloud-box.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets("Settings' move row says who is moving it", (tester) async {
+      final move = _FakeMove();
+      await Harness(rivet).show(
+        tester,
+        home: Center(child: MoveSettingRow(source: move)),
+      );
+      final copying = _at(
+        MovePhase.copying,
+        have: 1200000000,
+        total: 3400000000,
+        startedBy: 'rivet',
+      );
+      move.set(copying);
+      await tester.pump();
+      expect(
+        find.text(
+          'Rivet is copying Claktory to cloud-box: ${moveBytes(copying)}.',
+        ),
+        findsOneWidget,
+      );
+      move.set(_at(MovePhase.frozen, startedBy: 'rivet'));
+      await tester.pump();
+      expect(
+        find.text('Rivet is moving Claktory to cloud-box.'),
+        findsOneWidget,
+      );
+      move.set(_at(MovePhase.failed, startedBy: 'rivet'));
+      await tester.pump();
+      expect(
+        find.text("Rivet couldn't move Claktory to cloud-box."),
+        findsOneWidget,
+      );
+      // An agent no longer listed.
+      move.set(_at(MovePhase.frozen, startedBy: 'gone'));
+      await tester.pump();
+      expect(
+        find.text('An agent is moving Claktory to cloud-box.'),
+        findsOneWidget,
+      );
+      // The person's own.
+      move.set(_at(MovePhase.frozen));
+      await tester.pump();
+      expect(find.text('Moving to cloud-box.'), findsOneWidget);
+    });
+  });
+
   test('the backend\'s move as the app shows it; unset is none', () {
     expect(moveStatusOf(null).phase, MovePhase.none);
     final status = moveStatusOf(
@@ -306,6 +447,60 @@ void main() {
     move.set(_at(MovePhase.failed, error: 'No room.'));
     await tester.pump();
     expect(find.text('the window'), findsOneWidget);
+  });
+
+  testWidgets('a device that loses the connection mid-move says so in place '
+      'of the last step, without a Cancel that could do nothing', (
+    tester,
+  ) async {
+    final move = _FakeMove();
+    final harness = Harness(pb.Workspace());
+    await harness.show(
+      tester,
+      home: MoveGate(source: move, child: const Text('the window')),
+    );
+    const lost =
+        "Can't connect to Home right now. If the move finished, this device "
+        'connects to cloud-box by itself.';
+    move.set(
+      _at(MovePhase.frozen, step: 'Stopping agents for the last round…'),
+    );
+    await tester.pump();
+    expect(find.text('Stopping agents for the last round…'), findsOneWidget);
+    expect(find.text('Cancel move'), findsOneWidget);
+    expect(find.byType(LiveDot), findsOneWidget);
+
+    // The source stops its tunnel at the hand-over.
+    move.connected.value = false;
+    await tester.pump();
+    expect(find.text('Moving to cloud-box…'), findsOneWidget);
+    expect(find.text(lost), findsOneWidget);
+    expect(find.text('Stopping agents for the last round…'), findsNothing);
+    expect(find.text('Cancel move'), findsNothing);
+    expect(find.byType(LiveDot), findsNothing, reason: 'nothing live');
+
+    // Back again, it's live as before.
+    move.connected.value = true;
+    await tester.pump();
+    expect(find.text(lost), findsNothing);
+    expect(find.text('Cancel move'), findsOneWidget);
+
+    // Done is done, connected or not; a failure can't be closed unheard.
+    move.connected.value = false;
+    move.set(_at(MovePhase.done, canCancel: false));
+    await tester.pump();
+    expect(find.text('Moved to cloud-box'), findsOneWidget);
+    expect(find.text(lost), findsNothing);
+    move.set(_at(MovePhase.failed, error: "cloud-box didn't answer."));
+    await tester.pump();
+    expect(find.text("Couldn't move to cloud-box"), findsOneWidget);
+    expect(find.text('Close'), findsNothing);
+  });
+
+  test("the backend's move follows the backend's connection", () {
+    final harness = Harness(pb.Workspace());
+    final move = BackendMove(harness.backend);
+    expect(identical(move.connected, harness.backend.connected), isTrue);
   });
 
   test("the backend's move sends the backend's requests", () async {

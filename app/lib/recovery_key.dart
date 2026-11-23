@@ -102,7 +102,7 @@ class _SaveRecoveryKeyFormState extends State<SaveRecoveryKeyForm> {
           'message. Never share it: anyone with it can open your secrets.',
       fields: [
         if (key != null) ...[
-          _KeyBox(key),
+          RecoveryKeyBox(key),
           const SizedBox(height: Space.s),
           Align(
             alignment: AlignmentDirectional.centerStart,
@@ -165,8 +165,8 @@ class _SaveRecoveryKeyFormState extends State<SaveRecoveryKeyForm> {
 
 /// The key as a code block shows it, but wrapping at its blocks rather
 /// than scrolling sideways: all of it in sight, to copy down by hand.
-class _KeyBox extends StatelessWidget {
-  const _KeyBox(this.text);
+class RecoveryKeyBox extends StatelessWidget {
+  const RecoveryKeyBox(this.text, {super.key});
 
   final String text;
 

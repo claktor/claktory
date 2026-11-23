@@ -120,14 +120,14 @@ async fn events_status_and_timers_reach_factoryd() {
     assert_eq!((emit.app_id.as_str(), emit.kind.as_str(), emit.scope.as_str(), emit.text.as_str()), ("chat", "said", "chat", "hello"));
     assert_eq!((emit.data.as_str(), emit.dedupe_key.as_str()), ("{\"text\":\"hello\"}", "hello"));
 
-    factoryd.text("chat", "status", "Give it a bot token in Settings → Apps.").await;
+    factoryd.text("chat", "status", "Give it a bot token in the Marketplace's Apps tab.").await;
     let status = factoryd
         .told(|body| match body {
             Body::SetStatus(status) if status.text != "started" => Some(status.text.clone()),
             _ => None,
         })
         .await;
-    assert_eq!(status, "Give it a bot token in Settings → Apps.");
+    assert_eq!(status, "Give it a bot token in the Marketplace's Apps tab.");
 
     // A timer fires between calls, with nothing else asked.
     factoryd.text("chat", "timer", "50").await;

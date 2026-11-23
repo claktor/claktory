@@ -62,7 +62,7 @@ impl Factory {
         let (provider_id, method_id) = (provider_id.to_owned(), method_id.to_owned());
         tokio::spawn(async move {
             let outcome = factory.models.login(&provider_id, &method_id, &interaction, add_account).await;
-            factory.finish_login(generation, outcome).await;
+            factory.finish_login(generation, &provider_id, outcome).await;
         });
         Ok(())
     }
@@ -90,6 +90,7 @@ impl Factory {
         self.known_account(provider_id, account_id)?;
         self.models.logout(provider_id, account_id).await?;
         self.refresh_models().await;
+        self.accounts_changed(provider_id, false);
         Ok(())
     }
 
@@ -102,6 +103,7 @@ impl Factory {
         }
         self.models.move_account(provider_id, account_id, usize::try_from(position).unwrap_or(usize::MAX)).await?;
         self.refresh_models().await;
+        self.accounts_changed(provider_id, false);
         Ok(())
     }
 
@@ -114,6 +116,7 @@ impl Factory {
         }
         self.models.update_account(provider_id, account_id, label, retry).await?;
         self.refresh_models().await;
+        self.accounts_changed(provider_id, false);
         Ok(())
     }
 
@@ -130,11 +133,27 @@ impl Factory {
         Ok(())
     }
 
-    async fn finish_login(&self, generation: u64, outcome: Result<(), Error>) {
+    /// A provider's accounts changed (signed in or out of, moved, renamed,
+    /// a key tried again): agents waiting out its usage ask again now,
+    /// whatever the providers listing shows. Signing in to an account again
+    /// forgets its limits, Fable's too, which the listing doesn't carry, so
+    /// it can look the same (friend bug #3). An agent whose accounts are
+    /// still all spent asks nothing and waits on. With `read`, its usage and
+    /// plan are read again now (a plan upgraded before signing in again).
+    pub(crate) fn accounts_changed(&self, provider_id: &str, read: bool) {
+        if read {
+            self.usage_reread.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(provider_id.to_owned());
+            self.usage_wake.notify_one();
+        }
+        self.capacity_changed();
+    }
+
+    async fn finish_login(&self, generation: u64, provider_id: &str, outcome: Result<(), Error>) {
         match outcome {
             Ok(()) => {
                 // The new credential changes which providers and models are available.
                 self.refresh_models().await;
+                self.accounts_changed(provider_id, true);
                 let mut inner = self.lock();
                 if inner.login.as_ref().is_some_and(|flow| flow.generation == generation) {
                     inner.login = None;

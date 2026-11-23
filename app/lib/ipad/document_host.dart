@@ -298,18 +298,25 @@ class DocumentSurface extends ChangeNotifier {
   /// shows something else.
   void openPanel(DocumentPanel panel) {
     if (_panel == panel) return;
-    _endSearch();
+    // A search kept on the page ([searchKept]) carries on in Search.
+    if (panel != DocumentPanel.search) _endSearch();
     _panel = panel;
     notifyListeners();
   }
 
-  /// Closes the side panel; a search's highlights go with it.
-  void closePanel() {
+  /// Closes the side panel; a search's highlights go with it, unless
+  /// [keepSearch]: a panel that covered the page closed to show a match,
+  /// which stays marked among the others ([searchKept]).
+  void closePanel({bool keepSearch = false}) {
     if (_panel == null) return;
     _panel = null;
-    _endSearch();
+    if (!keepSearch) _endSearch();
     notifyListeners();
   }
+
+  /// A search's marks on the page with its panel closed: Search shows lit,
+  /// and opens on it again; closing the panel there ends it.
+  bool get searchKept => _panel == null && _query.isNotEmpty;
 
   void _endSearch() {
     if (_query.isNotEmpty) {
@@ -353,9 +360,12 @@ class DocumentSurface extends ChangeNotifier {
     });
   }
 
-  /// Shows [page], at [region] (0..1 of the page) when given.
-  void goTo(int page, {Rect? region}) =>
-      unawaited(_quietly(controller.goToPage(page, region: region)));
+  /// Shows [page], at [region] (0..1 of the page) when given; [match]: the
+  /// region is the search's match gone to, marked apart from the others
+  /// and brought high into the view.
+  void goTo(int page, {Rect? region, bool match = false}) => unawaited(
+    _quietly(controller.goToPage(page, region: region, match: match)),
+  );
 
   /// Whether this iPad reads handwriting (iPadOS 27 and later), as its
   /// view said when ready.
@@ -1087,7 +1097,8 @@ class _HostState extends State<_Host> {
             GlyphButton(
               key: const ValueKey('document-search'),
               label: 'Search',
-              active: surface.panel == DocumentPanel.search,
+              active:
+                  surface.panel == DocumentPanel.search || surface.searchKept,
               onTap: () => toggle(DocumentPanel.search),
               glyph: (color) =>
                   ExtensionGlyph(icon: 'search', name: '', color: color),

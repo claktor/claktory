@@ -478,14 +478,40 @@ A real phone's TEE is owed.
   own copies or a later Copy code, is left alone. From Android 10 a
   backgrounded app can't see what's there, so `clear` does nothing then
   and keeps the token for a later `clear`.
-- **Expiry:** Android has no expiry of its own, so `seconds` is the
-  app's to keep, by calling `clear`.
+- **Expiry:** Android has no expiry of its own. `copy` puts the time the
+  code expires (now + `seconds`, in ms since the epoch) in the
+  description's extras as `com.claktory.EXPIRES_MS`, beside
+  `IS_SENSITIVE`. The app calls `clear` when `seconds` have passed, but
+  a token lives only as long as the app's process.
+- **`sweep`** → the expiry still ahead, or null. The app calls it at
+  launch and whenever it comes back to the front. It reads only the clip's description, never its
+  text, so Android shows no paste notice. If the label is
+  `Claktory code` and `EXPIRES_MS` has passed, it clears the clipboard
+  and answers null. If that time is still ahead, it answers it (ms since
+  the epoch), so the app can sweep again then. It also answers null when
+  there's nothing of ours, or a code with no expiry. That covers a code that expired while the app was
+  stopped or away (row 181). The expiry rides in the clip, so the app
+  keeps nothing of its own. Like `clear`, `sweep` does nothing while
+  Android won't say what's there: from Android 10, until the app's
+  window has focus. The host also sweeps each time the window gets focus
+  (`onFocus(true)`), so a sweep at launch doesn't depend on when the
+  app's own call comes. After any sweep or copy that leaves a code with
+  an expiry ahead, the host sweeps again at that moment, one pending at
+  a time. So a code copied before the app was stopped, and still
+  unexpired when it came back, goes at its expiry even if the app stays
+  in front (row 185). A sweep leaves `clear`'s tokens alone. Any app
+  can label a clip `Claktory code`, so an expiry more than an hour
+  ahead (twice the longest a code lasts) isn't treated as ours: it's
+  left alone, nothing is scheduled for it, and the host's delay is
+  capped at that hour as well. Before that cap, a forged
+  `Long.MAX_VALUE` overflowed Handler's time, which made the host sweep
+  over and over on the main thread.
 
 Proofs:
 
 - `SecretClipboardCoreTest` (JVM, with timestamps and without).
 - `SecretClipboardTest` (instrumentation, the real clipboard from the
-  running app).
+  running app, including `sweep` and the channel's `copy` and `sweep`).
 
 ### Proof owed in A.2
 
@@ -596,7 +622,10 @@ a rebuild count (v0.1.15 → 101500), with `--build-name` the version.
 it, and also stamps `FACTORY_VERSION` into the Dart: without it the app
 calls itself "dev", which turns off its version checks against the
 backend and shows "dev" in its footer (the first friend APK, 101500, was
-built so; 101501 replaced it).
+built so; 101501 replaced it). `--keystore P12` names the key's keystore
+over FILE's `storeFile` (Gradle's `claktoryKeyStore`). It's for builds
+from the vault, which hands a command both files at fresh temporary
+paths, so no `storeFile` written into FILE can point at the keystore.
 
 An update keeps the pairing (2026-11-22, android36-ps16k, a QA sandbox).
 The friend APK exactly as published (0.1.15, 101502, hash-checked)

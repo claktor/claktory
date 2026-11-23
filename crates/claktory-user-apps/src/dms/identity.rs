@@ -573,7 +573,7 @@ mod tests {
     }
 
     fn device(account: &str) -> Caller {
-        Caller::Device { account_id: account.into(), device_key: "k".into(), registrations: Vec::<Registration>::new() }
+        Caller::Device { account_id: account.into(), device_key: "k".into(), registrations: Vec::<Registration>::new(), removed_devices: Vec::new(), signed_in_at: None, bound_devices: None }
     }
 
     fn call(db: &mut Connection, keys: &Keys, method: &str, route: &str, caller: &Caller, body: Value) -> (u16, Value) {

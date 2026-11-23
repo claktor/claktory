@@ -439,7 +439,8 @@ fn approve(transaction: &Transaction<'_>, caller: &Caller, id: &str, bytes: &[u8
         Err(Refusal(409, "epoch", _)) => {
             return super::messages::epoch_of(transaction, &proposal.conversation, proposal.contact_generation);
         }
-        Err(refused @ Refusal(400 | 409, "invalid_request" | "not_set_up" | "conflict", _)) => return Err(refused),
+        // Not yet: the friend isn't in the conversation (row 676).
+        Err(refused @ Refusal(400 | 409, "invalid_request" | "not_set_up" | "conflict" | "waiting_for_friend", _)) => return Err(refused),
         // The friendship ended or began again since: never this one.
         Err(Refusal(410 | 409 | 403, ..)) => return unsendable(transaction),
         Err(refused) => return Err(refused),
@@ -639,6 +640,9 @@ mod tests {
             account_id: account.into(),
             device_key: "k".into(),
             registrations: vec![Registration { claktory_id: "mac".into(), epoch }],
+            removed_devices: Vec::new(),
+            signed_in_at: None,
+            bound_devices: None,
         }
     }
 
@@ -728,6 +732,14 @@ mod tests {
         let (status, behind) = review.approve(&id, approval, 1);
         assert_eq!((status, &behind["epoch"]), (409, &json!(6)), "{behind}");
         assert_eq!(review.waiting("ana", 1).len(), 1, "still waiting");
+        // Bo's devices not in the conversation's group yet (row 676): not
+        // yet, nothing decided either.
+        review.world.db.execute("INSERT INTO dm_group_people (group_id, both_since) VALUES (?1, NULL)", [&group]).expect("not both");
+        let approval = review.approval(&waiting[0]);
+        let (status, refused) = review.approve(&id, approval, 1);
+        assert_eq!((status, refused["error"].as_str()), (409, Some("waiting_for_friend")), "{refused}");
+        assert_eq!(review.waiting("ana", 1).len(), 1, "still waiting");
+        review.world.db.execute("UPDATE dm_group_people SET both_since = 0 WHERE group_id = ?1", [&group]).expect("both in");
         let approval = review.approval(&waiting[0]);
         let (status, sent) = review.approve(&id, approval.clone(), 1);
         assert_eq!(status, 200, "{sent}");

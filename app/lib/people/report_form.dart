@@ -10,6 +10,7 @@ import '../identity.dart';
 import '../mobile/metrics.dart';
 import '../user_apps/session.dart';
 import '../tunnel/api/dm.dart' show DmMessage;
+import '../visible_codes.dart' show proseCodes;
 import 'contacts.dart';
 import 'e2ee.dart';
 import 'problems.dart';
@@ -227,7 +228,13 @@ class _ReportFormState extends State<ReportForm> {
           "${widget.person.name.isEmpty ? 'They' : widget.person.name} won't "
           "know you reported them. Reporting doesn't block them or decline "
           'their request: do that too, if you want.',
-      dirty: _reason != null || _note.text.isNotEmpty,
+      // Ticked messages are work too: Cancel or a swipe asks first
+      // (Zucchero's row 200).
+      dirty:
+          _reason != null ||
+          _note.text.isNotEmpty ||
+          _includeProfile ||
+          _picked.isNotEmpty,
       fields: [
         Field(
           label: 'Why',
@@ -302,9 +309,14 @@ extension on _ReportFormState {
                 opacity: full && !_picked.contains(message.seq) ? 0.4 : 1,
                 child: _CheckRow(
                   on: _picked.contains(message.seq),
-                  label:
-                      '${message.fromAccount == me ? 'You' : name}: '
-                      '${message.content.text}',
+                  // Their words: what reorders text shows by its code.
+                  label: proseCodes(
+                    '${message.fromAccount == me ? 'You' : name}: '
+                    '${message.content.text}',
+                  ),
+                  // A few lines each, so a long one doesn't fill screens
+                  // (row 200); the whole text goes with the report.
+                  maxLines: 4,
                   onTap: () => _pick(message),
                 ),
               ),
@@ -337,10 +349,18 @@ extension on _ReportFormState {
 
 /// A checkbox and its words, the whole row one target.
 class _CheckRow extends StatelessWidget {
-  const _CheckRow({required this.on, required this.label, required this.onTap});
+  const _CheckRow({
+    required this.on,
+    required this.label,
+    this.maxLines,
+    required this.onTap,
+  });
 
   final bool on;
   final String label;
+
+  /// The most lines it shows; all of it when null.
+  final int? maxLines;
   final VoidCallback onTap;
 
   @override
@@ -363,6 +383,8 @@ class _CheckRow extends StatelessWidget {
             Expanded(
               child: Text(
                 label,
+                maxLines: maxLines,
+                overflow: maxLines == null ? null : TextOverflow.ellipsis,
                 style: TypeScale.of(context).body.copyWith(
                   color: hovered ? palette.text : palette.textMuted,
                 ),

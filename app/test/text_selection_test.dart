@@ -11,6 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'app_test.dart' show builder, workspace;
 import 'harness.dart';
+import 'ipad/as_ipad.dart';
 import 'panes_test.dart' show beside, showPanes;
 import 'selection_test.dart' show watchClipboard;
 
@@ -129,6 +130,53 @@ Future<String> _drag(
 }
 
 void main() {
+  // Zucchero's row 105: a selection survived the Formatted/Plain toggle at
+  // the same character offset, landing on other words.
+  testWidgets('switching to Plain and back drops what was selected', (
+    tester,
+  ) async {
+    asIPad();
+    final copied = watchClipboard(tester);
+    final body = _report();
+    await showPanes(
+      tester,
+      beside('text', _path),
+      files: {
+        _path: FileContent(
+          path: _path,
+          mime: 'text/markdown',
+          data: body.codeUnits,
+          size: Int64(body.length),
+          sha256: 'v1',
+        ),
+      },
+    );
+    tester.view.physicalSize = const Size(1400, 1100);
+    await settle(tester);
+    List<TextSelection> lit() => [
+      for (final paragraph
+          in tester.allRenderObjects.whereType<RenderParagraph>())
+        for (final selection in paragraph.selections)
+          if (!selection.isCollapsed) selection,
+    ];
+    expect(await _drag(tester, copied, 'alpha23', 'omega24'), isNotEmpty);
+    expect(lit(), isNotEmpty);
+    for (final view in ['Plain', 'Formatted']) {
+      copied.clear();
+      await tester.tap(find.text(view));
+      await settle(tester);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+      await tester.pump();
+      expect(copied.where((text) => text.isNotEmpty), isEmpty, reason: view);
+      // Nothing lit in the text either.
+      expect(lit(), isEmpty, reason: view);
+      // Nothing to comment on either.
+      expect(find.text('Comment'), findsNothing, reason: view);
+    }
+  });
+
   for (final (sha, zoom, plain) in [
     ('v1', 1.0, false),
     ('', 1.0, false),

@@ -268,7 +268,10 @@ class Sidebar extends StatelessWidget {
                       Space.m,
                     ),
                     sliver: SliverToBoxAdapter(
-                      child: _PhoneFooter(workspace: workspace),
+                      child: _PhoneFooter(
+                        workspace: workspace,
+                        canAddProvider: _canAddProvider(backend, workspace),
+                      ),
                     ),
                   ),
                 ],
@@ -296,6 +299,7 @@ class Sidebar extends StatelessWidget {
                 _Footer(
                   workspace: workspace,
                   connected: backend.connected.value,
+                  canAddProvider: _canAddProvider(backend, workspace),
                   page: page,
                 ),
               ],
@@ -2035,6 +2039,14 @@ class _AgentRowState extends State<_AgentRow> {
                 label: 'reports to ${lead.name}',
                 child: const SizedBox(),
               ),
+            // Held up by usage limits: Try now (or Sign in…) under the
+            // pointer, to ask again without opening it. Its conversation
+            // has it too, by touch as well.
+            if (wait.isNotEmpty && hovered && !touchFirst(context))
+              Padding(
+                padding: const EdgeInsets.only(left: Space.xs),
+                child: TryNow(wait: wait, waiting: agent.id),
+              ),
             if (agent.queuedMessages > 0)
               Text(
                 '${agent.queuedMessages}',
@@ -3060,9 +3072,12 @@ class _FlatRow extends StatelessWidget {
 /// labelled row each (Map, Usage, Marketplace, Settings, What's new), then
 /// what's going on with sign-in and the settings file, and the versions.
 class _PhoneFooter extends StatelessWidget {
-  const _PhoneFooter({required this.workspace});
+  const _PhoneFooter({required this.workspace, required this.canAddProvider});
 
   final Workspace workspace;
+
+  /// Whether the + after the usage circles shows ([_canAddProvider]).
+  final bool canAddProvider;
 
   @override
   Widget build(BuildContext context) {
@@ -3160,7 +3175,12 @@ class _PhoneFooter extends StatelessWidget {
                 TeamActivity(workspace: workspace),
                 const SizedBox(width: Space.xs),
                 Expanded(
-                  child: ProviderUsageCircles(providers: workspace.providers),
+                  child: ProviderUsageCircles(
+                    providers: workspace.providers,
+                    onAdd: canAddProvider
+                        ? () => AppScope.openProviders(context)
+                        : null,
+                  ),
                 ),
               ],
             ),
@@ -3187,6 +3207,15 @@ class _PhoneFooter extends StatelessWidget {
     );
   }
 }
+
+/// Whether the footer offers to add an AI provider (the + after the usage
+/// circles): once this Claktory has shown what it has, as the circles do.
+/// Not while it doesn't allow this device, or before it ever answered,
+/// where Providers would read as if it had none (Zucchero's row 216); a
+/// moment's reconnecting keeps it, as it keeps the circles.
+bool _canAddProvider(Backend backend, Workspace workspace) =>
+    backend.refused.value == null &&
+    (backend.connected.value || usageMeters(workspace.providers).isNotEmpty);
 
 /// The footer's lines about sign-in and the settings file, when there's
 /// something to say: "Signing in to …", "Settings file has an error".
@@ -3254,11 +3283,15 @@ class _Footer extends StatelessWidget {
   const _Footer({
     required this.workspace,
     required this.connected,
+    required this.canAddProvider,
     required this.page,
   });
 
   final Workspace workspace;
   final bool connected;
+
+  /// Whether the + after the usage circles shows ([_canAddProvider]).
+  final bool canAddProvider;
   final AppPage page;
 
   @override
@@ -3297,7 +3330,12 @@ class _Footer extends StatelessWidget {
                 TeamActivity(workspace: workspace),
                 const SizedBox(width: Space.xs),
                 Expanded(
-                  child: ProviderUsageCircles(providers: workspace.providers),
+                  child: ProviderUsageCircles(
+                    providers: workspace.providers,
+                    onAdd: canAddProvider
+                        ? () => AppScope.openProviders(context)
+                        : null,
+                  ),
                 ),
               ],
             ),

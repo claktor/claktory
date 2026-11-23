@@ -89,6 +89,9 @@ fn phone_of(account: &str, epoch: u64) -> Caller {
         account_id: account.into(),
         device_key: format!("{account}-phone"),
         registrations: vec![Registration { claktory_id: "mac".into(), epoch }],
+        removed_devices: Vec::new(),
+        signed_in_at: None,
+        bound_devices: None,
     }
 }
 
@@ -164,7 +167,7 @@ fn test_3_a_replayed_commit_or_old_message_is_refused_by_epoch() {
     let phone = ana.caller(0);
     let id = [1; 16];
     let mut group = start(&mut world, &ana, 0, Says::SelfGroup { account: "ana".into() }, id, json!({"kind": "self"}));
-    let said = ana.with(0, |provider, me| group.send(provider, me, b"draft").expect("sent"));
+    let said = ana.with(0, |provider, me| group.send(provider, me, &Pins::default(), b"draft").expect("sent"));
     let path = format!("groups/{}/messages", b64(&id));
     let send = |id: &str| json!({"client_message_id": id, "envelope": env(said.clone())});
     assert_eq!(call(&mut world, &phone, "POST", &path, send("d-1")).1["seq"], 1);
@@ -206,7 +209,7 @@ fn test_4_format_1_is_refused_on_every_route() {
     }
     let mut group = start(&mut world, &ana, 0, says, [3; 16], json!({"kind": "self"}));
     let id = [3; 16];
-    let said = ana.with(0, |provider, me| group.send(provider, me, b"hi").expect("sent"));
+    let said = ana.with(0, |provider, me| group.send(provider, me, &Pins::default(), b"hi").expect("sent"));
     let path = format!("groups/{}/messages", b64(&id));
     for envelope in [format_1(&env(said)), old.clone()] {
         assert_eq!(call(&mut world, &phone, "POST", &path, json!({"client_message_id": "m-1", "envelope": envelope})).0, 400);
@@ -246,7 +249,7 @@ fn test_5_a_removed_device_cant_rejoin() {
     let mut group = start(&mut world, &ana, 0, says.clone(), id, json!({"kind": "self"}));
     let trust = pins(&[&ana]);
     let info = group_info(&mut world, &ana.caller(mac), &id);
-    let (_, joined) = ana.with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &info).expect("rejoined"));
+    let (_, joined) = ana.with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &info).expect("rejoined"));
     assert_eq!(post_commit(&mut world, &ana.caller(mac), &id, &joined).0, 200, "listed, it rejoins");
     ana.with(0, |provider, _| group.process(provider, &trust, &joined.commit).expect("processed"));
 
@@ -259,7 +262,7 @@ fn test_5_a_removed_device_cant_rejoin() {
     // The Mac rejoins from the latest GroupInfo, by our code and forced.
     let info = group_info(&mut world, &ana.caller(mac), &id);
     claktory_dm_crypto::storage::forget_group(&ana.stores[mac], &openmls::prelude::GroupId::from_slice(&id)).expect("forgot");
-    let fresh = ana.with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &info).expect("made").1);
+    let fresh = ana.with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &info).expect("made").1);
     for commit in [fresh, forced_rejoin(&ana, mac, &info)] {
         let (status, refused) = post_commit(&mut world, &ana.caller(mac), &id, &commit);
         assert_eq!(status, 400, "{refused}");
@@ -322,7 +325,7 @@ fn test_13_a_claktory_in_a_conversation_reads_only() {
     assert_eq!(call(&mut world, &machine, "POST", &format!("conversations/{conversation}/messages"), send).0, 403);
 
     // It commits a change of someone else's: refused.
-    let removal = ana.with(mac, |provider, me| its.remove(provider, me, &["bo-phone"]).expect("made"));
+    let removal = ana.with(mac, |provider, me| its.remove_of(provider, me, "bo", &["bo-phone"]).expect("made"));
     let (status, refused) = post_commit(&mut world, &machine, &id, &removal);
     assert_eq!((status, &refused["error"]), (403, &json!("claktory_update_only")), "{refused}");
     ana.with(mac, |provider, _| its.clear_pending(provider).expect("cleared"));

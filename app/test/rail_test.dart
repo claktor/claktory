@@ -17,6 +17,7 @@ import 'package:factory_app/sidebar.dart';
 import 'package:factory_app/tunnel_client.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -666,6 +667,51 @@ void main() {
       },
     );
   }
+
+  // Sorbet's row 102: at the largest text the initials grew past their
+  // 28 pt tile; they fill it at most.
+  testWidgets('at the largest text the initials stay inside their tile', (
+    tester,
+  ) async {
+    tester.platformDispatcher.textScaleFactorTestValue = 53 / 17;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final app = _App(
+      snapshots: {'': _workspace('Rivet'), _nixos: _workspace('Nix')},
+    );
+    app.connections
+      ..use(parsePairingCode(_nixos))
+      ..use(parsePairingCode(_mini))
+      ..use(null);
+    await app.show(tester);
+    await pumpFrames(tester);
+    for (final initials in ['N', 'MM']) {
+      final text = find.descendant(
+        of: find.byType(ClaktoryRail),
+        matching: find.text(initials),
+      );
+      expect(text, findsOneWidget);
+      final tile = tester.getRect(
+        find.ancestor(of: text, matching: find.byType(Stack)).first,
+      );
+      expect(tile.size, const Size.square(28));
+      // Laid out whole, on one line (not squeezed into a box narrower than
+      // the letters and painted past it)...
+      final paragraph = tester.renderObject<RenderParagraph>(text);
+      expect(
+        paragraph.getMaxIntrinsicWidth(double.infinity),
+        lessThanOrEqualTo(paragraph.size.width + 0.01),
+        reason: initials,
+      );
+      // ...and inside the tile as drawn.
+      final drawn = tester.getRect(text);
+      expect(drawn.left, greaterThanOrEqualTo(tile.left), reason: initials);
+      expect(drawn.right, lessThanOrEqualTo(tile.right), reason: initials);
+      expect(drawn.top, greaterThanOrEqualTo(tile.top), reason: initials);
+      expect(drawn.bottom, lessThanOrEqualTo(tile.bottom), reason: initials);
+      // Still larger than at the standard size, room allowing.
+      if (initials == 'N') expect(drawn.height, greaterThan(11));
+    }
+  });
 
   testWidgets('removing one from the phone list stays on the list', (
     tester,

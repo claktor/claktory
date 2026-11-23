@@ -3,11 +3,14 @@ import 'dart:async';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
 
+import 'app_dock.dart' show openAppsTab;
+import 'apps.dart' show undoAppAccess;
 import 'backend.dart';
 import 'characters/character.dart';
 import 'chats.dart' show ChatGlyph, chatTitle, openChat;
 import 'controls.dart';
 import 'find.dart' show FindScope;
+import 'forms.dart' show AgentSettingsForm;
 import 'identity.dart';
 import 'mobile/metrics.dart';
 import 'pipe_timeline.dart' show pipeItemKey, pipeLiaison;
@@ -18,6 +21,7 @@ import 'scope.dart';
 import 'selection.dart' show CopyShape, Unselectable;
 import 'taint_label.dart';
 import 'usage.dart' show formatAge;
+import 'visible_codes.dart' show proseCodes;
 
 /// How many records a page of history asks for.
 const historyPage = 50;
@@ -59,17 +63,72 @@ class _NeedsYouHistoryListState extends State<NeedsYouHistoryList> {
   /// The search the records answer.
   var _query = '';
 
+  /// What an Undo said, under the change it undid (by [_undoKey]): what
+  /// was left as it was, or why it couldn't.
+  final _undoNotes = <String, ({String text, bool failed})>{};
+
+  /// Who gave what in every app, and every agent's model and effort, as
+  /// last seen: a change to either (Rivet's, or the person's on another
+  /// device) changes it, and History asks again.
+  late String _given;
+
   @override
   void initState() {
     super.initState();
     _search.addListener(_searchChanged);
+    _given = _appsGiven();
+    _backend.workspace.addListener(_workspaceChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _load();
     });
   }
 
+  String _appsGiven() => [
+    for (final app in _backend.workspace.workspace.apps) ...[
+      for (final grant in app.grants)
+        '${grant.agentId}:${grant.given.changeId}',
+      for (final source in app.sources)
+        if (source.granted) '${source.id}:${source.given.changeId}',
+      '/',
+    ],
+    for (final agent in _backend.workspace.workspace.agents)
+      '${agent.id}=${agent.model}/${agent.effort}',
+  ].join(',');
+
+  void _workspaceChanged() {
+    final given = _appsGiven();
+    if (given == _given) return;
+    _given = given;
+    if (mounted) _load();
+  }
+
+  /// Undo on an app access or model change: done, then the list again
+  /// (it's marked Undone; an app access undo is a row of its own).
+  Future<void> _undo(NeedsYouRecord record) async {
+    final key = _undoKey(record);
+    final changeId = _changeOf(record);
+    setState(() => _undoNotes.remove(key));
+    try {
+      String? note;
+      if (_ofModel(record)) {
+        await _backend.undoModelChange(changeId);
+      } else {
+        note = await undoAppAccess(_backend, changeId);
+      }
+      if (!mounted) return;
+      if (note case final said?) {
+        setState(() => _undoNotes[key] = (text: said, failed: false));
+      }
+    } on RequestFailure catch (failure) {
+      if (!mounted) return;
+      setState(() => _undoNotes[key] = (text: failure.message, failed: true));
+    }
+    if (mounted) await _load();
+  }
+
   @override
   void dispose() {
+    _backend.workspace.removeListener(_workspaceChanged);
     _typing?.cancel();
     _search.dispose();
     _field.dispose();
@@ -198,7 +257,11 @@ class _NeedsYouHistoryListState extends State<NeedsYouHistoryList> {
                   child: CopyShape(
                     lines: true,
                     trail: '\n\n',
-                    child: HistoryRow(record: record),
+                    child: HistoryRow(
+                      record: record,
+                      onUndo: _undo,
+                      undoNote: _undoNotes[_undoKey(record)],
+                    ),
                   ),
                 ),
               ),
@@ -236,6 +299,34 @@ class _NeedsYouHistoryListState extends State<NeedsYouHistoryList> {
 
 /// Whether [record] is a pipe's own decision (a held message, a loop
 /// pause, where its reports go) rather than an agent's or chat's card.
+/// Whether [record] is a change to an app's access, or Rivet's card for
+/// one.
+bool _ofApp(NeedsYouRecord record) =>
+    record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_APP_ACCESS;
+
+/// Whether [record] is Rivet putting an agent on another model or effort.
+bool _ofModel(NeedsYouRecord record) =>
+    record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_MODEL;
+
+/// The change Undo undoes: an app access change's or a model change's; ""
+/// for none (a declined card, another kind).
+String _changeOf(NeedsYouRecord record) => _ofApp(record)
+    ? record.appChangeId
+    : _ofModel(record)
+    ? record.modelChangeId
+    : '';
+
+/// What an Undo's note is kept under: the kind and its change.
+String _undoKey(NeedsYouRecord record) =>
+    '${record.kind.value}/${_changeOf(record)}';
+
+/// Whether [record] opens the app in Marketplace → Apps rather than a
+/// conversation: the person's own change, or one with no entry to show.
+bool _opensApp(NeedsYouRecord record) =>
+    _ofApp(record) &&
+    record.appId.isNotEmpty &&
+    (record.agentId.isEmpty || record.seq == 0);
+
 bool _ofPipe(NeedsYouRecord record) =>
     record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_HELD ||
     record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_LOOP ||
@@ -281,9 +372,20 @@ String _shortened(String text, int max) {
 /// asked, and how they answered ("Answered · “Use the EU bucket”"), with
 /// the card's taint. A click opens the conversation at the card.
 class HistoryRow extends StatelessWidget {
-  const HistoryRow({super.key, required this.record});
+  const HistoryRow({
+    super.key,
+    required this.record,
+    this.onUndo,
+    this.undoNote,
+  });
 
   final NeedsYouRecord record;
+
+  /// Undo, for an app access or model change that can still be undone.
+  final ValueChanged<NeedsYouRecord>? onUndo;
+
+  /// What the last Undo of it said.
+  final ({String text, bool failed})? undoNote;
 
   @override
   Widget build(BuildContext context) {
@@ -315,7 +417,9 @@ class HistoryRow extends StatelessWidget {
             record.pipeId.isEmpty) ||
         // A kind of report the person made, changed or deleted.
         (record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_REPORT_TYPE &&
-            record.agentId.isEmpty);
+            record.agentId.isEmpty) ||
+        // A change to an app's access the person made, or an undo.
+        (_ofApp(record) && record.agentId.isEmpty);
     final who = yours
         ? 'You'
         : record.chatId.isNotEmpty
@@ -333,12 +437,27 @@ class HistoryRow extends StatelessWidget {
         ? _shortened(record.excerpt, 200)
         : '';
     final reply = _shortened(record.reply, 120);
-    final outcome = historyOutcome(record);
+    // An app access change undone since says so after how it ended.
+    final outcome = [
+      historyOutcome(record),
+      if ((_ofApp(record) || _ofModel(record)) && record.undone) 'Undone',
+    ].where((part) => part.isNotEmpty).join(' · ');
+    // Rivet's reason, as Rivet's own words, never as Claktory's.
+    final reason =
+        (_ofApp(record) || _ofModel(record)) && record.agentReason.isNotEmpty
+        ? '${agentName ?? 'An agent'}: “${proseCodes(_shortened(record.agentReason, 300))}”'
+        : '';
+    final undo =
+        _changeOf(record).isNotEmpty && !record.undone && onUndo != null
+        ? () => onUndo!(record)
+        : null;
     final decided = record.decidedMs.toInt();
     final where = record.chatId.isNotEmpty
         ? 'Open chat'
         : record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_REPORT_TYPE
         ? 'Show what crosses'
+        : _opensApp(record)
+        ? 'Show in Apps'
         : _ofPipe(record)
         ? 'Open pipe'
         : 'Open conversation';
@@ -440,6 +559,15 @@ class HistoryRow extends StatelessWidget {
                           ),
                         ),
                       ),
+                    if (reason.isNotEmpty)
+                      Text(
+                        reason,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyles.caption.copyWith(
+                          color: palette.textMuted,
+                        ),
+                      ),
                     if (excerpt.isNotEmpty)
                       Text(
                         '“$excerpt”',
@@ -474,9 +602,24 @@ class HistoryRow extends StatelessWidget {
                         ),
                       ),
                     TaintLabel(taint: record.taint, agent: who),
+                    if (undoNote case final note?)
+                      Text(
+                        note.text,
+                        style: TextStyles.caption.copyWith(
+                          color: note.failed
+                              ? palette.danger
+                              : palette.textMuted,
+                        ),
+                      ),
                   ],
                 ),
               ),
+              if (undo != null) ...[
+                const SizedBox(width: Space.s),
+                Unselectable(
+                  child: Button(label: 'Undo', onPressed: undo),
+                ),
+              ],
             ],
           ),
         ),
@@ -490,6 +633,12 @@ class HistoryRow extends StatelessWidget {
 void openHistoryRecord(BuildContext context, NeedsYouRecord record) {
   final backend = AppScope.of(context);
   final workspace = backend.workspace.workspace;
+  // The person's own app access change: the app, in Marketplace → Apps.
+  if (_opensApp(record)) {
+    openAppsTab(context);
+    backend.marketplaceApp.value = record.appId;
+    return;
+  }
   // A kind of report made, changed or deleted: what crosses with it.
   if (record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_REPORT_TYPE) {
     if (recordHasReportTypes(record)) showReportTypeRecord(context, record);
@@ -530,6 +679,20 @@ void openHistoryRecord(BuildContext context, NeedsYouRecord record) {
   final agent = workspace.agents
       .where((agent) => agent.id == record.agentId)
       .firstOrNull;
+  // A model change with no entry to show (Rivet gone, or no call): the
+  // agent whose model it was, in its settings.
+  if (_ofModel(record) && (agent == null || record.seq == 0)) {
+    final subject = workspace.agents
+        .where((agent) => agent.id == record.subjectAgentId)
+        .firstOrNull;
+    if (subject != null) {
+      showModal(
+        context,
+        (context, close) => AgentSettingsForm(agent: subject, close: close),
+      );
+    }
+    return;
+  }
   if (agent == null) return;
   AppScope.closePage(context);
   fireAndLog(() async {

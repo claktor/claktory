@@ -715,7 +715,7 @@ fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str,
             if !others.is_empty() {
                 let _ = write!(text, "\n\nAlso sent to: {}.", others.join(", "));
             }
-            // Read a pipe: those it messages know it.
+            // Read a web page: those it messages know it.
             let mut signature = signed(config, from, agent);
             signature.push_str(&label);
             let event = Event {
@@ -738,11 +738,10 @@ fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str,
             });
         }
     }
-    // What a pipe brought reaches them through the sender: they're as
-    // tainted as it is (their secrets wait for the person too).
+    // What the sender read never reaches them (#346): only its signature
+    // says it read a web page.
     let mut recorded = Vec::new();
     for (id, text, event) in letters {
-        crate::pipes::agents::spread_taint(factory, sender, &id);
         if factory.deliver_sent(&id, text, event, sent.clone()) {
             recorded.push(id);
         }

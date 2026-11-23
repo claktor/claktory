@@ -3,14 +3,12 @@ import 'package:flutter/widgets.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
-import 'extensions.dart' show agentExtension, logTime;
+import 'extensions.dart' show logTime;
 import 'identity.dart';
 import 'markdown.dart';
-import 'mobile/platform_policy.dart' show PhonePlatformPolicy;
 import 'mobile/metrics.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
-import 'selection.dart';
 import 'tool_views.dart' show ShowMore;
 
 /// Why an agent's message was sent, as its sender said (`Event.intent`,
@@ -64,114 +62,6 @@ String provenanceLine(String intent, int replies, {bool quiet = false}) => [
   if (replies > 1) 'Replying to earlier messages',
 ].join(' · ');
 
-/// The words for how many quiet copies [agent] hasn't read yet.
-String newCopiesLabel(int count) =>
-    count == 1 ? '1 new copy' : '$count new copies';
-
-/// How many copies, shown where there's little room: "1 copy".
-String copiesLabel(int count) => count == 1 ? '1 copy' : '$count copies';
-
-/// Whether [agent] has quiet copies it hasn't read, and Messaging on to
-/// show them in.
-bool showsNewCopies(Agent agent) =>
-    agent.unreadCopies > 0 &&
-    (agentExtension(agent, 'agents')?.enabled ?? false);
-
-/// In an agent's header while it has quiet copies it hasn't read: how many,
-/// in a quiet hairline capsule that opens its Messaging panel, where they
-/// are. Nothing otherwise. On a phone, the number alone in a header
-/// button.
-class QuietCopiesChip extends StatelessWidget {
-  const QuietCopiesChip({super.key, required this.agent, this.phone = false});
-
-  final Agent agent;
-
-  /// In the phone's header bar: a header button.
-  final bool phone;
-
-  @override
-  Widget build(BuildContext context) {
-    if (!showsNewCopies(agent)) return const SizedBox.shrink();
-    final count = agent.unreadCopies;
-    final label = newCopiesLabel(count);
-    void open() =>
-        fireAndLog(AppScope.of(context).openPanel(agent.id, 'agents'));
-    if (phone) {
-      // How many, with a word, so it isn't read as another count of what
-      // needs the person: "1 copy". A header's 44pt tall target, as wide as
-      // its words, at a glyph's size whatever the text size (VoiceOver
-      // reads "1 new copy").
-      final shown = count > 99 ? '99+ copies' : copiesLabel(count);
-      return Unselectable(
-        child: Semantics(
-          container: true,
-          button: true,
-          label: label,
-          onTap: open,
-          excludeSemantics: true,
-          child: Pressable(
-            onTap: open,
-            builder: (context, pressed) => SizedBox(
-              height: PhonePlatformPolicy.of(context).touchTarget,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: Space.xs),
-                child: Center(
-                  child: MediaQuery.withNoTextScaling(
-                    child: _Capsule(text: shown, hovered: pressed),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-    return Unselectable(
-      child: Semantics(
-        button: true,
-        label: label,
-        hint: 'Opens Messaging',
-        excludeSemantics: true,
-        child: Pressable(
-          onTap: open,
-          builder: (context, hovered) =>
-              _Capsule(text: label, hovered: hovered),
-        ),
-      ),
-    );
-  }
-}
-
-class _Capsule extends StatelessWidget {
-  const _Capsule({required this.text, this.hovered = false});
-
-  final String text;
-  final bool hovered;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: Space.s, vertical: 2),
-      decoration: BoxDecoration(
-        color: hovered ? palette.hover : null,
-        border: Border.all(color: palette.hairline),
-        borderRadius: BorderRadius.circular(Radii.panel),
-      ),
-      child: Text(
-        text,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: TypeScale.of(context).caption.copyWith(
-          color: hovered ? palette.text : palette.textMuted,
-          fontWeight: FontWeight.w500,
-          fontFeatures: const [FontFeature.tabularFigures()],
-        ),
-      ),
-    );
-  }
-}
-
 /// The words for how many quiet messages wait for an agent: "1 quiet
 /// message", "4 quiet messages".
 String quietWaitingLabel(int count) =>
@@ -192,70 +82,6 @@ String quietWaitingAbout(Agent agent) {
 /// "Queued".
 String quietQueuedLabel(String name) =>
     'Quiet · read when $name next starts working';
-
-/// In an agent's header while quiet messages wait for it: how many, in a
-/// quiet hairline capsule, saying on hover what that means. Not a button:
-/// they're at the conversation's end already. Nothing while none wait. On
-/// a phone, shorter ("4 quiet"), its words read by VoiceOver.
-class QuietWaitingChip extends StatelessWidget {
-  const QuietWaitingChip({super.key, required this.agent, this.phone = false});
-
-  final Agent agent;
-
-  /// In the phone's header bar.
-  final bool phone;
-
-  @override
-  Widget build(BuildContext context) {
-    final count = agent.quietWaiting;
-    if (count == 0) return const SizedBox.shrink();
-    final about = quietWaitingAbout(agent);
-    final faint = TypeScale.of(context).caption
-        .copyWith(color: Palette.of(context).textMuted);
-    if (phone) {
-      return Unselectable(
-        child: Semantics(
-          container: true,
-          label: about,
-          excludeSemantics: true,
-          child: HoverCard(
-            end: true,
-            holdToShow: true,
-            card: (context) => Text(about, style: faint),
-            child: SizedBox(
-              height: PhonePlatformPolicy.of(context).touchTarget,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: Space.xs),
-                child: Center(
-                  child: MediaQuery.withNoTextScaling(
-                    child: _Capsule(
-                      text: count > 99 ? '99+ quiet' : quietWaitingShort(count),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-    return Unselectable(
-      child: Semantics(
-        container: true,
-        label: about,
-        excludeSemantics: true,
-        child: HoverCard(
-          end: true,
-          card: (context) => ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 280),
-            child: Text(about, style: faint),
-          ),
-          child: _Capsule(text: quietWaitingLabel(count)),
-        ),
-      ),
-    );
-  }
-}
 
 /// How many copies a page asks for.
 const quietCopiesPage = 20;

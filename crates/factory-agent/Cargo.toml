@@ -36,6 +36,13 @@ uuid = { version = "1", features = ["v4"] }
 webpki-roots = "1"
 zeroize = "1"
 
+[features]
+# QA only (claktory-qa's sandboxes, scripts/qa.sh): lets factoryd point the
+# Anthropic subscription at qa-model on this computer
+# (providers/anthropic/qa.rs). Off by default, and a release build can't
+# have it: lib.rs refuses to compile it without debug assertions.
+qa-provider = []
+
 [dev-dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 tempfile = "3"

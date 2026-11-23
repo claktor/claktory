@@ -70,7 +70,7 @@ fn a_conversation_runs_on_the_store_and_survives_a_reload() {
     ipad.step(|provider, _| Group::join(provider, &pins, kind.clone(), id, &welcome).unwrap());
 
     // Each side loads its group again from its own store.
-    let said = phone.step(|provider, me| Group::load(provider, kind.clone(), id).unwrap().unwrap().send(provider, me, b"hi Ana").unwrap());
+    let said = phone.step(|provider, me| Group::load(provider, kind.clone(), id).unwrap().unwrap().send(provider, me, &Pins::default(), b"hi Ana").unwrap());
     let heard = ipad.step(|provider, _| Group::load(provider, kind.clone(), id).unwrap().unwrap().process(provider, &pins, &said).unwrap());
     let Incoming::Application { from, content } = heard else { panic!("not a message: {heard:?}") };
     assert_eq!((from.account(), from.leaf_id(), content.as_slice()), ("matt", "phone", b"hi Ana".as_slice()));

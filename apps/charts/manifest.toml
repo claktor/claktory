@@ -1,9 +1,9 @@
 id = "charts"
 name = "Charts"
-version = "0.2.1"
+version = "0.4.0"
 world = "claktory:app@1.1"
 publisher = "claktory"
-description = "Live charts of what your agents do: runs, messages, tokens and more, from Claktory's records and your agents' databases."
+description = "Live charts of what your agents do, such as their runs, messages and tokens. Tell Rivet what you'd like to see."
 icon = "chart-column"
 storage_mb = 5
 memory_mb = 32
@@ -11,13 +11,13 @@ instructions = """
 Charts shows the person dashboards of live charts. A dashboard is JSON:
 
 {"id": "claktory", "name": "Claktory", "time": {"from": "now-7d", "to": "now"}, "refresh_s": 30,
- "variables": [{"name": "agent", "label": "Agent", "query": {"source": "factory-records", "sql": "SELECT agent, MAX(agent_name) FROM agent_usage GROUP BY agent"}}],
+ "variables": [{"name": "agent", "label": "Agent", "query": {"source": "activity", "sql": "SELECT agent, MAX(agent_name) FROM agent_usage GROUP BY agent"}}],
  "panels": [{"id": "runs", "title": "Runs", "grid": {"x": 0, "y": 0, "w": 6, "h": 4},
-   "query": {"source": "factory-records", "sql": "SELECT (started / $step) * $step AS time, COUNT(*) AS runs FROM runs WHERE started >= $from AND started < $to AND ($agent = '' OR agent = $agent) GROUP BY 1 ORDER BY 1"},
+   "query": {"source": "activity", "sql": "SELECT (started / $step) * $step AS time, COUNT(*) AS runs FROM runs WHERE started >= $from AND started < $to AND ($agent = '' OR agent = $agent) GROUP BY 1 ORDER BY 1"},
    "viz": {"kind": "timeseries", "x": "time", "unit": "runs"}}],
  "_rev": 3}
 
-- A query is one read-only SQLite statement (SELECT or WITH) against a source charts_list names as granted: factory-records (Claktory's records: runs, messages, checklist_items, agent_usage, tasks, monitors…) or agent:<id> (an agent's own database).
+- A query is one read-only SQLite statement (SELECT or WITH) against a source charts_list names as granted: activity (your agents' runs, messages, tasks, monitors, checklist items and token use: ids, agents, times, states and counts, never text: runs, messages, tasks, monitors, monitor_events, checklist_items, checklist_events, agent_usage, model_usage, agent_presence) agent:<id> (an agent's own database) or file:<place>:<path> (a CSV or TSV file as one table, rows, with the header's names as columns, read again at every query). A column it doesn't hold is refused.
 - Values are bound, never written into the SQL: $from and $to are the range shown in milliseconds ($from_s and $to_s in seconds), $now is now, $step (and $step_s) a bucket that gives at most about 100 of them, and $<name> each variable's chosen value, "" for All. Don't use ?.
 - A variable's query answers its options: the value, then what shows (optional).
 - viz.kind is stat (the last column's total, its rows a spark line), timeseries, bars, stackedBars, pie, scatter or table. x names the column across (the first if not), y the columns to draw (every other numeric one if not), series_by a column whose values make the series (then y names one at most). color is palette, agent (series are agents' ids: their colors and names), signal or muted. columns, for a table: [{"name", "title", "format": "text"|"number"|"time"}].
@@ -29,10 +29,12 @@ Charts shows the person dashboards of live charts. A dashboard is JSON:
 id = "view"
 label = "See dashboards"
 tools = ["charts_list", "charts_get"]
+reads_data = false
 
 [[scopes]]
 id = "edit"
-label = "Change dashboards, and read anything Charts can read"
+label = "Change dashboards, and read what Charts reads"
+reads_data = true
 tools = ["charts_list", "charts_get", "charts_put", "charts_delete", "charts_query"]
 
 [[tools]]
@@ -58,17 +60,21 @@ parameters = { type = "object", required = ["id"], properties = { id = { type = 
 [[tools]]
 name = "charts_query"
 description = "Runs one read-only SQL statement against a granted source, bound as a panel's is ($from, $to, $step, your variables), and answers at most 200 rows, tab-separated."
-parameters = { type = "object", required = ["source", "sql"], properties = { source = { type = "string", description = "factory-records, or agent:<id>." }, sql = { type = "string" }, from = { type = "string", description = "The range's start: now-7d (the default), now-24h, or milliseconds." }, to = { type = "string", description = "Its end: now (the default)." }, dashboard = { type = "string", description = "A dashboard whose variables the SQL uses, each at its default (\"\" for All), so a panel's query runs as it is." }, variables = { type = "object", description = "Values for $names in the SQL, such as {\"agent\": \"rivet\"}; they win over the dashboard's." } } }
+parameters = { type = "object", required = ["source", "sql"], properties = { source = { type = "string", description = "activity, agent:<id> or file:<place>:<path>." }, sql = { type = "string" }, from = { type = "string", description = "The range's start: now-7d (the default), now-24h, or milliseconds." }, to = { type = "string", description = "Its end: now (the default)." }, dashboard = { type = "string", description = "A dashboard whose variables the SQL uses, each at its default (\"\" for All), so a panel's query runs as it is." }, variables = { type = "object", description = "Values for $names in the SQL, such as {\"agent\": \"rivet\"}; they win over the dashboard's." } } }
 
 [[views]]
 id = "main"
 title = "Charts"
 
 [[data]]
-kind = "factory-records"
-reason = "To chart your agents' runs, messages, tokens and tasks."
+kind = "activity"
+reason = "To chart when your agents run, how many messages and tasks they have, and the tokens they use."
 
 [[data]]
 kind = "agent-database"
 agent = "*"
-reason = "To chart what an agent keeps in its own database, when you turn it on."
+reason = "To chart what an agent keeps in its own database."
+
+[[data]]
+kind = "file"
+reason = "To chart a CSV or TSV file you or your agents keep, such as a list of bugs."

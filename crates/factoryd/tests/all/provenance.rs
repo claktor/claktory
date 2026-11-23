@@ -1,7 +1,7 @@
 //! Message provenance and quiet copies (#285, middleman.md H1 and H3): a
 //! message says its number and what it answers; a quiet copy reaches the
-//! sender's lead without waking it, and hands on the sender's taint as it
-//! was when it was sent.
+//! sender's lead without waking it, and marks no one (#346), only its
+//! signature saying its sender read a web page.
 
 use rusqlite::Connection;
 
@@ -171,29 +171,28 @@ async fn a_quiet_copy_reaches_the_lead_without_waking_it() {
     assert_eq!(received(&dir, "bo").len(), before);
 }
 
+/// A copy from an agent that read a web page says so in its signature, and
+/// marks no one (#346): what it carries isn't handed on.
 #[tokio::test]
-async fn a_copy_hands_on_the_senders_taint_as_it_was() {
+async fn a_copy_from_a_marked_sender_says_so_and_marks_no_one() {
     let (dir, factory, mut client, mut view, _) = setup().await;
-    pipes::taint_with_for_test(&factory, "max", "bo", r#"{"p-secret": []}"#);
-    let sent = call(&mut client, &mut view, "bo", "agents_send", r#"{"to": "max", "text": "From the pipe.", "copy_lead": true}"#).await;
+    pipes::taint_for_test(&factory, "bo", "browser:https://example.com");
+    let sent = call(&mut client, &mut view, "bo", "agents_send", r#"{"to": "max", "text": "From the page.", "copy_lead": true}"#).await;
     assert!(sent.ends_with("Copied quietly to Lea."), "{sent}");
     settle(&mut client, &mut view, &["max"]).await;
-    let signature: String = db(&dir).query_row("SELECT sender FROM quiet_copies", [], |row| row.get(0)).expect("a copy");
+    let (signature, taint): (String, String) =
+        db(&dir).query_row("SELECT sender, taint FROM quiet_copies", [], |row| Ok((row.get(0)?, row.get(1)?))).expect("a copy");
     assert!(signature.starts_with("Bo") && signature.len() > "Bo".len(), "the taint label is kept: {signature}");
-    assert_eq!(pipes::taint_of_for_test(&factory, "lea"), "{}", "not tainted until it reads it");
-
-    // Bo starts over and is renamed: the copy keeps what Bo had read.
-    let clear = v1::RunCommand { agent_id: "bo".into(), name: "clear".into(), args: String::new() };
-    apply_request(&mut client, &mut view, client_message::Body::RunCommand(clear)).await;
-    let rename = v1::UpdateAgent { agent_id: "bo".into(), name: Some("Bob".into()), ..Default::default() };
-    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(rename)).await;
-    view.follow(&mut client, |_| pipes::taint_of_for_test(&factory, "bo") == "{}").await;
-    call(&mut client, &mut view, "lea", "agents_copies", "{}").await;
-    assert!(pipes::taint_of_for_test(&factory, "lea").contains("p-secret"), "{}", pipes::taint_of_for_test(&factory, "lea"));
-
-    // A copy whose taint can't be read isn't given.
-    call(&mut client, &mut view, "bo", "agents_send", r#"{"to": "max", "text": "UNCHECKED text", "copy_lead": true}"#).await;
-    db(&dir).execute("UPDATE quiet_copies SET taint = 'not json' WHERE text = 'UNCHECKED text'", []).expect("spoiled");
+    assert_eq!(taint, "{}");
     let read = call(&mut client, &mut view, "lea", "agents_copies", "{}").await;
-    assert!(read.contains("couldn't be checked and was left out") && !read.contains("UNCHECKED"), "{read}");
+    assert!(read.contains("From the page."), "{read}");
+    assert_eq!(pipes::taint_of_for_test(&factory, "lea"), "{}");
+    assert_eq!(pipes::taint_of_for_test(&factory, "max"), "{}");
+
+    // A copy kept with an old taint is given all the same, and marks no one.
+    call(&mut client, &mut view, "bo", "agents_send", r#"{"to": "max", "text": "OLD text", "copy_lead": true}"#).await;
+    db(&dir).execute("UPDATE quiet_copies SET taint = '{\"p-old\":[]}' WHERE text = 'OLD text'", []).expect("an old row");
+    let read = call(&mut client, &mut view, "lea", "agents_copies", "{}").await;
+    assert!(read.contains("OLD text"), "{read}");
+    assert_eq!(pipes::taint_of_for_test(&factory, "lea"), "{}");
 }

@@ -12,8 +12,11 @@
 //! from the person.
 
 pub(crate) mod a2ui;
+pub(crate) mod access;
 pub(crate) mod bundle;
 pub mod bundled;
+pub(crate) mod changes;
+pub(crate) mod files;
 pub(crate) mod data;
 mod events;
 pub(crate) mod host;
@@ -96,8 +99,8 @@ pub(crate) fn grantee(app: &str) -> String {
 }
 
 /// Apps are offered in every Claktory: Claktory's own (Charts, shipped with
-/// each release: `bundled`) install, run and update from Settings → Apps
-/// (#201, Zucchero's gate passed). Off, only the dev Claktory (`factoryd
+/// each release: `bundled`) install by themselves and run and update from
+/// the Marketplace's Apps tab (#201, Zucchero's gate passed; #333). Off, only the dev Claktory (`factoryd
 /// --dev`) would have them. Telegram isn't shipped until it's proven.
 const SHIPPED: bool = true;
 
@@ -218,11 +221,16 @@ fn tier(tier: Tier) -> v1::AppTier {
     }
 }
 
-fn scopes(manifest: &Manifest) -> Vec<v1::AppScopeSpec> {
+fn scopes(manifest: &Manifest, key: &str) -> Vec<v1::AppScopeSpec> {
     manifest
         .scopes
         .iter()
-        .map(|scope| v1::AppScopeSpec { id: scope.id.clone(), label: scope.label.clone(), tools: scope.tools.clone() })
+        .map(|scope| v1::AppScopeSpec {
+            id: scope.id.clone(),
+            label: scope.label.clone(),
+            tools: scope.tools.clone(),
+            reads_data: scope_reads(manifest, key, scope),
+        })
         .collect()
 }
 
@@ -266,6 +274,8 @@ pub(crate) fn infos(factory: &Factory, config: &Config, vault: &v1::VaultState) 
                 state_detail: runtime.map(|runtime| runtime.detail.clone()).unwrap_or_default(),
                 installed_ms: app.installed_ms,
                 publisher_key: bundle::short_key(&app.key),
+                tier: tier(tier_of(&app.key)).into(),
+                bundled: bundled::is_bundled(factory, &app.id, &app.key),
                 ..Default::default()
             });
             continue;
@@ -283,11 +293,17 @@ pub(crate) fn infos(factory: &Factory, config: &Config, vault: &v1::VaultState) 
             Some(runtime) if runtime.retry_at.is_some() => (v1::AppState::Restarting, runtime.detail.clone()),
             _ => (v1::AppState::Starting, String::new()),
         };
+        // Who gave each what it has, and when.
+        let (sources_given, agents_given) = changes::given(factory, app);
         let mut grants: Vec<v1::AppGrant> = app
             .grants
             .iter()
             .filter(|(agent, _)| config.agent(agent).is_some())
-            .map(|(agent, scopes)| v1::AppGrant { agent_id: agent.clone(), scopes: scopes.clone() })
+            .map(|(agent, scopes)| v1::AppGrant {
+                agent_id: agent.clone(),
+                scopes: scopes.clone(),
+                given: agents_given.get(agent).cloned(),
+            })
             .collect();
         grants.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
         let subscriptions = app
@@ -308,7 +324,7 @@ pub(crate) fn infos(factory: &Factory, config: &Config, vault: &v1::VaultState) 
             icon: manifest.icon.clone(),
             state: state_now.into(),
             state_detail: detail,
-            scopes: scopes(manifest),
+            scopes: scopes(manifest, &app.key),
             events: event_kinds(manifest),
             hosts: manifest.hosts.clone(),
             grants,
@@ -319,7 +335,15 @@ pub(crate) fn infos(factory: &Factory, config: &Config, vault: &v1::VaultState) 
             installed_ms: app.installed_ms,
             publisher_key: bundle::short_key(&app.key),
             views: manifest.views.iter().map(|view| v1::AppViewSpec { id: view.id.clone(), title: view.title.clone() }).collect(),
-            sources: data::infos(config, manifest, app),
+            sources: data::infos(config, manifest, app)
+                .into_iter()
+                .map(|source| v1::AppDataSource {
+                    given: if source.granted { sources_given.get(&source.id).cloned() } else { None },
+                    ..source
+                })
+                .collect(),
+            bundled: bundled::is_bundled(factory, &app.id, &app.key),
+            reads_files: manifest.data.iter().any(|data| data.kind == bundle::FILE),
         });
     }
     infos.sort_by_key(|info| info.name.to_lowercase());
@@ -437,15 +461,27 @@ fn app_tool(factory: &Arc<Factory>, agent: &str, manifest: &Manifest, spec: &bun
     tool
 }
 
+/// Whether `scope`'s tools hand an agent what the app reads: as the
+/// manifest says for Claktory's own apps; always for another publisher's,
+/// whose word on it isn't taken.
+pub(crate) fn scope_reads(manifest: &Manifest, key: &str, scope: &bundle::ScopeSpec) -> bool {
+    !matches!(bundle::tier_of(key), bundle::Tier::Claktory) || manifest.reads_data(scope)
+}
+
 /// An agent's call of an app's tool: checked against its grant now, then
 /// made in the host.
 async fn call(factory: &Arc<Factory>, app: &str, tool: &str, args: &serde_json::Value, agent: &str) -> Result<ToolResult, String> {
     let manifest = factory.apps.manifest(app).ok_or_else(|| format!("The app that had {tool} isn't installed any more."))?;
     let allowed = {
         let inner = factory.lock();
-        let scopes = inner.config.apps.iter().find(|installed| installed.id == app).and_then(|installed| installed.grants.get(agent));
-        scopes
-            .is_some_and(|scopes| scopes.iter().any(|scope| manifest.scope(scope).is_some_and(|spec| spec.tools.iter().any(|t| t == tool))))
+        let installed = inner.config.apps.iter().find(|installed| installed.id == app);
+        let granted: Vec<&bundle::ScopeSpec> = installed
+            .and_then(|installed| installed.grants.get(agent))
+            .map(|scopes| {
+                scopes.iter().filter_map(|scope| manifest.scope(scope)).filter(|spec| spec.tools.iter().any(|t| t == tool)).collect()
+            })
+            .unwrap_or_default();
+        !granted.is_empty()
     };
     if !allowed {
         return Err(format!("You no longer have {tool}: the person took that part of the {} app back.", manifest.name));
@@ -501,7 +537,11 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
     loop {
         let next = {
             let Some(factory) = factory.upgrade() else { return };
-            reconcile(&factory).await
+            let next = reconcile(&factory).await;
+            // Claktory's own apps installed (or updated) by themselves,
+            // once the installed ones' manifests are read.
+            bundled::keep_installed(&factory).await;
+            next
         };
         tokio::select! {
             () = wake.notified() => {}
@@ -845,9 +885,10 @@ fn crashed(factory: &Arc<Factory>, app: &str, problem: &str) -> Option<Duration>
     });
     if paused {
         let name = factory.apps.manifest(app).map_or_else(|| app.to_owned(), |manifest| manifest.name.clone());
+        let last = format!("The last error: {problem}");
         let text = format!(
-            "The {name} app crashed {CRASHES_TO_PAUSE} times in 10 minutes, so Claktory paused it. The last error: {problem} \
-             It stays off until the person starts it again in Settings → Apps."
+            "The {name} app crashed {CRASHES_TO_PAUSE} times in 10 minutes, so Claktory paused it. {last} \
+             It stays off until the person starts it again in the Marketplace's Apps tab."
         );
         let event = host_event(format!("The {name} app was paused after crashing"));
         if factory.lock().config.agent(crate::config::RIVET).is_some() {
@@ -1056,6 +1097,9 @@ impl Factory {
             runtime.retry_at = None;
         }
         pins::installed(self, &id, installed.is_none(), !bundle.manifest.views.is_empty());
+        // Installed again: one of Claktory's own that the person had
+        // uninstalled is theirs to keep again.
+        bundled::note_uninstalled(self, &id, &bundle.key, false);
         // An older version's files go once this one is in place.
         if let Some(before) = before.filter(|before| *before != version) {
             let _ = tokio::fs::remove_dir_all(folder(self, &id).join(before)).await;
@@ -1104,7 +1148,7 @@ impl Factory {
             description: manifest.description.clone(),
             icon: manifest.icon.clone(),
             hosts: manifest.hosts.clone(),
-            scopes: scopes(manifest),
+            scopes: scopes(manifest, &bundle.key),
             events: event_kinds(manifest),
             secrets: secret_items(manifest, &[]),
             memory_mb: manifest.memory_mb,
@@ -1146,6 +1190,8 @@ impl Factory {
                 Ok(config.apps.remove(index))
             })
             .await?;
+        // One of Claktory's own stays uninstalled: it isn't put back.
+        bundled::note_uninstalled(self, &id, &removed.key, true);
         // The host forgets it before its files go.
         surfaces::app_uninstalled(self, &id);
         pins::uninstalled(self, &id);
@@ -1177,54 +1223,48 @@ impl Factory {
         Ok(())
     }
 
-    pub(crate) async fn grant_app(&self, request: &v1::GrantApp) -> Result<(), RequestError> {
+    /// GrantApp: the person gives the agent these scopes of the app in place
+    /// of what it had (none takes it away), kept as a change of theirs.
+    pub(crate) async fn grant_app(self: &Arc<Self>, request: &v1::GrantApp) -> Result<(), RequestError> {
         let manifest = self.apps.manifest(&request.app_id).ok_or_else(|| no_app(&request.app_id))?;
-        let mut scopes: Vec<String> = Vec::new();
         for scope in &request.scopes {
             if manifest.scope(scope).is_none() {
                 return Err(RequestError::Apps(format!("The {} app has no scope \"{scope}\".", manifest.name)));
             }
-            if !scopes.contains(scope) {
-                scopes.push(scope.clone());
-            }
         }
-        // In the manifest's order, so the agent's tools keep theirs.
-        scopes.sort_by_key(|scope| manifest.scopes.iter().position(|spec| &spec.id == scope));
-        self.edit_config(|config| {
-            if config.agent(&request.agent_id).is_none() {
+        let held = {
+            let inner = self.lock();
+            if inner.config.agent(&request.agent_id).is_none() {
                 return Err(RequestError::UnknownAgent(request.agent_id.clone()));
             }
-            let app = config.apps.iter_mut().find(|app| app.id == request.app_id).ok_or_else(|| no_app(&request.app_id))?;
-            if scopes.is_empty() {
-                app.grants.remove(&request.agent_id);
-            } else {
-                app.grants.insert(request.agent_id.clone(), scopes.clone());
-            }
-            // It no longer hears what it no longer has the scope for.
-            for (kind, agents) in &mut app.subscriptions {
-                let scope = manifest.event(kind).map(|event| event.scope.as_str());
-                if !scope.is_some_and(|scope| scopes.iter().any(|granted| granted == scope)) {
-                    agents.retain(|agent| agent != &request.agent_id);
-                }
-            }
-            app.subscriptions.retain(|_, agents| !agents.is_empty());
-            Ok(())
-        })
-        .await?;
-        self.agents_changed_apps();
+            let app = inner.config.apps.iter().find(|app| app.id == request.app_id).ok_or_else(|| no_app(&request.app_id))?;
+            changes::held(app, &request.agent_id)
+        };
+        // It no longer hears what it no longer has the scope for.
+        let hears =
+            held.hears.into_iter().filter(|kind| manifest.event(kind).is_some_and(|event| request.scopes.contains(&event.scope))).collect();
+        let to = changes::Access {
+            agents: [(request.agent_id.clone(), changes::Held { scopes: request.scopes.clone(), hears })].into(),
+            ..Default::default()
+        };
+        changes::apply(self, &request.app_id, &to, changes::How::YOU).await?;
         Ok(())
     }
 
-    pub(crate) async fn subscribe_app(&self, request: &v1::SubscribeApp) -> Result<(), RequestError> {
+    /// SubscribeApp: the agents that hear the app's events of a kind, in
+    /// place of those that did; kept as a change of the person's.
+    pub(crate) async fn subscribe_app(self: &Arc<Self>, request: &v1::SubscribeApp) -> Result<(), RequestError> {
         let manifest = self.apps.manifest(&request.app_id).ok_or_else(|| no_app(&request.app_id))?;
         let Some(event) = manifest.event(&request.event_kind) else {
             return Err(RequestError::Apps(format!("The {} app has no event \"{}\".", manifest.name, request.event_kind)));
         };
-        self.edit_config(|config| {
-            let mut agents = Vec::new();
+        let to = {
+            let inner = self.lock();
+            let config = &inner.config;
+            let app = config.apps.iter().find(|app| app.id == request.app_id).ok_or_else(|| no_app(&request.app_id))?;
+            let mut agents: Vec<&String> = Vec::new();
             for id in &request.agent_ids {
                 let Some(agent) = config.agent(id) else { return Err(RequestError::UnknownAgent(id.clone())) };
-                let app = config.apps.iter().find(|app| app.id == request.app_id).ok_or_else(|| no_app(&request.app_id))?;
                 if !app.grants.get(id).is_some_and(|scopes| scopes.contains(&event.scope)) {
                     let scope = manifest.scope(&event.scope).map_or(event.scope.as_str(), |scope| scope.label.as_str());
                     let heard = if event.label.is_empty() { event.kind.clone() } else { lower_first(&event.label) };
@@ -1233,19 +1273,33 @@ impl Factory {
                         agent.name, agent.name
                     )));
                 }
-                if !agents.contains(id) {
-                    agents.push(id.clone());
+                if !agents.contains(&id) {
+                    agents.push(id);
                 }
             }
-            let app = config.apps.iter_mut().find(|app| app.id == request.app_id).ok_or_else(|| no_app(&request.app_id))?;
-            if agents.is_empty() {
-                app.subscriptions.remove(&request.event_kind);
-            } else {
-                app.subscriptions.insert(request.event_kind.clone(), agents);
+            let had: Vec<String> = app.subscriptions.get(&request.event_kind).cloned().unwrap_or_default();
+            let mut to = changes::Access::default();
+            // Each agent that starts or stops hearing it.
+            for agent in agents
+                .iter()
+                .map(|id| id.as_str())
+                .filter(|id| !had.iter().any(|old| old == id))
+                .chain(had.iter().map(String::as_str).filter(|old| !agents.iter().any(|id| id == old) && config.agent(old).is_some()))
+            {
+                let mut held = changes::held(app, agent);
+                held.hears.retain(|kind| kind != &request.event_kind);
+                if agents.iter().any(|id| id.as_str() == agent) {
+                    held.hears.push(request.event_kind.clone());
+                    held.hears.sort();
+                }
+                to.agents.insert(agent.to_owned(), held);
             }
-            Ok(())
-        })
-        .await
+            to
+        };
+        if !to.is_empty() {
+            changes::apply(self, &request.app_id, &to, changes::How::YOU).await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn set_app_secret(&self, request: &v1::SetAppSecret) -> Result<(), RequestError> {
@@ -1259,8 +1313,12 @@ impl Factory {
             return Err(RequestError::Apps(format!("Paste the {what} to save it.")));
         }
         let kept = self.lock().config.apps.iter().find(|app| app.id == request.app_id).and_then(|app| app.secrets.get(&spec.name).cloned());
-        let values =
-            [crate::vault::Value { variable: spec.name.to_uppercase(), value: zeroize::Zeroizing::new(value.to_owned()), file: false, binary: false }];
+        let values = [crate::vault::Value {
+            variable: spec.name.to_uppercase(),
+            value: zeroize::Zeroizing::new(value.to_owned()),
+            file: false,
+            binary: false,
+        }];
         let label = if spec.label.is_empty() { spec.name.clone() } else { lower_first(&spec.label) };
         let description = format!("The {name} app's {label}. Only the {name} app uses it.", name = manifest.name);
         let exists = kept.as_ref().is_some_and(|id| self.vault.state(|_, _| false).secrets.iter().any(|secret| &secret.id == id));
@@ -1299,15 +1357,10 @@ impl Factory {
         self.vault_changed();
         Ok(())
     }
-
-    /// An agent's apps changed: it hears before its next step.
-    fn agents_changed_apps(&self) {
-        self.apps_changed();
-    }
 }
 
 /// A label inside a sentence: "Bot token" → "bot token"; "API key" stays.
-fn lower_first(label: &str) -> String {
+pub(super) fn lower_first(label: &str) -> String {
     let mut chars = label.chars();
     match (chars.next(), chars.next()) {
         (Some(first), Some(second)) if first.is_uppercase() && !second.is_uppercase() => {

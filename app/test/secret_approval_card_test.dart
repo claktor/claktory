@@ -2,6 +2,7 @@
 // line per pipe the command may come from (P1's taint), the agent's own
 // read or heard through others.
 import 'package:factory_app/decision.dart';
+import 'package:factory_app/pipes.dart' show SecretApprovalCard;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
@@ -56,31 +57,27 @@ SecretApproval _approval({
 );
 
 void main() {
-  testWidgets('it says where the command may come from, under who asks', (
-    tester,
-  ) async {
+  testWidgets('it says where the command may come from, under who asks; a '
+      'pipe read before #346 says nothing', (tester) async {
     await _card(
       tester,
       _approval(
         taint: [
           PipeTaint(pipeName: 'Acme launch', pipeId: 'pp'),
-          PipeTaint(
-            pipeName: 'Acme launch',
-            pipeId: 'pp',
-            viaNames: ['Liaison', 'Lea'],
-          ),
+          PipeTaint(kind: 'browser', pipeName: 'https://docs.example.com'),
         ],
       ),
     );
     final read = find.text(
-      "from June, which reads the pipe with Ana's Claktory",
+      'from June, which read a page on https://docs.example.com',
     );
     expect(read, findsOneWidget);
     expect(
-      find.text(
-        "from Lea, which heard from the pipe with Ana's Claktory via Liaison",
+      find.descendant(
+        of: find.byType(SecretApprovalCard),
+        matching: find.textContaining('Acme launch'),
       ),
-      findsOneWidget,
+      findsNothing,
     );
     final header = tester.getTopLeft(find.text('June wants to use AWS')).dy;
     final command = tester.getTopLeft(find.text('aws s3 ls')).dy;
@@ -112,15 +109,37 @@ void main() {
     expect(find.text('Allow once'), findsOneWidget);
   });
 
-  testWidgets('with a pipe read too, it says both', (tester) async {
+  testWidgets('with a page read too, it says both; a pipe read says '
+      'nothing', (tester) async {
     await _card(
       tester,
-      _approval(secrets: ['AWS', 'Stripe'], asks: ['AWS', 'Stripe']),
+      _approval(
+        secrets: ['AWS', 'Stripe'],
+        asks: ['AWS', 'Stripe'],
+        taint: [
+          PipeTaint(pipeName: 'Acme launch', pipeId: 'pp'),
+          PipeTaint(kind: 'browser', pipeName: 'https://docs.example.com'),
+        ],
+      ),
     );
     expect(
       find.text(
-        'June has read the pipe Acme launch, and you set AWS and Stripe to '
-        'ask each time. Allow it only if this command is what you expect.',
+        'June has read a page on https://docs.example.com, and you set AWS '
+        'and Stripe to ask each time. Allow it only if this command is what '
+        'you expect.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('an old card from a pipe read alone just says Claktory asks', (
+    tester,
+  ) async {
+    await _card(tester, _approval());
+    expect(
+      find.text(
+        'Claktory asks you before June uses a secret. Allow it only if this '
+        'command is what you expect.',
       ),
       findsOneWidget,
     );

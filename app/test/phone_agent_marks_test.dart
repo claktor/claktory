@@ -5,8 +5,7 @@
 import 'package:factory_app/agent_view.dart';
 import 'package:factory_app/mobile/agent_marks.dart';
 import 'package:factory_app/mobile/needs_you_button.dart';
-import 'package:factory_app/quiet_copies.dart'
-    show QuietCopiesChip, QuietWaitingChip;
+import 'package:factory_app/mobile/header.dart' show PhoneHeader;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/rendering.dart';
@@ -148,31 +147,30 @@ void main() {
     expect(find.text('Ingrid · Reads reports from 1 pipe'), findsOneWidget);
   });
 
-  testWidgets("quiet copies and waiting messages sit under the name too, so "
-      'the bar keeps only Needs you and "…"', (tester) async {
-    final workspace = _workspace('bo');
-    workspace.extensions.add(Extension(id: 'agents', name: 'Messaging'));
-    workspace.agents[2]
-      ..unreadCopies = 2
-      ..quietWaiting = 1
-      ..waitingSeqs.add(Int64(4))
-      ..extensions.add(AgentExtension(id: 'agents', enabled: true));
-    final harness = Harness(workspace);
-    await harness.show(tester, size: _phone);
-    await settle(tester);
-    expect(tester.takeException(), isNull);
-    final marks = find.byType(PhoneAgentMarks);
-    for (final chip in [QuietCopiesChip, QuietWaitingChip]) {
-      expect(
-        find.descendant(of: marks, matching: find.byType(chip)),
-        findsOneWidget,
-      );
+  testWidgets('quiet copies and waiting messages add nothing to the header: '
+      'it keeps its height on an iPhone SE (Matt)', (tester) async {
+    Future<double> header({bool quiet = false}) async {
+      final workspace = _workspace('omar');
+      workspace.extensions.add(Extension(id: 'agents', name: 'Messaging'));
+      if (quiet) {
+        workspace.agents[3]
+          ..unreadCopies = 2
+          ..quietWaiting = 1
+          ..waitingSeqs.add(Int64(4))
+          ..extensions.add(AgentExtension(id: 'agents', enabled: true));
+      }
+      await Harness(workspace).show(tester, size: _se);
+      await settle(tester);
+      expect(tester.takeException(), isNull);
+      return tester.getSize(find.byType(PhoneHeader)).height;
     }
-    // Under the name, beside the pipe marks.
-    expect(
-      tester.getTopLeft(find.byType(QuietCopiesChip)).dy,
-      greaterThan(tester.getBottomLeft(_inHeader(find.text('Bo'))).dy),
-    );
+
+    final plain = await header();
+    final quiet = await header(quiet: true);
+    expect(find.byType(PhoneAgentMarks), findsNothing);
+    expect(_inHeader(find.textContaining('cop')), findsNothing);
+    expect(_inHeader(find.textContaining('quiet')), findsNothing);
+    expect(quiet, plain);
     expect(find.byType(PhoneNeedsYouButton), findsOneWidget);
   });
 

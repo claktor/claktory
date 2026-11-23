@@ -14,6 +14,7 @@ import 'claktory_identity.dart' show claktoryName;
 import 'connections.dart';
 import 'links.dart' show confirmPairing;
 import 'controls.dart';
+import 'devices.dart' show thisDeviceKind;
 import 'explorer.dart';
 import 'extensions.dart';
 import 'identity.dart';
@@ -35,6 +36,7 @@ import 'mobile/review_bar.dart';
 import 'mobile/presentation.dart'
     show PhoneSheetHost, SheetOverlay, presentSheet;
 import 'pairing.dart';
+import 'pasted_code.dart';
 import 'panes.dart' show AppPane, appKind, pageOfKind, paneGlyph, paneTitle;
 import 'pipes.dart' show PipeView, selectedPipe;
 import 'protocol/factory/v1/factory.pb.dart';
@@ -1135,7 +1137,7 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
       setState(() => _scanError = problem);
       return;
     }
-    unawaited(_connect(parsePairingCode(text)!, code: text));
+    unawaited(_connect(pastedPairingCode(text)!, code: text));
   }
 
   /// While the person is asked whether to connect.
@@ -1355,7 +1357,7 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
       builder: (context, _) {
         final pasted = _code.text.trim();
         final error = pasted.isEmpty ? null : pairingProblem(pasted);
-        final target = error == null ? parsePairingCode(pasted) : null;
+        final target = error == null ? pastedPairingCode(pasted) : null;
         void connect() {
           if (target != null) unawaited(_connect(target));
         }
@@ -1406,16 +1408,21 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
                   ),
                 ],
               ),
-            if (!noCamera &&
-                _access != CameraAccess.denied &&
-                _access != CameraAccess.restricted) ...[
+            // Back to the camera, even one refused so far (friend bug #2):
+            // it says how to allow it, with Open Settings. Only a camera
+            // this phone can't have (none, or restricted) has no way back.
+            if (!noCamera && _access != CameraAccess.restricted) ...[
               const SizedBox(height: Space.m),
               _Link(
                 'Scan code instead',
-                onTap: () => setState(() {
-                  _pasting = false;
-                  _scanError = null;
-                }),
+                onTap: () {
+                  setState(() {
+                    _pasting = false;
+                    _scanError = null;
+                  });
+                  // Allowed in Settings meanwhile: straight to the camera.
+                  unawaited(_check());
+                },
               ),
             ],
           ],
@@ -1432,7 +1439,18 @@ String _phoneWord() =>
 /// Why [code] can't connect this phone, or null when it can: it isn't a
 /// code, or it's from a Claktory before the private tunnel.
 String? pairingProblem(String code, {bool scanned = false}) {
-  final target = parsePairingCode(code);
+  final target = pastedPairingCode(code);
+  // Another of Claktory's codes (friend bug #2): what it is, and where
+  // this one's code is.
+  if (target == null) {
+    final other = otherCodeProblem(
+      code,
+      device: thisDeviceKind,
+      where: defaultTargetPlatform == TargetPlatform.iOS ? onMac : whereItRuns,
+      scanned: scanned,
+    );
+    if (other != null) return other;
+  }
   // Android is often paired to a Claktory on a server, with no Mac in
   // sight.
   final android = defaultTargetPlatform == TargetPlatform.android;

@@ -387,10 +387,30 @@ class ChatThread extends ChangeNotifier {
   /// Still friends: it can be written to (once its group is here).
   bool get writable => conversation.active && !ended;
 
-  /// It can be sent to now: writable, and its group and this device's
-  /// keys are here.
+  /// It can be sent to now: writable, its group and this device's keys
+  /// are here, and the group isn't waiting for a new security key, nor
+  /// held at a change this device can't take yet (a send then would only
+  /// fail: Fugo, row 654).
   bool get canSend =>
-      writable && group.isNotEmpty && e2ee.setup == DmSetup.ready;
+      writable &&
+      group.isNotEmpty &&
+      e2ee.setup == DmSetup.ready &&
+      waitingFor == null &&
+      joining == null &&
+      !held;
+
+  /// The friend isn't in this conversation yet (row 676): nothing is sent
+  /// until a device of theirs is, and the chat says so. Their account.
+  String? get joining => group.isEmpty ? null : e2ee.joining[group];
+
+  /// Whose new security key the group waits for (row 630, Fugo): someone
+  /// started over on a new key, and their devices under the old one are
+  /// still in it until their new device takes them out. Nothing is sent
+  /// until it has (it would reach those devices); the chat says so.
+  String? get waitingFor => group.isEmpty ? null : e2ee.waitingFor[group];
+
+  /// What it waits for is a reinstalled device (row 202): its name.
+  String? get reinstalling => group.isEmpty ? null : e2ee.reinstalling[group];
 
   /// The friend's security key changed and the person hasn't seen it:
   /// nothing is sent to them until they have (Fugo 2b).

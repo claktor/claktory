@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../controls.dart' show Pressable;
+import '../highlights.dart' show HighlightGlow, HighlightStore;
 import '../extensions.dart' show extensionBarWidthOf;
 import '../identity.dart';
 import '../layout.dart';
@@ -362,10 +363,63 @@ class _WorkbenchState extends State<Workbench> {
   @override
   void dispose() {
     windowControls.removeListener(_controlsChanged);
+    _highlights?.removeListener(_glowed);
+    _highlights?.pointedAt.removeListener(_pointedAt);
     super.dispose();
   }
 
   void _controlsChanged() => setState(() {});
+
+  /// What glows, and what the backend points at: a pane of the agent's
+  /// shown again (an agent's show of a file already open, its show card
+  /// tapped) comes to the front, as a new one does ([didUpdateWidget]).
+  HighlightStore? _highlights;
+  var _lastGlow = 0;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final highlights = context
+        .getInheritedWidgetOfExactType<AppScope>()
+        ?.backend
+        .highlights;
+    if (highlights == _highlights) return;
+    _highlights?.removeListener(_glowed);
+    _highlights?.pointedAt.removeListener(_pointedAt);
+    _highlights = highlights
+      ?..addListener(_glowed)
+      ..pointedAt.addListener(_pointedAt);
+    _lastGlow = highlights?.glows.lastOrNull?.id ?? 0;
+  }
+
+  void _glowed() {
+    final glows = _highlights?.glows ?? const <HighlightGlow>[];
+    final fresh = [
+      for (final glow in glows)
+        if (glow.id > _lastGlow) glow.key,
+    ];
+    if (glows.isNotEmpty) _lastGlow = math.max(_lastGlow, glows.last.id);
+    fresh.forEach(_toFront);
+  }
+
+  void _pointedAt() => _highlights?.pointedAt.value?.keys.forEach(_toFront);
+
+  /// Brings `pane:<agent>:<pane>` to the front when it's a pane of the
+  /// agent shown here; not while a stroke is down on a document.
+  void _toFront(String key) {
+    final agent = widget.agent;
+    if (!mounted || agent == null) return;
+    final prefix = 'pane:${agent.id}:';
+    if (!key.startsWith(prefix)) return;
+    final pane = find(layoutOf(agent), key.substring(prefix.length));
+    if (pane == null) return;
+    final focus = context
+        .getInheritedWidgetOfExactType<WorkbenchScope>()
+        ?.notifier;
+    if (focus == null || focus.documents.drawing.value) return;
+    focus._noteDocument(agent.id, pane);
+    focus.focus(agent.id, pane.id);
+  }
 
   /// Panes, pointing at its button, or in the window's middle when none
   /// shows (⌥⌘P with every pane laid out).
@@ -380,18 +434,24 @@ class _WorkbenchState extends State<Workbench> {
       WorkbenchScope.of(context)._closeOverlayWhileBuilding();
       return;
     }
-    // A pane opened from the sidebar over the window (Needs you, Usage):
-    // the sidebar goes and the pane shows, as an agent chosen there does.
+    // A pane that comes into the layout (an agent's show, Needs you opened
+    // from the sidebar over the window) or takes another's place comes
+    // into sight, even where the window shows fewer panes than the layout
+    // has; the sidebar over the window goes, as for an agent chosen there.
+    // Not while a stroke is down on a document: it stays in front.
     final agent = widget.agent;
     final focus = WorkbenchScope.of(context);
-    if (agent == null || old.agent == null || !focus.overlayOpen) return;
-    final before = {for (final leaf in leaves(layoutOf(old.agent!))) leaf.id};
+    if (agent == null || old.agent == null) return;
+    final before = {
+      for (final leaf in leaves(layoutOf(old.agent!))) leaf.id: leaf.leaf,
+    };
     final added = [
       for (final leaf in leaves(layoutOf(agent)))
-        if (!before.contains(leaf.id)) leaf,
+        if (before[leaf.id] != leaf.leaf) leaf,
     ];
     if (added.isEmpty) return;
-    focus._closeOverlayWhileBuilding();
+    if (focus.overlayOpen) focus._closeOverlayWhileBuilding();
+    if (focus.documents.drawing.value) return;
     focus._focused[agent.id] = added.last.id;
     focus._noteDocument(agent.id, added.last);
   }

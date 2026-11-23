@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show File;
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -7,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../backend.dart' show Backend;
+import '../device_account.dart' show DeviceAccount;
 import '../protocol/factory/v1/factory.pb.dart' show DmLeafOffer;
 import '../scope.dart';
 import '../tunnel/api/dm.dart';
@@ -78,6 +80,10 @@ E2ee e2eeOf(BuildContext context) {
   return e2ee;
 }
 
+/// This device's engine for [account] if something started it already;
+/// null otherwise.
+E2ee? startedE2ee(DeviceAccount account) => _engines[account];
+
 /// Whether this device's messages start over as a new device: its account
 /// key changed from one it had (removed by another device). A first key,
 /// made at a fresh device's first sign-in, never does (Fugo).
@@ -123,6 +129,8 @@ class DmAccountKeys {
     required this.identityKey,
     required this.deviceList,
     required this.version,
+    this.replacedIdentityKeys = const [],
+    this.signedOut = const [],
   });
 
   factory DmAccountKeys.fromJson(Map<String, Object?> json) => DmAccountKeys(
@@ -130,12 +138,30 @@ class DmAccountKeys {
     identityKey: dmUnb64(_text(json, 'identity_key')),
     deviceList: dmUnb64(_text(json, 'device_list')),
     version: _int(json, 'version'),
+    replacedIdentityKeys: [
+      for (final key in json['replaced_identity_keys'] as List? ?? const [])
+        if (key is String && key.isNotEmpty) dmUnb64(key),
+    ],
+    signedOut: [
+      for (final leaf in json['signed_out'] as List? ?? const [])
+        if (leaf is String && leaf.isNotEmpty) leaf,
+    ],
   );
 
   final String accountId;
   final Uint8List identityKey;
   final Uint8List deviceList;
   final int version;
+
+  /// The keys the account replaced, oldest first, as the worker lists them
+  /// (row 654): only ever retired here as a held commit proves, or by this
+  /// device's own start-over (Fugo).
+  final List<Uint8List> replacedIdentityKeys;
+
+  /// The account's listed devices that signed out of it (row 671), by
+  /// leaf id: only in the answer to one of its own devices, and empty from
+  /// a service that doesn't say.
+  final List<String> signedOut;
 }
 
 /// A group as the worker lists it.
@@ -484,6 +510,21 @@ enum DmSetup {
   failed,
 }
 
+/// What signing out of the Claktory account does to this device's
+/// messages ([E2ee.signOutPlan], row 671).
+enum DmSignOut {
+  /// There are none here: it only signs out.
+  none,
+
+  /// This is the person's only device with them: they stay here, locked,
+  /// until it signs in to the same account again, unless deleted.
+  alone,
+
+  /// The person's other devices have them: this one leaves, and they're
+  /// deleted here.
+  withOthers,
+}
+
 /// Why [DmSetup.failed].
 enum DmFailure {
   none,
@@ -507,6 +548,30 @@ enum DmFailure {
 typedef DmOwnDevice = ({String leafId, String name, bool here, int sinceMs});
 
 /// What stopped a Remove… part-way, to try again.
+/// An add code [E2ee.scanned] refuses: handed off to already, or for a
+/// device the person removed or locked out (Abbacchio's row 612, Fugo).
+class DmCodeRefused implements Exception {
+  const DmCodeRefused();
+
+  /// What the Rust says, and the person reads.
+  static const message =
+      'This code was already used, or is for a device you removed.';
+
+  @override
+  String toString() => message;
+}
+
+/// Why [E2ee.startNewKey] didn't make a new security key.
+enum DmStartOverStop {
+  /// The account service wants a recent sign-in first (403
+  /// sign_in_again, Fugo): sign in again, then start over.
+  signInAgain,
+
+  /// Too many new keys today, or the worker refused; [E2ee.problem] has
+  /// the detail.
+  failed,
+}
+
 enum DmRemoveStop {
   /// Not yet out of every group (or off the list); [E2ee.problem] has the
   /// detail.
@@ -528,6 +593,10 @@ enum DmKeyChange {
   /// The worker or this device refused; [E2ee.problem] has the detail.
   /// Tried again from where it got to.
   failed,
+
+  /// The account service wants a recent sign-in for a new key (403
+  /// sign_in_again, row 630): sign in again, then carry on.
+  signInAgain,
 }
 
 /// Opens this device's store; tests give their own.
@@ -557,6 +626,9 @@ Future<Uint8List> _newSecretRust() async {
   await RustTunnels.load();
   return dmNewSecret();
 }
+
+/// Whether a store is at [path]; tests give their own.
+Future<bool> _storeExistsHere(String path) => File(path).exists();
 
 Future<void> _removeStoreRust(String path) async {
   await RustTunnels.load();
@@ -609,6 +681,7 @@ class E2ee extends ChangeNotifier {
     DmOpen? open,
     Future<Uint8List> Function()? newSecret,
     Future<void> Function(String path)? removeStore,
+    Future<bool> Function(String path)? storeExists,
     DmWhoAmI? whoAmI,
     int Function()? nowMs,
     String Function()? newId,
@@ -622,6 +695,7 @@ class E2ee extends ChangeNotifier {
        _open = open ?? _openRust,
        _newSecret = newSecret ?? _newSecretRust,
        _removeStore = removeStore ?? _removeStoreRust,
+       _storeExists = storeExists ?? _storeExistsHere,
        _whoAmI = whoAmI ?? session.account.whoAmI,
        _nowMs = nowMs ?? (() => DateTime.now().millisecondsSinceEpoch),
        _newId = newId ?? _randomId;
@@ -639,6 +713,7 @@ class E2ee extends ChangeNotifier {
   final Future<bool> Function(String idHex) _admitTransfer;
   final Future<Uint8List> Function() _newSecret;
   final Future<void> Function(String path) _removeStore;
+  final Future<bool> Function(String path) _storeExists;
   final DmWhoAmI _whoAmI;
   final int Function() _nowMs;
   final String Function() _newId;
@@ -662,6 +737,24 @@ class E2ee extends ChangeNotifier {
   String leafId = '';
   String deviceName = '';
 
+  /// The person's listed devices that signed out of the account (row 671),
+  /// by leaf id, as the worker last said: Signed out in Your devices.
+  Set<String> signedOut = const {};
+
+  /// Reads again which of the person's devices signed out.
+  Future<void> readSignedOut() async {
+    if (setup != DmSetup.ready || accountId.isEmpty) return;
+    try {
+      final mine = await routes.keys(accountId);
+      final now = {...?mine?.signedOut};
+      if (setEquals(now, signedOut)) return;
+      signedOut = now;
+      _notify();
+    } catch (_) {
+      // Read again when Your devices opens next.
+    }
+  }
+
   /// The groups the worker lists for this device, by id.
   final groups = <String, DmServerGroup>{};
 
@@ -679,9 +772,87 @@ class E2ee extends ChangeNotifier {
   final sending = <String, DmSending>{};
 
   /// Groups this device fell out of step with, and when it may next try
-  /// to join them again.
-  final _rejoinAfter = <String, DateTime>{};
+  /// to join them again (by [_nowMs]).
+  final _rejoinAfter = <String, int>{};
   final _rejoinTries = <String, int>{};
+
+  /// Groups whose commit from here (a move to the person's new key, a
+  /// removed device taken out) the worker refused as behind, how many
+  /// times in a row, and when it may next be tried (by [_nowMs]): never at
+  /// once again. A kept device that missed a rotation retried at every
+  /// pass of a sync, about 50 requests a second (Abbacchio's R5 rows
+  /// 570–575).
+  final _refusedTries = <String, int>{};
+  final _refusedAfter = <String, int>{};
+
+  /// Whether a commit to [group] waits after being refused as behind.
+  bool _waitsAfterRefusal(String group) =>
+      _nowMs() < (_refusedAfter[group] ?? 0);
+
+  /// [group] refused a commit from here as behind: it waits longer after
+  /// each time in a row. How many times in a row.
+  int _refusedAsBehind(String group) {
+    final tries = (_refusedTries[group] ?? 0) + 1;
+    _refusedTries[group] = tries;
+    _refusedAfter[group] =
+        _nowMs() + (retryAfter * min(1 << (tries - 1), 64)).inMilliseconds;
+    return tries;
+  }
+
+  /// When the last sync started (by [_nowMs]).
+  var _syncedMs = -1;
+
+  /// Whether a wait after a refusal, a refused join or a failed sign-out
+  /// has ended since the last sync started: [follow] syncs then, even with
+  /// nothing new in the account, where nothing else would (Abbacchio's row
+  /// 590: a kept device stayed out of the channel).
+  @visibleForTesting
+  bool get waitOver {
+    final now = _nowMs();
+    return [
+      ..._refusedAfter.values,
+      ..._rejoinAfter.values,
+      ..._signOutAfter.values,
+      ?_syncFailedAfter,
+    ].any((ms) => ms > _syncedMs && ms <= now);
+  }
+
+  /// After a sync stopped on an error (the worker briefly unavailable),
+  /// when it's tried again, longer after each in a row: the events it
+  /// missed are behind the cursor and won't come again (Abbacchio's row
+  /// 601: a kept device never read its self group again).
+  int? _syncFailedAfter;
+  var _syncFailures = 0;
+
+  void _syncFailed() {
+    // A sync something else started during the wait (a group event)
+    // that fails too leaves the wait as it is: only a try once it's over
+    // makes the next longer, so a short outage doesn't push it far past
+    // its end (Abbacchio: six quick failures in a 30 s outage made it
+    // 160 s).
+    final now = _nowMs();
+    final waiting = _syncFailedAfter;
+    if (waiting != null && now < waiting) return;
+    _syncFailures++;
+    _syncFailedAfter =
+        now + (retryAfter * min(1 << (_syncFailures - 1), 64)).inMilliseconds;
+  }
+
+  /// A commit from here to [group] went through.
+  void _commitTaken(String group) {
+    _refusedTries.remove(group);
+    _refusedAfter.remove(group);
+  }
+
+  /// The person's removed devices signed out of their account from here
+  /// while the app runs: not signed out again at each sync while a group
+  /// still holds them (the service's removal limit answered 429).
+  final _signedOut = <String>{};
+
+  /// Removed devices whose sign-out didn't go through, and when it may
+  /// next be tried (by [_nowMs]).
+  final _signOutAfter = <String, int>{};
+  final _signOutTries = <String, int>{};
 
   Future<void>? _syncing;
   var _syncAgain = false;
@@ -739,7 +910,7 @@ class E2ee extends ChangeNotifier {
               _events.add(event);
           }
         }
-        if (groupsMoved) await sync();
+        if (groupsMoved || waitOver) await sync();
       } on UserAppError catch (error) {
         if (_closed) return;
         if (error.problem == UserAppProblem.gone) {
@@ -785,6 +956,7 @@ class E2ee extends ChangeNotifier {
         return _fail(DmFailure.otherAccount);
       }
       final mine = await routes.keys(accountId);
+      signedOut = {...?mine?.signedOut};
       if (!status.setUp) {
         return _set(mine == null ? DmSetup.firstDevice : DmSetup.addThisDevice);
       }
@@ -835,28 +1007,54 @@ class E2ee extends ChangeNotifier {
   /// The store with this device's keys; made, with its keys, the first
   /// time. A store made with another key can't be read by anything, so
   /// it's replaced.
+  ///
+  /// A new store (none here, or one replaced) is a new device here, with
+  /// new device keys (row 202, Fugo): the key store outlives the app (an
+  /// iPhone's keychain keeps it across a reinstall), but a leaf key used
+  /// by an install whose store is gone would come back as the same leaf,
+  /// with its old key packages still handed out. So its leaf and store
+  /// keys are made anew, and the person's identity key is deleted: a
+  /// device with no store isn't in anything, and the key comes back the
+  /// usual ways (a hand-off, or a start-over).
+  ///
+  /// So where store.db lives must never change without moving it there
+  /// first, before this runs (Fugo): a store not found at its path is
+  /// taken for a new install, and an ordinary update would wipe the
+  /// person's identity on every device.
   Future<DmDevice?> _openStore() async {
+    final path = '${await keys.folder()}/store.db';
+    if (!await _storeExists(path)) await _forgetDeviceKeys();
+    var device = await _openWith(path);
+    if (device == null) {
+      await _removeStore(path);
+      await _forgetDeviceKeys();
+      device = await _openWith(path);
+    }
+    return device;
+  }
+
+  Future<DmDevice?> _openWith(String path) async {
     final storeKey = await _keyOrNew(DmKeyName.store);
     final leafKey = await _keyOrNew(DmKeyName.leaf);
     final identity = await _keptKey(DmKeyName.identity);
-    final path = '${await keys.folder()}/store.db';
-    var device = await _open(
-      path: path,
-      storeKey: storeKey,
-      leafKey: leafKey,
-      identityKey: identity,
-    );
-    if (device == null) {
-      await _removeStore(path);
-      device = await _open(
+    try {
+      return await _open(
         path: path,
         storeKey: storeKey,
         leafKey: leafKey,
         identityKey: identity,
       );
+    } finally {
+      identity?.fillRange(0, identity.length, 0);
     }
-    identity?.fillRange(0, identity.length, 0);
-    return device;
+  }
+
+  /// Every key kept for a store that's gone: what [_openWith] needs is
+  /// made anew.
+  Future<void> _forgetDeviceKeys() async {
+    for (final name in DmKeyName.values) {
+      await keys.delete(name);
+    }
   }
 
   /// The key store's [name], as a copy this engine may zero once done
@@ -916,6 +1114,67 @@ class E2ee extends ChangeNotifier {
       }
       _fail(DmFailure.refused);
     }
+  }
+
+  /// No other device: makes a new security key for the person's account
+  /// on this one (dms-e2ee §2, "All devices lost"; Abbacchio's row 630).
+  /// The account's keys go to the new key, with this device alone on the
+  /// list; it then rejoins each of the person's groups, taking out the
+  /// devices under the old key (Ghiaccio, Fugo). Its old messages aren't
+  /// here; friends see the key changed. Null once done.
+  Future<DmStartOverStop?> startNewKey() async {
+    final device = _device;
+    if (device == null || setup != DmSetup.addThisDevice) {
+      return DmStartOverStop.failed;
+    }
+    _dropOffer();
+    final identity = await _newSecret();
+    await keys.put(DmKeyName.identity, identity);
+    try {
+      // The key it replaces, held as retired here from the start
+      // (Ghiaccio): its leaves are the dead ones, and a Claktory enrolled
+      // under it can enroll again.
+      final old = await routes.keys(accountId);
+      if (old == null) throw StateError('the account has no key to replace');
+      final made = await device.setUpNewKey(
+        identityKey: identity,
+        oldIdentityPublic: old.identityKey,
+        // Those before it too, after more than one start-over (row 654).
+        replacedIdentityKeys: old.replacedIdentityKeys,
+        accountId: accountId,
+        leafId: leafId,
+        name: deviceName,
+        nowMs: BigInt.from(_nowMs()),
+      );
+      await routes.rotateKeys(
+        identityKey: made.identityPublic,
+        deviceList: made.deviceList,
+      );
+    } catch (error) {
+      // Not made: back to waiting to be added, with nothing kept.
+      problem = '$error';
+      await keys.delete(DmKeyName.identity);
+      await _forgetStore();
+      await start();
+      return error is UserAppError &&
+              error.problem == UserAppProblem.signInAgain
+          ? DmStartOverStop.signInAgain
+          : DmStartOverStop.failed;
+    } finally {
+      identity.fillRange(0, identity.length, 0);
+    }
+    // What stopped an earlier try (a sign-in too old) no longer stands.
+    problem = '';
+    try {
+      await _topUpKeyPackages(force: true);
+      _set(DmSetup.ready);
+      await sync();
+      await _makeSelfGroup(device);
+    } catch (error) {
+      // The key is the account's now; the rest carries on at each sync.
+      problem = '$error';
+    }
+    return null;
   }
 
   /// The person's self group, made by their first device.
@@ -1286,7 +1545,18 @@ class E2ee extends ChangeNotifier {
   /// On a device that's set up: what [qr] (scanned from a new device) says
   /// of it, with the person's identity sealed for it, to ask the person
   /// before [addDevice].
-  Future<DmHandoffSealed> scanned(String qr) => _device!.sealHandoff(qr: qr);
+  /// Throws [DmCodeRefused] for a code that was handed off to already,
+  /// or is for a device the person removed (Abbacchio's row 612).
+  Future<DmHandoffSealed> scanned(String qr) async {
+    try {
+      return await _device!.sealHandoff(qr: qr);
+    } catch (error) {
+      if ('$error'.contains(DmCodeRefused.message)) {
+        throw const DmCodeRefused();
+      }
+      rethrow;
+    }
+  }
 
   /// Adds the device [sealed] is for: a new device list naming it, then its
   /// hand-off through the worker. It joins the person's groups itself.
@@ -1306,6 +1576,9 @@ class E2ee extends ChangeNotifier {
       ],
     );
     await routes.handOff(sealed.leafId, sealed.sealed);
+    // A code works once: asked again, it's refused (Abbacchio's row 612:
+    // after its device was locked out, it put it back on the list).
+    await device.codeUsed(comparison: sealed.comparison);
     // Then this device's history, straight to it (E8).
     unawaited(_sendHistory(sealed.leafId));
     _notify();
@@ -1380,9 +1653,15 @@ class E2ee extends ChangeNotifier {
       ];
       if (out.isEmpty) return;
       try {
-        return await _commitRemove(device, group, out);
+        await _commitRemove(device, group, out);
+        return _commitTaken(group.groupId);
       } on UserAppError catch (error) {
-        if (error.problem != UserAppProblem.epoch || attempt > 0) rethrow;
+        if (error.problem != UserAppProblem.epoch) rethrow;
+        if (attempt > 0) {
+          // Behind even after catching up: tried again after a wait.
+          _refusedAsBehind(group.groupId);
+          rethrow;
+        }
         await _catchUpOne(device, group.groupId);
       }
     }
@@ -1417,6 +1696,14 @@ class E2ee extends ChangeNotifier {
     await refreshKeys(accountId);
     final strays = await _removedButIn(device);
     if (strays.isEmpty) return;
+    // Never signed out: a device under a key since replaced (Fugo, row
+    // 630), read before it comes out of the groups. A surviving old
+    // device's notice is the person's alarm when someone else started
+    // over; Your devices offers Remove… for it.
+    final replaced = <String>{};
+    for (final group in await _groupsHere(device)) {
+      replaced.addAll(await device.replacedLeaves(groupId: group.id));
+    }
     // Kept as under way first: a sign-out that doesn't go through shows in
     // Your devices with Try again, and is carried on at the next launch.
     await _beginRemoval(
@@ -1426,7 +1713,10 @@ class E2ee extends ChangeNotifier {
       newKey: false,
     );
     for (final group in await _groupsHere(device)) {
-      if (held.containsKey(group.groupId)) continue;
+      if (held.containsKey(group.groupId) ||
+          _waitsAfterRefusal(group.groupId)) {
+        continue;
+      }
       try {
         await _removeFrom(device, group, [...strays.keys]);
       } catch (error) {
@@ -1439,7 +1729,30 @@ class E2ee extends ChangeNotifier {
     // the person's own Mac). Signed out whatever group is left (a held
     // one shows as Not fully removed).
     for (final leaf in strays.keys) {
-      if (await signOutDevice(leaf) == null) await _removed(device, leaf);
+      if (replaced.contains(leaf)) {
+        await _removed(device, leaf);
+        continue;
+      }
+      // Once signed out it stays so; one that didn't go through waits
+      // longer after each try (Abbacchio's R5: 429 at every sync).
+      // One signed out already (an earlier sweep, a Lock out) ends its
+      // row here too (Abbacchio's row 613: a second sweep began its
+      // removal again and left it as Not fully removed).
+      if (_signedOut.contains(leaf)) {
+        await _removed(device, leaf);
+        continue;
+      }
+      if (_nowMs() < (_signOutAfter[leaf] ?? 0)) continue;
+      if (await signOutDevice(leaf) == null) {
+        _signedOut.add(leaf);
+        _signOutAfter.remove(leaf);
+        await _removed(device, leaf);
+      } else {
+        final tries = (_signOutTries[leaf] ?? 0) + 1;
+        _signOutTries[leaf] = tries;
+        _signOutAfter[leaf] =
+            _nowMs() + (retryAfter * min(1 << (tries - 1), 64)).inMilliseconds;
+      }
     }
     _notify();
   }
@@ -1456,6 +1769,16 @@ class E2ee extends ChangeNotifier {
         device,
       )).entries)
         if (!removing.contains(key)) key: value,
+    };
+  }
+
+  /// The person's devices a start-over took out of their groups (they had
+  /// the key it replaced), by leaf with their names, until removed.
+  Future<Map<String, String>> replacedDevices() async {
+    final device = _device;
+    if (device == null || setup != DmSetup.ready) return const {};
+    return {
+      for (final each in await device.replacedDevices()) each.leafId: each.name,
     };
   }
 
@@ -1537,6 +1860,15 @@ class E2ee extends ChangeNotifier {
   Future<DmRemoveStop?> remove(String leaf, String name) async {
     final device = _device;
     if (device == null || setup != DmSetup.ready) return DmRemoveStop.failed;
+    if (leaf == leafId) {
+      // This device itself (its leaf from before a start-over, listed by
+      // a build before row 640's fix): never removed or signed out from
+      // here; whatever kept it goes.
+      await _removed(device, leaf);
+      await device.forgetReplaced(leafId: leaf);
+      _notify();
+      return null;
+    }
     _removing++;
     _notify();
     try {
@@ -1545,6 +1877,7 @@ class E2ee extends ChangeNotifier {
       switch (await signOutDevice(leaf)) {
         case null:
           await _removed(device, leaf);
+          await device.forgetReplaced(leafId: leaf);
           return null;
         case UserAppProblem.unreachable:
           return DmRemoveStop.signOutUnreachable;
@@ -1797,7 +2130,9 @@ class E2ee extends ChangeNotifier {
       return null;
     } on UserAppError catch (error) {
       problem = error.toString();
-      return DmKeyChange.failed;
+      return error.problem == UserAppProblem.signInAgain
+          ? DmKeyChange.signInAgain
+          : DmKeyChange.failed;
     } catch (error) {
       problem = '$error';
       return DmKeyChange.failed;
@@ -1893,19 +2228,34 @@ class E2ee extends ChangeNotifier {
     }
     if (_ownKeyCheck) return;
     for (final group in [..._unmoved]) {
-      if (!groups.containsKey(group) || held.containsKey(group)) continue;
+      if (!groups.containsKey(group) ||
+          held.containsKey(group) ||
+          _waitsAfterRefusal(group)) {
+        continue;
+      }
       final id = dmUnb64(group);
       try {
         final commit = await device.moveGroup(groupId: id);
         await routes.commit(group, commit);
+        _commitTaken(group);
         await _catchUpOne(device, group);
         _unmoved.remove(group);
       } on UserAppError catch (error) {
         await device.commitRefused(groupId: id);
         problem = error.toString();
         if (error.problem == UserAppProblem.epoch) {
+          final tries = _refusedAsBehind(group);
           await _catchUpOne(device, group);
-          _syncAgain = true;
+          if (tries == 1) {
+            // Caught up: moved at the next pass, once the wait is over.
+            _syncAgain = true;
+          } else if (groups[group] case final known?) {
+            // Caught up before and still behind: its feed doesn't bring
+            // this device to where the group is (a commit it missed while
+            // the rotation went on). It joins again from the group as the
+            // worker has it, under the new key, which moves it too.
+            await _rejoin(device, known);
+          }
         }
       }
     }
@@ -1925,7 +2275,11 @@ class E2ee extends ChangeNotifier {
     return [
       for (final leaf in list?.leaves ?? const <DmListed>[])
         if (leaf.kind == DmLeafKind.device)
-          if (members.where((m) => m.leafId == leaf.leafId).firstOrNull
+          if (members
+                  .where(
+                    (m) => m.account == accountId && m.leafId == leaf.leafId,
+                  )
+                  .firstOrNull
               case final member)
             (
               leafId: leaf.leafId,
@@ -1957,11 +2311,18 @@ class E2ee extends ChangeNotifier {
           version: version + 1,
           previousVersion: version,
         );
-        return;
       } on UserAppError catch (error) {
+        // Refused (or no answer): the pins stay as they were, so the
+        // next list another device puts is taken (Abbacchio's row 615:
+        // one signed here and never taken wedged the device). Stale: the
+        // worker's list, and the change again on top of it.
         if (error.problem != UserAppProblem.stale || attempt > 0) rethrow;
         await refreshKeys(accountId);
+        continue;
       }
+      // Taken: it's the person's list now, here too.
+      await device.acceptList(account: accountId, deviceList: signed);
+      return;
     }
   }
 
@@ -1973,11 +2334,85 @@ class E2ee extends ChangeNotifier {
   /// Starts again on this device: its keys and store go (what's on the
   /// person's other devices stays there).
   Future<void> startOver() async {
+    await deleteHere();
+    await start();
+  }
+
+  /// What signing out of the Claktory account does to the messages here
+  /// (row 671, Fugo): nothing when there are none; kept, locked, when this
+  /// is the only device with them; gone when the person's other devices
+  /// have them ([leave]). A start under way is waited for, up to [wait].
+  Future<DmSignOut> signOutPlan({
+    Duration wait = const Duration(seconds: 10),
+  }) async {
+    if (setup == DmSetup.starting) await _settled(wait);
+    final device = _device;
+    if (device == null) return DmSignOut.none;
+    final status = device.status();
+    if (!status.setUp || status.accountId != accountId) return DmSignOut.none;
+    final others =
+        device
+            .deviceList(account: accountId)
+            ?.leaves
+            .any(
+              (leaf) => leaf.kind == DmLeafKind.device && leaf.leafId != leafId,
+            ) ??
+        false;
+    return others ? DmSignOut.withOthers : DmSignOut.alone;
+  }
+
+  /// Once [setup] isn't [DmSetup.starting] any more, or [wait] passed.
+  Future<void> _settled(Duration wait) {
+    final settled = Completer<void>();
+    void check() {
+      if (setup != DmSetup.starting && !settled.isCompleted) {
+        settled.complete();
+      }
+    }
+
+    addListener(check);
+    return settled.future
+        .timeout(wait, onTimeout: () {})
+        .whenComplete(() => removeListener(check));
+  }
+
+  /// Takes this device out of the person's messages before it signs out
+  /// of the account, where their other devices have them (row 671, Fugo):
+  /// a list without it, which it signs since it holds their security key
+  /// (the worker then drops its key packages, and their other devices take
+  /// it out of every group), then everything here deleted ([deleteHere]).
+  /// It doesn't leave the groups itself. When the worker can't be reached,
+  /// it's deleted here all the same.
+  Future<void> leave() async {
+    final device = _device;
+    if (device != null) {
+      final status = device.status();
+      if (status.setUp && status.accountId == accountId) {
+        try {
+          await _changeList(
+            device,
+            (leaves) => [
+              for (final each in leaves)
+                if (each.leafId != leafId) each,
+            ],
+          );
+        } catch (error) {
+          problem = '$error';
+        }
+      }
+    }
+    await deleteHere();
+  }
+
+  /// Deletes the messages and keys on this device, the person's security
+  /// key included: signing out where other devices have them ([leave]),
+  /// or with Delete messages from this device (row 671). What's on their
+  /// other devices stays there.
+  Future<void> deleteHere() async {
     for (final name in DmKeyName.values) {
       await keys.delete(name);
     }
     await _forgetStore();
-    await start();
   }
 
   Future<void> _forgetStore() async {
@@ -2019,6 +2454,7 @@ class E2ee extends ChangeNotifier {
   Future<void> _syncOnce() async {
     final device = _device;
     if (device == null || setup != DmSetup.ready) return;
+    _syncedMs = _nowMs();
     await _expireReceiver();
     try {
       for (final welcome in await routes.welcomes()) {
@@ -2052,6 +2488,8 @@ class E2ee extends ChangeNotifier {
         if (setup != DmSetup.ready) return;
       }
       await _moveGroups(device);
+      await _followDead(device);
+      await _followJoining(device);
       // Devices off the person's list come out of any group they're still
       // in, before anything is sent (Fugo, R5b).
       await _sweepRemovedDevices(device);
@@ -2062,11 +2500,15 @@ class E2ee extends ChangeNotifier {
       await _topUpKeyPackages();
       await _linkClaktory(device);
       await _reconcileGrantsSafely(device, adding: true);
+      _syncFailures = 0;
+      _syncFailedAfter = null;
     } on UserAppError catch (error) {
       problem = error.toString();
+      _syncFailed();
     } catch (error) {
       // Whatever else stops a sync is said, never left to stop the next.
       problem = '$error';
+      _syncFailed();
     }
     _notify();
   }
@@ -2248,6 +2690,83 @@ class E2ee extends ChangeNotifier {
     await _catchUpOne(device, group.groupId);
   }
 
+  /// Groups here with a device under a replaced key, on no list of the
+  /// new one, still in them, by group: the account it's of. Nothing is
+  /// sent there until it's out (Group::send waits too; Fugo, row 630), and
+  /// the conversation says so.
+  final waitingFor = <String, String>{};
+
+  /// Of those, the groups held by a reinstalled device's former install
+  /// (row 202): the device's name, for the chat to say so.
+  final reinstalling = <String, String>{};
+
+  /// Each group here: the person's own dead devices taken out (a
+  /// start-over whose removal didn't go through yet), and who it waits
+  /// for otherwise.
+  Future<void> _followDead(DmDevice device) async {
+    final before = {...waitingFor};
+    final reinstalledBefore = {...reinstalling};
+    final here = {
+      for (final group in await device.groups()) dmB64(group.groupId),
+    };
+    for (final group in [...groups.values]) {
+      if (!here.contains(group.groupId)) {
+        waitingFor.remove(group.groupId);
+        reinstalling.remove(group.groupId);
+        continue;
+      }
+      try {
+        var waiting = await device.waitingFor(groupId: group.id);
+        if (waiting == accountId && !_waitsAfterRefusal(group.groupId)) {
+          try {
+            await _removeDead(device, group);
+          } catch (error) {
+            // Tried again at the next sync; meanwhile it waits.
+            problem = '$error';
+          }
+          waiting = await device.waitingFor(groupId: group.id);
+        }
+        if (waiting == null) {
+          waitingFor.remove(group.groupId);
+          reinstalling.remove(group.groupId);
+        } else {
+          waitingFor[group.groupId] = waiting;
+          switch (await device.reinstalling(groupId: group.id)) {
+            case final name?:
+              reinstalling[group.groupId] = name;
+            case null:
+              reinstalling.remove(group.groupId);
+          }
+        }
+      } catch (error) {
+        problem = '$error';
+      }
+    }
+    if (before.length != waitingFor.length ||
+        before.entries.any((each) => waitingFor[each.key] != each.value) ||
+        !mapEquals(reinstalledBefore, reinstalling)) {
+      _notify();
+    }
+  }
+
+  /// Takes the person's own dead devices out of [group] in one commit:
+  /// after a start-over's rejoin, none holds the new epoch's secrets.
+  Future<void> _removeDead(DmDevice device, DmServerGroup group) async {
+    final commit = await device.removeDeadLeaves(groupId: group.id);
+    if (commit == null) return;
+    try {
+      await routes.commit(group.groupId, commit);
+    } on UserAppError catch (error) {
+      await device.commitRefused(groupId: group.id);
+      if (error.problem == UserAppProblem.epoch) {
+        _refusedAsBehind(group.groupId);
+      }
+      rethrow;
+    }
+    _commitTaken(group.groupId);
+    await _catchUpOne(device, group.groupId);
+  }
+
   /// [_reconcileGrants], whatever goes wrong in it kept to it: the rest
   /// of a sync goes on.
   Future<void> _reconcileGrantsSafely(
@@ -2357,7 +2876,11 @@ class E2ee extends ChangeNotifier {
         final friend = group.accounts.where((each) => each != accountId);
         if (friend.any((each) => _unseenChange(device, each))) continue;
         for (final leaf in want) {
-          if (members.any((member) => member.leafId == leaf)) continue;
+          if (members.any(
+            (member) => member.account == accountId && member.leafId == leaf,
+          )) {
+            continue;
+          }
           final channel = groups.values
               .where(
                 (each) =>
@@ -2404,25 +2927,91 @@ class E2ee extends ChangeNotifier {
     await routes.deleteWelcome(welcome.id);
   }
 
+  /// After joining [group] again at [until] (its own commit's seq), past
+  /// what came after [read]: when that held anything said, a line in the
+  /// chat says some messages can't be shown (row 654, Fugo: never silent,
+  /// whatever the cause), where they were.
+  Future<void> _noteSkipped(
+    DmDevice device,
+    DmServerGroup group,
+    int read,
+    int until,
+    String because,
+  ) async {
+    var after = read;
+    int? when;
+    var skipped = false;
+    try {
+      pages:
+      while (true) {
+        final page = await routes.feed(group.groupId, after);
+        for (final item in page.items) {
+          if (item.seq >= until) break pages;
+          when ??= item.acceptedMs;
+          if (item.kind == 'application') {
+            skipped = true;
+            break pages;
+          }
+          after = item.seq;
+        }
+        if (!page.hasMore || page.items.isEmpty) break;
+      }
+    } on UserAppError catch (error) {
+      // Gone from the worker: it can't be known, so it's said.
+      if (error.problem != UserAppProblem.tooFarBehind) {
+        problem = error.toString();
+        return;
+      }
+      skipped = true;
+    }
+    if (!skipped) return;
+    await device.noteSkipped(
+      groupId: group.id,
+      seq: read + 1,
+      arrivedMs: when ?? _nowMs(),
+      because: because,
+    );
+    _moved(group.groupId);
+  }
+
+  /// The person's groups this device couldn't join because a device of
+  /// theirs in it still has their old security key (Abbacchio's row 611):
+  /// one off their list, so it can't be named. Tried again by itself.
+  final _behindOldKey = <String>{};
+
+  /// Some of the person's chats can't come here until their other devices
+  /// update (Your devices says so).
+  bool get waitingForOtherDevices => _behindOldKey.isNotEmpty;
+
   /// Joins [group] by external commit: a group of the person's this device
   /// isn't in yet (a new device), or one it fell out of step with. Waits
-  /// longer after each try that didn't take.
-  Future<void> _rejoin(DmDevice device, DmServerGroup group) async {
+  /// longer after each try that didn't take. [because]: the account whose
+  /// security key changed past what this device can follow, if that's why.
+  Future<void> _rejoin(
+    DmDevice device,
+    DmServerGroup group, {
+    String because = '',
+  }) async {
     final kind = group.kindFor(accountId);
     if (kind == null) return;
     final after = _rejoinAfter[group.groupId];
-    if (after != null && DateTime.now().isBefore(after)) return;
+    if (after != null && _nowMs() < after) return;
     final tries = (_rejoinTries[group.groupId] ?? 0) + 1;
     _rejoinTries[group.groupId] = tries;
-    _rejoinAfter[group.groupId] = DateTime.now().add(
-      retryAfter * min(1 << (tries - 1), 64),
-    );
+    _rejoinAfter[group.groupId] =
+        _nowMs() + (retryAfter * min(1 << (tries - 1), 64)).inMilliseconds;
     try {
       if (kind.kind == DmGroupType.conversation) {
         for (final account in kind.accounts) {
           if (account != accountId) await refreshKeys(account);
         }
       }
+      // Where it read to: what's after it and before its own commit is
+      // skipped by joining again.
+      final read = (await device.groups())
+          .where((each) => dmB64(each.groupId) == group.groupId)
+          .firstOrNull
+          ?.seq;
       final info = await routes.groupInfo(group.groupId);
       final commit = await device.rejoinGroup(
         groupId: group.id,
@@ -2430,21 +3019,41 @@ class E2ee extends ChangeNotifier {
         groupInfo: info,
         seq: group.lastSeq,
       );
-      await routes.commit(group.groupId, commit);
+      final taken = await routes.commit(group.groupId, commit);
+      _commitTaken(group.groupId);
+      if (held.remove(group.groupId) != null) _notify();
+      if (read != null && kind.kind == DmGroupType.conversation) {
+        await _noteSkipped(device, group, read, taken.seq, because);
+      }
       _moved(group.groupId);
+      if (_behindOldKey.remove(group.groupId)) _notify();
       // Its commit comes back in the feed, which merges it.
       final mine = (await device.groups())
           .where((each) => dmB64(each.groupId) == group.groupId)
           .firstOrNull;
       if (mine != null) await _catchUp(device, group, mine);
+      // A start-over's: the person's devices under the key it replaced
+      // come out at once, in a commit of their own (row 630).
+      await _removeDead(device, group);
     } on UserAppError catch (error) {
       problem = error.toString();
-      if (error.problem == UserAppProblem.epoch) {
-        // Another commit came first: a sync after the wait tries again.
+      if (error.problem == UserAppProblem.epoch ||
+          error.problem == UserAppProblem.waitingForFriend) {
+        // Another commit came first, or the friend isn't in yet (the
+        // worker lets only a member's add bring them, row 676): a sync
+        // after the wait tries again.
         await device.forgetGroup(groupId: group.id);
       }
     } catch (error) {
       problem = '$error';
+      // A member under the person's replaced key refuses the join.
+      if (problem.contains(
+            "$accountId's certificate is from a security key that was "
+            'replaced',
+          ) &&
+          _behindOldKey.add(group.groupId)) {
+        _notify();
+      }
     }
   }
 
@@ -2480,9 +3089,39 @@ class E2ee extends ChangeNotifier {
         // again; the person's own wait for their self group. Until then
         // it's held, unread, and nothing after it is read (Ghiaccio, Fugo:
         // never dropped, so the group can go on once the key is in).
-        if (processed.outcome == DmOutcome.held && processed.why != accountId) {
-          await refreshKeys(processed.why);
+        if (processed.outcome == DmOutcome.held &&
+            !processed.replaced &&
+            processed.why != accountId) {
+          final served = await refreshKeys(processed.why);
           processed = await take();
+          // Still held: under a key they replaced since, which the worker
+          // lists and this commit proves (row 654, Fugo's conditions in
+          // the crate). Retired, it's one this device can never take.
+          if (processed.outcome == DmOutcome.held &&
+              !processed.replaced &&
+              served != null &&
+              served.replacedIdentityKeys.isNotEmpty) {
+            try {
+              if (await device.retireReplaced(
+                groupId: group.id,
+                envelope: item.envelope,
+                account: processed.why,
+                served: served.identityKey,
+                listed: served.replacedIdentityKeys,
+              )) {
+                processed = await take();
+              }
+            } catch (error) {
+              problem = '$error';
+            }
+          }
+        }
+        // Never to be taken here: it joins the group again past it, and
+        // the chat says what it couldn't read (row 654).
+        if (processed.outcome == DmOutcome.held && processed.replaced) {
+          held.putIfAbsent(group.groupId, _nowMs);
+          _notify();
+          return _rejoin(device, group, because: processed.why);
         }
         if (processed.outcome == DmOutcome.held) {
           if (processed.why == accountId) _ownKeyCheck = true;
@@ -2565,7 +3204,10 @@ class E2ee extends ChangeNotifier {
         DmSendState.refused,
         group: group,
         text: content.text ?? '',
-        problem: 'unencryptable',
+        // The friend isn't in yet (row 676): nothing was encrypted.
+        problem: problem.contains(' to join')
+            ? 'waitingForFriend'
+            : 'unencryptable',
       );
       return _notify();
     }
@@ -2701,11 +3343,12 @@ class E2ee extends ChangeNotifier {
   /// [account]'s keys, as the worker has them now, against what this
   /// device pinned: pinned at first contact, a changed key marked so the
   /// person sees it before anything is sent, and the device list taken.
-  Future<void> refreshKeys(String account) async {
+  Future<DmAccountKeys?> refreshKeys(String account) async {
     final device = _device;
-    if (device == null) return;
+    if (device == null) return null;
     final now = await routes.keys(account);
-    if (now == null) return;
+    if (now == null) return null;
+    if (account == accountId) signedOut = {...now.signedOut};
     final pin = device.pin(account: account);
     if (pin == null) {
       await device.firstContact(
@@ -2717,7 +3360,7 @@ class E2ee extends ChangeNotifier {
       // ([_followOwnKey]), never from the worker alone.
       if (account == accountId) {
         _ownKeyCheck = true;
-        return;
+        return now;
       }
       if (pin.verified) wasVerified.add(account);
       await device.keyChanged(
@@ -2736,6 +3379,7 @@ class E2ee extends ChangeNotifier {
       if (group.accounts.contains(account)) _moved(group.groupId);
     }
     _notify();
+    return now;
   }
 
   /// The person saw that [account]'s security key changed: sending to
@@ -2870,46 +3514,144 @@ class E2ee extends ChangeNotifier {
       rethrow;
     }
     groups[group.groupId] = group;
-    await _addEveryone(device, group, [friend, accountId]);
+    try {
+      await _addEveryone(device, group, [friend, accountId]);
+    } catch (error) {
+      // Nothing is sent until the friend is in (row 676): the chat says
+      // it waits, and the next sync adds them ([_followJoining]).
+      problem = '$error';
+    }
+    await _followJoining(device);
     return group;
   }
 
-  /// Adds every leaf of [accounts] that [group] doesn't have yet, from
-  /// their key packages, in one commit with its Welcome.
+  /// Adds every listed device of [accounts] that [group] doesn't have
+  /// yet, from their key packages, in one commit with its Welcome. When
+  /// another commit got there first (an own device joining, row 676), it
+  /// catches up and works out again what's missing, with a new claim,
+  /// up to [_addTries] times: never a claim from before (Fugo).
   Future<void> _addEveryone(
     DmDevice device,
     DmServerGroup group,
     List<String> accounts,
   ) async {
-    final packages = <String>[];
-    for (final account in accounts) {
-      // The person's own devices only: a Claktory comes in with a grant.
-      final List<String>? only = account == accountId
-          ? [
-              for (final leaf
-                  in device.deviceList(account: accountId)?.leaves ??
-                      const <DmListed>[])
-                if (leaf.kind == DmLeafKind.device && leaf.leafId != leafId)
-                  leaf.leafId,
-            ]
-          : null;
-      if (only != null && only.isEmpty) continue;
-      for (final claimed in await routes.claim(account, leafIds: only)) {
-        if (claimed.leafId != leafId) packages.add(claimed.keyPackage);
+    for (var attempt = 1; ; attempt++) {
+      final here = {
+        for (final leaf in await device.leaves(groupId: group.id))
+          (leaf.account, leaf.leafId),
+      };
+      final packages = <String>[];
+      for (final account in accounts) {
+        // Listed devices only: a Claktory comes in with a grant. A friend
+        // not pinned yet: whichever the worker has, checked as they're
+        // added.
+        final listed = device.deviceList(account: account)?.leaves;
+        final List<String>? only = listed == null && account != accountId
+            ? null
+            : [
+                for (final leaf in listed ?? const <DmListed>[])
+                  if (leaf.kind == DmLeafKind.device &&
+                      !(account == accountId && leaf.leafId == leafId) &&
+                      !here.contains((account, leaf.leafId)))
+                    leaf.leafId,
+              ];
+        if (only != null && only.isEmpty) continue;
+        for (final claimed in await routes.claim(account, leafIds: only)) {
+          if (account == accountId && claimed.leafId == leafId) continue;
+          if (here.contains((account, claimed.leafId))) continue;
+          packages.add(claimed.keyPackage);
+        }
+      }
+      if (packages.isEmpty) return;
+      // Each is checked against its account's signed list as it's added
+      // (Group::add): one that isn't on it refuses the whole add.
+      final commit = await device.addMembers(
+        groupId: group.id,
+        keyPackages: packages,
+      );
+      try {
+        await routes.commit(group.groupId, commit);
+      } on UserAppError catch (error) {
+        await device.commitRefused(groupId: group.id);
+        if (error.problem != UserAppProblem.epoch || attempt >= _addTries) {
+          rethrow;
+        }
+        await _catchUpOne(device, group.groupId);
+        continue;
+      }
+      _commitTaken(group.groupId);
+      await _catchUpOne(device, group.groupId);
+      return;
+    }
+  }
+
+  static const _addTries = 3;
+
+  /// Conversations here the friend isn't in yet (row 676), by group: the
+  /// friend's account. Nothing is sent there until they are (Group::send
+  /// refuses too), and the chat says so.
+  final joining = <String, String>{};
+
+  /// Since when each of [joining] has waited, and when its next add may
+  /// be tried.
+  final _joiningSince = <String, int>{};
+  final _joinAfter = <String, int>{};
+  final _joinTries = <String, int>{};
+
+  /// How long the person's other devices leave the friend's add to the
+  /// first of them (the creator, unless it left), so they don't each
+  /// spend the friend's key packages (Fugo).
+  static const joinFirstFor = Duration(minutes: 2);
+
+  /// Each conversation here the friend isn't in yet: said in the chat,
+  /// and the friend's devices added by the person's first member there,
+  /// or by any of them once that's waited [joinFirstFor]. With no key
+  /// package of the friend's, it waits: their device joins when it next
+  /// syncs.
+  Future<void> _followJoining(DmDevice device) async {
+    final before = {...joining};
+    final here = {
+      for (final group in await device.groups()) dmB64(group.groupId),
+    };
+    for (final group in [...groups.values]) {
+      if (group.kind != 'conversation' || !here.contains(group.groupId)) {
+        joining.remove(group.groupId);
+        continue;
+      }
+      try {
+        final waits = await device.notJoined(groupId: group.id);
+        if (waits == null) {
+          joining.remove(group.groupId);
+          _joiningSince.remove(group.groupId);
+          _joinAfter.remove(group.groupId);
+          _joinTries.remove(group.groupId);
+          continue;
+        }
+        joining[group.groupId] = waits.account;
+        final since = _joiningSince[group.groupId] ??= _nowMs();
+        final now = _nowMs();
+        if (!waits.addsFirst && now - since < joinFirstFor.inMilliseconds) {
+          continue;
+        }
+        if (now < (_joinAfter[group.groupId] ?? 0)) continue;
+        try {
+          await _addEveryone(device, group, [waits.account]);
+        } catch (error) {
+          problem = '$error';
+          final tries = (_joinTries[group.groupId] ?? 0) + 1;
+          _joinTries[group.groupId] = tries;
+          _joinAfter[group.groupId] =
+              now + (retryAfter * min(1 << (tries - 1), 64)).inMilliseconds;
+        }
+        if (await device.notJoined(groupId: group.id) == null) {
+          joining.remove(group.groupId);
+          _joiningSince.remove(group.groupId);
+        }
+      } catch (error) {
+        problem = '$error';
       }
     }
-    if (packages.isEmpty) return;
-    final commit = await device.addMembers(
-      groupId: group.id,
-      keyPackages: packages,
-    );
-    try {
-      await routes.commit(group.groupId, commit);
-    } on UserAppError {
-      await device.commitRefused(groupId: group.id);
-      rethrow;
-    }
-    await _catchUpOne(device, group.groupId);
+    if (!mapEquals(before, joining)) _notify();
   }
 
   /// Takes [group]'s feed now, outside a whole [sync].

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io' show HttpOverrides;
 
 import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/device_account.dart';
@@ -7,9 +8,11 @@ import 'package:factory_app/people/people_view.dart';
 import 'package:factory_app/people/report_form.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/user_apps/session.dart';
+import 'package:factory_app/scanner.dart' show CameraAccess;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'device_account_test.dart' show FakeKeys, FakeService;
 import 'harness.dart';
 
 // D3b: friend requests, friends and blocks, against D1b's contract
@@ -114,9 +117,15 @@ void main() {
     setUp(() => service = _Service());
     tearDown(() => contactsApi = null);
 
-    Future<void> show(WidgetTester tester, {Size? size}) async {
+    Future<Harness> show(
+      WidgetTester tester, {
+      Size? size,
+      CameraAccess camera = CameraAccess.unavailable,
+      DeviceAccount? account,
+    }) async {
       contactsApi = (_) => service.api();
-      final harness = Harness(Workspace());
+      final harness = Harness(Workspace(), account: account)
+        ..camera.state = camera;
       await harness.show(
         tester,
         size: size ?? const Size(1200, 900),
@@ -142,6 +151,7 @@ void main() {
         await pumpFrames(tester, const Duration(seconds: 1));
       }
       await settle(tester);
+      return harness;
     }
 
     testWidgets('not signed in on this device: it says so, and never waits '
@@ -161,6 +171,53 @@ void main() {
       await settle(tester);
       expect(find.text('Sign in to use People'), findsOneWidget);
       expect(find.text('Email address'), findsWidgets);
+    });
+
+    testWidgets('removed by another of the person\'s devices: it says so, '
+        'as soon as the service does (row 199)', (tester) async {
+      service.signedIn = false;
+      // Real HTTP to the fake service: widget tests answer 400 otherwise.
+      final removed = await tester.runAsync(
+        () => HttpOverrides.runWithHttpOverrides(() async {
+          final fake = await FakeService.start();
+          fake.listen();
+          fake.answer = (request, body) =>
+              (403, {'error': 'device_removed', 'message': ''});
+          final account = DeviceAccount(
+            key: 'ab' * 32,
+            service: fake.url,
+            email: 'matt@example.com',
+            open: (key, url) => DeviceAccountService(
+              accountKey: key,
+              service: url,
+              keys: FakeKeys(),
+            ),
+          );
+          try {
+            await account.signed('GET', '/v1/apps/dms/feed');
+          } on AccountServiceError {
+            // Refused, as removed.
+          }
+          await fake.server.close(force: true);
+          return account;
+        }, _RealHttp()),
+      );
+      expect(removed!.removed, isTrue);
+      await show(tester, account: removed);
+      expect(
+        find.text(
+          'This device was removed from your account. Sign in again to '
+          'start over as a new device.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Sign in to your Claktory account on this device to use People.',
+        ),
+        findsNothing,
+      );
+      expect(find.text('Sign in…'), findsOneWidget);
     });
 
     testWidgets('signed out on a phone, at the largest text: Sign in… fits', (
@@ -361,6 +418,33 @@ void main() {
       expect(sends.last['action_id'], sends.first['action_id']);
     });
 
+    testWidgets('Add a friend scans their friend ID where there is a camera; '
+        'Send request is still the person\'s (friend bug #2)', (tester) async {
+      final harness = await show(tester, camera: CameraAccess.granted);
+      await tester.tap(find.text('Add a friend…'));
+      await settle(tester);
+      await settle(tester);
+      expect(
+        find.textContaining('Paste, type or scan their friend ID.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Scan code'));
+      await pumpFrames(tester);
+      expect(find.text('Scan their friend ID'), findsOneWidget);
+      harness.camera.scan('claktory-pipe://?w=a');
+      await pumpFrames(tester);
+      expect(find.text("This isn't a friend ID."), findsOneWidget);
+      harness.camera.scan('claktory://add-friend#cf1_ABCD');
+      await pumpFrames(tester);
+      await settle(tester);
+      expect(
+        tester.widget<EditableText>(find.byType(EditableText)).controller.text,
+        'cf1_ABCD',
+      );
+      expect(service.log.where((l) => l.startsWith('POST')), isEmpty);
+      expect(find.text('Send request'), findsOneWidget);
+    });
+
     testWidgets('on a phone, a request’s actions sit under its words', (
       tester,
     ) async {
@@ -542,3 +626,6 @@ void main() {
     });
   });
 }
+
+/// The platform's own HTTP, past flutter_test's stand-in.
+class _RealHttp extends HttpOverrides {}

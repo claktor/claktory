@@ -198,6 +198,12 @@ COPYFILE_DISABLE=1 tar --no-xattrs -czf "$STAGE/$NAME" \
   -C "$SRC" LICENSE.md \
   -C "$SRC/scripts" install-release.sh
 
+# Never QA's provider override (Fugo, #332), whatever built this release.
+check_no_qa_provider "$RELEASE/factoryd" || exit 1
+# The real app carries the backend as a helper too; a dev release's doesn't.
+if [[ "$APP_NAME" == "Factory.app" ]]; then
+  check_no_qa_provider "$RELEASE/$APP_NAME/Contents/Helpers/factoryd" || exit 1
+fi
 ARCHS="$(lipo -archs "$RELEASE/factoryd" | sed 's/[^ ][^ ]*/"&"/g; s/ /, /g')"
 MIN_MACOS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$RELEASE/$APP_NAME/Contents/Info.plist" 2>/dev/null || echo 12.0)"
 # Where an uploaded file ends up.
@@ -217,6 +223,7 @@ for arch in ${LINUX[@]+"${LINUX[@]}"}; do
   FACTORY_LINUX_SRC="$SRC" FACTORY_VERSION="$BACKEND_VERSION" FACTORY_UPDATE_URL="$MANIFEST_URL" "$ROOT/scripts/build-linux.sh" "$arch" "$build/factoryd"
   FACTORY_LINUX_SRC="$SRC" "$ROOT/scripts/build-linux.sh" "$arch" "$build/claktory-apps" claktory-apps
   FACTORY_LINUX_SRC="$SRC" "$ROOT/scripts/build-linux.sh" "$arch" "$build/claktory-speech" claktory-speech
+  check_no_qa_provider "$build/factoryd" || exit 1
   cp "$RELEASE/backend-version" "$RELEASE/CHANGELOG.md" "$build/"
   [[ ! -d "$RELEASE/apps" ]] || cp -R "$RELEASE/apps" "$build/apps"
   linux_name="factory-$VERSION-linux-$arch.tar.gz"

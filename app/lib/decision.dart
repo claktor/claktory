@@ -112,26 +112,29 @@ class _DecisionCommentState extends State<DecisionComment> {
         // Enter does the card's main action, where it has one; Shift+Enter
         // starts a new line.
         // Or said: the mic puts what's said in, to check before sending.
-        Dictation(
+        KeepWhileTyped(
           controller: widget.controller,
-          focusNode: _focus,
-          enabled: widget.enabled,
-          child: CallbackShortcuts(
-            bindings: {
-              const SingleActivator(LogicalKeyboardKey.enter): ?onSubmitted,
-            },
-            child: TextField(
-              controller: widget.controller,
-              focusNode: _focus,
-              placeholder: 'A comment for ${widget.agent}, if you like',
-              // Named once typed in, when the placeholder is gone.
-              semanticsLabel: 'A comment for ${widget.agent}',
-              minLines: 1,
-              maxLines: 6,
-              // As much as the backend takes.
-              inputFormatters: [
-                LengthLimitingTextInputFormatter(decisionCommentLimit),
-              ],
+          child: Dictation(
+            controller: widget.controller,
+            focusNode: _focus,
+            enabled: widget.enabled,
+            child: CallbackShortcuts(
+              bindings: {
+                const SingleActivator(LogicalKeyboardKey.enter): ?onSubmitted,
+              },
+              child: TextField(
+                controller: widget.controller,
+                focusNode: _focus,
+                placeholder: 'A comment for ${widget.agent}, if you like',
+                // Named once typed in, when the placeholder is gone.
+                semanticsLabel: 'A comment for ${widget.agent}',
+                minLines: 1,
+                maxLines: 6,
+                // As much as the backend takes.
+                inputFormatters: [
+                  LengthLimitingTextInputFormatter(decisionCommentLimit),
+                ],
+              ),
             ),
           ),
         ),
@@ -145,5 +148,68 @@ class _DecisionCommentState extends State<DecisionComment> {
         ),
       ],
     );
+  }
+}
+
+/// Keeps the card around [child] while [controller] has something typed in
+/// it, so what the person wrote is still there when the card scrolls out
+/// of view and back (Zucchero's rows 189 and 193): a conversation or Needs
+/// you otherwise builds it afresh. Nothing is kept anywhere else; it goes
+/// with the conversation, and once the field is empty or gone (the card
+/// answered) the card scrolls away like any entry.
+class KeepWhileTyped extends StatefulWidget {
+  const KeepWhileTyped({
+    super.key,
+    required this.controller,
+    required this.child,
+  });
+
+  final TextEditingController controller;
+  final Widget child;
+
+  @override
+  State<KeepWhileTyped> createState() => _KeepWhileTypedState();
+}
+
+class _KeepWhileTypedState extends State<KeepWhileTyped>
+    with AutomaticKeepAliveClientMixin {
+  late var _typed = widget.controller.text.isNotEmpty;
+
+  @override
+  bool get wantKeepAlive => _typed;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_changed);
+  }
+
+  @override
+  void didUpdateWidget(KeepWhileTyped old) {
+    super.didUpdateWidget(old);
+    if (old.controller != widget.controller) {
+      old.controller.removeListener(_changed);
+      widget.controller.addListener(_changed);
+      _changed();
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    final typed = widget.controller.text.isNotEmpty;
+    if (typed == _typed) return;
+    _typed = typed;
+    updateKeepAlive();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
   }
 }

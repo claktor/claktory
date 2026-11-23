@@ -218,21 +218,25 @@ class _AskPersonCardState extends State<AskPersonCard> {
       // buttons for either.
       if (wantsText) ...[
         // Or said: the mic puts what's said in, to check before sending.
-        Dictation(
+        // What's typed stays when the card scrolls away and back.
+        KeepWhileTyped(
           controller: _text,
-          focusNode: _focus,
-          enabled: !_busy,
-          child: CallbackShortcuts(
-            bindings: {
-              const SingleActivator(LogicalKeyboardKey.enter): () =>
-                  _answer(dismiss: false),
-            },
-            child: TextField(
-              controller: _text,
-              focusNode: _focus,
-              placeholder: 'Your answer',
-              minLines: 1,
-              maxLines: 8,
+          child: Dictation(
+            controller: _text,
+            focusNode: _focus,
+            enabled: !_busy,
+            child: CallbackShortcuts(
+              bindings: {
+                const SingleActivator(LogicalKeyboardKey.enter): () =>
+                    _answer(dismiss: false),
+              },
+              child: TextField(
+                controller: _text,
+                focusNode: _focus,
+                placeholder: 'Your answer',
+                minLines: 1,
+                maxLines: 8,
+              ),
             ),
           ),
         ),
@@ -330,17 +334,20 @@ class _AskPersonCardState extends State<AskPersonCard> {
         const SizedBox(height: Space.m),
         if (_cant) ...[
           // What's in the way, for the agent to decide what's next; typed
-          // or said.
-          Dictation(
+          // or said. What's typed stays when the card scrolls away and back.
+          KeepWhileTyped(
             controller: _text,
-            focusNode: _focus,
-            enabled: !_busy,
-            child: TextField(
+            child: Dictation(
               controller: _text,
               focusNode: _focus,
-              placeholder: "What's in the way? (optional)",
-              minLines: 1,
-              maxLines: 6,
+              enabled: !_busy,
+              child: TextField(
+                controller: _text,
+                focusNode: _focus,
+                placeholder: "What's in the way? (optional)",
+                minLines: 1,
+                maxLines: 6,
+              ),
             ),
           ),
           const SizedBox(height: Space.s),

@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:factory_app/agent_view.dart';
-import 'package:factory_app/controls.dart' show Button;
+import 'package:factory_app/controls.dart' show Button, showModal;
 import 'package:factory_app/device_account.dart';
 import 'package:factory_app/inbox.dart';
 import 'package:factory_app/people/chat.dart';
@@ -19,6 +19,7 @@ import 'package:factory_app/tunnel/api/dm.dart'
     show DmByAgent, DmContent, DmLeafKind, DmMember, DmMembers;
 import 'package:factory_app/user_apps/session.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -213,6 +214,41 @@ class _World {
   String get group => matt.e2ee.groups.values
       .firstWhere((each) => each.kind == 'conversation')
       .groupId;
+
+  /// Ana started over [times] times while Matt's phone was away (row
+  /// 654): it never saw her new keys, and the first commit it meets is
+  /// under one she has replaced since; [said] went after it. The worker
+  /// serves her newest key and lists the ones before it.
+  void anaStartedOver(int times, {List<String> said = const []}) {
+    String key(int n) => dmB64(List.filled(32, 40 + n));
+    final first = worker.keys['ana']!['identity_key']! as String;
+    worker.deliver(
+      group,
+      fakeEnvelope({
+        't': 'commit',
+        'g': group,
+        'epoch': worker.epochOf(group),
+        'from': 'ana/pixel',
+        'members': ['matt/phone', 'ana/pixel'],
+        'id': key(1),
+      }),
+      // The worker's GroupInfo stays the one to join again from.
+      advance: false,
+    );
+    for (final text in said) {
+      worker.deliver(
+        group,
+        FakeDmDevice.claktorySays(
+          group,
+          'ana/pixel',
+          DmContent(kind: 'text', clientMessageId: 'a-$text', extraJson: ''),
+          epoch: worker.epochOf(group),
+        ),
+      );
+    }
+    worker.retired['ana'] = {first, for (var n = 1; n < times; n++) key(n)};
+    worker.keys['ana']!['identity_key'] = key(times);
+  }
 
   /// Ana says [texts] in the conversation, and Matt's device takes them in.
   Future<void> fromAna(List<String> texts) async {
@@ -493,6 +529,88 @@ void main() {
     thread.dispose();
   });
 
+  test('the friend started over on a new key: nothing goes until their new '
+      'device has taken the old ones out (row 630, Fugo)', () async {
+    final thread = world.thread();
+    await thread.load();
+    await world.fromAna(['before']);
+    expect(thread.canSend, isTrue);
+    // Ana's only device lost its keys: she starts over on a new one,
+    // which hasn't rejoined the chat yet.
+    final commits = 'POST groups/${world.group}/commits';
+    world.worker.refuse = (route) => route == commits
+        ? const AccountServiceError(503, 'unavailable', 'unavailable')
+        : null;
+    final tablet = FakeEndpoint(world.worker, 'ana', 'tablet', name: 'Tablet')
+      ..skipSecrets(100);
+    await tablet.e2ee.start();
+    expect(await tablet.e2ee.startNewKey(), isNull);
+    await world.matt.e2ee.refreshKeys('ana');
+    await world.matt.e2ee.sync();
+    expect(thread.waitingFor, 'ana');
+    expect(thread.canSend, isFalse);
+    await thread.send('hello');
+    expect(thread.outgoing, isEmpty);
+    // Her new device rejoins and takes the old one out: sending goes on.
+    world.worker.refuse = null;
+    await tablet.e2ee.sync();
+    await world.matt.e2ee.sync();
+    expect(thread.waitingFor, isNull);
+    expect(thread.canSend, isTrue);
+    thread.dispose();
+  });
+
+  group('a friend behind more than one start-over (row 654)', () {
+    test("Ana's Mac, stuck across two it missed: joins again, and says what "
+        "it couldn't read", () async {
+      final thread = world.thread();
+      await thread.load();
+      await world.fromAna(['before']);
+      world.anaStartedOver(2, said: ['missed']);
+      await world.matt.e2ee.sync();
+      expect(world.matt.e2ee.held, isEmpty);
+      expect(world.matt.device.retiredHere['ana'], {
+        dmB64(List.filled(32, 41)),
+      });
+      await thread.load();
+      final lines = [
+        for (final message in thread.messages)
+          if (message.members case final members?)
+            ...memberLines(members, me: 'matt', friend: 'Ana'),
+      ];
+      expect(
+        lines,
+        contains(
+          "Some messages sent when Ana's security key changed can't be "
+          'shown on this device.',
+        ),
+      );
+      expect(thread.messages.map((each) => each.text), contains('before'));
+      expect(
+        thread.messages.map((each) => each.text),
+        isNot(contains('missed')),
+      );
+      thread.dispose();
+    });
+
+    test('a service listing the key it serves as replaced retires nothing: '
+        'held, never joined again past it', () async {
+      final thread = world.thread();
+      await thread.load();
+      addTearDown(thread.dispose);
+      world.anaStartedOver(2, said: ['missed']);
+      final served = world.worker.keys['ana']!['identity_key']! as String;
+      world.worker.retired['ana']!.add(served);
+      final before = world.worker.mailboxOf(world.group).length;
+      await world.matt.e2ee.sync();
+      expect(world.matt.e2ee.held.keys, [world.group]);
+      // Nothing goes while it's held: it would only fail.
+      expect(thread.canSend, isFalse);
+      expect(world.matt.device.retiredHere['ana'], isNull);
+      expect(world.worker.mailboxOf(world.group), hasLength(before));
+    });
+  });
+
   test('the draft goes to the person\'s other devices', () async {
     final thread = world.thread();
     final drafts = <String>[];
@@ -536,6 +654,7 @@ void main() {
     expect(
       memberLines(
         DmMembers(
+          setUpAgain: const [],
           added: [
             member('ana', 'Pixel', DmLeafKind.device),
             member('ana', 'mac-mini', DmLeafKind.claktory),
@@ -557,6 +676,113 @@ void main() {
         'Ana removed a device: Old phone',
       ],
     );
+  });
+
+  test('this device removed by another of the person\'s says so, never '
+      '"You removed a device" with its own name (row 199)', () {
+    DmMember member(String leaf, String name) => DmMember(
+      account: 'matt',
+      leafId: leaf,
+      kind: DmLeafKind.device,
+      name: name,
+      sinceMs: BigInt.zero,
+    );
+    expect(
+      memberLines(
+        DmMembers(
+          setUpAgain: const [],
+          added: const [],
+          removed: [
+            member('studio-a', "Ana's Mac Studio"),
+            member('studio-b', "Ana's Mac Studio"),
+          ],
+          keyChanged: const [],
+        ),
+        me: 'matt',
+        friend: 'Ana',
+        here: 'studio-a',
+      ),
+      [
+        'This device was removed from your account',
+        "You removed a device: Ana's Mac Studio",
+      ],
+    );
+  });
+
+  test("a friend's device under this device's id is the friend's (row "
+      '671)', () {
+    expect(
+      memberLines(
+        DmMembers(
+          setUpAgain: const [],
+          added: const [],
+          removed: [
+            DmMember(
+              account: 'ana',
+              leafId: 'studio-a',
+              kind: DmLeafKind.device,
+              name: 'Pixel',
+              sinceMs: BigInt.zero,
+            ),
+          ],
+          keyChanged: const [],
+        ),
+        me: 'matt',
+        friend: 'Ana',
+        here: 'studio-a',
+      ),
+      ['Ana removed a device: Pixel'],
+    );
+  });
+
+  test('a device installed again is one line, never a removal and an add '
+      '(row 202, Trish)', () {
+    DmMember member(String account, String name) => DmMember(
+      account: account,
+      leafId: name,
+      kind: DmLeafKind.device,
+      name: name,
+      sinceMs: BigInt.zero,
+    );
+    expect(
+      memberLines(
+        DmMembers(
+          setUpAgain: [member('ana', 'iPhone'), member('matt', 'iPad')],
+          added: const [],
+          removed: const [],
+          keyChanged: const [],
+        ),
+        me: 'matt',
+        friend: 'Ana',
+      ),
+      ['Ana set up a device again: iPhone', 'You set up a device again: iPad'],
+    );
+  });
+
+  test('messages it joined again past: a quiet line saying why, if it '
+      'knows (row 654)', () {
+    List<String> skipped(String because) => memberLines(
+      DmMembers(
+        setUpAgain: const [],
+        added: const [],
+        removed: const [],
+        keyChanged: const [],
+        skipped: because,
+      ),
+      me: 'matt',
+      friend: 'Ana',
+    );
+    expect(skipped('ana'), [
+      "Some messages sent when Ana's security key changed can't be shown on "
+          'this device.',
+    ]);
+    expect(skipped('matt'), [
+      "Some messages sent when your security key changed can't be shown on "
+          'this device.',
+    ]);
+    expect(skipped(''), [
+      "Some messages sent while this device was away can't be shown on it.",
+    ]);
   });
 
   group("agents' suggestions (D3d)", () {
@@ -900,6 +1126,102 @@ void main() {
       await close(tester);
     });
 
+    testWidgets("the friend's new security key not finished yet: said, and "
+        'nothing can be sent until it is (row 630)', (tester) async {
+      await show(tester, _conversation());
+      await world.fromAna(['before']);
+      await settle(tester);
+      final commits = 'POST groups/${world.group}/commits';
+      world.worker.refuse = (route) => route == commits
+          ? const AccountServiceError(503, 'unavailable', 'unavailable')
+          : null;
+      final tablet = FakeEndpoint(world.worker, 'ana', 'tablet')
+        ..skipSecrets(100);
+      await tablet.e2ee.start();
+      await tablet.e2ee.startNewKey();
+      await world.matt.e2ee.refreshKeys('ana');
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      const waiting = "Waiting for Ana's new security key to finish.";
+      expect(find.text(waiting), findsOneWidget);
+      world.worker.refuse = null;
+      await tablet.e2ee.sync();
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      expect(find.text(waiting), findsNothing);
+      await close(tester);
+    });
+
+    testWidgets("a new friend not in the chat yet: said, nothing can be "
+        'sent, and it opens once they are (row 676)', (tester) async {
+      world.worker.packages.remove('ana/pixel');
+      world.worker.lastResort.remove('ana/pixel');
+      await show(tester, _conversation());
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      const waiting = 'Waiting for Ana to join this chat.';
+      expect(find.text(waiting), findsOneWidget);
+      expect(world.matt.e2ee.joining, {world.group: 'ana'});
+      // Her device puts key packages up: Matt's next sync adds her.
+      await world.ana.e2ee.sync();
+      world.matt.now += FakeEndpoint.retryAfter.inMilliseconds * 2;
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      expect(find.text(waiting), findsNothing);
+      await close(tester);
+    });
+
+    testWidgets("a friend's reinstalled device not back yet: said, with its "
+        'name, and nothing can be sent until it is (row 202)', (tester) async {
+      await show(tester, _conversation());
+      await world.fromAna(['before']);
+      await settle(tester);
+      world.matt.device.reinstalledIn[world.group] = (
+        account: 'ana',
+        device: 'iPhone',
+      );
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      const waiting = "Waiting for Ana's iPhone to finish setting up again.";
+      expect(find.text(waiting), findsOneWidget);
+      expect(
+        find.text('You can send messages here again once it has.'),
+        findsOneWidget,
+      );
+      expect(
+        find.text("Waiting for Ana's new security key to finish."),
+        findsNothing,
+      );
+      world.matt.device.reinstalledIn.clear();
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      expect(find.text(waiting), findsNothing);
+      await close(tester);
+    });
+
+    testWidgets("away across four of Ana's start-overs: the chat goes on, and "
+        "says what it couldn't read (row 654)", (tester) async {
+      await show(tester, _conversation());
+      await world.fromAna(['before']);
+      await settle(tester);
+      world.anaStartedOver(4, said: ['one', 'two']);
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      expect(
+        find.text(
+          "Some messages sent when Ana's security key changed can't be "
+          'shown on this device.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Waiting for the new security key to reach this device.'),
+        findsNothing,
+      );
+      expect(find.text('two'), findsNothing);
+      await close(tester);
+    });
+
     testWidgets('Report: the messages ticked go with it, as shown here; at '
         'most 50', (tester) async {
       await world.matt.e2ee.conversationGroup('v1', 3, 'ana');
@@ -963,6 +1285,64 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('Report on a phone: a long message shows a few lines, and '
+        'Cancel with messages ticked asks first (row 200)', (tester) async {
+      await world.matt.e2ee.conversationGroup('v1', 3, 'ana');
+      final long = 'word ' * 3200;
+      await world.fromAna([long, 'short']);
+      e2eeFor = (_) => world.matt.e2ee;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      var closed = 0;
+      await Harness(Workspace()).show(
+        tester,
+        size: const Size(375, 667),
+        home: Builder(
+          builder: (context) => Center(
+            child: GestureDetector(
+              onTap: () => showModal(
+                context,
+                (sheet, close) => ReportForm(
+                  api: ContactsApi(world.matt.e2ee.session),
+                  person: _ana,
+                  contactId: 'c1',
+                  conversationId: 'v1',
+                  close: () {
+                    closed++;
+                    close();
+                  },
+                ),
+              ),
+              child: const Text('Open'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await settle(tester);
+      await settle(tester);
+      final row = find.text('Ana: ${long.trim()}'.padRight(0));
+      final text = tester.widget<Text>(
+        find.byWidgetPredicate(
+          (w) => w is Text && (w.data ?? '').startsWith('Ana: word word'),
+        ),
+      );
+      expect(text.maxLines, 4);
+      expect(row, findsNothing, reason: 'the data keeps the whole text');
+      await tester.ensureVisible(find.text('Ana: short'));
+      await tester.tap(find.text('Ana: short'));
+      await tester.pump();
+      expect(find.text('1 message included'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await pumpFrames(tester, const Duration(seconds: 1));
+      expect(find.text('Discard changes'), findsOneWidget);
+      expect(closed, 0);
+      await tester.tap(find.text('Keep editing'));
+      await settle(tester);
+      expect(find.text('1 message included'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('Verify: the security code, then marked verified', (
       tester,
     ) async {
@@ -1014,6 +1394,43 @@ void main() {
       await settle(tester);
       expect(world.matt.e2ee.pin('ana')!.verified, isTrue);
       expect(find.text('Verify Ana'), findsNothing);
+      await close(tester);
+    });
+
+    testWidgets('Verify with a refused camera: how to allow it, with Open '
+        'Settings, and Scan once allowed and back; a restricted one has no '
+        'Scan (friend bug #2)', (tester) async {
+      final harness = await show(tester, _conversation());
+      harness.camera.state = CameraAccess.denied;
+      await world.ana.e2ee.sync();
+      await tester.tap(find.text('Verify…'));
+      await settle(tester);
+      await settle(tester);
+      expect(find.text("Scan Ana's code"), findsNothing);
+      expect(
+        find.text(
+          "To scan Ana's code, allow Claktory to use the camera in Settings.",
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Open Settings'));
+      await settle(tester);
+      expect(harness.camera.settingsOpened, 1);
+      harness.camera.state = CameraAccess.granted;
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await settle(tester);
+      expect(find.text("Scan Ana's code"), findsOneWidget);
+      expect(find.text('Open Settings'), findsNothing);
+
+      // Restricted: no dead Scan, and nothing to open.
+      harness.camera.state = CameraAccess.restricted;
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await settle(tester);
+      expect(find.text("Scan Ana's code"), findsNothing);
+      expect(find.text('Open Settings'), findsNothing);
+      expect(find.text('Mark as verified'), findsOneWidget);
       await close(tester);
     });
 

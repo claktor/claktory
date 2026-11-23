@@ -472,7 +472,9 @@ class ShowMore extends StatefulWidget {
 
   final Widget child;
 
-  /// Its height cut, in pixels: four lines of body text by default.
+  /// Its height cut, in pixels at the standard text size: four lines of
+  /// body text by default. It grows with the person's text size, so larger
+  /// text still shows as many lines (Zucchero's row 140).
   final double height;
 
   @override
@@ -493,11 +495,14 @@ class _ShowMoreState extends State<ShowMore> {
     final found = findWentHere(context);
     if (found && !_found) _whole = true;
     _found = found;
+    final scaler = MediaQuery.textScalerOf(context);
+    final height = scaler.scale(widget.height);
+    final fade = scaler.scale(18);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _Clamped(
-          height: widget.height,
+          height: height,
           clamp: !_whole,
           onTaller: (taller) {
             if (mounted && taller != _taller) {
@@ -512,8 +517,8 @@ class _ShowMoreState extends State<ShowMore> {
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     stops: [
-                      (widget.height - 18) / bounds.height,
-                      widget.height / bounds.height,
+                      (height - fade) / bounds.height,
+                      height / bounds.height,
                     ],
                     colors: const [Color(0xFFFFFFFF), Color(0x00FFFFFF)],
                   ).createShader(bounds),
@@ -595,7 +600,9 @@ class _RenderClamped extends RenderProxyBox {
       constraints.copyWith(minHeight: 0, maxHeight: double.infinity),
       parentUsesSize: true,
     );
-    final taller = child.size.height > _height + 0.5;
+    // A pixel's leeway: text lays out to whole pixels, so three lines at
+    // a larger size measure a little over three times one.
+    final taller = child.size.height > _height + 1;
     _cut = _clamp && taller;
     size = constraints.constrain(
       Size(child.size.width, _cut ? _height : child.size.height),
@@ -1163,11 +1170,11 @@ class _TalkButton extends StatelessWidget {
           onTap: onTap,
           builder: (context, hovered) => AnimatedContainer(
             duration: Motion.fast,
-            // A finger's height on a phone, taller with larger text.
-            height: isPhoneLayout(context) ? null : 28,
-            constraints: isPhoneLayout(context)
-                ? const BoxConstraints(minHeight: Touch.target)
-                : null,
+            // A finger's height on a phone; both grow with larger text
+            // rather than cutting it (Zucchero's row 140, iPad at AX5).
+            constraints: BoxConstraints(
+              minHeight: isPhoneLayout(context) ? Touch.target : 28,
+            ),
             padding: const EdgeInsets.symmetric(horizontal: Space.m),
             decoration: BoxDecoration(
               color: color.withValues(alpha: hovered ? 0.28 : 0.16),
@@ -1739,18 +1746,32 @@ class _ShowLine extends StatelessWidget {
           style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
         ),
         const SizedBox(width: Space.xs),
-        Flexible(
-          child: _Link(
-            text: name,
-            onTap: call.done && path.isNotEmpty
-                ? () => _focus(context, call, path)
-                : null,
+        // The file's name first; its folder gives way before it does (a
+        // narrow pane, Abbacchio's row 544, showed "Showing" and no name).
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, constraints) => Row(
+              children: [
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: constraints.maxWidth),
+                  child: _Link(
+                    text: name,
+                    onTap: call.done && path.isNotEmpty
+                        ? () => _focus(context, call, path)
+                        : null,
+                  ),
+                ),
+                if (folder.isNotEmpty)
+                  Flexible(
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: Space.s),
+                      child: _Trailing(folder),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
-        if (folder.isNotEmpty) ...[
-          const SizedBox(width: Space.s),
-          Flexible(child: _Trailing(folder)),
-        ],
       ],
     );
   }
@@ -1764,14 +1785,21 @@ class _ShowLine extends StatelessWidget {
     final agent = backend.workspace.agent(agentId);
     if (agent == null) return;
     final root = layoutOf(agent);
+    // The pane it opened in, while that still shows this file: a later
+    // show in place of the oldest pane keeps the pane's id for another file
+    // or page (Zucchero's row 136: Needs you came forward). Else the pane
+    // that shows it now, or a new one.
     final pane = _string(call.details['pane']);
-    final shown = pane.isNotEmpty && find(root, pane) != null
+    final kept = pane.isEmpty ? null : find(root, pane);
+    final shown = kept != null && kept.hasLeaf() && kept.leaf.path == path
         ? (root: root, paneId: pane)
         : open(root, path);
     if (identical(shown.root, root)) {
-      backend.highlights.glow('pane:${agent.id}:${shown.paneId}', [
-        agentColor(agent.color),
-      ]);
+      final key = 'pane:${agent.id}:${shown.paneId}';
+      // Brought forward even with highlights off (an iPad's hidden pane);
+      // it glows when they're on.
+      backend.highlights.pointedAt.value = (keys: [key], at: DateTime.now());
+      backend.highlights.glow(key, [agentColor(agent.color)]);
       return;
     }
     fireAndLog(backend.setLayout(agent.id, shown.root));

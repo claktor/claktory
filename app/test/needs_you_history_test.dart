@@ -1,7 +1,10 @@
 // Needs you's History (Matt's ask): what the person already answered,
 // approved, declined or dismissed in the last 30 days, newest first, found
 // by agent or words, each opening the conversation at its card.
+import 'package:factory_app/forms.dart' show AgentSettingsForm;
+import 'package:factory_app/controls.dart' show ExtensionGlyph;
 import 'package:factory_app/inbox.dart';
+import 'package:factory_app/pipes.dart' show PortalGlyph;
 import 'package:factory_app/needs_you_history.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
@@ -224,8 +227,8 @@ void main() {
     expect(find.text('Back again?'), findsOneWidget);
   });
 
-  testWidgets("a card from a chat, and one an agent asked after reading a "
-      'pipe, keep where they came from', (tester) async {
+  testWidgets("a card from a chat keeps where it came from; one asked after "
+      'reading a pipe says nothing of it (#346)', (tester) async {
     await _openHistory(tester, [
       _record(
         'rivet',
@@ -245,11 +248,7 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Approved', findRichText: true), findsOneWidget);
-    expect(find.byType(TaintLabel), findsNWidgets(2));
-    expect(
-      find.text('from June, which reads the pipe “Acme launch”'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('Acme launch'), findsNothing);
   });
 
   testWidgets('on a phone: Waiting and History as segments, and it fits', (
@@ -428,5 +427,299 @@ void main() {
     expect(find.text('Declined', findRichText: true), findsOneWidget);
     expect(find.text('“Fine”', findRichText: true), findsOneWidget);
     expect(find.textContaining('Dismissed'), findsNothing);
+  });
+
+  testWidgets('a web page read is marked by a globe, not a pipe\'s portal '
+      '(#346)', (tester) async {
+    await _openHistory(tester, [
+      _record(
+        'june',
+        'Use the deploy key?',
+        taint: [PipeTaint(kind: 'browser', pipeName: 'https://example.com')],
+      ),
+    ]);
+    expect(
+      find.text('from June, which read a page on https://example.com'),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(TaintLabel),
+        matching: find.byType(PortalGlyph),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(TaintLabel),
+        matching: find.byType(ExtensionGlyph),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  group('app access (#339)', () {
+    Workspace withRivet() => _workspace()
+      ..agents.add(
+        Agent(
+          id: 'rivet',
+          name: 'Rivet',
+          modelAvailable: true,
+          status: AgentStatus.AGENT_STATUS_IDLE,
+        ),
+      )
+      ..apps.add(
+        AppInfo(
+          id: 'charts',
+          name: 'Charts',
+          grants: [
+            AppGrant(
+              agentId: 'june',
+              scopes: ['edit'],
+              given: AppAccessGiven(byAgentId: 'rivet', changeId: '12'),
+            ),
+          ],
+        ),
+      );
+
+    NeedsYouRecord change({
+      String agent = 'rivet',
+      String id = '12',
+      String reason = '',
+      int seq = 40,
+      NeedsYouOutcome outcome = NeedsYouOutcome.NEEDS_YOU_OUTCOME_CHANGED,
+    }) =>
+        _record(
+            agent,
+            agent.isEmpty
+                ? 'You gave June Change dashboards on Charts'
+                : 'Rivet gave June Change dashboards on Charts',
+            kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_APP_ACCESS,
+            outcome: outcome,
+            seq: seq,
+          )
+          ..agentName = agent.isEmpty ? '' : 'Rivet'
+          ..appChangeId = id
+          ..appId = 'charts'
+          ..agentReason = reason;
+
+    testWidgets("Rivet's change: its reason as Rivet's, and Undo puts it "
+        'back', (tester) async {
+      final harness = await _openHistory(tester, [
+        change(reason: 'Matt asked for a chart of her bugs by severity.'),
+      ], workspace: withRivet());
+      expect(
+        find.text('Rivet gave June Change dashboards on Charts'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Rivet: “Matt asked for a chart of her bugs by severity.”'),
+        findsOneWidget,
+      );
+      expect(find.text('Rivet · 2 h ago', findRichText: true), findsOneWidget);
+
+      final asked = harness.backend.sent
+          .where((message) => message.hasListNeedsYouHistory())
+          .length;
+      await tester.tap(find.text('Undo'));
+      await settle(tester);
+      await settle(tester);
+      expect(
+        harness.backend.sent.any((m) => m.hasUndoAppAccessChange()),
+        isTrue,
+      );
+      expect(
+        harness.backend.sent
+            .lastWhere((m) => m.hasUndoAppAccessChange())
+            .undoAppAccessChange
+            .changeId,
+        '12',
+      );
+      // Asked again: the change is marked Undone, with no Undo.
+      expect(
+        harness.backend.sent
+            .where((message) => message.hasListNeedsYouHistory())
+            .length,
+        asked + 1,
+      );
+      expect(find.text('Undone', findRichText: true), findsOneWidget);
+      expect(find.text('Undo'), findsNothing);
+    });
+
+    testWidgets('an undo that left something says what', (tester) async {
+      final harness = await _openHistory(tester, [
+        change(),
+      ], workspace: withRivet());
+      harness.backend.undoAnswer = AppAccessUndone(
+        changeId: 'undo-1',
+        kept: [
+          "June's access to Charts changed since, so it was left as it is.",
+        ],
+      );
+      await tester.tap(find.text('Undo'));
+      await settle(tester);
+      await settle(tester);
+      expect(
+        find.text(
+          "June's access to Charts changed since, so it was left as it is.",
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a refused undo says why, and Undo stays', (tester) async {
+      final harness = await _openHistory(tester, [
+        change(),
+      ], workspace: withRivet());
+      harness.backend.refuseUndo = 'Charts was uninstalled.';
+      await tester.tap(find.text('Undo'));
+      await settle(tester);
+      await settle(tester);
+      expect(find.text('Charts was uninstalled.'), findsOneWidget);
+      expect(find.text('Undo'), findsOneWidget);
+    });
+
+    testWidgets('a declined card has nothing to undo', (tester) async {
+      await _openHistory(tester, [
+        change(id: '', outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_DENIED),
+      ], workspace: withRivet());
+      expect(find.text('Declined', findRichText: true), findsOneWidget);
+      expect(find.text('Undo'), findsNothing);
+    });
+
+    testWidgets('your own change opens the app in Marketplace → Apps', (
+      tester,
+    ) async {
+      final harness = await _openHistory(tester, [
+        change(agent: '', seq: 0),
+      ], workspace: withRivet());
+      expect(find.text('You · 2 h ago', findRichText: true), findsOneWidget);
+      await tester.tap(find.text('You gave June Change dashboards on Charts'));
+      await settle(tester);
+      expect(harness.page.value, AppPage.marketplace);
+    });
+
+    testWidgets('a change made elsewhere (who gave what changed) asks again', (
+      tester,
+    ) async {
+      final workspace = withRivet();
+      final harness = await _openHistory(tester, [
+        change(),
+      ], workspace: workspace);
+      int asked() => harness.backend.sent
+          .where((message) => message.hasListNeedsYouHistory())
+          .length;
+      final before = asked();
+      // Another Workspace with the same access: no new ask.
+      harness.backend.workspace.apply(workspace.deepCopy());
+      await settle(tester);
+      expect(asked(), before);
+      harness.backend.workspace.apply(
+        workspace.deepCopy()
+          ..apps.first.grants.first.given = AppAccessGiven(
+            byAgentId: 'rivet',
+            changeId: '13',
+          ),
+      );
+      await settle(tester);
+      await settle(tester);
+      expect(asked(), before + 1);
+    });
+  });
+
+  group('model changes', () {
+    Workspace withRivet() => _workspace()
+      ..agents.add(
+        Agent(
+          id: 'rivet',
+          name: 'Rivet',
+          modelAvailable: true,
+          status: AgentStatus.AGENT_STATUS_IDLE,
+        ),
+      );
+
+    NeedsYouRecord change({String reason = '', int seq = 40}) =>
+        _record(
+            'rivet',
+            'Rivet put June on Claude Opus 4.8, high',
+            kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_MODEL,
+            outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_CHANGED,
+            seq: seq,
+          )
+          ..agentName = 'Rivet'
+          ..subjectAgentId = 'june'
+          ..modelChangeId = 'm1'
+          ..agentReason = reason;
+
+    testWidgets("Rivet's reason as Rivet's, and Undo puts the model back", (
+      tester,
+    ) async {
+      final harness = await _openHistory(tester, [
+        change(reason: 'June needs to think harder about the migration.'),
+      ], workspace: withRivet());
+      expect(
+        find.text('Rivet put June on Claude Opus 4.8, high'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Rivet: “June needs to think harder about the migration.”'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Undo'));
+      await settle(tester);
+      await settle(tester);
+      expect(
+        harness.backend.sent
+            .lastWhere((m) => m.hasUndoModelChange())
+            .undoModelChange
+            .changeId,
+        'm1',
+      );
+      expect(find.text('Undone', findRichText: true), findsOneWidget);
+      expect(find.text('Undo'), findsNothing);
+    });
+
+    testWidgets('a refused undo says why under it', (tester) async {
+      final harness = await _openHistory(tester, [
+        change(),
+      ], workspace: withRivet());
+      harness.backend.refuseModelUndo =
+          "June's model changed since, so it was left as it is.";
+      await tester.tap(find.text('Undo'));
+      await settle(tester);
+      await settle(tester);
+      expect(
+        find.text("June's model changed since, so it was left as it is."),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets("an agent's model changing asks again", (tester) async {
+      final workspace = withRivet();
+      final harness = await _openHistory(tester, [
+        change(),
+      ], workspace: workspace);
+      int asked() => harness.backend.sent
+          .where((message) => message.hasListNeedsYouHistory())
+          .length;
+      final before = asked();
+      harness.backend.workspace.apply(
+        workspace.deepCopy()
+          ..agents.first.model = 'anthropic/claude-opus-4-8'
+          ..agents.first.effort = 'high',
+      );
+      await settle(tester);
+      await settle(tester);
+      expect(asked(), before + 1);
+    });
+
+    testWidgets('with no entry to show, a click opens the agent\'s settings', (
+      tester,
+    ) async {
+      await _openHistory(tester, [change(seq: 0)], workspace: withRivet());
+      await tester.tap(find.text('Rivet put June on Claude Opus 4.8, high'));
+      await settle(tester);
+      expect(find.byType(AgentSettingsForm), findsOneWidget);
+    });
   });
 }

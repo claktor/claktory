@@ -214,6 +214,8 @@ else
   fi
   # Nothing in it may name this Mac (its home, user, host or checkouts).
   check_no_traces "$partial"
+  # Never QA's provider override (Fugo, #332).
+  check_no_qa_provider "$partial/factoryd" "$partial/$APP_NAME/Contents/Helpers/factoryd" || exit 1
   # The app's libraries load the way dyld demands (scripts/check-macho.py):
   # a misaligned string pool stops macOS loading the tunnel. The helpers
   # beside it are executables, which macOS's dyld doesn't hold to that.

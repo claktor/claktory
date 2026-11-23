@@ -569,6 +569,9 @@ impl Agent {
                     tracing::info!(until_ms, "waited out the accounts' usage limits");
                     attempt = 0;
                     self.take_inbox(context, produced).await?;
+                    // Its model may have changed meanwhile (another
+                    // provider, #341): the request goes there.
+                    model = self.state.model.clone();
                     continue;
                 }
                 context.push(assistant(message.clone()));

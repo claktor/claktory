@@ -15,7 +15,6 @@
 //! the agent is told how it ended.
 
 use std::fmt::Write as _;
-use std::future::Future;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -23,10 +22,9 @@ use factory_agent::{Tool, ToolResult};
 use factory_protocol::v1::{self, DevicePairingState as State};
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::{Extension, Manifest, PromptKind, PromptSection};
+use super::{Extension, Manifest, PromptKind, PromptSection, async_tool};
 use crate::config::AgentConfig;
 use crate::factory::{Factory, Inner, RequestError, host_event};
 use crate::remote::{self, Device};
@@ -116,33 +114,6 @@ impl Extension for Devices {
     fn admin_default(&self) -> bool {
         true
     }
-}
-
-/// Binds an asynchronous tool to an agent without keeping Factory alive.
-fn async_tool<A, F>(
-    factory: &Arc<Factory>,
-    agent: &str,
-    name: &'static str,
-    label: &'static str,
-    description: &'static str,
-    parameters: Value,
-    run: fn(Arc<Factory>, String, A) -> F,
-) -> Tool
-where
-    A: DeserializeOwned + Send + 'static,
-    F: Future<Output = Result<ToolResult, String>> + Send + 'static,
-{
-    super::tool(
-        name,
-        label,
-        description,
-        parameters,
-        super::agent_handler(factory, agent, move |factory, agent, args| async move {
-            let args: A = serde_json::from_value(args)?;
-            let factory = super::live(factory)?;
-            run(factory, agent, args).await.map_err(factory_agent::Error::Other)
-        }),
-    )
 }
 
 #[derive(Deserialize)]

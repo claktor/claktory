@@ -165,10 +165,60 @@ enum PaperCore {
       matches.append(
         Match(
           page: document.index(for: page), range: selection.range(at: 0, on: page),
-          region: region(selection.bounds(for: page), on: page),
+          region: region(tightBounds(of: selection, on: page), on: page),
           text: (line.string ?? query).trimmingCharacters(in: .whitespacesAndNewlines)))
     }
     return (matches, false)
+  }
+
+  /// A match's bounds on [page] (page space), as the iPad's PaperView
+  /// finds them: the union of its
+  /// characters', each as PDFKit selects it. A selection's own bounds, and
+  /// its lines', can take in far more (the whole column of lines in a
+  /// monospaced report, Zucchero's row 91), and PDFPage.characterBounds
+  /// can be a line or a character away across (row 117). Some PDFs place
+  /// a line's first few characters far too wide: those count as wide as
+  /// the rest, so a match starting a line is washed from its own start.
+  /// Some make every character as tall as the page: then the height is
+  /// characterBounds', which keeps to the line.
+  static func tightBounds(of selection: PDFSelection, on page: PDFPage) -> CGRect {
+    let range = selection.range(at: 0, on: page)
+    guard range.location != NSNotFound, range.length > 0, range.length <= 500 else {
+      return selection.bounds(for: page)
+    }
+    let indices = range.location..<(range.location + range.length)
+    let glyphs = indices.map {
+      page.selection(for: NSRange(location: $0, length: 1))?.bounds(for: page) ?? .null
+    }
+    let placed = glyphs.filter { !$0.isNull && $0.width > 0 && $0.height > 0 }
+    guard !placed.isEmpty else { return selection.bounds(for: page) }
+    // The characters' usual width: of those as wide as another, within a
+    // seventh, since a line's misplaced first few can be most of a match.
+    let widths = placed.map(\.width)
+    let alike = widths.filter { w in widths.filter { abs($0 - w) <= w / 7 }.count > 1 }.sorted()
+    let width = alike.isEmpty ? widths.sorted()[widths.count / 2] : alike[alike.count / 2]
+    let height = placed.map(\.height).sorted()[placed.count / 2]
+    let sound = glyphs.indices.filter {
+      let g = glyphs[$0]
+      return !g.isNull && g.width >= width * 0.4 && g.width <= width * 1.75 && g.height > 0
+        && g.height <= height * 2.5
+    }
+    guard let first = sound.first, let last = sound.last else {
+      return selection.bounds(for: page)
+    }
+    var bounds = sound.reduce(CGRect.null) { $0.union(glyphs[$1]) }
+    let before = CGFloat(first), after = CGFloat(glyphs.count - 1 - last)
+    bounds.origin.x -= before * width
+    bounds.size.width += (before + after) * width
+    if height > width * 6 {
+      let ink = indices.map { page.characterBounds(at: $0) }.filter { $0.height > 0 }
+      if let low = ink.map(\.minY).min(), let high = ink.map(\.maxY).max(), high > low {
+        let pad = (high - low) * 0.05
+        bounds.origin.y = low - pad
+        bounds.size.height = high - low + 2 * pad
+      }
+    }
+    return bounds
   }
 
   /// The answer to `search`, as the fixture has it (cmd_search.json).

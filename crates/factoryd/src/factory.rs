@@ -189,6 +189,9 @@ pub enum RequestError {
     /// A search that can't be made so, and why (`crate::find`).
     #[error("{0}")]
     Find(String),
+    /// A usage wait that can't be ended so, and why (`crate::waits`).
+    #[error("{0}")]
+    Wait(String),
 }
 
 impl RequestError {
@@ -242,7 +245,8 @@ impl RequestError {
             | RequestError::Avatar(_)
             | RequestError::Ink(_)
             | RequestError::TooLong { .. }
-            | RequestError::Find(_) => v1::ErrorCode::InvalidRequest,
+            | RequestError::Find(_)
+            | RequestError::Wait(_) => v1::ErrorCode::InvalidRequest,
             RequestError::Unreachable(_) => v1::ErrorCode::Unreachable,
             RequestError::Account(code, _) => *code,
             RequestError::Io(_) | RequestError::Json(_) | RequestError::Db(_) | RequestError::Transcript(_) | RequestError::Provider(_) => {
@@ -332,6 +336,10 @@ pub struct Factory {
     task_check_every: std::sync::atomic::AtomicU64,
     /// Wakes the usage monitor, so a new sign-in's usage and plan are read at once.
     pub(crate) usage_wake: Arc<tokio::sync::Notify>,
+    /// Providers whose accounts' usage and plan are read again at the
+    /// monitor's next look, whenever they were last read: signed in to
+    /// again, or Try now (`crate::usage`).
+    pub(crate) usage_reread: Mutex<std::collections::HashSet<String>>,
     /// Wakes agents waiting out their accounts' usage limits (`crate::waits`)
     /// when the accounts or the settings change.
     pub(crate) capacity: Arc<tokio::sync::Notify>,
@@ -368,6 +376,8 @@ pub struct Factory {
     /// This Claktory's direct-message leaf: its sealed store, one writer at
     /// a time (`user_apps::dms::leaf`).
     pub(crate) dm_leaf: crate::user_apps::dms::leaf::State,
+    /// What wakes its direct-message loops (`user_apps::dms::Wakes`).
+    pub(crate) dm_wakes: crate::user_apps::dms::Wakes,
     /// The apps installed, as they run (`crate::apps`).
     pub(crate) apps: crate::apps::Apps,
     /// Hides the vault's values in what agents and the app are shown.
@@ -390,6 +400,9 @@ pub struct Factory {
     pub(crate) voices: crate::speech::voice::Voices,
     /// The person's chats (`crate::chats`).
     pub(crate) chats: crate::chats::Chats,
+    /// Agents and chats that continued on another provider while theirs
+    /// was at its usage limit (`crate::usage_switch`).
+    pub(crate) usage_switches: crate::usage_switch::Switches,
     /// Notifications: who's using Claktory where, and what was seen
     /// (`crate::notify`).
     pub(crate) notify: crate::notify::State,
@@ -693,6 +706,7 @@ impl Factory {
         let store = crate::store::Store::open(&home.db_path())?;
         crate::runs::import_files(&home, &store).await?;
         let chats = crate::chats::Chats::load(&store);
+        let usage_switches = crate::usage_switch::Switches::load(&store);
         let mut state: State = store.state()?;
         if state.selected_agent.as_deref().is_some_and(|id| config.agent(id).is_none()) {
             state.selected_agent = None;
@@ -752,6 +766,7 @@ impl Factory {
             nudge_minute: std::sync::atomic::AtomicU64::new(60_000),
             task_check_every: std::sync::atomic::AtomicU64::new(60_000),
             usage_wake: Arc::default(),
+            usage_reread: Mutex::default(),
             capacity: Arc::default(),
             resetting: Mutex::default(),
             monitors: crate::extensions::monitors::State::default(),
@@ -769,6 +784,7 @@ impl Factory {
             vault,
             vault_moved: Arc::default(),
             dm_leaf: crate::user_apps::dms::leaf::State::default(),
+            dm_wakes: crate::user_apps::dms::Wakes::default(),
             apps: crate::apps::Apps::default(),
             account,
             onboarding,
@@ -777,6 +793,7 @@ impl Factory {
             pipes: crate::pipes::Pipes::default(),
             voices: crate::speech::voice::Voices::new(),
             chats,
+            usage_switches,
             notify: crate::notify::State::default(),
             browser: crate::browser::Browser::default(),
             presentations: crate::presentation::Hub::default(),
@@ -1126,6 +1143,8 @@ impl Factory {
         crate::pipes::curator::forget(self, id)?;
         crate::extensions::agents::provenance::forget(&self.store, id)?;
         crate::user_apps::forget(self, id)?;
+        crate::apps::access::forget(&self.store, id)?;
+        self.usage_switches.forget(&self.store, id);
         self.forget_presence(id)?;
         match tokio::fs::remove_dir_all(self.home.agent_dir(id)).await {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
@@ -1367,6 +1386,22 @@ impl Factory {
     }
 
     pub async fn update_agent(&self, id: &str, change: AgentChange<'_>) -> Result<(), RequestError> {
+        let before = change.model.and_then(|_| self.lock().config.agent(id).map(|agent| agent.model.clone()));
+        let model = change.model.map(str::to_owned);
+        self.update_agent_keeping_switch(id, change).await?;
+        // Its model chosen anew: a switch to another provider (#341) is over.
+        if let (Some(before), Some(model)) = (before, model)
+            && before != model
+        {
+            self.usage_switches.forget(&self.store, id);
+            self.broadcast_workspace(&self.lock());
+        }
+        Ok(())
+    }
+
+    /// UpdateAgent's change, keeping a switch to another provider: what
+    /// `crate::usage_switch` switches it with.
+    pub(crate) async fn update_agent_keeping_switch(&self, id: &str, change: AgentChange<'_>) -> Result<(), RequestError> {
         let notify = change.notify;
         self.edit_config(|config| {
             if let Some(project) = change.project
@@ -1704,6 +1739,9 @@ impl Factory {
         if let Err(error) = crate::user_apps::restore(&self.store, id, &mut transcript) {
             tracing::error!(agent = %id, %error, "could not read its proposals of app access; decided ones show as waiting");
         }
+        if let Err(error) = crate::apps::access::restore(&self.store, id, &mut transcript) {
+            tracing::error!(agent = %id, %error, "could not read its proposals of what apps read; decided ones show as waiting");
+        }
         match self.vault.requests_of(id) {
             Ok(requests) => {
                 for request in requests.into_iter().filter(|request| request.state() != v1::SecretRequestState::Pending) {
@@ -1767,6 +1805,7 @@ impl Factory {
             || crate::extensions::devices::waiting_of(&self.store, id)
             || crate::pipes::start::waiting_of(&self.store, id)
             || crate::user_apps::pending_of(&self.store, id)
+            || crate::apps::access::pending_of(&self.store, id)
     }
 
     /// Changes the config in memory and on disk, or changes nothing.
@@ -2335,6 +2374,7 @@ impl Factory {
             tracing::error!(%error, "could not read the checklist items waiting on the person");
             Default::default()
         });
+        let switching = crate::usage_switch::view(self, inner);
         for agent in &inner.config.agents {
             let runtime = inner.agents.get(&agent.id);
             let character = self.character(inner, agent, now);
@@ -2388,6 +2428,9 @@ impl Factory {
                 fallback_model: agent.fallback_model.clone(),
                 notify: crate::notify::settings(self).mode(&agent.id).to_proto().into(),
                 unread_copies: unread_copies.get(&agent.id).copied().unwrap_or_default(),
+                usage_wait_alternative: switching.alternative(&agent.id),
+                usage_wait_no_other_provider: switching.no_other_provider(&agent.id),
+                usage_switch: switching.switch(&agent.id),
             });
         }
         let config = &inner.config;
@@ -2412,7 +2455,7 @@ impl Factory {
         }
         let apps = crate::apps::infos(self, config, &vault);
         let (pipes, selected_pipe_id) = crate::pipes::view(self, inner);
-        let (chats, selected_chat_id) = crate::chats::view(self, inner);
+        let (chats, selected_chat_id) = crate::chats::view(self, inner, &switching);
         v1::Workspace {
             os: std::env::consts::OS.to_owned(),
             map: Some(crate::map::build(config, &self.home, &vault, &apps)),
@@ -2695,6 +2738,10 @@ async fn watch(factory: Weak<Factory>) {
             // What was taken in is written there again, or emptied.
             auth_stamp = stamp(&auth_path).await;
             factory.refresh_models().await;
+            // Signed in to again, perhaps, which the listing may not show:
+            // waiting agents ask again (friend bug #3). One whose accounts
+            // are all still spent asks nothing.
+            factory.capacity_changed();
         }
         factory.refresh_explorer().await;
         let release_now = stamp(&release_path).await;

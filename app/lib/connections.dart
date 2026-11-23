@@ -147,7 +147,53 @@ const pairingSchemes = {'factory', 'claktory'};
 /// code this app made for a Claktory found through the account is one
 /// only when [fromAccount] (as kept on this device), never as pasted.
 RemoteFactory? parsePairingCode(String text, {bool fromAccount = false}) {
+  for (final code in _pastedCodes(text)) {
+    if (_parsePairingCode(code, fromAccount) case final target?) {
+      return target;
+    }
+  }
+  return null;
+}
+
+/// What [text] may hold as a code (friend bug #2), as a messenger or a
+/// note may give it: first the code from its `factory://` (or
+/// `claktory://`) on, without the line breaks it was wrapped with,
+/// invisible characters, or words and brackets around it (a code is one
+/// word, its parts percent-encoded, so none of that is part of it);
+/// then with spaces inside it encoded, for a messenger that showed the
+/// name decoded; last, [text] itself, trimmed.
+Iterable<String> _pastedCodes(String text) sync* {
   final code = text.trim();
+  final start = _codeStart.firstMatch(code);
+  if (start == null) {
+    yield code;
+    return;
+  }
+  // Its lines, joined, until a line of words ("Sent from my iPhone"):
+  // the code's own have no spaces.
+  final lines = code
+      .substring(start.start)
+      .replaceAll(_invisible, '')
+      .split(_lineBreak);
+  var joined = lines.first.trim();
+  for (final line in lines.skip(1).map((line) => line.trim())) {
+    if (line.isEmpty || _space.hasMatch(line)) break;
+    joined += line;
+  }
+  final word = joined.split(_space).first.replaceFirst(_trailing, '');
+  yield word;
+  final spaced = joined.replaceFirst(_trailing, '').replaceAll(_space, '%20');
+  if (spaced != word) yield spaced;
+  if (code != word && code != spaced) yield code;
+}
+
+final _codeStart = RegExp(r'\b(factory|claktory)://', caseSensitive: false);
+final _invisible = RegExp('[\u00AD\u200B-\u200D\u2060\uFEFF]');
+final _lineBreak = RegExp('\r\n|[\r\n\u2028\u2029]');
+final _space = RegExp(r'\s+');
+final _trailing = RegExp('[.,;:!?)\\]>"\'\u201D\u2019\u00BB]+\$');
+
+RemoteFactory? _parsePairingCode(String code, bool fromAccount) {
   final Uri uri;
   final Map<String, String> query;
   final Map<String, List<String>> queryAll;

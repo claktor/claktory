@@ -135,7 +135,7 @@ fn test_17_a_moved_or_restored_copy_of_a_claktory_reads_nothing_new() {
         out.welcome.unwrap()
     });
     mini.step(|provider, _| Group::join(provider, &pins, kind.clone(), id, &welcome).unwrap());
-    let said = phone.step(|provider, me| group_of(provider, &kind, id).send(provider, me, b"before the move").unwrap());
+    let said = phone.step(|provider, me| group_of(provider, &kind, id).send(provider, me, &Pins::default(), b"before the move").unwrap());
     assert!(matches!(
         mini.step(|provider, _| group_of(provider, &kind, id).process(provider, &pins, &said)),
         Ok(Incoming::Application { .. })
@@ -164,7 +164,7 @@ fn test_17_a_moved_or_restored_copy_of_a_claktory_reads_nothing_new() {
         out
     });
     moved.step(|provider, _| Group::join(provider, &pins, kind.clone(), id, added.welcome.as_ref().unwrap()).unwrap());
-    let after = phone.step(|provider, me| group_of(provider, &kind, id).send(provider, me, b"after the move").unwrap());
+    let after = phone.step(|provider, me| group_of(provider, &kind, id).send(provider, me, &Pins::default(), b"after the move").unwrap());
     let heard = moved.step(|provider, _| group_of(provider, &kind, id).process(provider, &pins, &after));
     assert!(matches!(heard, Ok(Incoming::Application { .. })), "{heard:?}");
 
@@ -215,4 +215,54 @@ fn test_17_a_moved_or_restored_copy_of_a_claktory_reads_nothing_new() {
 
 fn group_of(provider: &Provider, kind: &GroupKind, id: &[u8]) -> Group {
     Group::load(provider, kind.clone(), id).unwrap().unwrap()
+}
+
+/// Row 671 (Fugo): Ana takes a leaf of hers out of a conversation by its
+/// id. Bo's leaf under the same id (no two accounts share a device's key
+/// since, but a leaf id is only what a certificate says) stays: a removal
+/// never touches another person's leaf. Named with his account, it's his.
+#[test]
+fn a_removal_by_id_never_takes_out_another_persons_leaf_with_that_id() {
+    let ana = IdentityKey::generate().unwrap();
+    let bo = IdentityKey::generate().unwrap();
+    let mut phone = End::new(&ana, LeafKind::Device, "ana", "ana-phone", 1);
+    let mut mac = End::new(&ana, LeafKind::Device, "ana", "shared", 2);
+    let mut his = End::new(&bo, LeafKind::Device, "bo", "shared", 3);
+    let mut pins = Pins::default();
+    pins.first_contact("ana", ana.public()).unwrap();
+    pins.first_contact("bo", bo.public()).unwrap();
+    pins.accept_list("ana", &list(&ana, "ana", 1, vec![phone.listed(), mac.listed()])).unwrap();
+    pins.accept_list("bo", &list(&bo, "bo", 1, vec![his.listed()])).unwrap();
+    let kind = GroupKind::Conversation { people: ["ana".into(), "bo".into()] };
+    let id = b"ana-and-bo";
+    let packages = vec![mac.step(|provider, me| me.key_package(provider).unwrap()), his.step(|provider, me| me.key_package(provider).unwrap())];
+    phone.step(|provider, me| {
+        let mut started = Group::create(provider, me, kind.clone(), id).unwrap();
+        started.add(provider, me, &pins, &packages).unwrap();
+        started.merge_pending(provider).unwrap();
+    });
+    let leaves = |end: &mut End| -> Vec<(String, String)> {
+        let mut leaves: Vec<(String, String)> =
+            group(end, &kind, id).leaves_unchecked().into_iter().map(|leaf| (leaf.account_id, leaf.leaf_id)).collect();
+        leaves.sort();
+        leaves
+    };
+    let pair = |account: &str, leaf: &str| (account.to_owned(), leaf.to_owned());
+    assert_eq!(leaves(&mut phone), [pair("ana", "ana-phone"), pair("ana", "shared"), pair("bo", "shared")]);
+
+    phone.step(|provider, me| {
+        let mut conversation = group_of(provider, &kind, id);
+        conversation.remove(provider, me, &["shared"]).unwrap();
+        conversation.merge_pending(provider).unwrap();
+    });
+    assert_eq!(leaves(&mut phone), [pair("ana", "ana-phone"), pair("bo", "shared")], "hers only");
+    let again = phone.step(|provider, me| group_of(provider, &kind, id).remove(provider, me, &["shared"]).map(|_| ()));
+    assert!(again.is_err(), "none of hers left under that id");
+
+    phone.step(|provider, me| {
+        let mut conversation = group_of(provider, &kind, id);
+        conversation.remove_of(provider, me, "bo", &["shared"]).unwrap();
+        conversation.merge_pending(provider).unwrap();
+    });
+    assert_eq!(leaves(&mut phone), [pair("ana", "ana-phone")]);
 }

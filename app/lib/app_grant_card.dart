@@ -14,7 +14,6 @@ import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
 import 'people/contacts.dart';
 import 'people/people_view.dart' show contactsApi;
-import 'pipes.dart' show PortalGlyph, pipeColor;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart' show SelectableArea;
@@ -38,12 +37,15 @@ String _agentName(AppGrantProposal grant, Workspace workspace) =>
 const appGrantSend = 'dm.send';
 
 /// What the warning says when the agent it would give access to has read
-/// messages from another Claktory; more when it could send as the person.
+/// a web page (grantee_read_pipes, agents_read_pipes: since #346 only a
+/// page read through browser control marks an agent); more when it could
+/// send as the person.
 String appGrantReadPipes(String name, {required bool sends}) => sends
-    ? '$name has read messages from another Claktory. Whoever wrote them '
-          'could try to get $name to send messages as you. Approve only '
-          'if you trust them.'
-    : '$name has read messages from another Claktory.';
+    ? '$name has read a web page, which may hold someone else\'s '
+          'instructions. Whoever wrote it could try to get $name to send '
+          'messages as you. Approve only if you expected this.'
+    : '$name has read a web page, which may hold someone else\'s '
+          'instructions.';
 
 /// Whether the app gave [resources] names of their own: until it does,
 /// each label is only its id, which the person never sees.
@@ -285,7 +287,7 @@ class _AppGrantCardState extends State<AppGrantCard> {
             ),
           ),
           // Before anything else it gives: whom it would give it to has
-          // read another Claktory's messages (Fugo's condition).
+          // read a web page (Fugo's condition; a pipe before #346).
           if (grant.granteeReadPipes) ...[
             const SizedBox(height: Space.s),
             _ReadPipes(
@@ -580,9 +582,9 @@ class _Reason extends StatelessWidget {
   }
 }
 
-/// The agent it would give access to has read a pipe: a line after the
-/// portal, as cards say where a request may come from; when the grant
-/// would let it send as the person, a `danger` box of its own instead.
+/// The agent it would give access to has read a web page: a line after a
+/// globe, as cards say where a request may come from; when the grant would
+/// let it send as the person, a `danger` box of its own instead.
 class _ReadPipes extends StatelessWidget {
   const _ReadPipes({required this.name, required this.sends});
 
@@ -598,10 +600,15 @@ class _ReadPipes extends StatelessWidget {
       return Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Padding(
-            padding: EdgeInsets.only(top: 2),
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
             child: ExcludeSemantics(
-              child: PortalGlyph(color: pipeColor, size: 12),
+              child: ExtensionGlyph(
+                icon: 'globe',
+                name: '',
+                color: palette.textMuted,
+                size: 12,
+              ),
             ),
           ),
           const SizedBox(width: Space.xs + 2),
@@ -627,7 +634,12 @@ class _ReadPipes extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(top: 3),
             child: ExcludeSemantics(
-              child: PortalGlyph(color: palette.danger, size: 14),
+              child: ExtensionGlyph(
+                icon: 'globe',
+                name: '',
+                color: palette.danger,
+                size: 14,
+              ),
             ),
           ),
           const SizedBox(width: Space.s),

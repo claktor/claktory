@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -5,11 +7,15 @@ import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
 import 'decision.dart';
+import 'devices.dart' show QrCode;
 import 'extensions.dart' show logTime;
 import 'identity.dart';
 import 'mobile/share.dart' show canShare, globalRectOf, shareText;
+import 'people/messages_setup.dart' show secretClipboard;
+import 'people/secret_clipboard.dart' show clearWhenDue;
 import 'pipes.dart';
 import 'protocol/factory/v1/factory.pb.dart';
+import 'scan_code.dart';
 import 'scope.dart';
 import 'selection.dart' show SelectableArea;
 import 'state.dart' show WorkspaceStore;
@@ -59,8 +65,36 @@ class _PipeStartCardState extends State<PipeStartCard> {
   /// does, never kept anywhere.
   PipeInvite? _invite;
   var _copied = false;
+
+  /// The invite's code shows as a QR too, to scan in person.
+  var _qr = false;
+
+  /// A code can be scanned here, with the camera (friend bug #2).
+  var _canScan = false;
   var _busy = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_accept) {
+      canOfferScan(context).then((can) {
+        if (mounted && can) setState(() => _canScan = true);
+      });
+    }
+  }
+
+  /// Scans the code someone sent, then reads it as a pasted one is.
+  Future<void> _scan() async {
+    final code = await scanCode(
+      context,
+      title: 'Scan a pipe invite',
+      check: pipeInviteCheck,
+    );
+    if (code == null || !mounted) return;
+    _code.text = code;
+    _read();
+  }
 
   @override
   void dispose() {
@@ -123,8 +157,8 @@ class _PipeStartCardState extends State<PipeStartCard> {
     ),
   );
 
-  Future<void> _copy(String code) async {
-    await Clipboard.setData(ClipboardData(text: code));
+  Future<void> _copy(String code, int expiresMs) async {
+    await copyInviteCode(code, expiresMs: expiresMs);
     if (mounted) setState(() => _copied = true);
   }
 
@@ -214,7 +248,9 @@ class _PipeStartCardState extends State<PipeStartCard> {
       return [
         Field(
           label: 'Code',
-          note: 'Paste the code you were sent.',
+          note: _canScan
+              ? 'Paste the code you were sent, or scan it.'
+              : 'Paste the code you were sent.',
           child: TextField(
             controller: _code,
             placeholder: 'Paste code',
@@ -225,6 +261,8 @@ class _PipeStartCardState extends State<PipeStartCard> {
         ),
         _actions(palette, [
           _dismissButton(),
+          if (_canScan)
+            Button(label: 'Scan code', onPressed: _busy ? null : _scan),
           ListenableBuilder(
             listenable: _code,
             builder: (context, _) => Button(
@@ -381,6 +419,10 @@ class _PipeStartCardState extends State<PipeStartCard> {
           ),
         ),
       ),
+      if (_qr) ...[
+        const SizedBox(height: Space.m),
+        PipeInviteQr(code: invite.code),
+      ],
       const SizedBox(height: Space.xs),
       Text(
         expires > 0
@@ -394,10 +436,15 @@ class _PipeStartCardState extends State<PipeStartCard> {
       _actions(palette, [
         if (pipe != null)
           Button(label: 'Open pipe', onPressed: () => openPipe(context, pipe)),
+        if (!_qr)
+          Button(
+            label: 'Show QR code',
+            onPressed: () => setState(() => _qr = true),
+          ),
         Button(
           label: _copied ? 'Copied' : 'Copy code',
           primary: !share,
-          onPressed: () => _copy(invite.code),
+          onPressed: () => _copy(invite.code, expires),
         ),
         // Where there's a share sheet, it's the way to send the code, last.
         if (share)
@@ -528,4 +575,62 @@ class _TheySay extends StatelessWidget {
       ),
     );
   }
+}
+
+/// A pipe invite's code as a QR code, for someone with the person to scan
+/// in Claktory on their phone or tablet, instead of being sent the code.
+class PipeInviteQr extends StatelessWidget {
+  const PipeInviteQr({super.key, required this.code});
+
+  final String code;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Center(
+          child: QrCode(key: ValueKey(code), text: code, size: 180),
+        ),
+        const SizedBox(height: Space.s),
+        Text(
+          'Someone with you can scan it in Claktory on their phone or '
+          'tablet: Connect a pipe…, I have a code, then Scan code.',
+          textAlign: TextAlign.center,
+          style: TextStyles.caption.copyWith(color: palette.textFaint),
+        ),
+      ],
+    );
+  }
+}
+
+/// Why [text] isn't a pipe invite, for a scan to keep reading; null when
+/// it is one (`claktory-pipe://…`), to read as a pasted code is.
+String? pipeInviteCheck(String text) =>
+    text.trim().startsWith('claktory-pipe://')
+    ? null
+    : "This isn't a pipe invite.";
+
+/// A pipe invite's code works for 10 minutes, from when it was made.
+const inviteLifetime = Duration(minutes: 10);
+
+/// Copies a pipe invite's code (row 166, Fugo): marked sensitive, so the
+/// clipboard's preview, keyboards and clipboard history leave it out, for
+/// as long as it works ([expiresMs], else [inviteLifetime]) and cleared
+/// then, if it's still there: a dead code, never one the person is about
+/// to paste into a messenger. Where this device has no such clipboard
+/// (Linux, Windows), the plain one.
+Future<void> copyInviteCode(String code, {required int expiresMs}) async {
+  final now = DateTime.now().millisecondsSinceEpoch;
+  final lasts = expiresMs > now
+      ? ((expiresMs - now) / 1000).ceil()
+      : inviteLifetime.inSeconds;
+  final token = await secretClipboard.copy(code, lasts: lasts);
+  if (token == null) {
+    await Clipboard.setData(ClipboardData(text: code));
+    return;
+  }
+  // Android keeps no expiry of its own; iOS's is set, and this is the same.
+  clearWhenDue(secretClipboard, token, Duration(seconds: lasts));
 }

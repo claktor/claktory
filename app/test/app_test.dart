@@ -366,10 +366,9 @@ void main() {
     expect(harness.last.updateSettings.compactAtTokens, Int64(300000));
   });
 
-  testWidgets('Settings shows Apps only where the backend runs apps', (
-    tester,
-  ) async {
-    final harness = await showApp(tester, workspace());
+  testWidgets('apps are in the Marketplace, where the backend runs them, '
+      'not in Settings', (tester) async {
+    final harness = await showApp(tester, workspace()..appsAvailable = true);
     harness.page.value = AppPage.settings;
     await settle(tester);
     final settings = find
@@ -378,24 +377,24 @@ void main() {
           matching: find.byType(Scrollable),
         )
         .first;
-
     await tester.scrollUntilVisible(
       find.text('Opus 5.5'),
       200,
       scrollable: settings,
     );
     await settle(tester);
-    expect(find.text('Apps'), findsNothing);
     expect(find.text('Install from a file…'), findsNothing);
 
-    harness.backend.workspace.apply(workspace()..appsAvailable = true);
+    harness.page.value = AppPage.marketplace;
     await settle(tester);
-    await tester.scrollUntilVisible(
-      find.text('Install from a file…'),
-      -200,
-      scrollable: settings,
-    );
-    expect(find.text('Apps'), findsOneWidget);
+    await tester.tap(find.text('Apps'));
+    await settle(tester);
+    expect(find.text('Install from a file…'), findsOneWidget);
+
+    // No Apps tab where the backend doesn't run apps.
+    harness.backend.workspace.apply(workspace());
+    await settle(tester);
+    expect(find.text('Apps'), findsNothing);
   });
 
   testWidgets('agent settings move, change model, and delete', (tester) async {

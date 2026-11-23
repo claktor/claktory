@@ -56,6 +56,28 @@ pub enum Error {
     /// devices (M3), never from what the service says.
     #[error("refused: {account}'s certificate isn't from their security key")]
     UnknownIdentity { account: String },
+    /// A leaf under the identity pinned for its account that the latest
+    /// device list taken here doesn't name: refused like any `Refused`, but
+    /// typed, since a newer list (one this endpoint hasn't fetched yet) may
+    /// name it. An endpoint fetches that account's list and tries again
+    /// rather than skip a commit for it (R5).
+    #[error("refused: {account}'s device list doesn't name this leaf")]
+    Unlisted { account: String },
+    /// A leaf under a security key its account replaced, as this endpoint's
+    /// pins hold it (L5): refused like any `Refused`, but typed, since a
+    /// commit from one can never be taken here. A device fallen behind
+    /// across more than one new key of a friend's rejoins the group, and
+    /// says what it skipped (row 654).
+    #[error("refused: {account}'s certificate is from a security key that was replaced")]
+    Replaced { account: String },
+    /// A group still holds a leaf its account is about to take out: a dead
+    /// device leaf (`validation::dead`, under a security key its account
+    /// replaced, off its current list: a start-over's, row 630) or a stale
+    /// one (`validation::stale`, a former install of a device now listed
+    /// under a new key: a reinstall's, row 202). Nothing is sent until it's
+    /// gone: it could still read it. `reason` says which.
+    #[error("waiting for {account}'s {reason} to finish")]
+    Waiting { account: String, reason: validation::Held },
     /// OpenMLS failed.
     #[error("mls: {0}")]
     Mls(String),

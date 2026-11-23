@@ -142,6 +142,26 @@ int reportTypeUses(Workspace workspace, String id) {
   return uses;
 }
 
+/// Where [id] is still on, as Delete's refusal names them: open pipes
+/// that forward it (by name) and projects whose new pipes would ("Garden's
+/// new pipes").
+List<String> reportTypePlaces(Workspace workspace, String id) => [
+  for (final pipe in workspace.pipes)
+    if (pipe.state != PipeState.PIPE_STATE_CLOSED &&
+        pipe.hasForward() &&
+        forwardTypeIds(pipe.forward).contains(id))
+      pipe.name.isEmpty ? pipe.id : pipe.name,
+  for (final project in workspace.projects)
+    if (project.hasReportForward() &&
+        forwardTypeIds(project.reportForward).contains(id))
+      "${project.name}'s new pipes",
+];
+
+/// "a", "a and b", "a, b and c".
+String _joined(List<String> words) => words.length < 2
+    ? words.join()
+    : '${words.take(words.length - 1).join(', ')} and ${words.last}';
+
 /// "4 fields · v2", with "on 2 pipes" while pipes forward it.
 String reportTypeSummary(Workspace workspace, ReportSchema type) {
   final fields = type.fields.length;
@@ -482,15 +502,25 @@ class _ReportTypeSheetState extends State<ReportTypeSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final store = AppScope.of(context).workspace;
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) => _sheet(context, store.workspace),
+    );
+  }
+
+  Widget _sheet(BuildContext context, Workspace workspace) {
     final palette = Palette.of(context);
     final textStyle = TypeScale.of(context);
-    final workspace = AppScope.of(context).workspace.workspace;
     // The version as it is now, once an edit is saved.
     final type =
         workspace.reportSchemas
             .where((each) => each.id == widget.type.id)
             .firstOrNull ??
         widget.type;
+    // Delete is refused while it's on anywhere: the confirm says where,
+    // rather than promising pipes stop forwarding it (Zucchero's T6 nit).
+    final places = reportTypePlaces(workspace, type.id);
     return FormFrame(
       title: type.name,
       body: reportTypeChangedText(workspace, type),
@@ -513,8 +543,11 @@ class _ReportTypeSheetState extends State<ReportTypeSheet> {
                 ),
                 const SizedBox(height: Space.xs),
                 Text(
-                  'Pipes stop forwarding it. Reports already forwarded '
-                  'keep it.',
+                  places.isEmpty
+                      ? 'No pipe forwards it. Reports already forwarded keep '
+                            'it.'
+                      : '“${type.name}” is still forwarded by '
+                            '${_joined(places)}. Turn it off there first.',
                   style: textStyle.body.copyWith(color: palette.textMuted),
                 ),
                 const SizedBox(height: Space.m),
@@ -532,7 +565,7 @@ class _ReportTypeSheetState extends State<ReportTypeSheet> {
                     Button(
                       label: 'Delete',
                       primary: true,
-                      onPressed: _busy ? null : _delete,
+                      onPressed: _busy || places.isNotEmpty ? null : _delete,
                     ),
                   ],
                 ),

@@ -347,6 +347,18 @@ pub struct DmMember {
     pub since_ms: u64,
 }
 
+/// A conversation the other person isn't in yet (row 676): none of their
+/// devices passes the checks there, so nothing is sent until one does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DmJoining {
+    /// Whose devices it waits for.
+    pub account: String,
+    /// This device adds them first: it's the person's member with the
+    /// lowest leaf index there (the creator, unless it left), so the
+    /// person's devices don't each spend the friend's key packages (Fugo).
+    pub adds_first: bool,
+}
+
 /// Who a commit added and removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DmMembers {
@@ -357,6 +369,19 @@ pub struct DmMembers {
     /// anything said under it (Fugo).
     #[serde(default)]
     pub key_changed: Vec<String>,
+    /// What was sent here between the last message this device read and
+    /// this line was skipped: it joined the group again past it, and
+    /// can't read it (row 654, Fugo: never silent). Some(account) when
+    /// that account's security key changed meanwhile ("" for any other
+    /// cause); None for a line about members.
+    #[serde(default)]
+    pub skipped: Option<String>,
+    /// Leaves back under their id with a new signature key: the device
+    /// installed again (row 202). One line each ("Ana set up a device
+    /// again: iPhone", Trish); its former install leaving under that id
+    /// says nothing.
+    #[serde(default)]
+    pub set_up_again: Vec<DmMember>,
 }
 
 /// What the person's own devices keep of a conversation, through the self
@@ -401,11 +426,15 @@ pub struct DmProcessed {
     /// Dropped, and it was a commit or proposal: this device may have
     /// fallen out of step and should rejoin.
     pub handshake: bool,
+    /// Held, and never to be taken here: a commit or proposal from a leaf
+    /// under a security key [why]'s account replaced (row 654). This
+    /// device rejoins the group past it.
+    pub replaced: bool,
 }
 
 impl DmProcessed {
     fn of(outcome: DmOutcome) -> DmProcessed {
-        DmProcessed { outcome, message: None, epoch: 0, why: String::new(), handshake: false }
+        DmProcessed { outcome, message: None, epoch: 0, why: String::new(), handshake: false, replaced: false }
     }
 
     fn message(message: DmMessage) -> DmProcessed {
@@ -566,8 +595,40 @@ impl DmDevice {
         Ok(())
     }
 
-    fn save_pins(&self, tx: &Transaction<'_>, pins: &Pins) -> Result<(), Error> {
+    /// Keeps [pins] in place of [before]; the person's devices ([account]'s
+    /// leaves) its list no longer names are kept as removed, so a code for
+    /// one is never taken again ([DmDevice::seal_handoff]).
+    fn save_pins(&self, tx: &Transaction<'_>, account: &str, before: &Pins, pins: &Pins) -> Result<(), Error> {
+        let listed = |pins: &Pins| -> Vec<String> {
+            pins.get(account)
+                .and_then(|pin| pin.device_list.as_ref())
+                .and_then(|bytes| SignedDeviceList::from_bytes(bytes).ok())
+                .map(|signed| signed.list.leaves.into_iter().map(|leaf| leaf.leaf_id).collect())
+                .unwrap_or_default()
+        };
+        let now = listed(pins);
+        let gone: Vec<String> = listed(before).into_iter().filter(|leaf| !now.contains(leaf)).collect();
+        self.note_removed(tx, &gone)?;
         self.save_row(tx, PINS, &Zeroizing::new(json(pins)?))
+    }
+
+    /// Adds [leaves] to the person's devices removed here or off a list
+    /// this device took: their codes are refused from then on.
+    fn note_removed(&self, tx: &Transaction<'_>, leaves: &[String]) -> Result<(), Error> {
+        if leaves.is_empty() {
+            return Ok(());
+        }
+        let mut removed: Vec<String> = self.read_row(tx, REMOVED)?.unwrap_or_default();
+        let before = removed.len();
+        for leaf in leaves {
+            if !removed.contains(leaf) {
+                removed.push(leaf.clone());
+            }
+        }
+        if removed.len() == before {
+            return Ok(());
+        }
+        self.save_row(tx, REMOVED, &json(&removed)?)
     }
 
     #[frb(sync)]
@@ -612,7 +673,7 @@ impl DmDevice {
         let kept = Kept { account_id: account_id.to_owned(), certificate: bytes.clone() };
         self.store.with_tx(|_, tx| -> Result<(), Error> {
             self.save_row(tx, ME, &json(&kept)?)?;
-            self.save_pins(tx, &pins)
+            self.save_pins(tx, account_id, &state.pins, &pins)
         })?;
         state.pins = pins;
         state.me = Some(me);
@@ -633,16 +694,76 @@ impl DmDevice {
         name: String,
         now_ms: u64,
     ) -> anyhow::Result<DmSetUp> {
+        self.set_up(identity_key, None, account_id, leaf_id, name, now_ms)
+    }
+
+    /// No other device (dms-e2ee §2, "All devices lost"; row 630): sets
+    /// up this device as [set_up_first] does, under a new identity
+    /// [identity_key] that replaces the account's [old_identity_public]
+    /// (as the worker serves it), held as retired here from the start, as
+    /// a key change would leave it (Ghiaccio): leaves under the old key
+    /// are the dead ones, and a Claktory enrolled under it can be enrolled
+    /// again. [replaced_identity_keys]: the keys the account replaced
+    /// before that one, oldest first (GET keys' list), retired too, so
+    /// leaves and Claktories under any of them are known after more than
+    /// one start-over (row 654; Fugo: only here, for the person's own
+    /// account, and refused whole if the list names the new key).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_up_new_key(
+        &self,
+        identity_key: Vec<u8>,
+        old_identity_public: Vec<u8>,
+        replaced_identity_keys: Vec<Vec<u8>>,
+        account_id: String,
+        leaf_id: String,
+        name: String,
+        now_ms: u64,
+    ) -> anyhow::Result<DmSetUp> {
+        let mut keys = replaced_identity_keys;
+        keys.push(old_identity_public);
+        self.set_up(identity_key, Some(keys), account_id, leaf_id, name, now_ms)
+    }
+
+    fn set_up(
+        &self,
+        identity_key: Vec<u8>,
+        old_identity_publics: Option<Vec<Vec<u8>>>,
+        account_id: String,
+        leaf_id: String,
+        name: String,
+        now_ms: u64,
+    ) -> anyhow::Result<DmSetUp> {
         let mut state = self.state();
         if state.me.is_some() {
             bail!("this device is set up already");
         }
         let identity = IdentityKey::from_secret(&bytes32(&identity_key)?);
+        if let Some(old) = old_identity_publics {
+            // Oldest first, the one the worker serves now last: each retired
+            // by the next, as key changes would have left them.
+            let old = old.iter().map(|key| IdentityPublic::from_slice(key)).collect::<Result<Vec<_>, _>>()?;
+            if old.contains(&identity.public()) {
+                bail!("that's the key the account has");
+            }
+            let Some((first, rest)) = old.split_first() else { bail!("no key to replace") };
+            let mut pins = state.pins.clone();
+            pins.first_contact(&account_id, *first)?;
+            for key in rest {
+                pins.key_changed(&account_id, *key)?;
+            }
+            pins.key_changed(&account_id, identity.public())?;
+            pins.seen(&account_id);
+            // Kept with the leaf below, in one transaction.
+            state.pins = pins;
+        }
         let public = identity.public().0.to_vec();
         let certificate = self.become_leaf(&mut state, identity, &account_id, &leaf_id, &name, now_ms)?;
         let listed = DmListed { kind: DmLeafKind::Device, leaf_id, signature_key: state.leaf.public().to_vec() };
         drop(state);
         let device_list = self.sign_device_list(1, now_ms, vec![listed])?;
+        // The first list, this device's own: pinned at once (nothing on
+        // the worker to step out of line with; a refused setup starts over).
+        self.accept_list(account_id, device_list.clone())?;
         Ok(DmSetUp { identity_public: public, certificate, device_list })
     }
 
@@ -669,6 +790,16 @@ impl DmDevice {
         let state = self.state();
         let identity = state.identity.as_ref().ok_or_else(|| anyhow!("this device isn't set up"))?;
         let offer = Offer::from_qr(&qr)?;
+        // A code works once, and never for a device the person removed
+        // (Abbacchio's row 612: an old code put a locked-out device back
+        // on the list). Checked before the person compares the numbers.
+        let comparison = offer.comparison();
+        let (removed, used) = self.store.with_tx(|_, tx| -> Result<(Vec<String>, Vec<String>), Error> {
+            Ok((self.read_row(tx, REMOVED)?.unwrap_or_default(), self.read_row(tx, USED_CODES)?.unwrap_or_default()))
+        })?;
+        if removed.contains(&offer.device.leaf_id) || used.contains(&comparison) {
+            bail!(CODE_USED);
+        }
         let sealed = handoff::seal(&offer, &state.account_id, identity, &state.pins)?;
         let device = &offer.device;
         // The history-transfer key (E8), for the endpoint this QR code named
@@ -681,8 +812,25 @@ impl DmDevice {
             name: device.name.clone(),
             platform: device.platform.clone(),
             endpoint_id: device.endpoint_id.to_vec(),
-            comparison: offer.comparison(),
+            comparison,
         })
+    }
+
+    /// The code whose digits are [comparison] was handed off to: it's
+    /// refused from now on.
+    pub fn code_used(&self, comparison: String) -> anyhow::Result<()> {
+        let _state = self.state();
+        self.store.with_tx(|_, tx| -> Result<(), Error> {
+            let mut used: Vec<String> = self.read_row(tx, USED_CODES)?.unwrap_or_default();
+            if used.contains(&comparison) {
+                return Ok(());
+            }
+            used.push(comparison);
+            let over = used.len().saturating_sub(USED_CODES_KEPT);
+            used.drain(..over);
+            self.save_row(tx, USED_CODES, &json(&used)?)
+        })?;
+        Ok(())
     }
 
     /// On the new device: opens what the scanning device sent ([sealed])
@@ -736,25 +884,25 @@ impl DmDevice {
     }
 
     /// The person's device list at [version] (one more than the last),
-    /// signed, and taken into this device's own pins.
+    /// signed. Not pinned here: that's [accept_list] once the worker took
+    /// it, so a list it refused (or never heard) never counts as seen, and
+    /// the next one another device puts at that version is taken
+    /// (Abbacchio's row 615).
     pub fn sign_device_list(&self, version: u64, created_ms: u64, leaves: Vec<DmListed>) -> anyhow::Result<Vec<u8>> {
-        let mut state = self.state();
+        let state = self.state();
         let identity = state.identity.as_ref().ok_or_else(|| anyhow!("this device isn't set up"))?;
         let leaves = leaves
             .into_iter()
             .map(|leaf| Ok(Listed { kind: leaf.kind.into(), leaf_id: leaf.leaf_id, signature_key: bytes32(&leaf.signature_key)? }))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let list = DeviceList { account_id: state.account_id.clone(), version, created_ms, leaves };
-        let bytes = list.sign(identity)?.to_bytes()?;
-        let account = state.account_id.clone();
-        self.change_pins(&mut state, |pins| pins.accept_list(&account, &bytes))?;
-        Ok(bytes)
+        Ok(list.sign(identity)?.to_bytes()?)
     }
 
     fn change_pins(&self, state: &mut State, change: impl FnOnce(&mut Pins) -> Result<(), Error>) -> anyhow::Result<()> {
         let mut pins = state.pins.clone();
         change(&mut pins)?;
-        self.store.with_tx(|_, tx| self.save_pins(tx, &pins))?;
+        self.store.with_tx(|_, tx| self.save_pins(tx, &state.account_id, &state.pins, &pins))?;
         state.pins = pins;
         Ok(())
     }
@@ -764,6 +912,38 @@ impl DmDevice {
     pub fn first_contact(&self, account: String, identity_public: Vec<u8>) -> anyhow::Result<()> {
         let identity = IdentityPublic::from_slice(&identity_public)?;
         self.change_pins(&mut self.state(), |pins| pins.first_contact(&account, identity))
+    }
+
+    /// The commit or proposal [envelope] held in [group_id] proves that
+    /// [account] replaced the key its leaf is under, which the worker lists
+    /// in [listed] (GET keys' replaced_identity_keys, with [served] its
+    /// current key): that key is retired here, so the commit is known as
+    /// one this device can never take (row 654). Only what a held commit
+    /// proves, and nothing when the list names a current key (Fugo: no
+    /// wedge against the friend's next key). Whether a key was retired.
+    pub fn retire_replaced(
+        &self,
+        group_id: Vec<u8>,
+        envelope: String,
+        account: String,
+        served: Vec<u8>,
+        listed: Vec<Vec<u8>>,
+    ) -> anyhow::Result<bool> {
+        let served = IdentityPublic::from_slice(&served)?.0;
+        let listed = listed.iter().map(|key| IdentityPublic::from_slice(key).map(|key| key.0)).collect::<Result<Vec<_>, _>>()?;
+        let envelope = read_envelope(&envelope)?;
+        let mut state = self.state();
+        let signer = self.store.with_tx(|provider, tx| {
+            let (mut group, _) = Self::load(provider, tx, &group_id)?;
+            group.held_signer(provider, envelope.bytes())
+        })?;
+        let Some(signer) = signer else { return Ok(false) };
+        let mut retired = false;
+        self.change_pins(&mut state, |pins| {
+            retired = pins.replaced(&account, served, &listed, &signer)?;
+            Ok(())
+        })?;
+        Ok(retired)
     }
 
     /// [account]'s security key changed: sending waits until [seen].
@@ -932,6 +1112,32 @@ impl DmDevice {
         Ok(())
     }
 
+    /// A line in [group_id]'s history at [seq] (the first one this device
+    /// didn't read): what was sent from there until it joined again was
+    /// skipped, because [because]'s security key changed ("" for another
+    /// cause). Row 654: a device that can't read messages says so.
+    pub fn note_skipped(&self, group_id: Vec<u8>, seq: i64, arrived_ms: i64, because: String) -> anyhow::Result<()> {
+        let _state = self.state();
+        let message = DmMessage {
+            seq,
+            mine: false,
+            from_account: String::new(),
+            from_leaf: String::new(),
+            from_kind_device: false,
+            content: DmContent {
+                kind: String::new(),
+                client_message_id: String::new(),
+                text: None,
+                by_agent: None,
+                extra_json: String::new(),
+            },
+            arrived_ms,
+            members: Some(DmMembers { added: vec![], removed: vec![], key_changed: vec![], skipped: Some(because), set_up_again: vec![] }),
+        };
+        self.store.with_tx(|_, tx| self.keep(tx, &group_id, &message))?;
+        Ok(())
+    }
+
     /// Joins [group_id] again from the worker's GroupInfo ([group_info],
     /// an envelope's JSON), with an external commit for the worker; the
     /// feed goes on after [seq]. For a device whose state broke or that
@@ -942,7 +1148,7 @@ impl DmDevice {
         let me = state.me.as_ref().ok_or_else(|| anyhow!("this device isn't set up"))?;
         let out = self.store.with_tx(|provider, tx| {
             claktory_dm_crypto::storage::forget_group(tx, &openmls_group_id(&group_id)).map_err(|e| Error::Storage(e.to_string()))?;
-            let (_, out) = Group::rejoin(provider, me, &state.pins, group_kind(&kind)?, info.bytes())?;
+            let (_, out) = Group::rejoin(provider, me, &state.pins, group_kind(&kind)?, &group_id, info.bytes())?;
             Self::add_group(tx, &group_id, &kind, seq)?;
             Self::pending_commit(tx, &group_id, &out.commit)?;
             Ok::<_, Error>(out)
@@ -982,6 +1188,146 @@ impl DmDevice {
     pub fn remove_members(&self, group_id: Vec<u8>, leaf_ids: Vec<String>) -> anyhow::Result<DmCommit> {
         let ids: Vec<&str> = leaf_ids.iter().map(String::as_str).collect();
         self.change_group(&group_id, |group, provider, me, _| group.remove(provider, me, &ids))
+    }
+
+    /// After a start-over's rejoin (row 630): one commit taking every dead
+    /// leaf of the person's out of [group_id] (under a key other than this
+    /// device's, on no list of the new one), so none holds the new epoch's
+    /// secrets. None when there's none.
+    pub fn remove_dead_leaves(&self, group_id: Vec<u8>) -> anyhow::Result<Option<DmCommit>> {
+        let state = self.state();
+        let me = state.me.as_ref().ok_or_else(|| anyhow!("this device isn't set up"))?;
+        let out = self.store.with_tx(|provider, tx| {
+            let (mut group, _) = Self::load(provider, tx, &group_id)?;
+            // The person's own devices among them, kept by name: Your devices
+            // lists them ("Still on your old security key") until the person
+            // removes them, signing them out (Fugo). Not this device's own
+            // leaf from before the start-over (same leaf id, old key): that's
+            // this device, not another (Abbacchio's row 640).
+            let here = &me.certificate.leaf.leaf_id;
+            let own: Vec<DmMember> = group
+                .dead(&state.pins, me)
+                .into_iter()
+                .filter(|dead| dead.leaf.account_id == state.account_id && dead.leaf.kind == LeafKind::Device && &dead.leaf.leaf_id != here)
+                .map(|dead| DmMember {
+                    account: dead.leaf.account_id,
+                    leaf_id: dead.leaf.leaf_id,
+                    kind: DmLeafKind::Device,
+                    name: dead.leaf.name,
+                    since_ms: dead.leaf.created_ms,
+                })
+                .collect();
+            let Some(out) = group.remove_dead(provider, me, &state.pins)? else { return Ok::<_, Error>(None) };
+            if !own.is_empty() {
+                let mut kept: Vec<DmMember> = self.read_row(tx, REPLACED)?.unwrap_or_default();
+                for each in own {
+                    if !kept.iter().any(|known| known.leaf_id == each.leaf_id) {
+                        kept.push(each);
+                    }
+                }
+                self.save_row(tx, REPLACED, &json(&kept)?)?;
+            }
+            Self::pending_commit(tx, &group_id, &out.commit)?;
+            Ok(Some(out))
+        })?;
+        out.map(commit).transpose()
+    }
+
+    /// The person's devices a start-over took out of their groups (under
+    /// the key it replaced), until the person removes them.
+    pub fn replaced_devices(&self) -> anyhow::Result<Vec<DmMember>> {
+        let state = self.state();
+        let here = state.me.as_ref().map(|me| me.certificate.leaf.leaf_id.as_str());
+        let kept: Vec<DmMember> = self.store.with_tx(|_, tx| self.read_row(tx, REPLACED))?.unwrap_or_default();
+        // Never this device (kept by a build before row 640's fix).
+        Ok(kept.into_iter().filter(|each| Some(each.leaf_id.as_str()) != here).collect())
+    }
+
+    /// [leaf_id] was removed (signed out): no longer listed as replaced.
+    pub fn forget_replaced(&self, leaf_id: String) -> anyhow::Result<()> {
+        let _state = self.state();
+        self.store.with_tx(|_, tx| -> Result<(), Error> {
+            let mut kept: Vec<DmMember> = self.read_row(tx, REPLACED)?.unwrap_or_default();
+            kept.retain(|each| each.leaf_id != leaf_id);
+            self.save_row(tx, REPLACED, &json(&kept)?)
+        })?;
+        Ok(())
+    }
+
+    /// The person's own leaves in [group_id] under a security key other
+    /// than this device's (a key replaced since), by leaf id, unchecked:
+    /// never signed out by a sweep (Fugo: a surviving old device is the
+    /// person's alarm when someone else started over), and shown apart.
+    pub fn replaced_leaves(&self, group_id: Vec<u8>) -> anyhow::Result<Vec<String>> {
+        let state = self.state();
+        let current = state.identity.as_ref().map(|identity| identity.public());
+        Ok(self.store.with_tx(|provider, tx| {
+            let (group, _) = Self::load(provider, tx, &group_id)?;
+            Ok::<_, Error>(
+                group
+                    .certificates_unchecked()
+                    .into_iter()
+                    .filter(|certificate| {
+                        certificate.leaf.account_id == state.account_id
+                            && Some(certificate.identity) != current
+                            && state.me.as_ref().is_none_or(|me| me.certificate.leaf.leaf_id != certificate.leaf.leaf_id)
+                    })
+                    .map(|certificate| certificate.leaf.leaf_id)
+                    .collect(),
+            )
+        })?)
+    }
+
+    /// The other person in the conversation [group_id] when none of their
+    /// devices is in yet (row 676), and whether this device adds them
+    /// first. None for any other group, or once they're in.
+    pub fn not_joined(&self, group_id: Vec<u8>) -> anyhow::Result<Option<DmJoining>> {
+        let state = self.state();
+        let me = state.me.as_ref().ok_or_else(|| anyhow!("this device isn't set up"))?;
+        Ok(self.store.with_tx(|provider, tx| {
+            let Some((kind, _)) = Self::group_row(tx, &group_id)? else { return Ok::<_, Error>(None) };
+            let (group, _) = Self::load(provider, tx, &group_id)?;
+            // Waiting for a new security key or a reinstall is said as that
+            // ([waiting_for]).
+            if group.waiting(&state.pins, me).is_some() {
+                return Ok(None);
+            }
+            let Some(account) = not_joined(&kind, &group, &state.pins, &state.account_id) else { return Ok(None) };
+            // Members in tree order: the first of the person's devices adds.
+            let first = roster(&group, &state.pins).into_iter().find(|(member, _)| member.account == state.account_id);
+            let mine = &me.certificate.leaf;
+            let adds_first = first.is_some_and(|(member, key)| member.leaf_id == mine.leaf_id && key == mine.signature_key);
+            Ok(Some(DmJoining { account, adds_first }))
+        })?)
+    }
+
+    /// The account whose device under a replaced key, on no list of the new
+    /// one, is still in [group_id]: nothing is sent there until it's out
+    /// (Fugo, row 630). None when nothing holds it.
+    pub fn waiting_for(&self, group_id: Vec<u8>) -> anyhow::Result<Option<String>> {
+        let state = self.state();
+        let me = state.me.as_ref().ok_or_else(|| anyhow!("this device isn't set up"))?;
+        Ok(self.store.with_tx(|provider, tx| {
+            let (group, _) = Self::load(provider, tx, &group_id)?;
+            Ok::<_, Error>(group.waiting(&state.pins, me))
+        })?)
+    }
+
+    /// The device whose former install holds [group_id] (row 202): its
+    /// name, when what [waiting_for] waits for is a reinstall; None
+    /// otherwise.
+    pub fn reinstalling(&self, group_id: Vec<u8>) -> anyhow::Result<Option<String>> {
+        let state = self.state();
+        let me = state.me.as_ref().ok_or_else(|| anyhow!("this device isn't set up"))?;
+        Ok(self.store.with_tx(|provider, tx| {
+            let (group, _) = Self::load(provider, tx, &group_id)?;
+            Ok::<_, Error>(match group.held(&state.pins, me) {
+                Some((_, claktory_dm_crypto::validation::Held::Reinstalled)) => {
+                    group.stale(&state.pins).into_iter().next().map(|stale| stale.leaf.name)
+                }
+                _ => None,
+            })
+        })?)
     }
 
     /// New keys for this device's leaf in [group_id].
@@ -1094,7 +1440,16 @@ impl DmDevice {
                 }
             }
             let (mut group, _) = Self::load(provider, tx, &group_id)?;
-            let bytes = group.send(provider, me, &encoded)?;
+            // The other person isn't in yet (row 676): nothing is encrypted
+            // for a group they can never read it in, whatever calls. Every
+            // application message goes through here.
+            // (A wait for a new security key or a reinstall says so first.)
+            if group.waiting(&state.pins, me).is_none()
+                && let Some(account) = not_joined(&kind, &group, &state.pins, &state.account_id)
+            {
+                return Err(Error::Refused(format!("waiting for {account} to join")));
+            }
+            let bytes = group.send(provider, me, &state.pins, &encoded)?;
             let sealed = self.store.seal_row(&place(b"outgoing", &group_id, id.as_bytes(), b"value"), &pending)?;
             tx.execute(
                 "INSERT INTO outgoing (grp, client_id, digest, envelope, value, created_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1241,6 +1596,12 @@ impl DmDevice {
                 Err(Error::UnknownIdentity { account }) if handshake => {
                     return Ok(Ok(DmProcessed { why: account, handshake, ..DmProcessed::of(DmOutcome::Held) }));
                 }
+                // One under a key its account replaced: never taken here, so
+                // held for a rejoin past it (row 654). Something said under
+                // one (a kept device before it moves) is dropped as before.
+                Err(Error::Replaced { account }) if handshake => {
+                    return Ok(Ok(DmProcessed { why: account, handshake, replaced: true, ..DmProcessed::of(DmOutcome::Held) }));
+                }
                 Err(error) if refusal(&error) => return Ok(Err(error.to_string())),
                 Err(error) => return Err(error),
             };
@@ -1341,8 +1702,9 @@ impl DmDevice {
             let Some(exported) = extra.get("pins") else { return Ok(()) };
             let mut theirs: Pins = serde_json::from_value(exported.clone()).map_err(|e| Error::Format(e.to_string()))?;
             theirs.reparse()?;
+            let before = state.pins.clone();
             state.pins.import(&theirs)?;
-            return self.save_pins(tx, &state.pins);
+            return self.save_pins(tx, &state.account_id, &before, &state.pins);
         }
         self.apply_view(tx, content, &extra)
     }
@@ -1421,19 +1783,32 @@ impl DmDevice {
     ) -> Result<Option<DmMessage>, Error> {
         // By every leaf in the tree, checked or not: a friend's leaf that
         // moved to their new key was there all along, under the old one.
-        let missing = |from: &[DmMember], other: &Snapshot| -> Vec<DmMember> {
-            from.iter().filter(|member| member.leaf_id != own_leaf && !other.ids.contains(&member.leaf_id)).cloned().collect()
+        // A leaf is its id and its signature key (row 202, Fugo): one that
+        // comes back under its id with a new key (a reinstall) went, and a
+        // new one came.
+        // And whose it is: its certificate's account goes with its id (row
+        // 671, Fugo), so a friend's leaf under an id one of the person's
+        // own has is the friend's, never taken for this device or theirs.
+        let own = |account: &str, id: &str| account == own_account && id == own_leaf;
+        let missing = |from: &[(DmMember, [u8; 32])], other: &Snapshot| -> Vec<DmMember> {
+            from.iter()
+                .filter(|(member, key)| !own(&member.account, &member.leaf_id) && !other.holds(member, key))
+                .map(|(member, _)| member.clone())
+                .collect()
         };
         // Another's leaves pass now and none did before, though they had
         // leaves here (one that moved, or one that no longer passes and
         // isn't the person's own: in a chat of two, theirs): their new key,
         // said at the first commit under it. Never for someone joining.
-        let theirs_failed =
-            before.ids.iter().any(|id| id != own_leaf && !own_listed.contains(id) && !before.roster.iter().any(|old| &old.leaf_id == id));
+        let theirs_failed = before.ids.iter().any(|(account, id)| {
+            !own(account, id)
+                && !(account == own_account && own_listed.contains(id))
+                && !before.roster.iter().any(|(old, _)| &old.account == account && &old.leaf_id == id)
+        });
         let mut key_changed: Vec<String> = Vec::new();
-        for member in &after.roster {
-            let passed = before.roster.iter().any(|old| old.account == member.account);
-            let had = before.ids.contains(&member.leaf_id) || theirs_failed;
+        for (member, _) in &after.roster {
+            let passed = before.roster.iter().any(|(old, _)| old.account == member.account);
+            let had = before.has(&member.account, &member.leaf_id) || theirs_failed;
             if had && !passed && member.account != own_account && !key_changed.contains(&member.account) {
                 key_changed.push(member.account.clone());
             }
@@ -1441,8 +1816,14 @@ impl DmDevice {
         // Who came: those that pass. Who went: every leaf that was there,
         // checked or not, since one taken off its list fails the checks
         // before the commit removing it.
-        let members = DmMembers { added: missing(&after.roster, &before), removed: missing(&before.all, &after), key_changed };
-        if members.added.is_empty() && members.removed.is_empty() && members.key_changed.is_empty() {
+        // A leaf back under an id that was here, with a new key, is the
+        // device installed again (row 202): said once, as that; the former
+        // install going under an id still here says nothing.
+        let (set_up_again, added): (Vec<DmMember>, Vec<DmMember>) =
+            missing(&after.roster, &before).into_iter().partition(|member| before.has(&member.account, &member.leaf_id));
+        let removed = missing(&before.all, &after).into_iter().filter(|member| !after.has(&member.account, &member.leaf_id)).collect();
+        let members = DmMembers { added, removed, key_changed, skipped: None, set_up_again };
+        if members.added.is_empty() && members.removed.is_empty() && members.key_changed.is_empty() && members.set_up_again.is_empty() {
             return Ok(None);
         }
         let message = DmMessage {
@@ -1469,7 +1850,9 @@ impl DmDevice {
     /// pass the checks now).
     pub fn members(&self, group_id: Vec<u8>) -> anyhow::Result<Vec<DmMember>> {
         let state = self.state();
-        Ok(self.store.with_tx(|provider, tx| Ok::<_, Error>(roster(&Self::load(provider, tx, &group_id)?.0, &state.pins)))?)
+        Ok(self.store.with_tx(|provider, tx| {
+            Ok::<_, Error>(roster(&Self::load(provider, tx, &group_id)?.0, &state.pins).into_iter().map(|(member, _)| member).collect())
+        })?)
     }
 
     /// Every leaf in [group_id] by id, checked or not: a Claktory's leaf
@@ -1488,7 +1871,9 @@ impl DmDevice {
     /// for showing who's in or trusting what a leaf says ([members] does).
     pub fn leaves(&self, group_id: Vec<u8>) -> anyhow::Result<Vec<DmMember>> {
         let _state = self.state();
-        Ok(self.store.with_tx(|provider, tx| Ok::<_, Error>(unchecked(&Self::load(provider, tx, &group_id)?.0)))?)
+        Ok(self.store.with_tx(|provider, tx| {
+            Ok::<_, Error>(unchecked(&Self::load(provider, tx, &group_id)?.0).into_iter().map(|(member, _)| member).collect())
+        })?)
     }
 
     /// A proposal or an agent's draft in the channel [group_id], which
@@ -1561,6 +1946,19 @@ pub const ROTATION_KIND: &str = "rotation";
 const ROTATION: &[&[u8]] = &[b"rows", b"rotation"];
 const ROTATION_IN: &[&[u8]] = &[b"rows", b"rotation_in"];
 const REMOVAL: &[&[u8]] = &[b"rows", b"removal"];
+/// The person's devices removed here or off a list this device took, by
+/// leaf: a code for one is refused (Abbacchio's row 612, Fugo).
+const REMOVED: &[&[u8]] = &[b"rows", b"removed"];
+/// The add codes this device has handed off to, by their digits: each
+/// works once.
+const USED_CODES: &[&[u8]] = &[b"rows", b"used_codes"];
+/// The person's devices a start-over took out of their groups (row 630).
+const REPLACED: &[&[u8]] = &[b"rows", b"replaced"];
+/// How many used codes are kept: each works for 30 minutes, so a few is
+/// plenty.
+const USED_CODES_KEPT: usize = 256;
+/// Why a code is refused, as the person reads it.
+const CODE_USED: &str = "This code was already used, or is for a device you removed.";
 
 /// A removal the person confirmed (Remove…, or Lock out with a new
 /// security key, dms-e2ee §2.1), kept in the sealed store from its start
@@ -1748,7 +2146,11 @@ impl DmDevice {
     /// Keeps [removal] as the one under way, in place of any before.
     pub fn begin_removal(&self, removal: DmRemoval) -> anyhow::Result<()> {
         let _state = self.state();
-        self.store.with_tx(|_, tx| self.save_row(tx, REMOVAL, &json(&removal)?))?;
+        self.store.with_tx(|_, tx| -> Result<(), Error> {
+            // Removed for good, whatever becomes of the removal.
+            self.note_removed(tx, &removal.remove)?;
+            self.save_row(tx, REMOVAL, &json(&removal)?)
+        })?;
         Ok(())
     }
 
@@ -1806,7 +2208,7 @@ impl DmDevice {
         let (me, certificate) = Self::recertify(&state, &identity)?;
         self.store.with_tx(|_, tx| -> Result<(), Error> {
             self.save_row(tx, ME, &json(&Kept { account_id: state.account_id.clone(), certificate: certificate.clone() })?)?;
-            self.save_pins(tx, &pins)?;
+            self.save_pins(tx, &state.account_id, &state.pins, &pins)?;
             Self::delete_row(tx, ROTATION)?;
             // The Lock out it finishes, with it.
             Self::delete_row(tx, REMOVAL)
@@ -1910,7 +2312,7 @@ impl DmDevice {
         let (me, certificate) = Self::recertify(&state, &identity)?;
         self.store.with_tx(|_, tx| -> Result<(), Error> {
             self.save_row(tx, ME, &json(&Kept { account_id: state.account_id.clone(), certificate: certificate.clone() })?)?;
-            self.save_pins(tx, &pins)?;
+            self.save_pins(tx, &state.account_id, &state.pins, &pins)?;
             Self::delete_row(tx, ROTATION_IN)
         })?;
         state.pins = pins;
@@ -1929,16 +2331,33 @@ impl DmDevice {
 }
 
 /// Who's in a group around a commit: the members that pass the checks
-/// (to name), and every leaf's id (to tell who came and went).
+/// (to name), and every leaf as it claims (to tell who came and went).
+/// A leaf is its certificate's account, its id and its signature key
+/// (rows 202 and 671, Fugo).
 #[frb(ignore)]
 #[derive(Default)]
 struct Snapshot {
-    roster: Vec<DmMember>,
-    ids: Vec<String>,
+    /// Those that pass the checks, each with its signature key.
+    roster: Vec<(DmMember, [u8; 32])>,
+    /// Every leaf's account and id, checked or not.
+    ids: Vec<(String, String)>,
     /// Every leaf with what it claims, checked or not: for who went, since
     /// a leaf taken off its list fails the checks before its removal
     /// commits (Fugo).
-    all: Vec<DmMember>,
+    all: Vec<(DmMember, [u8; 32])>,
+}
+
+impl Snapshot {
+    /// Whether a leaf of [account]'s with the id [leaf_id] is here, under
+    /// any key.
+    fn has(&self, account: &str, leaf_id: &str) -> bool {
+        self.ids.iter().any(|(a, id)| a == account && id == leaf_id)
+    }
+
+    /// Whether [member]'s leaf is here under [key]: the same leaf.
+    fn holds(&self, member: &DmMember, key: &[u8; 32]) -> bool {
+        self.all.iter().any(|(m, k)| m.account == member.account && m.leaf_id == member.leaf_id && k == key)
+    }
 }
 
 /// The leaf ids on [account]'s device list as this device took it.
@@ -1951,37 +2370,69 @@ fn listed_ids(pins: &Pins, account: &str) -> Vec<String> {
 }
 
 fn snapshot(group: &Group, pins: &Pins) -> Snapshot {
-    Snapshot { roster: roster(group, pins), ids: group.leaf_ids(), all: unchecked(group) }
+    let all = unchecked(group);
+    Snapshot {
+        roster: roster(group, pins),
+        ids: all.iter().map(|(member, _)| (member.account.clone(), member.leaf_id.clone())).collect(),
+        all,
+    }
 }
 
 /// Every leaf of [group] with what its certificate claims, unchecked: for
 /// removal decisions and who went, never for trust.
-fn unchecked(group: &Group) -> Vec<DmMember> {
+fn unchecked(group: &Group) -> Vec<(DmMember, [u8; 32])> {
     group
         .leaves_unchecked()
         .into_iter()
-        .map(|leaf| DmMember {
-            account: leaf.account_id,
-            leaf_id: leaf.leaf_id,
-            kind: leaf.kind.into(),
-            name: leaf.name,
-            since_ms: leaf.created_ms,
+        .map(|leaf| {
+            let key = leaf.signature_key;
+            (
+                DmMember {
+                    account: leaf.account_id,
+                    leaf_id: leaf.leaf_id,
+                    kind: leaf.kind.into(),
+                    name: leaf.name,
+                    since_ms: leaf.created_ms,
+                },
+                key,
+            )
         })
         .collect()
 }
 
 /// The members of [group] that pass the checks now.
-fn roster(group: &Group, pins: &Pins) -> Vec<DmMember> {
+/// In a conversation, the other person when none of their devices passes
+/// the checks in [group] (row 676): a stale or dead leaf, or one off their
+/// list, doesn't count (Fugo). None for any other group.
+fn not_joined(kind: &DmGroupKind, group: &Group, pins: &Pins, own: &str) -> Option<String> {
+    if kind.kind != DmGroupType::Conversation {
+        return None;
+    }
+    let present = roster(group, pins);
+    kind.accounts
+        .iter()
+        .find(|account| {
+            account.as_str() != own && !present.iter().any(|(member, _)| &member.account == *account && member.kind == DmLeafKind::Device)
+        })
+        .cloned()
+}
+
+fn roster(group: &Group, pins: &Pins) -> Vec<(DmMember, [u8; 32])> {
     group
         .members(pins)
         .into_iter()
         .flatten()
-        .map(|member| DmMember {
-            account: member.account().to_owned(),
-            leaf_id: member.leaf_id().to_owned(),
-            kind: member.kind().into(),
-            name: member.certificate.leaf.name.clone(),
-            since_ms: member.certificate.leaf.created_ms,
+        .map(|member| {
+            (
+                DmMember {
+                    account: member.account().to_owned(),
+                    leaf_id: member.leaf_id().to_owned(),
+                    kind: member.kind().into(),
+                    name: member.certificate.leaf.name.clone(),
+                    since_ms: member.certificate.leaf.created_ms,
+                },
+                member.certificate.leaf.signature_key,
+            )
         })
         .collect()
 }
@@ -2105,8 +2556,86 @@ mod tests {
         phone.key_changed("ana".into(), dm_public_key(dm_new_secret().unwrap()).unwrap()).unwrap();
         assert!(phone.send(id.clone(), text("m2", "wait"), 22).is_err());
         phone.seen("ana".into()).unwrap();
-        assert!(phone.send(id.clone(), text("m2", "now"), 23).is_ok());
-        phone.drop_unsent(id.clone(), "m2".into()).unwrap();
+        // Seen, but her iPad's leaf is still under the replaced key and on no
+        // list of the new one: held until it moves or is taken out (row 630).
+        let held = phone.send(id.clone(), text("m2", "now"), 23).unwrap_err().to_string();
+        assert!(held.contains("waiting for ana's new security key"), "{held}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn nothing_is_sent_in_a_conversation_until_the_friend_is_in() {
+        // Row 676: Matt's phone made the conversation, and his tablet got in
+        // before Ana (an external join winning the race with the add).
+        // Nothing is encrypted there, of any kind, until a device of Ana's
+        // passes the checks; the first of Matt's members adds her.
+        let dir = folder();
+        let (phone, ipad) = two(&dir);
+        let tablet = device(&dir, "tablet");
+        let handoff = tablet.start_handoff(TABLET.into(), "iPad".into(), "iPadOS".into(), vec![7; 32]).unwrap();
+        tablet.finish_handoff(&handoff, phone.seal_handoff(handoff.qr()).unwrap().sealed, 5).unwrap();
+        let listed = |device: &DmDevice, id: &str| DmListed {
+            kind: DmLeafKind::Device,
+            leaf_id: id.into(),
+            signature_key: device.status().leaf_public,
+        };
+        let list = phone.sign_device_list(2, 6, vec![listed(&phone, "phone"), listed(&tablet, TABLET)]).unwrap();
+        for device in [&phone, &tablet, &ipad] {
+            device.accept_list("matt".into(), list.clone()).unwrap();
+        }
+        let id = b"conversation-1".to_vec();
+        let info = phone.create_group(id.clone(), chat()).unwrap();
+        let joined = tablet.rejoin_group(id.clone(), chat(), info, 0).unwrap();
+        tablet.commit_taken(id.clone()).unwrap();
+        phone.process(id.clone(), 1, joined.commit, 10).unwrap();
+
+        let waits = |device: &DmDevice| device.not_joined(id.clone()).unwrap();
+        assert_eq!(waits(&phone), Some(DmJoining { account: "ana".into(), adds_first: true }));
+        assert_eq!(waits(&tablet), Some(DmJoining { account: "ana".into(), adds_first: false }));
+        let refused = phone.send(id.clone(), text("m1", "ana 1"), 11).unwrap_err().to_string();
+        assert!(refused.contains("waiting for ana to join"), "{refused}");
+        let reaction = DmContent {
+            kind: "reaction".into(),
+            client_message_id: "r1".into(),
+            text: None,
+            by_agent: None,
+            extra_json: r#"{"to":"m0","emoji":"+1"}"#.into(),
+        };
+        assert!(tablet.send(id.clone(), reaction, 12).unwrap_err().to_string().contains("to join"));
+        assert!(phone.unsent().unwrap().is_empty() && tablet.unsent().unwrap().is_empty(), "nothing sealed to send");
+
+        // A key package of a device of Ana's that isn't on her list: refused,
+        // and the chat still waits.
+        let rogue = device(&dir, "rogue");
+        let offer =
+            rogue.start_handoff("cm9ndWUtcm9ndWUtcm9ndWUtcm9ndWUtcm9ndWUtcm8".into(), "Rogue".into(), "macOS".into(), vec![8; 32]).unwrap();
+        rogue.finish_handoff(&offer, ipad.seal_handoff(offer.qr()).unwrap().sealed, 5).unwrap();
+        let rogue_add = phone.add_members(id.clone(), vec![rogue.key_packages(1).unwrap().remove(0)]).unwrap_err().to_string();
+        assert!(rogue_add.contains("list"), "{rogue_add}");
+        assert!(phone.send(id.clone(), text("m1", "ana 1"), 13).is_err());
+
+        // Ana's listed iPad is added: it goes, at the new epoch.
+        let added = phone.add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap();
+        phone.process(id.clone(), 2, added.commit.clone(), 14).unwrap();
+        tablet.process(id.clone(), 2, added.commit, 14).unwrap();
+        ipad.join_group(id.clone(), chat(), added.welcome.unwrap(), 2).unwrap();
+        assert_eq!((waits(&phone), waits(&tablet)), (None, None));
+        let said = phone.send(id.clone(), text("m1", "ana 1"), 15).unwrap();
+        let heard = ipad.process(id.clone(), 3, said, 16).unwrap().message.unwrap();
+        assert_eq!(heard.content.text.as_deref(), Some("ana 1"));
+
+        // Her only device set up again under a new key, the old leaf still
+        // in: it doesn't count, and the chat holds.
+        let again = device(&dir, "ipad-again");
+        let relisted = ipad
+            .sign_device_list(
+                2,
+                20,
+                vec![DmListed { kind: DmLeafKind::Device, leaf_id: "ipad".into(), signature_key: again.status().leaf_public }],
+            )
+            .unwrap();
+        phone.accept_list("ana".into(), relisted).unwrap();
+        assert!(phone.send(id.clone(), text("m2", "after"), 21).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2163,6 +2692,8 @@ mod tests {
             signature_key: device.status().leaf_public,
         };
         let list = phone.sign_device_list(2, 6, vec![listed(&phone, "phone"), listed(&tablet, TABLET)]).unwrap();
+        // Taken by the worker: pinned here too.
+        phone.accept_list("matt".into(), list.clone()).unwrap();
         // The phone took its own new list: the next change starts from it.
         let mine = phone.device_list("matt".into()).unwrap().unwrap();
         assert_eq!((mine.version, mine.leaves.len()), (2, 2));
@@ -2187,6 +2718,125 @@ mod tests {
     }
 
     #[test]
+    fn a_reinstalled_device_comes_back_under_its_leaf_id_with_a_new_key_said_once() {
+        let dir = folder();
+        let (phone, ipad) = two(&dir);
+        let listed = |device: &DmDevice, id: &str| DmListed {
+            kind: DmLeafKind::Device,
+            leaf_id: id.into(),
+            signature_key: device.status().leaf_public,
+        };
+        let hand_off = |to: &DmDevice| {
+            let handoff = to.start_handoff(TABLET.into(), "iPad".into(), "iPadOS".into(), vec![7; 32]).unwrap();
+            let sealed = phone.seal_handoff(handoff.qr()).unwrap();
+            to.finish_handoff(&handoff, sealed.sealed, 5).unwrap();
+        };
+        let tablet = device(&dir, "tablet");
+        hand_off(&tablet);
+        let list = phone.sign_device_list(2, 6, vec![listed(&phone, "phone"), listed(&tablet, TABLET)]).unwrap();
+        for device in [&phone, &tablet, &ipad] {
+            device.accept_list("matt".into(), list.clone()).unwrap();
+        }
+        let id = b"conversation-1".to_vec();
+        phone.create_group(id.clone(), chat()).unwrap();
+        let added = phone
+            .add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0), tablet.key_packages(1).unwrap().remove(0)])
+            .unwrap();
+        phone.process(id.clone(), 1, added.commit.clone(), 10).unwrap();
+        ipad.join_group(id.clone(), chat(), added.welcome.clone().unwrap(), 1).unwrap();
+
+        // Reinstalled: a new store, so a new leaf key, under the same leaf
+        // id; handed off again, and the list names its new key.
+        let again = device(&dir, "tablet-again");
+        assert_ne!(again.status().leaf_public, tablet.status().leaf_public);
+        hand_off(&again);
+        let list = phone.sign_device_list(3, 7, vec![listed(&phone, "phone"), listed(&again, TABLET)]).unwrap();
+        for device in [&phone, &again, &ipad] {
+            device.accept_list("matt".into(), list.clone()).unwrap();
+        }
+        let info = added.group_info.clone().unwrap();
+        let rejoined = again.rejoin_group(id.clone(), chat(), info, 1).unwrap();
+        again.commit_taken(id.clone()).unwrap();
+        // The others take it at seq 2: one line, "set up a device again",
+        // never a removal and an add.
+        for device in [&phone, &ipad] {
+            let line = device.process(id.clone(), 2, rejoined.commit.clone(), 20).unwrap().message.unwrap();
+            let members = line.members.unwrap();
+            assert_eq!(members.set_up_again.iter().map(|m| (m.leaf_id.as_str(), m.name.as_str())).collect::<Vec<_>>(), [(TABLET, "iPad")]);
+            assert!(members.added.is_empty() && members.removed.is_empty());
+        }
+        // Its former install is still in: nobody sends, Ana included, and
+        // the chat can say whose device it waits for.
+        assert_eq!(ipad.waiting_for(id.clone()).unwrap().as_deref(), Some("matt"));
+        assert_eq!(ipad.reinstalling(id.clone()).unwrap().as_deref(), Some("iPad"));
+        assert!(ipad.send(id.clone(), text("a1", "wait"), 21).is_err());
+        // Ana never takes it out; the reinstalled iPad does, by index.
+        assert!(ipad.remove_dead_leaves(id.clone()).unwrap().is_none());
+        let out = again.remove_dead_leaves(id.clone()).unwrap().unwrap();
+        again.commit_taken(id.clone()).unwrap();
+        for device in [&phone, &ipad] {
+            // Its former install going under an id still here says nothing.
+            assert!(device.process(id.clone(), 3, out.commit.clone(), 30).unwrap().message.is_none());
+        }
+        assert_eq!(ipad.reinstalling(id.clone()).unwrap(), None);
+        assert_eq!(ipad.waiting_for(id.clone()).unwrap(), None);
+        // The new install stays, and hears Ana.
+        let said = ipad.send(id.clone(), text("a2", "welcome back"), 40).unwrap();
+        let heard = again.process(id.clone(), 4, said, 41).unwrap().message.unwrap();
+        assert_eq!(heard.content.text.as_deref(), Some("welcome back"));
+        assert_eq!(phone.members(id.clone()).unwrap().iter().filter(|m| m.leaf_id == TABLET).count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_friends_leaf_under_an_id_of_the_persons_own_is_the_friends() {
+        // Row 671 (Fugo): a leaf is its certificate's account with its id
+        // and key. Ana lists a device under the id of Matt's phone itself:
+        // the phone says Ana added it, never takes it for its own leaf.
+        let dir = folder();
+        let (phone, ipad) = (device(&dir, "phone"), device(&dir, "ipad"));
+        let matt = phone.set_up_first(dm_new_secret().unwrap(), "matt".into(), TABLET.into(), "iPhone".into(), 1).unwrap();
+        let ana = ipad.set_up_first(dm_new_secret().unwrap(), "ana".into(), "ipad".into(), "iPad".into(), 1).unwrap();
+        phone.first_contact("ana".into(), ana.identity_public.clone()).unwrap();
+        phone.accept_list("ana".into(), ana.device_list).unwrap();
+        ipad.first_contact("matt".into(), matt.identity_public.clone()).unwrap();
+        ipad.accept_list("matt".into(), matt.device_list).unwrap();
+        let mini = device(&dir, "mini");
+        let handoff = mini.start_handoff(TABLET.into(), "iPad mini".into(), "iPadOS".into(), vec![7; 32]).unwrap();
+        let sealed = ipad.seal_handoff(handoff.qr()).unwrap();
+        mini.finish_handoff(&handoff, sealed.sealed, 5).unwrap();
+        let listed = |device: &DmDevice, id: &str| DmListed {
+            kind: DmLeafKind::Device,
+            leaf_id: id.into(),
+            signature_key: device.status().leaf_public,
+        };
+        let list = ipad.sign_device_list(2, 6, vec![listed(&ipad, "ipad"), listed(&mini, TABLET)]).unwrap();
+        for device in [&ipad, &mini, &phone] {
+            device.accept_list("ana".into(), list.clone()).unwrap();
+        }
+        let id = b"conversation-1".to_vec();
+        phone.create_group(id.clone(), chat()).unwrap();
+        let added = phone.add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap();
+        phone.process(id.clone(), 1, added.commit.clone(), 10).unwrap();
+        ipad.join_group(id.clone(), chat(), added.welcome.unwrap(), 1).unwrap();
+
+        let more = ipad.add_members(id.clone(), vec![mini.key_packages(1).unwrap().remove(0)]).unwrap();
+        ipad.process(id.clone(), 2, more.commit.clone(), 20).unwrap();
+        let line = phone.process(id.clone(), 2, more.commit.clone(), 21).unwrap().message.expect("a line for Ana's device");
+        let members = line.members.unwrap();
+        let who = |list: &[DmMember]| list.iter().map(|m| (m.account.clone(), m.leaf_id.clone(), m.name.clone())).collect::<Vec<_>>();
+        assert_eq!(who(&members.added), [("ana".to_owned(), TABLET.to_owned(), "iPad mini".to_owned())]);
+        assert!(members.removed.is_empty() && members.set_up_again.is_empty() && members.key_changed.is_empty());
+        // Both leaves are in, each under its own account.
+        let mut both: Vec<(String, String)> =
+            phone.members(id.clone()).unwrap().into_iter().filter(|m| m.leaf_id == TABLET).map(|m| (m.account, m.name)).collect();
+        both.sort();
+        assert_eq!(both, [("ana".to_owned(), "iPad mini".to_owned()), ("matt".to_owned(), "iPhone".to_owned())]);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn the_self_group_carries_drafts_reads_deletions_and_pins() {
         let dir = folder();
         let (phone, ipad) = two(&dir);
@@ -2200,6 +2850,8 @@ mod tests {
             signature_key: device.status().leaf_public,
         };
         let list = phone.sign_device_list(2, 6, vec![listed(&phone, "phone"), listed(&tablet, TABLET)]).unwrap();
+        // Taken by the worker: pinned here too.
+        phone.accept_list("matt".into(), list.clone()).unwrap();
         tablet.accept_list("matt".into(), list).unwrap();
 
         let me = b"self".to_vec();

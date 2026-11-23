@@ -1,9 +1,6 @@
 // Quiet copies and message provenance (#285): a lead sees what its team
-// handed each other without being woken for it (its Messaging panel, opened
-// from its header while it has unread ones), and an agent's message says
-// why it was sent and what it replies to.
-import 'package:factory_app/forms.dart' show AgentSettingsForm;
-import 'package:factory_app/identity.dart' show titleBarHeight;
+// handed each other without being woken for it (its Messaging panel), and
+// an agent's message says why it was sent and what it replies to.
 import 'package:factory_app/phone.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/quiet_copies.dart';
@@ -155,88 +152,25 @@ void main() {
   });
 
   group("the agent's header", () {
-    testWidgets('shows how many are new, and opens Messaging', (tester) async {
-      final harness = Harness(_workspace(unread: 3));
-      await harness.show(tester);
-      await settle(tester);
-      expect(find.text('3 new copies'), findsOneWidget);
-      await tester.tap(find.text('3 new copies'));
-      await tester.pump();
-      final opened = harness.backend.sent.lastWhere((m) => m.hasOpenPanel());
-      expect(opened.openPanel.agentId, 'a1');
-      expect(opened.openPanel.extensionId, 'agents');
-      // Tapping it opens no settings.
-      expect(find.byType(AgentSettingsForm), findsNothing);
-
-      await harness.apply(tester, _workspace(unread: 1));
-      expect(find.text('1 new copy'), findsOneWidget);
-      await harness.apply(tester, _workspace());
-      expect(find.byType(QuietCopiesChip), findsNothing);
-      await harness.apply(tester, _workspace(unread: 2, messaging: false));
-      expect(find.byType(QuietCopiesChip), findsNothing);
-    });
-
-    testWidgets('on iPhone, how many with a word, a finger\'s size', (
-      tester,
-    ) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      final snapshot = _workspace(unread: 2)..openPanel = '';
-      snapshot.agents.firstWhere((a) => a.id == 'a1').openPanel = '';
-      final harness = Harness(snapshot);
-      tester.view.padding = const FakeViewPadding(top: 59, bottom: 34);
-      await harness.show(tester, size: const Size(393, 852));
-      await pumpFrames(tester);
-      expect(find.byType(PhoneShell), findsOneWidget);
-      final chip = find.bySemanticsLabel('2 new copies');
-      expect(chip, findsOneWidget);
-      expect(find.text('2 copies'), findsOneWidget);
-      expect(tester.getSize(chip).height, greaterThanOrEqualTo(44));
-      await tester.tap(chip);
-      await tester.pump();
-      final opened = harness.backend.sent.lastWhere((m) => m.hasOpenPanel());
-      expect(opened.openPanel.extensionId, 'agents');
-    });
-  });
-
-  group('at any text size', () {
-    testWidgets('the title bar keeps its height at ordinary text', (
+    testWidgets('says nothing of them: they wait in Messaging (Matt)', (
       tester,
     ) async {
       await Harness(_workspace(unread: 3)).show(tester);
       await settle(tester);
-      final bar = find
-          .ancestor(
-            of: find.byType(QuietCopiesChip),
-            matching: find.byType(Container),
-          )
-          .first;
-      expect(tester.getSize(bar).height, titleBarHeight);
+      expect(find.textContaining('new cop'), findsNothing);
     });
 
-    for (final scale in [1.5, 2.0]) {
-      testWidgets('nothing cut at ${scale}x on an iPad', (tester) async {
-        tester.platformDispatcher.textScaleFactorTestValue = scale;
-        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
-        await Harness(_workspace(unread: 128))
-            .show(tester, size: const Size(1024, 768));
-        await settle(tester);
-        expect(find.text('128 new copies'), findsOneWidget);
-      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
-    }
-
-    testWidgets('nothing cut on a small iPhone at the largest text', (
-      tester,
-    ) async {
+    testWidgets('on iPhone, nothing either', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      tester.platformDispatcher.textScaleFactorTestValue = 3.1;
-      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
-      final snapshot = _workspace(unread: 128)..openPanel = '';
+      final snapshot = _workspace(unread: 2)..openPanel = '';
       snapshot.agents.firstWhere((a) => a.id == 'a1').openPanel = '';
-      await Harness(snapshot).show(tester, size: const Size(320, 568));
+      tester.view.padding = const FakeViewPadding(top: 59, bottom: 34);
+      await Harness(snapshot).show(tester, size: const Size(393, 852));
       await pumpFrames(tester);
-      expect(find.text('99+ copies'), findsOneWidget);
+      expect(find.byType(PhoneShell), findsOneWidget);
+      expect(find.textContaining('cop'), findsNothing);
+      expect(find.bySemanticsLabel('2 new copies'), findsNothing);
     });
   });
 

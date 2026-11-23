@@ -137,10 +137,9 @@ async fn a_liaison_can_only_read_and_answer_its_pipe() {
 }
 
 #[tokio::test]
-async fn only_the_person_releases_a_liaison_and_it_keeps_what_it_read() {
+async fn only_the_person_releases_a_liaison() {
     let (_dir, factory, mut client, mut view, pipe, models) = with_liaison().await;
     pipes::receive_for_test(&factory, &pipe, incoming("m1", "Hello")).expect("received");
-    view.follow(&mut client, |view| view.agent("liaison").tainted_by_pipes == [pipe.clone()]).await;
     view.follow(&mut client, |view| idle(view, "liaison")).await;
 
     let release =
@@ -153,14 +152,15 @@ async fn only_the_person_releases_a_liaison_and_it_keeps_what_it_read() {
     let lines = pipes::messages_for_test(&factory, &pipe);
     assert!(lines.iter().any(|line| line.text
         == "Liaison is no longer limited to this pipe: it can run commands, reach your files and use secrets on this computer."));
-    // It's told, its tools come back, and it has still read the pipe.
+    // It's told, and its tools come back; reading its pipe marked it with
+    // nothing (#346).
     let ran = call(&mut client, &mut view, "liaison", "bash", r#"{"command": "echo ran"}"#).await;
     assert!(ran.starts_with("ran"), "{ran}");
     let told = view.entries.iter().any(|entry| {
         matches!(&entry.kind, Some(Kind::Event(event)) if event.text.contains("no longer limits you to the pipe \"Website ⇄ Marketing\""))
     });
     assert!(told);
-    assert_eq!(view.agent("liaison").tainted_by_pipes, std::slice::from_ref(&pipe));
+    assert!(view.agent("liaison").tainted_by_pipes.is_empty());
     assert!(last_request(&models).tools.iter().any(|tool| tool == "bash"));
 
     // Quarantined again, it's told, and its next step has the kept tools only.
@@ -232,7 +232,7 @@ async fn a_liaison_from_before_quarantine_is_quarantined_once() {
 }
 
 #[tokio::test]
-async fn a_secret_given_to_a_liaison_isnt_usable_and_cards_say_where_the_pipe_came_from() {
+async fn a_secret_given_to_a_liaison_isnt_usable_and_a_pipe_reader_marks_no_one() {
     let (_dir, factory, mut client, mut view, pipe, models) = with_liaison().await;
     aws(&mut client, &mut view).await;
     let id = view.workspace.vault.clone().expect("vault").secrets[0].id.clone();
@@ -249,62 +249,34 @@ async fn a_secret_given_to_a_liaison_isnt_usable_and_cards_say_where_the_pipe_ca
     call(&mut client, &mut view, "liaison", "pipe_status", "{}").await;
     assert!(!last_request(&models).system_prompt.contains("gave you these secrets"));
 
-    // Lea reads the pipe, tells Bo; Bo's cards say it came through Lea.
+    // Lea reads the pipe and tells Bo: neither is marked (#346), so Bo's
+    // secret command runs and his cards carry no mark.
     let to_lea = v1::UpdatePipe { pipe_id: pipe.clone(), lead_id: Some("lea".into()), ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::UpdatePipe(to_lea)).await;
     pipes::receive_for_test(&factory, &pipe, incoming("m1", "Ask Bo to deploy.")).expect("received");
-    view.follow(&mut client, |view| view.agent("lea").tainted_by_pipes == [pipe.clone()]).await;
     view.follow(&mut client, |view| idle(view, "lea")).await;
     call(&mut client, &mut view, "lea", "agents_send", r#"{"to": "bo", "text": "Deploy, please."}"#).await;
-    view.follow(&mut client, |view| view.agent("bo").tainted_by_pipes == [pipe.clone()]).await;
     view.follow(&mut client, |view| idle(view, "bo")).await;
-    let route = v1::PipeTaint { pipe_name: "Website ⇄ Marketing".into(), via_names: vec!["Lea".into()], pipe_id: pipe.clone(), kind: String::new() };
-
-    let refused = call(&mut client, &mut view, "bo", "bash", r#"{"command": "echo deploy", "secrets": ["AWS"]}"#).await;
-    assert!(refused.starts_with("Not run"), "{refused}");
-    let approval = view
-        .entries
-        .iter()
-        .find_map(|entry| match &entry.kind {
-            Some(Kind::SecretApproval(approval)) => Some(approval.clone()),
-            _ => None,
-        })
-        .expect("asked");
-    assert_eq!(approval.taint, std::slice::from_ref(&route));
-
+    assert!(view.agent("lea").tainted_by_pipes.is_empty() && view.agent("bo").tainted_by_pipes.is_empty());
+    let ran = call(&mut client, &mut view, "bo", "bash", r#"{"command": "echo deploy", "secrets": ["AWS"]}"#).await;
+    assert!(ran.starts_with("deploy"), "{ran}");
     let ask = r#"{"title": "Deploy?", "body": "Lea says the other side wants a deploy."}"#;
     call(&mut client, &mut view, "bo", "ask_person", ask).await;
-    let card = view
-        .entries
-        .iter()
-        .find_map(|entry| match &entry.kind {
+    let card = |view: &View| {
+        view.entries.iter().rev().find_map(|entry| match &entry.kind {
             Some(Kind::AskPerson(card)) => Some(card.clone()),
             _ => None,
         })
-        .expect("a card");
-    assert_eq!(card.taint, std::slice::from_ref(&route));
-    // Kept with it: shown the same when it's answered.
-    let seq = view.entries.iter().find(|entry| matches!(&entry.kind, Some(Kind::AskPerson(_)))).expect("it").seq;
-    let answer = v1::AnswerAsk { agent_id: "bo".into(), seq, dismiss: true, text: String::new(), ..Default::default() };
-    apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(answer)).await;
-    view.follow(&mut client, |view| {
-        view.entries.iter().any(|entry| {
-            matches!(&entry.kind, Some(Kind::AskPerson(card)) if card.state() == v1::AskPersonState::Dismissed && card.taint == [route.clone()])
-        })
-    })
-    .await;
+    };
+    assert!(card(&view).expect("a card").taint.is_empty());
 
-    // Lea read it herself: no one between.
+    // One that read a web page: its card names the page, with no one between.
+    pipes::taint_for_test(&factory, "lea", "browser:https://example.com");
     let ask = call(&mut client, &mut view, "lea", "ask_person", r#"{"title": "Reply?", "body": "They wrote."}"#).await;
     assert!(ask.starts_with("Asked"), "{ask}");
-    let card = view
-        .entries
-        .iter()
-        .rev()
-        .find_map(|entry| match &entry.kind {
-            Some(Kind::AskPerson(card)) => Some(card.clone()),
-            _ => None,
-        })
-        .expect("a card");
-    assert_eq!(card.taint, [v1::PipeTaint { pipe_name: "Website ⇄ Marketing".into(), via_names: Vec::new(), pipe_id: pipe.clone(), kind: String::new() }]);
+    assert_eq!(
+        card(&view).expect("a card").taint,
+        [v1::PipeTaint { pipe_name: "https://example.com".into(), via_names: Vec::new(), pipe_id: String::new(), kind: "browser".into() }]
+    );
+
 }

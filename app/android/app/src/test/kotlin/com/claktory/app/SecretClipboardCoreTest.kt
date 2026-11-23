@@ -13,24 +13,27 @@ class FakeClipboard(private val timestamps: Boolean = true) : SecretClipboardPor
     var text: String? = null
     var timestamp = 0L
     var sensitiveWrites = 0
+    var expiresAt: Long? = null
     var inFront = true
     var textReads = 0
 
-    override fun write(label: String, text: String) {
+    override fun write(label: String, text: String, expiresAt: Long?) {
         sensitiveWrites++
         put(label, text)
+        this.expiresAt = expiresAt
     }
 
-    /** Another app's copy, or the app's own through Flutter. */
+    /** Another app's copy, or the app's own through Flutter: no expiry. */
     fun put(label: String?, text: String?) {
         this.label = label
         this.text = text
+        expiresAt = null
         timestamp++
     }
 
     override fun stamp(): ClipStamp? {
         if (!inFront || text == null) return null
-        return ClipStamp(label, if (timestamps) timestamp else null)
+        return ClipStamp(label, if (timestamps) timestamp else null, expiresAt)
     }
 
     override fun text(): String? {
@@ -126,5 +129,80 @@ class SecretClipboardCoreTest {
         core.copy(code)
         assertFalse(core.clear(99))
         assertEquals(code, clipboard.text)
+    }
+
+    @Test
+    fun sweepClearsTheCodeOnlyOnceItHasExpired() {
+        var now = 1_000_000L
+        val clipboard = FakeClipboard()
+        // A new core: the app was stopped in between, so no token is left.
+        SecretClipboardCore(clipboard) { now }.copy(code, seconds = 600)
+        assertEquals(now + 600_000, clipboard.expiresAt)
+        val core = SecretClipboardCore(clipboard) { now }
+        val expiresAt = now + 600_000
+        now += 599_999
+        // Not yet: it answers when, for a sweep then.
+        assertEquals(expiresAt, core.sweep())
+        assertEquals(code, clipboard.text)
+        now += 1
+        assertNull(core.sweep())
+        assertNull(clipboard.text)
+        // Only the description is read, never the text.
+        assertEquals(0, clipboard.textReads)
+    }
+
+    @Test
+    fun sweepLeavesOtherClipsAlone() {
+        var now = 1_000_000L
+        val clipboard = FakeClipboard()
+        val core = SecretClipboardCore(clipboard) { now }
+        // Copied with no expiry.
+        core.copy(code)
+        assertNull(clipboard.expiresAt)
+        now += 10_000_000
+        assertNull(core.sweep())
+        assertEquals(code, clipboard.text)
+        // What the person copied since, under another label.
+        core.copy(code, seconds = 60)
+        clipboard.put("text label?", "a message they copied")
+        now += 10_000_000
+        assertNull(core.sweep())
+        assertEquals("a message they copied", clipboard.text)
+        // Another label with an expiry, all the same.
+        clipboard.expiresAt = now - 1
+        assertNull(core.sweep())
+        assertEquals("a message they copied", clipboard.text)
+        // Android won't say: nothing is cleared.
+        core.copy(code, seconds = 60)
+        now += 120_000
+        clipboard.inFront = false
+        assertNull(core.sweep())
+        assertEquals(code, clipboard.text)
+        clipboard.inFront = true
+        assertNull(core.sweep())
+        assertNull(clipboard.text)
+        assertEquals(0, clipboard.textReads)
+    }
+
+    @Test
+    fun anExpiryFurtherAheadThanOursIsntOurs() {
+        // Any app can label a clip "Claktory code": an expiry no copy of ours sets is left alone, and waits on nothing.
+        val now = 1_000_000L
+        val clipboard = FakeClipboard()
+        val core = SecretClipboardCore(clipboard) { now }
+        for (forged in listOf(Long.MAX_VALUE, now + SecretClipboardCore.MAX_AHEAD_MS + 1)) {
+            clipboard.put(SecretClipboardCore.LABEL, "forged")
+            clipboard.expiresAt = forged
+            assertNull(core.sweep())
+            assertEquals("forged", clipboard.text)
+        }
+        // Long.MIN_VALUE is long past: under our label, cleared, without overflowing.
+        clipboard.expiresAt = Long.MIN_VALUE
+        assertNull(core.sweep())
+        assertNull(clipboard.text)
+        // The longest of ours, at the limit, still counts.
+        core.copy(code, seconds = 3600)
+        assertEquals(now + SecretClipboardCore.MAX_AHEAD_MS, core.sweep())
+        assertEquals(0, clipboard.textReads)
     }
 }

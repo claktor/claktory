@@ -14,12 +14,22 @@
 //!   friendship gone) is forgotten here, history and all.
 //! - A conversation it's too far behind in is forgotten too (a device adds
 //!   it again); its own channel it rejoins by external commit.
+//! - **A commit is never skipped** (R5): one naming a leaf the device list
+//!   kept here doesn't (a device the person just added, its list not
+//!   fetched yet) is read again once the newest list is fetched; one that
+//!   stays refused under it keeps its group waiting there, sending nothing,
+//!   and the channel rejoins at the current epoch if every member there
+//!   checks out, at most once a round.
+//! - **A channel out of step heals:** a commit from an epoch after its own
+//!   that it can't take, or the worker's epoch past its own once it has read
+//!   everything, means it missed a commit; it rejoins the same way.
 //! - A group that reaches a commit under a security key this leaf hasn't
 //!   been given (the person's new one, a friend's) waits there, unread,
 //!   until a device of the person's gives it. Enrolled under the person's
 //!   new key, the leaf moves to it in every group, by an Update each.
 
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -31,7 +41,6 @@ use claktory_dm_crypto::group::{Group, Incoming};
 use claktory_dm_crypto::validation::Pins;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::Notify;
 
 use super::leaf::{self, KeptGroup, StepError, Unready};
 use super::store;
@@ -41,6 +50,7 @@ use crate::factory::Factory;
 /// How long the worker may hold a call for events, and how long this side waits.
 const WAIT: u64 = 25;
 const CALL: Duration = Duration::from_secs(WAIT + 15);
+const FEED_WAIT: Duration = Duration::from_secs(WAIT);
 /// Between looks while the leaf can't run.
 const IDLE: Duration = Duration::from_secs(60);
 /// Between looks while the vault is locked: opening it is all it waits for,
@@ -53,17 +63,17 @@ const STOCK: i64 = 100;
 const LOW: i64 = 30;
 /// Messages asked for at a time.
 const PAGE: i64 = 100;
-
-fn notify() -> &'static Notify {
-    static WAKE: OnceLock<Notify> = OnceLock::new();
-    WAKE.get_or_init(Notify::new)
-}
+/// After rejoining the channel, the least time before it may try again, in
+/// milliseconds: a round (tests set less). Doubled after each attempt that
+/// fails, up to `REJOIN_MOST`.
+pub(crate) static REJOIN_WAIT: AtomicU64 = AtomicU64::new(ROUND.as_millis() as u64);
+const REJOIN_MOST: Duration = Duration::from_secs(3600);
 
 /// Something changed here (an enrollment): a full round now, even in the
 /// middle of waiting for the feed.
 pub(crate) fn wake(factory: &Factory) {
     factory.dm_leaf.round_now.store(true, std::sync::atomic::Ordering::SeqCst);
-    notify().notify_waiters();
+    factory.dm_wakes.process.notify_waiters();
 }
 
 #[derive(Debug)]
@@ -109,8 +119,10 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
     let mut cursor: Option<String> = None;
     let mut last_round: Option<tokio::time::Instant> = None;
     let mut backoff = Duration::from_secs(30);
+    let mut pace = super::pace::Pace::default();
     loop {
         let Some(strong) = factory.upgrade() else { return };
+        let wake = strong.dm_wakes.process.clone();
         let ready = leaf::step(&strong, |step| step.leaf().map(drop));
         let pause = match ready {
             Err(StepError::Unready(Unready::Locked)) => Some(LOCKED),
@@ -122,6 +134,7 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
             Ok(()) => {
                 // The feed's cursor first, so nothing between it and the round is missed.
                 let mut outcome = Ok(());
+                let mut early = None;
                 if strong.dm_leaf.round_now.swap(false, std::sync::atomic::Ordering::SeqCst) {
                     last_round = None;
                 }
@@ -139,20 +152,29 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
                     }
                 }
                 if outcome.is_ok() {
+                    // A long poll once there's a cursor.
+                    let held = cursor.is_some();
+                    let asked = tokio::time::Instant::now();
                     let happened = tokio::select! {
-                        happened = events(&strong, &mut cursor) => happened,
+                        happened = events(&strong, &mut cursor) => happened.map(Some),
                         // Woken (an enrollment): the round comes first.
-                        () = notify().notified() => Ok(Vec::new()),
+                        () = wake.notified() => Ok(None),
                     };
                     outcome = match happened {
-                        Ok(happened) => follow(&strong, happened).await,
+                        Ok(Some(happened)) => {
+                            let nothing = held && happened.is_empty();
+                            early = pace.after(super::pace::early(FEED_WAIT, asked.elapsed(), nothing), FEED_WAIT);
+                            follow(&strong, happened).await
+                        }
+                        Ok(None) => Ok(()),
                         Err(error) => Err(error),
                     };
                 }
                 match outcome {
                     Ok(()) => {
                         backoff = Duration::from_secs(30);
-                        None
+                        // Not held at the worker: not again at once.
+                        early
                     }
                     Err(Stop::Unready(Unready::Locked)) => Some(LOCKED),
                     Err(Stop::Unready(_)) => Some(IDLE),
@@ -172,7 +194,7 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
         if let Some(pause) = pause {
             tokio::select! {
                 () = tokio::time::sleep(pause) => {}
-                () = notify().notified() => {}
+                () = wake.notified() => {}
             }
         }
     }
@@ -246,21 +268,57 @@ async fn full_round(factory: &Arc<Factory>) -> Result<(), Stop> {
     let peers: Vec<String> = leaf::step(factory, |step| Ok(step.groups()?.into_iter().map(|group| group.peer).collect()))?;
     refresh_keys(factory, &peers).await?;
     welcomes(factory).await?;
-    groups(factory).await?;
+    let listed = groups(factory).await?;
     for group in leaf::step(factory, |step| step.groups())? {
-        if !waiting(catch_up(factory, &group).await)? {
-            rotate(factory, &group).await?;
+        if waiting(catch_up(factory, &group).await)? {
+            continue;
         }
+        if group.channel
+            && let Some(at) = listed.iter().find(|listed| listed.id == group.group_id)
+            && out_of_step(factory, &group, at)?
+        {
+            tracing::warn!("this Claktory's channel is out of step (a commit it never took): it rejoins");
+            if !rejoin(factory, &group).await {
+                continue;
+            }
+        }
+        // Taken out of it earlier, and its rejoin waited (throttled).
+        if group.channel && taken_out(factory, &group)? && !rejoin(factory, &group).await {
+            continue;
+        }
+        rotate(factory, &group).await?;
     }
     Ok(())
 }
 
+/// Whether `group`, read through everything the worker listed, is at an
+/// earlier epoch than the worker's: it missed a commit, so nothing it reads
+/// from now on opens (an old Claktory skipped one; R5).
+fn out_of_step(factory: &Factory, group: &KeptGroup, listed: &ListedGroup) -> Result<bool, Stop> {
+    Ok(leaf::step(factory, |step| {
+        let leaf = step.leaf()?;
+        let read = store::position(step.db(), &group.group_id)?.is_some_and(|position| position >= listed.last_seq);
+        let Some(mls) = Group::load(&step.provider()?, step.kind_of(&leaf, group), &group.group_id)? else { return Ok(false) };
+        Ok(read && mls.epoch() < listed.epoch)
+    })?)
+}
+
+/// Whether a commit took this leaf out of `group`, its MLS state kept.
+fn taken_out(factory: &Factory, group: &KeptGroup) -> Result<bool, Stop> {
+    Ok(leaf::step(factory, |step| {
+        let leaf = step.leaf()?;
+        Ok(Group::load(&step.provider()?, step.kind_of(&leaf, group), &group.group_id)?.is_some_and(|mls| mls.removed()))
+    })?)
+}
+
 /// A group whose catching up stopped at a security key this leaf hasn't
-/// been given (`process`) waits there; the others carry on. Whether it waits.
+/// been given, or at a leaf no list it can fetch names (`process`), or a
+/// channel waiting to rejoin, waits there; the others carry on. Whether it
+/// waits.
 fn waiting(caught: Result<(), Stop>) -> Result<bool, Stop> {
     match caught {
         Ok(()) => Ok(false),
-        Err(Stop::Unready(Unready::Rotating | Unready::FriendsNewKey)) => Ok(true),
+        Err(Stop::Unready(Unready::Rotating | Unready::FriendsNewKey | Unready::Unlisted | Unready::NoChannel)) => Ok(true),
         Err(stop) => Err(stop),
     }
 }
@@ -364,12 +422,14 @@ struct Keys {
 /// The latest signed device lists of this Claktory's own account and of
 /// `accounts`, from the worker: taken only when signed by the identity the
 /// person's devices pinned (a key the service swapped is never adopted
-/// here; the person's devices tell this Claktory of a real change).
-async fn refresh_keys(factory: &Arc<Factory>, accounts: &[String]) -> Result<(), Stop> {
+/// here; the person's devices tell this Claktory of a real change), and
+/// never older than the one kept. Whether any was newer.
+async fn refresh_keys(factory: &Arc<Factory>, accounts: &[String]) -> Result<bool, Stop> {
     let own = leaf::step(factory, |step| Ok(step.registration().0.clone()))?;
     let mut wanted: Vec<&str> = std::iter::once(own.as_str()).chain(accounts.iter().map(String::as_str)).filter(|account| !account.is_empty()).collect();
     wanted.sort_unstable();
     wanted.dedup();
+    let mut newer = false;
     for account in wanted {
         if !super::valid_id(account) {
             continue;
@@ -379,12 +439,17 @@ async fn refresh_keys(factory: &Arc<Factory>, accounts: &[String]) -> Result<(),
             other => other?,
         };
         let Ok(list) = URL_SAFE_NO_PAD.decode(&keys.device_list) else { continue };
-        let accepted = leaf::step(factory, |step| step.accept_list(account, &list));
-        if let Err(error) = accepted {
-            tracing::debug!(?error, "a device list this Claktory didn't take");
+        let accepted = leaf::step(factory, |step| {
+            let before = step.list_version(account)?;
+            step.accept_list(account, &list)?;
+            Ok(step.list_version(account)? > before)
+        });
+        match accepted {
+            Ok(moved) => newer |= moved,
+            Err(error) => tracing::debug!(?error, "a device list this Claktory didn't take"),
         }
     }
-    Ok(())
+    Ok(newer)
 }
 
 #[derive(Deserialize)]
@@ -488,7 +553,8 @@ fn join(step: &mut leaf::Step<'_>, welcome: &Welcome) -> Result<(), StepError> {
     // the join back.
     if !kept.channel {
         let mut accounts = std::collections::BTreeSet::new();
-        for member in group.members(&leaf.pins) {
+        // A device the person kept at a new key, not moved yet, counts.
+        for member in group.present(&leaf.pins) {
             accounts.insert(member?.account().to_owned());
         }
         let expected = std::collections::BTreeSet::from([leaf.account_id.clone(), kept.peer.clone()]);
@@ -509,14 +575,34 @@ struct Groups {
 #[derive(Deserialize)]
 struct Listed {
     group_id: String,
+    #[serde(default)]
+    epoch: u64,
+    #[serde(default)]
+    last_seq: i64,
 }
 
-/// Forgets the groups the worker no longer lists for this leaf.
-async fn groups(factory: &Arc<Factory>) -> Result<(), Stop> {
+/// A group the worker lists for this leaf, where it stands there.
+struct ListedGroup {
+    id: Vec<u8>,
+    epoch: u64,
+    last_seq: i64,
+}
+
+/// Forgets the groups the worker no longer lists for this leaf; the ones it
+/// lists.
+async fn groups(factory: &Arc<Factory>) -> Result<Vec<ListedGroup>, Stop> {
     let listed: Groups = get(factory, "groups", &[]).await?;
-    let listed: Vec<Vec<u8>> = listed.groups.iter().filter_map(|group| URL_SAFE_NO_PAD.decode(&group.group_id).ok()).collect();
-    let gone: Vec<KeptGroup> =
-        leaf::step(factory, |step| Ok(step.groups()?.into_iter().filter(|group| !listed.contains(&group.group_id)).collect()))?;
+    let listed: Vec<ListedGroup> = listed
+        .groups
+        .iter()
+        .filter_map(|group| {
+            let id = URL_SAFE_NO_PAD.decode(&group.group_id).ok()?;
+            Some(ListedGroup { id, epoch: group.epoch, last_seq: group.last_seq })
+        })
+        .collect();
+    let gone: Vec<KeptGroup> = leaf::step(factory, |step| {
+        Ok(step.groups()?.into_iter().filter(|group| !listed.iter().any(|listed| listed.id == group.group_id)).collect())
+    })?;
     for group in gone {
         tracing::info!(channel = group.channel, "a direct-message group this Claktory can't reach any more is forgotten");
         // It asks to be removed, for the next device commit to take in
@@ -535,7 +621,7 @@ async fn groups(factory: &Arc<Factory>) -> Result<(), Stop> {
         }
         leaf::step(factory, |step| Ok(store::forget_group(step.db(), &group.group_id)?))?;
     }
-    Ok(())
+    Ok(listed)
 }
 
 #[derive(Deserialize)]
@@ -565,11 +651,28 @@ struct Done {
     /// A commit in the channel added someone: a device that can't read
     /// what was proposed before it.
     added_in_channel: bool,
+    /// A commit or proposal from an epoch after this leaf's, which it
+    /// couldn't take: it missed a commit, and is out of step.
+    behind: bool,
+    /// A commit in the channel took this leaf out: after the person started
+    /// over (row 630), their device removes the Claktory's leaf under the
+    /// old key along with the rest, and the Claktory, enrolled again under
+    /// the new one, rejoins.
+    removed: bool,
 }
 
 /// Processes `group` from its position to the end of its mailbox.
 async fn catch_up(factory: &Arc<Factory>, group: &KeptGroup) -> Result<(), Stop> {
     let id = URL_SAFE_NO_PAD.encode(&group.group_id);
+    // A channel kept without its MLS state: its rejoin wasn't taken.
+    let stateless = group.channel
+        && leaf::step(factory, |step| {
+            let leaf = step.leaf()?;
+            Ok(Group::load(&step.provider()?, step.kind_of(&leaf, group), &group.group_id)?.is_none())
+        })?;
+    if stateless && !rejoin(factory, group).await {
+        return Err(Stop::Unready(Unready::NoChannel));
+    }
     loop {
         let position = leaf::step(factory, |step| Ok(store::position(step.db(), &group.group_id)?))?;
         let Some(position) = position else { return Ok(()) };
@@ -579,11 +682,20 @@ async fn catch_up(factory: &Arc<Factory>, group: &KeptGroup) -> Result<(), Stop>
             other => other?,
         };
         let mut added = false;
+        let mut behind = false;
+        let mut removed = false;
         let mut waits = None;
         for message in &page.messages {
             match leaf::step(factory, |step| process(step, group, message)) {
-                Ok(done) => added |= done.added_in_channel,
-                Err(StepError::Unready(unready @ (Unready::Rotating | Unready::FriendsNewKey))) => {
+                Ok(done) => {
+                    added |= done.added_in_channel;
+                    behind |= done.behind;
+                    removed |= done.removed;
+                    if removed {
+                        break;
+                    }
+                }
+                Err(StepError::Unready(unready @ (Unready::Rotating | Unready::FriendsNewKey | Unready::Unlisted))) => {
                     waits = Some(unready);
                     break;
                 }
@@ -593,9 +705,41 @@ async fn catch_up(factory: &Arc<Factory>, group: &KeptGroup) -> Result<(), Stop>
         if added {
             super::sends::reposted(factory).await;
         }
+        // Out of step, nothing more it reads here opens: the channel
+        // rejoins at the current epoch (else the round looks again).
+        if behind && group.channel {
+            tracing::warn!("this Claktory's channel is out of step (a commit it never took): it rejoins");
+            if rejoin(factory, group).await {
+                continue;
+            }
+        }
+        // Taken out of its own channel, which the worker still lists for it:
+        // it rejoins, once the person's devices list it under their key now
+        // (until then the worker refuses, and it tries again later).
+        if removed {
+            tracing::warn!("this Claktory was taken out of its channel: it rejoins");
+            if rejoin(factory, group).await {
+                continue;
+            }
+            return Err(Stop::Unready(Unready::NoChannel));
+        }
+        if waits == Some(Unready::Unlisted) {
+            // Never skipped (R5): a list newer than the one kept may name
+            // the leaf (a device just added), so the same commit is read
+            // again once it's fetched.
+            if refresh_keys(factory, std::slice::from_ref(&group.peer)).await? {
+                continue;
+            }
+            // No newer list: the channel rejoins at the current epoch, if
+            // every member there checks out; a conversation waits.
+            if group.channel && rejoin(factory, group).await {
+                continue;
+            }
+            tracing::warn!(channel = group.channel, "a direct-message group waits at a commit naming a leaf no device list here names");
+        }
         if group.channel {
-            // Nothing is sent in a channel stopped at the person's new key.
-            factory.dm_leaf.channel_waits.store(waits.is_some(), std::sync::atomic::Ordering::SeqCst);
+            // Nothing is sent in a channel stopped at a commit.
+            factory.dm_leaf.set_channel_waits(waits.clone());
         }
         if let Some(unready) = waits {
             return Err(Stop::Unready(unready));
@@ -606,8 +750,9 @@ async fn catch_up(factory: &Arc<Factory>, group: &KeptGroup) -> Result<(), Stop>
     }
 }
 
-/// One message, in one step: whatever happens, the position moves past it,
-/// so one bad message never stops a group.
+/// One message, in one step: the position moves past it, so one bad
+/// message never stops a group, except a commit or proposal that waits for
+/// a key or a device list (taken back, unread, to be read again).
 fn process(step: &mut leaf::Step<'_>, kept: &KeptGroup, message: &Message) -> Result<Done, StepError> {
     // Read already: the loop and an agent's read may fetch the same page.
     if store::position(step.db(), &kept.group_id)?.is_none_or(|position| message.seq <= position) {
@@ -630,8 +775,18 @@ fn process(step: &mut leaf::Step<'_>, kept: &KeptGroup, message: &Message) -> Re
             Ok(Incoming::Application { from, content }) => {
                 received(step, &leaf, kept, message, &from, &content)?;
             }
-            Ok(Incoming::Committed { .. }) => done.added_in_channel = kept.channel && group.members(&leaf.pins).len() > before,
+            Ok(Incoming::Committed { .. }) => {
+                done.added_in_channel = kept.channel && group.members(&leaf.pins).len() > before;
+                done.removed = kept.channel && group.removed();
+            }
             Ok(Incoming::Proposal) => {}
+            // Under a key the person's devices told this leaf was replaced
+            // (after more than one new key, row 654): never taken here, so
+            // out of step, and the channel rejoins.
+            Err(claktory_dm_crypto::Error::Replaced { .. }) if message.kind != "application" => {
+                tracing::warn!(seq = message.seq, channel = kept.channel, "a commit under a replaced security key: out of step");
+                done.behind = true;
+            }
             // A change under a security key this leaf hasn't been given: the
             // person's new one before a device enrolls this Claktory under
             // it, or a friend's before the person's devices pass it on. Left
@@ -642,7 +797,18 @@ fn process(step: &mut leaf::Step<'_>, kept: &KeptGroup, message: &Message) -> Re
                 let own = account == leaf.account_id;
                 return Err(StepError::Unready(if own { Unready::Rotating } else { Unready::FriendsNewKey }));
             }
-            Err(error) => tracing::warn!(?error, seq = message.seq, channel = kept.channel, "a direct message this Claktory couldn't take"),
+            // A leaf the device list kept here doesn't name, most likely a
+            // device just added whose list this leaf hasn't fetched yet:
+            // skipped, the group would be an epoch behind for good (R5).
+            // Left unread, and read again with the newest list.
+            Err(claktory_dm_crypto::Error::Unlisted { .. }) if message.kind != "application" => {
+                tracing::info!(seq = message.seq, channel = kept.channel, "a direct-message group waits for a newer device list");
+                return Err(StepError::Unready(Unready::Unlisted));
+            }
+            Err(error) => {
+                tracing::warn!(?error, seq = message.seq, channel = kept.channel, "a direct message this Claktory couldn't take");
+                done.behind = message.kind != "application" && message.epoch > group.epoch();
+            }
         }
     }
     store::set_position(step.db(), &kept.group_id, message.seq)?;
@@ -701,6 +867,41 @@ async fn behind(factory: &Arc<Factory>, group: &KeptGroup) -> Result<(), Stop> {
         leaf::step(factory, |step| Ok(store::forget_group(step.db(), &group.group_id)?))?;
         return Ok(());
     }
+    if rejoin(factory, group).await { Ok(()) } else { Err(Stop::Unready(Unready::NoChannel)) }
+}
+
+/// Rejoins this Claktory's channel by external commit at its current epoch,
+/// from the GroupInfo the worker keeps: when it's too far behind, or at a
+/// commit that stays refused under the newest device lists (R5). Every
+/// other member there must check out against the lists kept here
+/// (`Group::rejoin`), and the GroupInfo must be this group's; if not,
+/// nothing changes and the channel waits. At most one attempt a round,
+/// the wait doubling after each that fails (Fugo). Whether it rejoined.
+async fn rejoin(factory: &Arc<Factory>, group: &KeptGroup) -> bool {
+    let base = Duration::from_millis(REJOIN_WAIT.load(Ordering::SeqCst));
+    {
+        let throttle = factory.dm_leaf.rejoin();
+        if throttle.next.is_some_and(|next| std::time::Instant::now() < next) {
+            return false;
+        }
+    }
+    let outcome = rejoin_now(factory, group).await;
+    let mut throttle = factory.dm_leaf.rejoin();
+    throttle.wait = if outcome.is_ok() || throttle.wait.is_zero() { base } else { (throttle.wait * 2).min(REJOIN_MOST.max(base)) };
+    throttle.next = Some(std::time::Instant::now() + throttle.wait);
+    match outcome {
+        Ok(()) => {
+            tracing::info!("this Claktory rejoined its channel");
+            true
+        }
+        Err(stop) => {
+            tracing::warn!(?stop, "this Claktory couldn't rejoin its channel: it waits, and tries again later");
+            false
+        }
+    }
+}
+
+async fn rejoin_now(factory: &Arc<Factory>, group: &KeptGroup) -> Result<(), Stop> {
     let id = URL_SAFE_NO_PAD.encode(&group.group_id);
     #[derive(Deserialize)]
     struct Info {
@@ -708,10 +909,13 @@ async fn behind(factory: &Arc<Factory>, group: &KeptGroup) -> Result<(), Stop> {
     }
     let info: Info = get(factory, &format!("groups/{id}/group-info"), &[]).await?;
     let info = Envelope::from_json(&info.group_info).map_err(unreadable)?;
+    // Refused (a member no list here names, another group's GroupInfo), the
+    // step is taken back and the channel stays as it was.
     let outgoing = leaf::step(factory, |step| {
         let leaf = step.leaf()?;
         store::forget_group(step.db(), &group.group_id)?;
-        let (_, outgoing) = Group::rejoin(&step.provider()?, &leaf.me, &leaf.pins, step.kind_of(&leaf, group), info.bytes())?;
+        let kind = step.kind_of(&leaf, group);
+        let (_, outgoing) = Group::rejoin(&step.provider()?, &leaf.me, &leaf.pins, kind, &group.group_id, info.bytes())?;
         Ok(outgoing)
     })?;
     let mut body = json!({"commit": Envelope::new(outgoing.commit).map_err(unreadable)?.to_json()});
@@ -739,8 +943,12 @@ async fn behind(factory: &Arc<Factory>, group: &KeptGroup) -> Result<(), Stop> {
             Ok(())
         }
         Err(problem) => {
-            // Not taken (another commit came first): the next round tries again.
-            leaf::step(factory, |step| Ok(store::forget_group(step.db(), &group.group_id)?))?;
+            // Not taken (another commit came first): kept without its MLS
+            // state, so it rejoins again, never lost.
+            leaf::step(factory, |step| {
+                store::forget_group(step.db(), &group.group_id)?;
+                step.keep_group(group)
+            })?;
             Err(problem.into())
         }
     }

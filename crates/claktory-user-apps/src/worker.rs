@@ -217,6 +217,13 @@ impl Worker {
     pub fn answer(&self, request: Request, body: &[u8]) -> Answer {
         match request {
             Request::Health => json(200, &serde_json::json!({"ok": true})),
+            Request::SignedOut { account_id, account_key, time } => match crate::dms::leaves::signed_out(&self.db(), &account_id, &account_key, time.saturating_mul(1000)) {
+                Ok(_) => (204, Vec::new()),
+                Err(failure) => {
+                    tracing::error!("dropping a signed-out device's KeyPackages: {failure}");
+                    error(503, "unavailable", "Something went wrong. Try again later.")
+                }
+            },
             Request::PurgeAccount { account_id, time } => {
                 let mut db = self.db();
                 if let Err(refused) = grants::purge_account(&mut db, &account_id) {
@@ -452,7 +459,7 @@ mod tests {
         };
         tokio::spawn(serve(listener, worker.clone(), uid));
         let ask = |method: &str, path: &str, query: &str, body: serde_json::Value| {
-            let caller = Caller::Device { account_id: "ana".into(), device_key: "k".into(), registrations: Vec::new() };
+            let caller = Caller::Device { account_id: "ana".into(), device_key: "k".into(), registrations: Vec::new(), removed_devices: Vec::new(), signed_in_at: None, bound_devices: None };
             let request = Request::Call {
                 method: method.into(),
                 path: format!("/v1/apps/dms/{path}"),
@@ -497,7 +504,7 @@ mod tests {
             path: "/v1/apps/dms/sync".into(),
             query: format!("since={latest}&wait=20"),
             time: 1_795_183_320,
-            caller: Caller::Device { account_id: "ana".into(), device_key: "k".into(), registrations: Vec::new() },
+            caller: Caller::Device { account_id: "ana".into(), device_key: "k".into(), registrations: Vec::new(), removed_devices: Vec::new(), signed_in_at: None, bound_devices: None },
         };
         let held: Vec<Slot> = (0..WAITS_PER_KEY).map(|_| worker.enter(&waiting).expect("a place")).collect();
         let started = tokio::time::Instant::now();
@@ -514,7 +521,7 @@ mod tests {
             path: path.into(),
             query: query.into(),
             time: 1_795_183_320,
-            caller: Caller::Device { account_id: "ana".into(), device_key: "k".into(), registrations: Vec::new() },
+            caller: Caller::Device { account_id: "ana".into(), device_key: "k".into(), registrations: Vec::new(), removed_devices: Vec::new(), signed_in_at: None, bound_devices: None },
         };
         let waits = |method: &str, path: &str, query: &str| long_poll(&call(method, path, query)).map(|wait| wait.as_secs());
         assert_eq!(waits("GET", "/v1/apps/dms/sync", "since=c1.0&wait=25"), Some(25));
@@ -536,7 +543,7 @@ mod tests {
             path: format!("/v1/apps/dms/{path}"),
             query: query.into(),
             time: 1_795_183_320,
-            caller: Caller::Device { account_id: account.into(), device_key: key.into(), registrations: Vec::new() },
+            caller: Caller::Device { account_id: account.into(), device_key: key.into(), registrations: Vec::new(), removed_devices: Vec::new(), signed_in_at: None, bound_devices: None },
         };
         let wait = |account: &str, key: &str| call(account, key, "GET", "sync", "since=c1.0&wait=25");
         let mut ana = worker.enter(&wait("ana", "phone")).expect("a place");
@@ -612,6 +619,30 @@ mod tests {
         let conn = worker.db();
         assert!(worker.keys().open(&conn, field, &mine).is_err(), "gone with its key");
         assert_eq!(worker.keys().open(&conn, field, &theirs).expect("another account's stays").bytes(), b"Eve");
+    }
+
+    /// Row 671: the service says a device signed out; its KeyPackages put
+    /// up until then go, another device's stay, and so do those it put up
+    /// after (signed back in before the notice came: the service retries).
+    #[test]
+    fn a_signed_out_devices_key_packages_go() {
+        let dir = tempfile::tempdir().expect("a folder");
+        let worker = Worker::open(&dir.path().join("apps.db"), Keys::from_bytes([7; 32])).expect("the worker");
+        worker
+            .db()
+            .execute_batch(
+                "INSERT INTO dm_key_packages VALUES (x'01', 'acct', 'mac', 'device', 0, x'00', 1000), (x'02', 'acct', 'phone', 'device', 0, x'00', 1000),
+                 (x'03', 'acct', 'mac', 'device', 0, x'00', 2000);",
+            )
+            .expect("held");
+        let signed_out = Request::SignedOut { account_id: "acct".into(), account_key: "mac".into(), time: 1 };
+        assert_eq!(worker.answer(signed_out, &[]).0, 204);
+        let left: Vec<(String, i64)> = {
+            let conn = worker.db();
+            let mut statement = conn.prepare("SELECT leaf_id, uploaded FROM dm_key_packages ORDER BY ref").expect("query");
+            statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).expect("rows").collect::<Result<_, _>>().expect("leaves")
+        };
+        assert_eq!(left, [("phone".to_owned(), 1000), ("mac".to_owned(), 2000)]);
     }
 
     #[test]

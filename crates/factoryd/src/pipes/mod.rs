@@ -7,8 +7,8 @@
 //! This is the store: what a pipe is and who may use it, its messages, and
 //! the limits code enforces whatever the model does (an outgoing secret scan,
 //! files only from the outbox unless the person approves, Review outgoing,
-//! rate limits and a loop breaker, and the person's approval for secrets once
-//! an agent has read a pipe: `agents`). The transport (`crate::pipe_link`)
+//! rate limits and a loop breaker: `agents`; since #346 reading a pipe marks
+//! no one, and only a web page read through browser control does). The transport (`crate::pipe_link`)
 //! only carries what this hands it.
 //!
 //! Pipes live in factory.db, never in config.json, so no agent (Rivet
@@ -17,7 +17,6 @@
 pub(crate) mod agents;
 pub(crate) mod bound;
 pub(crate) mod curator;
-pub(crate) mod files;
 pub mod handoff;
 pub mod identity;
 pub(crate) mod lead;
@@ -39,10 +38,9 @@ use crate::pipe_link::{self, Incoming, LinkStatus, Outgoing, Peer, PipeError, Si
 use crate::transcript::now_ms;
 
 /// Where an agent's taint came from: the agents, by id, that what it read
-/// came through (JSON list), first the one that read the pipe; null or empty
-/// when it read the pipe itself. And the same on the asks and proposals of
-/// an agent that had read a pipe (`agents::routes_json`), for the person's
-/// card; null for none.
+/// came through (JSON list). Since #346 a mark never spreads, so it's null
+/// on new rows, kept for old ones; the same on the asks and proposals of an
+/// agent that had read a web page (`agents::routes_json`); null for none.
 pub(crate) const TAINT_VIA: &str = "
 ALTER TABLE pipe_taint ADD COLUMN via TEXT;
 ALTER TABLE asks ADD COLUMN taint TEXT;
@@ -393,11 +391,6 @@ impl Pipes {
         data.curators.contains(agent) || data.pipes.values().any(|record| record.quarantined.iter().any(|id| id == agent))
     }
 
-    /// The curators, by id.
-    pub(crate) fn curators(&self) -> Vec<String> {
-        self.data().curators.iter().cloned().collect()
-    }
-
     pub(crate) fn set_curator(&self, agent: &str, curator: bool) {
         let mut data = self.data();
         if curator {
@@ -451,17 +444,12 @@ pub(crate) fn start(factory: &Arc<Factory>) {
         Err(error) => tracing::error!(%error, "could not read the curators"),
     }
     data.loaded = true;
-    // Invites don't outlive a restart's ten minutes for long; those expired meanwhile close.
-    let now = now_ms();
-    let expired: Vec<String> = data
-        .pipes
-        .values()
-        .filter(|pipe| pipe.state == State::Invited && pipe.invite_expires > 0 && pipe.invite_expires < now)
-        .map(|pipe| pipe.id.clone())
-        .collect();
+    // Invites expired meanwhile close now; the others when they expire.
+    let invites: Vec<String> =
+        data.pipes.values().filter(|pipe| pipe.state == State::Invited && pipe.invite_expires > 0).map(|pipe| pipe.id.clone()).collect();
     drop(data);
-    for id in expired {
-        close_with(factory, &id, "The invite expired before anyone used it.");
+    for id in invites {
+        watch_invite(factory, &id);
     }
     quarantine::upgrade(factory);
     bound::upgrade(factory);
@@ -489,6 +477,18 @@ fn load(factory: &Factory) -> rusqlite::Result<Loaded> {
             Err(error) => tracing::error!(pipe = %id, %error, "could not read a pipe"),
         }
     }
+    // #346: reading a pipe or a direct message marks no one any more, so
+    // nobody stays marked by one read before, and a secret's use waiting
+    // for the person only because of one goes (`expired`, out of Needs
+    // you): run again, the command simply runs, or asks afresh if one of its
+    // secrets asks each time. Only a web page read through browser control
+    // still marks its reader. Every start; a no-op once done.
+    db.execute("DELETE FROM pipe_taint WHERE pipe NOT LIKE 'browser:%'", [])?;
+    db.execute(
+        "UPDATE pipe_secret_approvals SET state = 'expired', decided = ?1 WHERE state = 'pending' AND pipes NOT IN ('', '[]')
+         AND agent NOT IN (SELECT agent FROM pipe_taint)",
+        [crate::transcript::now_ms()],
+    )?;
     let mut tainted: BTreeMap<String, Taint> = BTreeMap::new();
     let mut statement = db.prepare("SELECT agent, pipe, via FROM pipe_taint")?;
     let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)))?;
@@ -1041,13 +1041,36 @@ fn over_incoming(factory: &Factory, record: &Record) -> Option<String> {
     None
 }
 
-/// How many agents' messages in a row pause the pipe.
-const LOOP_AFTER: u32 = 10;
+/// How many agents' messages in a row pause the pipe (#345: 10 tripped on
+/// ordinary conversations; the rate limits and the spend cap bound the
+/// cost, not this).
+const LOOP_AFTER: u32 = 50;
+/// The same text this many times among the latest `REPEAT_WINDOW` agents'
+/// messages, either side's, is a loop: a message bounced back and forth.
+const REPEATS: usize = 3;
+const REPEAT_WINDOW: usize = 10;
+/// Only a text at least this long counts as repeated: "OK" or "Thanks" said
+/// again is no loop (Fugo's #345 rule).
+const REPEAT_MIN_CHARS: usize = 40;
+
+/// Which rule paused a pipe.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tripped {
+    Count,
+    Repeat,
+}
+
+/// A text as the repeat rule compares it: trimmed, lower case, each run of
+/// whitespace one space; None when it's too short to count.
+fn repeatable(text: &str) -> Option<String> {
+    let normal = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    (normal.chars().count() >= REPEAT_MIN_CHARS).then_some(normal)
+}
 
 /// Counts a message towards the loop breaker: this side's person's resets
 /// it (the other side's can't: it could claim any message is its
-/// person's); ten others in a row, or the same text three times lately,
-/// pause the pipe.
+/// person's); `LOOP_AFTER` others in a row, or a long text `REPEATS` times
+/// among the latest `REPEAT_WINDOW`, pause the pipe.
 pub(crate) fn count_for_loop(factory: &Arc<Factory>, pipe: &str, author: Author, text: &str) {
     use std::hash::{Hash, Hasher};
     let tripped = {
@@ -1056,21 +1079,32 @@ pub(crate) fn count_for_loop(factory: &Arc<Factory>, pipe: &str, author: Author,
         if author == Author::Me {
             record.quiet = 0;
             record.recent.clear();
-            false
+            None
         } else {
             record.quiet += 1;
+            // Every message takes a place in the window; a short one's hash
+            // is never compared, so it can't make a repeat.
+            let normal = repeatable(text);
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            text.trim().to_lowercase().hash(&mut hasher);
+            normal.as_deref().unwrap_or(text).hash(&mut hasher);
+            normal.is_some().hash(&mut hasher);
             let hash = hasher.finish();
-            let repeats = record.recent.iter().filter(|seen| **seen == hash).count();
+            let repeats = if normal.is_some() { record.recent.iter().filter(|seen| **seen == hash).count() + 1 } else { 0 };
             record.recent.push(hash);
-            if record.recent.len() > 6 {
+            while record.recent.len() > REPEAT_WINDOW - 1 {
                 record.recent.remove(0);
             }
-            (record.quiet >= LOOP_AFTER || repeats >= 2) && record.state == State::Open
+            let tripped = if record.quiet >= LOOP_AFTER {
+                Some(Tripped::Count)
+            } else if repeats >= REPEATS {
+                Some(Tripped::Repeat)
+            } else {
+                None
+            };
+            tripped.filter(|_| record.state == State::Open)
         }
     };
-    if tripped {
+    if let Some(tripped) = tripped {
         let who = factory.pipes.get(pipe).map(|record| record.peer_who()).unwrap_or_default();
         let paused = change(factory, pipe, |record| {
             record.state = State::Paused;
@@ -1083,9 +1117,14 @@ pub(crate) fn count_for_loop(factory: &Arc<Factory>, pipe: &str, author: Author,
             line(
                 factory,
                 pipe,
-                format!(
-                    "Your agents and {who}'s have exchanged {LOOP_AFTER} messages on their own, or repeated themselves, so the pipe is paused. Continue?"
-                ),
+                match tripped {
+                    Tripped::Count => format!(
+                        "Your agents and {who}'s have exchanged {LOOP_AFTER} messages on their own, so the pipe is paused. Continue?"
+                    ),
+                    Tripped::Repeat => format!(
+                        "Your agents and {who}'s have repeated the same message, so the pipe is paused. Continue?"
+                    ),
+                },
             );
         }
     } else if let Some(record) = factory.pipes.get(pipe) {
@@ -1165,12 +1204,59 @@ pub(crate) async fn create_invite(factory: &Arc<Factory>, request: &v1::CreatePi
     record.invite_expires = expires;
     let id = record.id.clone();
     let made = record.clone();
-    insert(factory, record);
-    line(factory, &id, "Invite made. Send its code to the other person; it works once, for 10 minutes.");
+    invited(factory, record);
     if !request.start_id.is_empty() {
         start::done(factory, &request.start_id, &made, true);
     }
     Ok(v1::PipeInvite { pipe_id: id, code })
+}
+
+/// Keeps a new invite's pipe, saying so, and closes it if no one uses the
+/// invite before it expires.
+fn invited(factory: &Arc<Factory>, record: Record) {
+    let id = record.id.clone();
+    insert(factory, record);
+    line(factory, &id, "Invite made. Send its code to the other person; it works once, for 10 minutes.");
+    watch_invite(factory, &id);
+}
+
+/// Closes the pipe of an invite no one used once it expires: now if it
+/// has, else when it does, while Claktory runs (a restart watches it again).
+fn watch_invite(factory: &Arc<Factory>, id: &str) {
+    let Some(expires) = factory.pipes.get(id).filter(|record| record.state == State::Invited).map(|record| record.invite_expires) else {
+        return;
+    };
+    if expires <= now_ms() {
+        close_expired(factory, id);
+        return;
+    }
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+    let (weak, id) = (Arc::downgrade(factory), id.to_owned());
+    runtime.spawn(async move {
+        let wait = u64::try_from(expires - now_ms()).unwrap_or(0);
+        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+        if let Some(factory) = weak.upgrade() {
+            close_expired(&factory, &id);
+        }
+    });
+}
+
+/// Closes the pipe if it's still waiting on an invite that has expired:
+/// one used meanwhile, or cancelled, stays as it is.
+fn close_expired(factory: &Factory, id: &str) {
+    let now = now_ms();
+    let closed = change(factory, id, |record| {
+        let expired = record.state == State::Invited && record.invite_expires > 0 && record.invite_expires <= now;
+        if expired {
+            record.state = State::Closed;
+            record.paused = Pause::None;
+        }
+        expired
+    });
+    if closed == Some(true) {
+        unsent(factory, id);
+        line(factory, id, "The invite expired before anyone used it.");
+    }
 }
 
 /// ReadPipeInvite: what a code says, without using it.
@@ -2240,6 +2326,17 @@ pub fn open_for_test(factory: &Arc<Factory>, project: &str, name: &str, members:
     id
 }
 
+/// Tests: a pipe waiting on an invite that expires in `ms`, as
+/// CreatePipeInvite makes it.
+#[doc(hidden)]
+pub fn invited_for_test(factory: &Arc<Factory>, project: &str, name: &str, ms: i64) -> String {
+    let mut record = new_record(factory, project, name, "testing", State::Invited).expect("a pipe");
+    record.invite_expires = now_ms() + ms;
+    let id = record.id.clone();
+    invited(factory, record);
+    id
+}
+
 /// Tests: what the transport hands the store, as the transport would.
 #[doc(hidden)]
 pub fn receive_for_test(factory: &Arc<Factory>, pipe: &str, message: Incoming) -> Result<(), String> {
@@ -2343,11 +2440,27 @@ pub fn taint_of_for_test(factory: &Factory, agent: &str) -> String {
     serde_json::to_string(&factory.pipes.taint_of(agent)).expect("JSON")
 }
 
-/// Tests: what a monitor `from` set for `to` does when it fires, with the
-/// taint it kept (`taint_of_for_test`).
+/// Tests: a message counted towards the loop breaker, as `author` wrote it
+/// ("their_agent", "their_person", "my_agent" or "me"), without the rate
+/// limits that hold what arrives.
 #[doc(hidden)]
-pub fn taint_with_for_test(factory: &Arc<Factory>, from: &str, to: &str, taint: &str) {
-    agents::taint_with(factory, from, to, &serde_json::from_str(taint).expect("a taint"));
+pub fn count_for_loop_for_test(factory: &Arc<Factory>, pipe: &str, author: &str, text: &str) {
+    let author = match author {
+        "their_agent" => Author::TheirAgent,
+        "their_person" => Author::TheirPerson,
+        "my_agent" => Author::MyAgent,
+        "me" => Author::Me,
+        other => panic!("no author {other}"),
+    };
+    count_for_loop(factory, pipe, author, text);
+}
+
+/// Tests: `agent` has read `key` (`agents::Kind`, such as
+/// "browser:https://example.com"), as a page read through browser control
+/// marks it.
+#[doc(hidden)]
+pub fn taint_for_test(factory: &Arc<Factory>, agent: &str, key: &str) {
+    agents::taint(factory, agent, key);
 }
 
 /// Tests: the lead's wakes apart by `every` at least.

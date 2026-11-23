@@ -405,6 +405,33 @@ void main() {
     expect(harness.last.listPipeReports.recipientId, 'ingrid');
   });
 
+  testWidgets("Stop reading reports… says so first while a project's new "
+      "pipes forward to it, not only its pipes (Abbacchio's row 645)", (
+    tester,
+  ) async {
+    final workspace = _workspace(pipe: _pipe(to: ''));
+    workspace.projects.first.reportForward = PipeForward(recipientId: 'ingrid');
+    final harness = await show(tester, workspace, size: const Size(1200, 1600));
+    final ingrid = workspace.agents.firstWhere((agent) => agent.id == 'ingrid');
+    await open(
+      tester,
+      (close) => AgentSettingsForm(agent: ingrid, close: close),
+    );
+    await tester.ensureVisible(find.text('Stop reading reports…'));
+    await settle(tester);
+    await tester.tap(find.text('Stop reading reports…'));
+    await settle(tester);
+    expect(
+      find.text(
+        'Ingrid still gets reports from Factory’s new pipes. Choose another '
+        'agent for them in the project’s settings first.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Stop Ingrid reading reports?'), findsNothing);
+    expect(harness.backend.sent.where((m) => m.hasSetReportReader()), isEmpty);
+  });
+
   testWidgets("a reader's settings say what reading reports keeps it from; "
       'it stops only once no pipe forwards to it, and after asking', (
     tester,
@@ -715,6 +742,21 @@ void main() {
     );
     expect(text, 'Reports from Kai to Ingrid: 3 today, room for 27 more');
     expect(refused, 2);
+
+    // The hour's limit tighter than the day's: it says so (Abbacchio's
+    // row 645).
+    final hourly = _pipe(counts: PipeReportCounts(today: 2, roomToday: 4))
+      ..forward.limits = ReportLimits(perHour: 6, perDay: 30);
+    expect(
+      mapReportsText(_workspace(), hourly).$1,
+      'Reports from Kai to Ingrid: 2 today, room for 4 more this hour',
+    );
+    final daily = _pipe(counts: PipeReportCounts(today: 28, roomToday: 2))
+      ..forward.limits = ReportLimits(perHour: 6, perDay: 30);
+    expect(
+      mapReportsText(_workspace(), daily).$1,
+      'Reports from Kai to Ingrid: 28 today, room for 2 more',
+    );
   });
 
   testWidgets('History shows who changed where reports go: Rivet, or you', (

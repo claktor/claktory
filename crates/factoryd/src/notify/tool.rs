@@ -2,7 +2,7 @@
 //! them to look (an ops watchdog's "account.claktory.com isn't answering"),
 //! as a notification on their devices. Part of the Ask extension, so a
 //! liaison quarantined for a pipe keeps it, under the rule that an agent
-//! that has read a pipe puts none of its words in a notification.
+//! that has read a web page puts none of its words in a notification.
 
 use std::sync::Arc;
 
@@ -73,7 +73,7 @@ fn notify(factory: &Arc<Factory>, agent: &str, args: Args) -> Result<ToolResult,
     note.mode = settings.mode(agent);
     note.urgent = args.urgent;
     note.what = if text.is_empty() { title.clone() } else { format!("{title}\n{text}") };
-    // It read a pipe: what it says may be the other side's words.
+    // It read a web page: what it says may be a stranger's words.
     note.tainted = !factory.pipes.tainted(agent).is_empty();
     let delivered = super::deliver(factory, &config, &settings, note);
     let said = match delivered {

@@ -222,7 +222,8 @@ pub(crate) fn password_spec(ask: &Password, length: u32) -> Result<v1::PasswordS
     };
     if length < shortest || length > longest {
         return Err(refused(format!(
-            "A {length}-character password is out of bounds here: from {size} characters, it can be {shortest} to {longest} characters long."
+            "{} {length}-character password is out of bounds here: from {size} characters, it can be {shortest} to {longest} characters long.",
+            article(length)
         )));
     }
     let has = |class: &str| alphabet.characters.iter().any(|character| class_of(*character) == class);
@@ -303,9 +304,28 @@ pub(crate) fn make_password(spec: &v1::PasswordSpec) -> Result<Zeroizing<String>
     Err(refused("The vault couldn't make a password with every kind of character asked for."))
 }
 
+/// "A" or "An" before a number below 1,000 said aloud: "An 8-character",
+/// "An 11-", "An 18-", "An 80-" to "89-", "An 800-" to "899-"; "A" otherwise.
+fn article(number: u32) -> &'static str {
+    if matches!(number, 8 | 11 | 18 | 80..=89 | 800..=899) { "An" } else { "A" }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_length_reads_with_its_article() {
+        let read = |length: u32| format!("{} {length}-character", article(length));
+        assert_eq!(read(8), "An 8-character");
+        assert_eq!(read(11), "An 11-character");
+        assert_eq!(read(18), "An 18-character");
+        assert_eq!(read(84), "An 84-character");
+        assert_eq!(read(12), "A 12-character");
+        assert_eq!(read(16), "A 16-character");
+        assert_eq!(read(108), "A 108-character");
+        assert_eq!(read(256), "A 256-character");
+    }
 
     #[test]
     fn a_made_key_reads_back_as_the_same_key() {

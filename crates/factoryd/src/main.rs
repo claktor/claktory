@@ -63,6 +63,10 @@ enum MainError {
     /// An import into this home hasn't finished: it doesn't start half made.
     #[error("{0}")]
     ImportUnfinished(String),
+    /// QA builds only: FACTORY_QA_ANTHROPIC_URL that the guard refuses.
+    #[cfg(feature = "qa-provider")]
+    #[error("{0}")]
+    QaProvider(String),
 }
 
 fn main() -> ExitCode {
@@ -642,12 +646,38 @@ async fn stop(mut child: tokio::process::Child) -> Result<(), MainError> {
     Ok(())
 }
 
+/// The models and sign-ins factoryd uses. Built for QA (the `qa-provider`
+/// feature, claktory-qa's sandboxes only), FACTORY_QA_ANTHROPIC_URL points
+/// the Anthropic subscription at qa-model on this computer, within Fugo's
+/// guard; anything the guard refuses stops factoryd, saying why.
+fn registry(home: &Home, port: u16) -> Result<Registry, MainError> {
+    #[cfg(feature = "qa-provider")]
+    {
+        use factory_agent::providers::anthropic::qa;
+        let url = std::env::var_os(qa::URL_VAR).map(|url| url.to_string_lossy().into_owned());
+        if let Some((base, anthropic)) = qa::provider_for(url.as_deref(), home.root(), port).map_err(MainError::QaProvider)? {
+            tracing::warn!("QA provider override: {base}");
+            let mut providers = factory_agent::providers::models::default_providers();
+            if let Some(slot) = providers.iter_mut().find(|provider| provider.id == anthropic.id) {
+                *slot = anthropic;
+            }
+            let store = factory_agent::credentials::FileCredentialStore::new(home.auth_path());
+            return Ok(Registry::with_providers(store, factory_agent::auth::process_env(), providers));
+        }
+    }
+    #[cfg(not(feature = "qa-provider"))]
+    let _ = port;
+    Ok(Registry::new(home.auth_path()))
+}
+
 async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Handed>) -> Result<(), MainError> {
     let Instance { home, addr } = instance;
     // Never half started: an import that didn't finish is finished first.
     if let Some(why) = factoryd::move_import::unfinished(&home) {
         return Err(MainError::ImportUnfinished(why));
     }
+    // Before it listens: a QA override the guard refuses stops it here.
+    let models = Arc::new(registry(&home, addr.port())?);
     // A helper an older backend's update left out goes in beside this one.
     factoryd::update::heal_helpers(&home);
     let listener = TcpListener::bind(addr).await.map_err(|source| match source.kind() {
@@ -665,7 +695,6 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
         factoryd::move_import::moved::serve(listener, &home, moved).await;
         return Ok(());
     }
-    let models = Arc::new(Registry::new(home.auth_path()));
     let factory = Factory::open(home.clone(), models).await?;
     if let Some(handed) = handed {
         factory.take_vault_key(handed);

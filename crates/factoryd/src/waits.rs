@@ -3,10 +3,12 @@
 //! limit, or out of credit), its run doesn't fail: it waits, says so in its
 //! conversation and its status, and asks again when the first limit resets
 //! (with a small margin), or sooner when something changes that may give it
-//! one: the person adds an account, uses a usage reset, tries a key again or
-//! changes the agent's model. An account out of credit doesn't reset by
-//! itself, so then it waits for the person. Messages and events that come
-//! meanwhile queue as for any working agent; the run stays open, so a
+//! one: the person signs in (again) or out, adds an account, uses a usage
+//! reset, tries a key again, chooses Try now, messages it or changes the
+//! agent's model, or the usage read sees room. An account out of credit
+//! doesn't reset by itself, so then it waits for the person, as it does
+//! when every account was signed out while it ran. Messages and events that
+//! come meanwhile queue as for any working agent; the run stays open, so a
 //! backend restart resumes it, and it waits again.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,7 +17,7 @@ use std::time::Duration;
 
 use factory_protocol::v1::NoticeLevel;
 
-use crate::factory::Factory;
+use crate::factory::{Factory, RequestError};
 
 /// How long after a limit's reset the request goes again, so the provider
 /// has reset it too, in ms (15 s; tests make it shorter).
@@ -38,6 +40,9 @@ pub(crate) struct UsageWait {
     /// When it asks again by itself, in ms since 1970; 0 when it waits for
     /// the person.
     pub until_ms: i64,
+    /// It waits on a usage limit or on credit, not for a sign-in or the
+    /// secrets: another provider could carry it (`crate::usage_switch`).
+    pub switchable: bool,
 }
 
 /// Clears the agent's wait however the wait ends: over, or stopped.
@@ -92,8 +97,9 @@ impl Factory {
         let locked = until.is_none() && self.models.sign_ins_locked(&provider).await;
         {
             let mut inner = self.lock();
-            let provider_name =
-                inner.providers.iter().find(|known| known.id == provider).map_or(provider.clone(), |known| known.name.clone());
+            let known = inner.providers.iter().find(|known| known.id == provider);
+            let provider_name = known.map_or(provider.clone(), |known| known.name.clone());
+            let signed_out = known.is_none_or(|known| known.signed_in_with.is_empty());
             let noun = factory_agent::accounts::account_noun(&provider, &provider_name);
             let Some(runtime) = inner.agents.get_mut(id).filter(|runtime| runtime.epoch == epoch) else { return false };
             if runtime.idle {
@@ -125,6 +131,12 @@ impl Factory {
                     ),
                     format!("{why} {name} will carry on by itself then."),
                 ),
+                // Signed out of every account while it ran: it carries on
+                // once the person signs in again.
+                None if signed_out => (
+                    format!("Waiting for you to sign in to {noun}"),
+                    format!("{why} {name} will carry on once you sign in under Settings → Providers."),
+                ),
                 None => (
                     format!("Waiting for you to add credit or another {noun} account"),
                     format!(
@@ -132,7 +144,8 @@ impl Factory {
                     ),
                 ),
             };
-            let wait = UsageWait { text, until_ms: until.and_then(|at| i64::try_from(at).ok()).unwrap_or(0) };
+            let switchable = until.is_some() || (!locked && !signed_out);
+            let wait = UsageWait { text, until_ms: until.and_then(|at| i64::try_from(at).ok()).unwrap_or(0), switchable };
             // Said once per reset time, not again on every look.
             let say = runtime.wait_said != Some(until);
             runtime.wait_said = Some(until);
@@ -188,6 +201,28 @@ impl Factory {
     /// they ask again now.
     pub(crate) fn capacity_changed(&self) {
         self.capacity.notify_waiters();
+    }
+
+    /// TryAgainNow: Try now, beside an agent's or a chat's usage wait. Its
+    /// provider's spent marks are forgotten and their usage read again, and
+    /// every agent waiting on it asks again now (`probe_accounts`).
+    pub(crate) async fn try_again_now(self: &Arc<Self>, id: &str) -> Result<(), RequestError> {
+        let (model, name, waiting) = {
+            let inner = self.lock();
+            let model_and_name =
+                inner.config.agent(id).map(|agent| (agent.model.clone(), agent.name.clone())).or_else(|| self.chats.model_and_name(id));
+            let Some((model, name)) = model_and_name else { return Err(RequestError::UnknownAgent(id.to_owned())) };
+            (model, name, inner.agents.get(id).is_some_and(|runtime| runtime.usage_wait.is_some()))
+        };
+        if !waiting {
+            return Err(RequestError::Wait(format!("{name} isn't waiting anymore.")));
+        }
+        let provider = model.split_once('/').map_or(model.as_str(), |(provider, _)| provider).to_owned();
+        tracing::info!(agent = %id, %provider, "Try now: asking the provider again");
+        self.usage_reread.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(provider.clone());
+        self.usage_wake.notify_one();
+        self.clone().probe_accounts(provider).await;
+        Ok(())
     }
 
     /// The person messaged an agent waiting out the provider's usage: they

@@ -30,7 +30,7 @@
 //!   the text.
 
 use std::fmt::Write as _;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use factory_agent::ToolResult;
@@ -38,7 +38,6 @@ use factory_protocol::v1;
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::Notify;
 
 use claktory_dm_crypto::content::{Content, kind};
 use claktory_dm_crypto::envelope::Envelope;
@@ -144,15 +143,10 @@ impl Row {
 
 const COLUMNS: &str = "id, agent, incarnation, conversation, client_id, expires, COALESCE(sequence, revision)";
 
-fn notify() -> &'static Notify {
-    static WAKE: OnceLock<Notify> = OnceLock::new();
-    WAKE.get_or_init(Notify::new)
-}
-
 /// Something changed (a proposal, the agent's grants): look again now,
 /// cutting short the call waiting on the service.
-pub(crate) fn wake() {
-    notify().notify_waiters();
+pub(crate) fn wake(factory: &Factory) {
+    factory.dm_wakes.sends.notify_waiters();
 }
 
 fn unreadable() -> String {
@@ -444,7 +438,7 @@ fn keep(factory: &Factory, actor: &Actor, conversation: &str, client_id: &str, s
         tracing::warn!(%error, "couldn't keep an agent's proposed message");
     }
     factory.broadcast_workspace(&factory.lock());
-    wake();
+    wake(factory);
 }
 
 /// dm_withdraw: takes back a proposal still waiting.
@@ -584,10 +578,12 @@ fn end(factory: &Arc<Factory>, row: &Row, state: &str, seq: Option<i64>, tell: E
 /// Claktory runs. Started with the message watch, in the preview only.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
     let mut backoff = Duration::from_secs(30);
+    let mut pace = super::pace::Pace::default();
     loop {
         let Some(strong) = factory.upgrade() else { return };
         // Listening before looking, so a change meanwhile isn't missed.
-        let woken = notify().notified();
+        let wake = strong.dm_wakes.sends.clone();
+        let woken = wake.notified();
         tokio::pin!(woken);
         woken.as_mut().enable();
         let rows = pending(&strong);
@@ -601,11 +597,22 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
         }
         let wait = (WAIT / rows.len() as u64).max(SHORTEST);
         let mut trouble = false;
+        // Whether every look came back still waiting well before its wait
+        // (none was held at the worker); unknown when cut short.
+        let mut early = Some(true);
         for row in rows {
+            let asked = tokio::time::Instant::now();
             match look(&strong, &row, wait, woken.as_mut()).await {
-                Ok(Looked::Done) => {}
+                Ok(Looked::Done { waiting }) => {
+                    if !super::pace::early(Duration::from_secs(wait), asked.elapsed(), waiting) {
+                        early = early.map(|_| false);
+                    }
+                }
                 // Something changed: start the round again.
-                Ok(Looked::Woken) => break,
+                Ok(Looked::Woken) => {
+                    early = None;
+                    break;
+                }
                 Err(problem) => {
                     tracing::debug!(?problem, "an agent's proposed message wasn't looked at");
                     trouble = true;
@@ -614,15 +621,22 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
             }
         }
         drop(strong);
-        if trouble {
+        let pause = if trouble {
             let pause = backoff;
             backoff = (backoff * 2).min(Duration::from_secs(300));
-            tokio::select! {
-                () = tokio::time::sleep(pause) => {}
-                () = notify().notified() => {}
-            }
+            Some(pause)
         } else {
             backoff = Duration::from_secs(30);
+            // None held at the worker: not again at once.
+            early.and_then(|early| pace.after(early, Duration::from_secs(WAIT)))
+        };
+        if let Some(pause) = pause {
+            // Listened to since before the round, so a change meanwhile
+            // ends the pause.
+            tokio::select! {
+                () = tokio::time::sleep(pause) => {}
+                () = woken => {}
+            }
         }
     }
 }
@@ -653,7 +667,8 @@ fn pending(factory: &Arc<Factory>) -> Vec<Row> {
 }
 
 enum Looked {
-    Done,
+    /// Answered; `waiting` while the proposal still waits.
+    Done { waiting: bool },
     /// Cut short: something changed here.
     Woken,
 }
@@ -679,15 +694,16 @@ async fn look(
         Ok(answer) => {
             let status: Status =
                 serde_json::from_slice(&answer).map_err(|error| Problem::ForNow(format!("an unreadable answer: {error}")))?;
-            if status.state != "pending" {
+            let waiting = status.state == "pending";
+            if !waiting {
                 end(factory, row, &status.state, status.seq, Ended::Told);
             }
-            Ok(Looked::Done)
+            Ok(Looked::Done { waiting })
         }
         // Its own proposal it may no longer see: its access ended.
         Err(Problem::Refused(403 | 404, _)) => {
             end_for_access(factory, row);
-            Ok(Looked::Done)
+            Ok(Looked::Done { waiting: false })
         }
         Err(problem) => Err(problem),
     }

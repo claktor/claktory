@@ -1,7 +1,7 @@
 //! Notifications (#273): new Needs-you items, agents' alerts and replies to
 //! the person's phone reach every connected app as Notify, unless the person
 //! is using Claktory; devices registered for pushes get them sealed through
-//! the push relay. An agent that has read a pipe never puts its words in one.
+//! the push relay. An agent that has read a web page never puts its words in one.
 
 use std::sync::{Arc, Mutex};
 
@@ -292,12 +292,15 @@ async fn an_agent_notifies_six_times_an_hour() {
 }
 
 #[tokio::test]
-async fn an_agent_that_read_a_pipe_never_puts_its_words_in_a_notification() {
+async fn an_agent_that_read_a_web_page_never_puts_its_words_in_a_notification() {
     let (_dir, factory, mut client, mut view, pipe) = crate::pipes::setup(false).await;
     let mut notes = Vec::new();
+    // Reading a pipe marks no one (#346); a web page does.
     factoryd::pipes::receive_for_test(&factory, &pipe, incoming("m1", MARKER)).expect("received");
     call(&mut client, &mut view, &mut notes, "bo", "pipe_read", serde_json::json!({})).await;
-    assert!(!view.agent("bo").tainted_by_pipes.is_empty());
+    assert!(view.agent("bo").tainted_by_pipes.is_empty());
+    factoryd::pipes::taint_for_test(&factory, "bo", "browser:https://example.com");
+    view.follow(&mut client, |view| !view.agent("bo").tainted_by_pipes.is_empty()).await;
     notes.clear();
     call(&mut client, &mut view, &mut notes, "bo", "ask_person", ask(MARKER)).await;
     call(&mut client, &mut view, &mut notes, "bo", "notify_person", alert(MARKER)).await;

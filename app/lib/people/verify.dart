@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import '../controls.dart';
@@ -46,7 +47,7 @@ class VerifyView extends StatefulWidget {
   State<VerifyView> createState() => _VerifyViewState();
 }
 
-class _VerifyViewState extends State<VerifyView> {
+class _VerifyViewState extends State<VerifyView> with WidgetsBindingObserver {
   CameraAccess? _access;
   var _scanning = false;
 
@@ -62,7 +63,20 @@ class _VerifyViewState extends State<VerifyView> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     unawaited(_ask());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  // Back from Settings, the camera may be allowed now (friend bug #2).
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) unawaited(_ask());
   }
 
   Future<void> _ask() async {
@@ -106,10 +120,12 @@ class _VerifyViewState extends State<VerifyView> {
     final safety = widget.e2ee.safety(widget.account);
     final verified = widget.e2ee.pin(widget.account)?.verified ?? false;
     final groups = safety?.digits.split(' ') ?? const <String>[];
+    // Scan where the camera works or can be asked for; refused, how to
+    // allow it; none, or one the person can't allow (Screen Time), no
+    // Scan at all: the numbers are compared by eye.
     final canScan =
-        _access != null &&
-        _access != CameraAccess.unavailable &&
-        _access != CameraAccess.denied;
+        _access == CameraAccess.granted || _access == CameraAccess.undetermined;
+    final refused = _access == CameraAccess.denied;
     return FormFrame(
       title: 'Verify ${widget.name.isEmpty ? 'your friend' : widget.name}',
       body:
@@ -173,6 +189,26 @@ class _VerifyViewState extends State<VerifyView> {
           Align(
             alignment: AlignmentDirectional.centerStart,
             child: Button(label: "Scan $_their code", onPressed: _scan),
+          ),
+        ],
+        if (refused && safety != null) ...[
+          const SizedBox(height: Space.s),
+          Text(
+            defaultTargetPlatform == TargetPlatform.android
+                ? 'To scan $_their code, allow Claktory to use the camera in '
+                      'Settings.'
+                : 'To scan $_their code, allow camera access in Settings → '
+                      'Claktory.',
+            style: type.body.copyWith(color: palette.textMuted),
+          ),
+          const SizedBox(height: Space.s),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: Button(
+              label: 'Open Settings',
+              onPressed: () =>
+                  unawaited(AppScope.scope(context).camera.openSettings()),
+            ),
           ),
         ],
       ],

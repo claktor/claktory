@@ -897,6 +897,20 @@ impl Registry {
                             return;
                         }
                     };
+                    // Signed out of every account, and no key from the
+                    // environment: the request waits for a sign-in (the
+                    // person signing in again, say) rather than failing.
+                    if accounts.is_empty()
+                        && registry.provider(&model.provider).is_some()
+                        && matches!(registry.account_auth(&model, None).await, Ok(None))
+                    {
+                        let mut event = failed(&model, format!("You're signed out of {}.", registry.noun(&model.provider)));
+                        if let StreamEvent::Error { error, .. } = &mut event {
+                            mark_none_left(error, None);
+                        }
+                        sink.push(event);
+                        return;
+                    }
                     let chosen = with_capacity(&accounts, &tried, fable, now_ms()).map(|(_, account)| account.clone());
                     if chosen.is_none() && !accounts.is_empty() {
                         sink.push(registry.none_left(&model, &accounts));

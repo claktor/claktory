@@ -23,6 +23,14 @@ enum UserAppProblem {
   /// Another device changed it first: read it again.
   stale,
 
+  /// A device list naming a device removed from the account (409
+  /// removed_device): it never comes back (Abbacchio's row 612).
+  removedDevice,
+
+  /// This needs a recent sign-in (403 sign_in_again): a new security key
+  /// with no other device to hand it over (row 630, Fugo).
+  signInAgain,
+
   /// Too many tries for now; the message says how long to wait.
   rateLimited,
 
@@ -66,6 +74,10 @@ enum UserAppProblem {
   /// End to end: the account's security key isn't the one sent (409
   /// identity_changed): another device made a new one.
   identityChanged,
+
+  /// End to end: the friend isn't in the conversation yet (409
+  /// waiting_for_friend, row 676): nothing goes until they are.
+  waitingForFriend,
 }
 
 class UserAppError implements Exception {
@@ -145,6 +157,9 @@ class UserAppsSession {
       throw UserAppError(
         switch ((error.status, error.code)) {
           (401, _) => UserAppProblem.notSignedIn,
+          // Removed by another of the person's devices: signed out here
+          // (DeviceAccount.removed says why).
+          (403, 'device_removed') => UserAppProblem.notSignedIn,
           (_, 'device_only') => UserAppProblem.deviceOnly,
           (_, 'accepted') => UserAppProblem.accepted,
           (_, 'epoch') => UserAppProblem.epoch,
@@ -152,6 +167,9 @@ class UserAppsSession {
           (_, 'too_far_behind') => UserAppProblem.tooFarBehind,
           (_, 'not_set_up') => UserAppProblem.notSetUp,
           (_, 'identity_changed') => UserAppProblem.identityChanged,
+          (_, 'waiting_for_friend') => UserAppProblem.waitingForFriend,
+          (_, 'removed_device') => UserAppProblem.removedDevice,
+          (_, 'sign_in_again') => UserAppProblem.signInAgain,
           (404, _) => UserAppProblem.notFound,
           (410, _) => UserAppProblem.gone,
           (_, 'stale') || (409, _) => UserAppProblem.stale,

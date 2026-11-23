@@ -22,9 +22,12 @@ import 'voice.dart';
 
 /// Why a recording couldn't become words, in the person's terms.
 class DictationFailure implements Exception {
-  const DictationFailure(this.message);
+  const DictationFailure(this.message, {this.code = ''});
 
   final String message;
+
+  /// AudioTranscribed's error code, when the Claktory said why.
+  final String code;
 
   @override
   String toString() => message;
@@ -84,7 +87,7 @@ Future<String> transcribeOnClaktory(
     uploadId: uploadId,
   );
   if (heard.error.isNotEmpty) {
-    throw DictationFailure(dictationError(heard.error));
+    throw DictationFailure(dictationError(heard.error), code: heard.error);
   }
   return heard.text;
 }
@@ -106,6 +109,10 @@ String dictationError(String code) => switch (code) {
   'no_speech' => "Didn't catch any words. Try again.",
   _ => "Couldn't turn that into text. Try again.",
 };
+
+/// A recording shorter than this with no words in it was most likely a tap
+/// by mistake: it goes without a word (Matt's). A longer one says so.
+const quietlyUnder = Duration(seconds: 5);
 
 /// The least room the waveform is drawn in, beside the dot and the time.
 const _leastWaveform = 120.0;
@@ -224,10 +231,12 @@ class DictationFieldState extends State<Dictation> {
     }
     unawaited(Haptics.light());
     _set(DictationState.transcribing);
+    final short = recording.duration < quietlyUnder;
     try {
       final words = (await transcribeRecording(backend, recording)).trim();
       if (!mounted) return;
       if (words.isEmpty) {
+        if (short) return _nothingSaid();
         return _set(
           DictationState.idle,
           error: "Didn't catch any words. Try again.",
@@ -236,6 +245,7 @@ class DictationFieldState extends State<Dictation> {
       _insert(words);
       _set(DictationState.idle);
     } on DictationFailure catch (failure) {
+      if (failure.code == 'no_speech' && short) return _nothingSaid();
       unawaited(Haptics.warning());
       _set(DictationState.idle, error: failure.message);
     } on RequestFailure catch (failure) {
@@ -252,6 +262,13 @@ class DictationFieldState extends State<Dictation> {
         // Gone already.
       }
     }
+  }
+
+  /// A short recording with nothing said in it: the line closes and the
+  /// field is as it was, as if cancelled.
+  void _nothingSaid() {
+    _set(DictationState.idle);
+    widget.focusNode?.requestFocus();
   }
 
   /// Puts [words] in at the caret (or over what's selected, or at the end),

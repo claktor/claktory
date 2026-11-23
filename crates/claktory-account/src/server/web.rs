@@ -22,7 +22,7 @@ pub(super) async fn page(service: &Service, call: &Call) -> Reply {
         (&Method::POST, "/account/sign-in") => sign_in(service, call, &form).await,
         (&Method::POST, "/account/verify") => verify(service, call, &form),
         (&Method::POST, "/account/remove") => remove(service, call, &form),
-        (&Method::POST, "/account/remove-device") => remove_device(service, call, &form),
+        (&Method::POST, "/account/remove-device") => remove_device(service, call, &form).await,
         (&Method::POST, "/account/remove-grant") => remove_grant(service, call, &form).await,
         (&Method::POST, "/account/delete") => delete(service, call, &form).await,
         (&Method::GET, "/account/delete") => Ok(delete_page(service, call)),
@@ -459,18 +459,37 @@ fn remove(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError
     Ok(redirect(None))
 }
 
-fn remove_device(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
-    let Some(email) = checked_session(service, call, form) else { return Ok(home(service, call, None, None)) };
+/// Removes a device at the account page, then tells the worker (row 671),
+/// past the database's lock.
+async fn remove_device(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
+    match remove_device_now(service, call, form)? {
+        Ok(Removed { account, key, now }) => {
+            super::apps::signed_out(service, &account, &key, now, 0).await;
+            Ok(redirect(None))
+        }
+        Err(page) => Ok(page),
+    }
+}
+
+struct Removed {
+    account: String,
+    key: String,
+    now: i64,
+}
+
+/// Removed, or the page to show instead.
+fn remove_device_now(service: &Service, call: &Call, form: &Form) -> Result<Result<Removed, Reply>, ApiError> {
+    let Some(email) = checked_session(service, call, form) else { return Ok(Err(home(service, call, None, None))) };
     let mut conn = service.db();
     let account = db::account_by_email(&conn, &email)?;
     let device =
         db::device(&conn, form.get("device"))?.filter(|device| account.as_ref().is_some_and(|account| account.id == device.account_id));
     let (Some(account), Some(device)) = (account, device) else {
         drop(conn);
-        return Ok(home(service, call, None, None));
+        return Ok(Err(home(service, call, None, None)));
     };
     if form.get("confirm") != "yes" {
-        return Ok(html(
+        return Ok(Err(html(
             StatusCode::OK,
             &format!("Remove {}?", device.name),
             &format!(
@@ -483,11 +502,14 @@ fn remove_device(service: &Service, call: &Call, form: &Form) -> Result<Reply, A
                 csrf = escape(form.get("csrf")),
                 key = escape(&device.account_key),
             ),
-        ));
+        )));
     }
-    db::remove_device(&mut conn, &device.account_key, &account.id, service.now())?;
+    let now = service.now();
+    if !db::remove_device(&mut conn, &device.account_key, &account.id, service.config.user_apps.is_some(), now)? {
+        return Ok(Err(redirect(None)));
+    }
     tracing::info!("removed: a device of account {}", account.id);
-    Ok(redirect(None))
+    Ok(Ok(Removed { account: account.id, key: device.account_key, now }))
 }
 
 /// An app's name, as the account page says it.

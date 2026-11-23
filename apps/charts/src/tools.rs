@@ -91,7 +91,7 @@ fn list(host: &mut impl Host) -> ToolOutput {
                 "- {} ({}): {}",
                 source.id,
                 source.label,
-                if source.granted { "granted" } else { "not granted; the person turns it on in Settings → Apps" }
+                if source.granted { "granted" } else { "not granted: the person gives it to Charts (Rivet proposes it with apps_propose_access)" }
             ));
             json!({"id": source.id, "label": source.label, "granted": source.granted})
         })
@@ -164,7 +164,7 @@ fn put(host: &mut impl Host, args: &Value, caller: &str) -> ToolOutput {
     }
     for wait in &waiting {
         text.push_str(&format!(
-            "\nPanel {} shows nothing until the person turns on {} for Charts in Settings → Apps.",
+            "\nPanel {} shows nothing until the person gives Charts {} (Rivet proposes it with apps_propose_access).",
             wait["panel"].as_str().unwrap_or_default(),
             wait["source"].as_str().unwrap_or_default()
         ));
@@ -239,19 +239,20 @@ fn query(host: &mut impl Host, args: &Value) -> ToolOutput {
         Err(why) => return refuse(format!("The query: {why}.")),
     };
     let sources = host.data_sources();
+    let source = crate::source_for(source, &sources);
     match sources.iter().find(|known| known.id == source) {
         None => {
             let ids: Vec<&str> = sources.iter().map(|known| known.id.as_str()).collect();
             return refuse(format!("Charts doesn't read \"{source}\"; it reads {}.", ids.join(", ")));
         }
         Some(found) if !found.granted => {
-            return refuse(format!("The person hasn't turned on {} for Charts (Settings → Apps), so it can't be read.", found.label));
+            return refuse(format!("The person hasn't given Charts {}, so it can't be read (Rivet proposes it with apps_propose_access).", found.label));
         }
         Some(_) => {}
     }
     let table = match host.data_query(source, &bound.sql, &Value::Array(bound.params)) {
         Ok(table) => table,
-        Err(DataError::NotGranted) => return refuse("The person hasn't turned that source on for Charts (Settings → Apps)."),
+        Err(DataError::NotGranted) => return refuse("The person hasn't given Charts that source."),
         Err(DataError::UnknownSource) => return refuse(format!("Charts can't read \"{source}\".")),
         Err(DataError::Invalid(why) | DataError::Failed(why)) => return refuse(format!("The query failed: {why}")),
     };

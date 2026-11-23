@@ -135,6 +135,8 @@ impl World {
             DmListed { kind: DmLeafKind::Device, leaf_id: TABLET.into(), signature_key: tablet.status().leaf_public },
         ];
         let v2 = self.phone.sign_device_list(2, 2, both).unwrap();
+        // Taken by the worker: pinned here too.
+        self.phone.accept_list("matt".into(), v2.clone()).unwrap();
         tablet.accept_list("matt".into(), v2.clone()).unwrap();
         self.ipad.accept_list("matt".into(), v2).unwrap();
         let added = self.phone.add_members(self.id.clone(), tablet.key_packages(1).unwrap()).unwrap();
@@ -437,6 +439,8 @@ fn test_5_a_removed_device_reads_nothing_new_and_cant_rejoin() {
     // Lost: the phone lists Matt's devices without it and removes it.
     let only_phone = vec![DmListed { kind: DmLeafKind::Device, leaf_id: "phone".into(), signature_key: w.phone.status().leaf_public }];
     let v3 = w.phone.sign_device_list(3, 3, only_phone).unwrap();
+    // Taken by the worker: pinned here too.
+    w.phone.accept_list("matt".into(), v3.clone()).unwrap();
     w.ipad.accept_list("matt".into(), v3).unwrap();
     // Off the list, its leaf fails the checks, so it isn't a member; but
     // unchecked it's there as it claims, to decide its removal (Fugo, #78).
@@ -541,7 +545,9 @@ fn test_14_a_claktory_leaf_the_service_substituted_is_refused() {
     let certificate = LeafCertificate::from_bytes(&certificate).unwrap();
     let claktory = DmListed { kind: DmLeafKind::Claktory, leaf_id: leaf_id.clone(), signature_key: real.public().to_vec() };
     let phone = DmListed { kind: DmLeafKind::Device, leaf_id: "phone".into(), signature_key: w.phone.status().leaf_public };
-    w.phone.sign_device_list(2, 2, vec![phone, claktory]).unwrap();
+    let v2 = w.phone.sign_device_list(2, 2, vec![phone, claktory]).unwrap();
+    // Taken by the worker: pinned here too.
+    w.phone.accept_list("matt".into(), v2.clone()).unwrap();
 
     // The service's key package: the real certificate, its own key.
     let swapped = LeafKey::generate().unwrap();

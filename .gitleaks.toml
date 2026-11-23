@@ -77,9 +77,9 @@ regexTarget = "secret"
 regexes = ['''^claktory\.dm\.v1$''']
 
 [[rules.allowlists]]
-description = "Web search's fixtures as first committed (a11d340e, before Giorno's scrub 9ad0b811): Ecosia's and Yahoo's public page identifiers (DataDome client key, Braze SDK key, Tag Manager environment, Yahoo's hashKey), never credentials of ours. That commit only: the fixtures as they are now are zeroed, and their guard test refuses new ones"
+description = "Web search's fixtures as first committed (a11d340e, before Giorno's scrub 9ad0b811): Ecosia's and Yahoo's public page identifiers (DataDome client key, Braze SDK key, Tag Manager environment, Yahoo's hashKey), never credentials of ours. That commit, and 58bd5c9f, the public repository's v0.1.17 commit, which published them as they were then (a release's public history is scanned too). Those commits only: the fixtures as they are now are zeroed, and their guard test refuses new ones"
 condition = "AND"
-commits = ["a11d340e08ed655643f277fdba1677a62a0805e8"]
+commits = ["a11d340e08ed655643f277fdba1677a62a0805e8", "58bd5c9f5540f527e2c84f496f05b920855e38e0"]
 paths = ['''^crates/factoryd/tests/fixtures/web/(?:ecosia|yahoo)-results\.html$''']
 regexTarget = "secret"
 regexes = ['''^(?:32FD9D46AF889F2B9903ED03CE0B3C|ce0dc535-dc9e-42a0-afe7-a88335a378d4|yQLXq56VlYmlCpsDKUq5-Q|b8de5b4c1b8afc8e080b5914d595c6da)$''']
@@ -138,6 +138,11 @@ commits = [
   "94266178fd45504f72941283f6891f43c6f821a8",
   "6345f3678176965a600332e446880180c2954558",
 ]
+[[allowlists]]
+description = "People's device-name tests (app/test/chat_test.dart, app/test/messages_setup_test.dart) as first written in 4b32c16c: a made-up device named after this machine's user, a label only, no path or credential; renamed to Ana's Mac Studio right after. That commit only: the files as they are now are checked like any other."
+condition = "AND"
+commits = ["4b32c16c86ccbea009c2685d9613ef1bf4f1a2f4"]
+paths = ['''^app/test/(?:chat|messages_setup)_test\.dart$''']
 [[allowlists]]
 description = "Move S3's report test (crates/factoryd/tests/all/move_rivet.rs) as first written: a made-up mapping from /Users/matt to /root, the person's name rather than this machine's home, fixed to /Users/me right after. These two commits only; the file as it is now is checked like any other."
 commits = [

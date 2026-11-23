@@ -209,13 +209,16 @@ class DeviceAccountService {
     required String platform,
     required String version,
   }) async {
+    // Signed by the key it names, like verify (row 671): only then does
+    // the service say the key is another account's, so that only its
+    // holder learns it.
     final answer = await _call('POST', '/v1/devices/sign-in/start', {
       'email': email,
       'account_key': b64(await keys.publicKey(accountKey)),
       'name': name,
       'platform': platform,
       'version': version,
-    }, signed: false);
+    });
     return (
       requestId: answer['request_id'] as String? ?? '',
       expiresIn: Duration(seconds: answer['expires_in'] as int? ?? 900),
@@ -482,7 +485,7 @@ class DeviceAccount extends ChangeNotifier {
     if (_key.isEmpty) _key = _makeKey();
     if (!signedIn) _service = service == defaultAccountService ? '' : service;
     _kept();
-    final started = await _unlessRemoved(
+    Future<DeviceSignInStarted> send() => _unlessRemoved(
       () => _api.start(
         email: email.trim(),
         name: name,
@@ -490,6 +493,15 @@ class DeviceAccount extends ChangeNotifier {
         version: version,
       ),
     );
+    DeviceSignInStarted started;
+    try {
+      started = await send();
+    } on AccountServiceError catch (error) {
+      // Its key is another account's: with the new key [_unlessRemoved]
+      // made, once more, as a new device (row 671, Fugo).
+      if (!_anotherAccounts(error)) rethrow;
+      started = await send();
+    }
     _awaiting = DeviceCodeWait(
       email: email.trim(),
       requestId: started.requestId,
@@ -511,6 +523,7 @@ class DeviceAccount extends ChangeNotifier {
     );
     _awaiting = null;
     _email = signedIn.email.isNotEmpty ? signedIn.email : awaiting.email;
+    _removed = false;
     _assertions.clear();
     _kept();
   }
@@ -522,8 +535,10 @@ class DeviceAccount extends ChangeNotifier {
   }
 
   /// Signs this device out: at the service if it can be reached, and here
-  /// in any case.
-  Future<void> signOut() async {
+  /// in any case. [newKey]: it left the person's messages (row 671), so
+  /// their other devices take its key out of the account; the next
+  /// sign-in is a new device, with a new key.
+  Future<void> signOut({bool newKey = false}) async {
     try {
       if (_key.isNotEmpty) await _api.signOut();
     } on AccountServiceError {
@@ -531,6 +546,10 @@ class DeviceAccount extends ChangeNotifier {
     } on AccountServiceUnreachable {
       // Its key stays bound there until removed at claktory.com/account.
     } finally {
+      if (newKey) {
+        _key = _makeKey();
+        _client = null;
+      }
       _signedOut();
     }
   }
@@ -582,7 +601,7 @@ class DeviceAccount extends ChangeNotifier {
   /// removed at claktory.com/account); signs it out here if not.
   Future<void> check() async {
     if (!signedIn) return;
-    final me = await _api.me();
+    final me = await _whileSignedIn(() => _api.me());
     if (me == null) {
       _signedOut();
     } else if (me.email.isNotEmpty && me.email != _email) {
@@ -598,10 +617,42 @@ class DeviceAccount extends ChangeNotifier {
     try {
       return await call();
     } on AccountServiceError catch (error) {
-      if (error.status == 401 && error.code == 'unauthorized') _signedOut();
+      if (error.status == 401 && error.code == 'unauthorized') {
+        // Signed out from elsewhere, or removed: the apps behind the
+        // service (DMs' worker) don't say which, so the service is asked.
+        if (await _removedHere()) _removed = true;
+        _signedOut();
+      }
+      // Another of the person's devices removed this one (row 199): signed
+      // out here at once, saying so. The key stays until the next sign-in,
+      // which the service refuses the same way, and which then starts over
+      // as a new device ([_unlessRemoved]).
+      if (error.status == 403 && error.code == 'device_removed') {
+        _removed = true;
+        _signedOut();
+      }
       rethrow;
     }
   }
+
+  /// Whether the service says this device's key was removed from the
+  /// account; false when it says anything else, or can't be asked.
+  Future<bool> _removedHere() async {
+    try {
+      await _api.me();
+      return false;
+    } on AccountServiceError catch (error) {
+      return error.status == 403 && error.code == 'device_removed';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Another of the person's devices removed this one, as the service
+  /// said on a signed call (row 199): what People and chats say instead of
+  /// a plain sign-in, until this device signs in again.
+  bool get removed => _removed;
+  var _removed = false;
 
   /// The account key this device signs in with (hex): a new one once
   /// another device removed this one, so it starts over as a new device.
@@ -611,12 +662,16 @@ class DeviceAccount extends ChangeNotifier {
   /// one (403 device_removed), its key can never sign in to that account
   /// again (Fugo): a new key, so the next sign-in starts over as a new
   /// device, and its messages with it (e2eeOf starts them over when [key]
-  /// changes). The refusal goes on to say so.
+  /// changes). The refusal goes on to say so. The same when its key was
+  /// last another account's (403 key_of_another_account, row 671): a key,
+  /// and the messages under it, belong to one account; [start] then tries
+  /// once more by itself.
   Future<T> _unlessRemoved<T>(Future<T> Function() call) async {
     try {
       return await call();
     } on AccountServiceError catch (error) {
-      if (error.status == 403 && error.code == 'device_removed') {
+      if (error.status == 403 &&
+          (error.code == 'device_removed' || _anotherAccounts(error))) {
         _key = _makeKey();
         _client = null;
         _signedOut();
@@ -624,6 +679,9 @@ class DeviceAccount extends ChangeNotifier {
       rethrow;
     }
   }
+
+  static bool _anotherAccounts(AccountServiceError error) =>
+      error.status == 403 && error.code == 'key_of_another_account';
 
   void _signedOut() {
     _email = '';

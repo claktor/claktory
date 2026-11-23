@@ -246,20 +246,33 @@ impl Group {
     /// whose state broke or that was away past the mailbox, from the
     /// GroupInfo the worker keeps (the ratchet tree rides in it). With the
     /// same certificate, its earlier leaf is removed in the same commit.
+    /// After a start-over (row 630), the group may hold its own account's
+    /// dead leaves (`validation::dead`): it joins past them, and takes them
+    /// out with `remove_dead` as soon as the worker takes this commit
+    /// (OpenMLS puts no other leaf's Remove in an external commit).
     /// Every member is checked first; a Claktory never rejoins a
-    /// conversation by itself (H1). The commit goes to the worker; once it
-    /// takes it, `merge_pending`.
+    /// conversation by itself (H1). The GroupInfo must be `group_id`'s: a
+    /// service could otherwise hand over another group with members the
+    /// kind accepts (the self group's for a channel, an older generation's
+    /// for a conversation), kept then under the wrong id (Fugo). The commit
+    /// goes to the worker; once it takes it, `merge_pending`.
     pub fn rejoin(
         provider: &impl OpenMlsProvider,
         me: &Me,
         trust: &impl Trust,
         kind: GroupKind,
+        group_id: &[u8],
         info: &[u8],
     ) -> Result<(Group, Outgoing), Error> {
         if matches!(kind, GroupKind::Conversation { .. }) && me.certificate.leaf.kind == LeafKind::Claktory {
             return Err(Error::Refused("a Claktory doesn't join a conversation by itself".to_owned()));
         }
         let MlsMessageBodyIn::GroupInfo(info) = read(info)? else { return Err(Error::NotMls("not a group info".to_owned())) };
+        // As the GroupInfo says before its signature is checked; checked
+        // below, it's the group's own.
+        if info.group_id().as_slice() != group_id {
+            return Err(Error::Refused("a GroupInfo of another group than this one".to_owned()));
+        }
         let (joined, bundle) = MlsGroup::external_commit_builder()
             .with_config(join_config())
             .build_group(provider, info, me.credential()?)
@@ -271,12 +284,19 @@ impl Group {
             .finalize(provider)
             .map_err(mls)?;
         let group = Group { mls: joined, kind };
-        // The members it joins, as the tree it was given has them.
+        // The members it joins, as the tree it was given has them. A dead
+        // or stale leaf of its own account's (a start-over's, row 630; its
+        // own former install, row 202) it takes out at once (`remove_dead`),
+        // before anything is sent; anything else must pass. A device it
+        // kept, on its own new list, is present past its old key.
+        let rejoining = validation::Rejoining { trust, me: &me.certificate };
         for member in group.mls.members() {
             if member.index == group.mls.own_leaf_index() {
                 continue;
             }
-            validation::member(&group.kind, trust, &member.credential, &member.signature_key)?;
+            if !Self::ours_to_take_out(trust, me, &member) {
+                validation::present(&group.kind, &rejoining, &member.credential, &member.signature_key)?;
+            }
         }
         let (commit, _, info) = bundle.into_contents();
         Ok((group, Outgoing { commit: commit.tls_serialize_detached().map_err(mls)?, welcome: None, group_info: group_info(info)? }))
@@ -301,9 +321,74 @@ impl Group {
         &self.kind
     }
 
+    /// Whether a commit it took removed this endpoint's own leaf: it reads
+    /// nothing more here, and rejoins (a channel's Claktory) or is added
+    /// again.
+    pub fn removed(&self) -> bool {
+        !self.mls.is_active()
+    }
+
     /// The members as their certificates say, each checked now.
     pub fn members(&self, trust: &impl Trust) -> Vec<Result<Member, Error>> {
         self.mls.members().map(|member| validation::member(&self.kind, trust, &member.credential, &member.signature_key)).collect()
+    }
+
+    /// Every member as a joiner checks it (`validation::present`): as
+    /// `members`, but a device the person kept when they made a new key,
+    /// still under the old one and named on their current list, passes
+    /// (inert until it moves). For who's in a group being joined, never
+    /// for trusting what a member says.
+    pub fn present(&self, trust: &impl Trust) -> Vec<Result<Member, Error>> {
+        self.mls.members().map(|member| validation::present(&self.kind, trust, &member.credential, &member.signature_key)).collect()
+    }
+
+    /// Every leaf's certificate, in tree order, **unchecked**, as
+    /// `leaves_unchecked`, with the identity that signed it: for telling a
+    /// leaf under a replaced key apart (never sign one out on a sweep;
+    /// Fugo), never for trusting anyone.
+    pub fn certificates_unchecked(&self) -> Vec<LeafCertificate> {
+        self.mls.members().filter_map(|member| LeafCertificate::from_credential(&member.credential).ok()).collect()
+    }
+
+    /// The group's dead leaves as `me` sees them (`validation::dead`), in
+    /// tree order.
+    pub fn dead(&self, trust: &impl Trust, me: &Me) -> Vec<LeafCertificate> {
+        self.mls
+            .members()
+            .filter_map(|member| validation::dead(trust, &me.certificate, &member.credential, &member.signature_key))
+            .collect()
+    }
+
+    /// The group's stale leaves (`validation::stale`: former installs of
+    /// devices now listed under a new key), in tree order.
+    pub fn stale(&self, trust: &impl Trust) -> Vec<LeafCertificate> {
+        self.mls.members().filter_map(|member| validation::stale(trust, &member.credential, &member.signature_key)).collect()
+    }
+
+    /// The account whose dead device leaf or stale leaf is still in the
+    /// group, while one is, and which: nothing is sent here until it's
+    /// taken out, since it would read it (row 630, row 202; Fugo), at the
+    /// person's own devices and at friends'. A Claktory's leaf under an old
+    /// key doesn't hold sends: after a new key it waits, off the list, until
+    /// a device enrolls it again, and it's the person's own.
+    pub fn held(&self, trust: &impl Trust, me: &Me) -> Option<(String, validation::Held)> {
+        let dead = self.dead(trust, me).into_iter().find(|dead| dead.leaf.kind == LeafKind::Device);
+        let dead = dead.map(|dead| (dead.leaf.account_id, validation::Held::Replaced));
+        dead.or_else(|| self.stale(trust).into_iter().next().map(|stale| (stale.leaf.account_id, validation::Held::Reinstalled)))
+    }
+
+    /// The account `held` names.
+    pub fn waiting(&self, trust: &impl Trust, me: &Me) -> Option<String> {
+        self.held(trust, me).map(|(account, _)| account)
+    }
+
+    /// Whether `member` is a leaf of `me`'s own account that `me` takes out
+    /// (`remove_dead`): dead or stale.
+    fn ours_to_take_out(trust: &impl Trust, me: &Me, member: &openmls::group::Member) -> bool {
+        let own = &me.certificate.leaf.account_id;
+        let dead = validation::dead(trust, &me.certificate, &member.credential, &member.signature_key);
+        let stale = || validation::stale(trust, &member.credential, &member.signature_key);
+        dead.or_else(stale).is_some_and(|gone| gone.leaf.account_id == *own)
     }
 
     /// Every leaf's id as its certificate names it, in tree order,
@@ -374,15 +459,27 @@ impl Group {
         })
     }
 
-    /// Removes the leaves with these leaf ids (a device removed, a grant
-    /// taken back).
+    /// Removes this person's own leaves with these leaf ids (a device
+    /// removed, a grant taken back): every leaf of their account with one,
+    /// so never for a reinstalled device's former install, which shares its
+    /// id with the new one (`remove_dead` takes that out by index). Another
+    /// person's leaf is never taken out, even under the same id (Fugo, row
+    /// 671).
     pub fn remove(&mut self, provider: &impl OpenMlsProvider, me: &Me, leaf_ids: &[&str]) -> Result<Outgoing, Error> {
+        let account = me.certificate.leaf.account_id.clone();
+        self.remove_of(provider, me, &account, leaf_ids)
+    }
+
+    /// Removes `account`'s leaves with these leaf ids, as `remove` does its
+    /// own: only that account's.
+    pub fn remove_of(&mut self, provider: &impl OpenMlsProvider, me: &Me, account: &str, leaf_ids: &[&str]) -> Result<Outgoing, Error> {
         let indexes: Vec<LeafNodeIndex> = self
             .mls
             .members()
             .filter(|member| {
-                LeafCertificate::from_credential(&member.credential)
-                    .is_ok_and(|certificate| leaf_ids.contains(&certificate.leaf.leaf_id.as_str()))
+                LeafCertificate::from_credential(&member.credential).is_ok_and(|certificate| {
+                    certificate.leaf.account_id == account && leaf_ids.contains(&certificate.leaf.leaf_id.as_str())
+                })
             })
             .map(|member| member.index)
             .collect();
@@ -395,6 +492,44 @@ impl Group {
             welcome: welcome.map(|welcome| welcome.tls_serialize_detached()).transpose().map_err(mls)?,
             group_info: group_info(info)?,
         })
+    }
+
+    /// Takes out this person's own dead leaves (`validation::dead`), after a
+    /// start-over's rejoin (row 630), and stale ones (`validation::stale`),
+    /// a reinstalled device's former install (row 202), whichever of their
+    /// devices commits it: an ordinary commit of Removes, by tree index (a
+    /// dead or stale leaf may have this leaf's own id, or the new install's),
+    /// of nothing else. None when there are none. A leaf the current list
+    /// names (one the person kept, the new install) and another person's
+    /// leaf are never taken out here.
+    pub fn remove_dead(&mut self, provider: &impl OpenMlsProvider, me: &Me, trust: &impl Trust) -> Result<Option<Outgoing>, Error> {
+        let here = self.mls.own_leaf_index();
+        let indexes: Vec<LeafNodeIndex> = self
+            .mls
+            .members()
+            .filter(|member| member.index != here && Self::ours_to_take_out(trust, me, member))
+            .map(|member| member.index)
+            .collect();
+        if indexes.is_empty() {
+            return Ok(None);
+        }
+        let bundle = self
+            .mls
+            .commit_builder()
+            .consume_proposal_store(false)
+            .propose_removals(indexes)
+            .load_psks(provider.storage())
+            .map_err(mls)?
+            .build(provider.rand(), provider.crypto(), &me.key, |_| true)
+            .map_err(mls)?
+            .stage_commit(provider)
+            .map_err(mls)?;
+        let (commit, welcome, info) = bundle.into_contents();
+        Ok(Some(Outgoing {
+            commit: commit.tls_serialize_detached().map_err(mls)?,
+            welcome: welcome.map(|welcome| welcome.tls_serialize_detached()).transpose().map_err(mls)?,
+            group_info: group_info(info)?,
+        }))
     }
 
     /// This leaf's own Update: new keys, for post-compromise security.
@@ -443,13 +578,31 @@ impl Group {
         self.mls.clear_pending_commit(provider.storage()).map_err(mls)
     }
 
-    /// Encrypts `content` (`envelope`'s bytes) for the group.
-    pub fn send(&mut self, provider: &impl OpenMlsProvider, me: &Me, content: &[u8]) -> Result<Vec<u8>, Error> {
+    /// Encrypts `content` (`envelope`'s bytes) for the group: not while it
+    /// holds a dead device leaf (`waiting`), which would read it.
+    pub fn send(&mut self, provider: &impl OpenMlsProvider, me: &Me, trust: &impl Trust, content: &[u8]) -> Result<Vec<u8>, Error> {
         if matches!(self.kind, GroupKind::Conversation { .. }) && me.certificate.leaf.kind == LeafKind::Claktory {
             return Err(Error::Refused("a Claktory doesn't send messages in a conversation".to_owned()));
         }
+        if let Some((account, reason)) = self.held(trust, me) {
+            return Err(Error::Waiting { account, reason });
+        }
         let message = self.mls.create_message(provider, &me.key, content).map_err(mls)?;
         message.tls_serialize_detached().map_err(mls)
+    }
+
+    /// The certificate of the leaf behind a commit or proposal this group
+    /// can't take yet (`Error::UnknownIdentity`): its signature checked by
+    /// MLS, its certificate by the identity it names, and nothing kept or
+    /// merged. None for anything else. For `Pins::replaced`'s proof.
+    pub fn held_signer(&mut self, provider: &impl OpenMlsProvider, bytes: &[u8]) -> Result<Option<LeafCertificate>, Error> {
+        let message = MlsMessageIn::tls_deserialize_exact(bytes).map_err(|e| Error::NotMls(e.to_string()))?;
+        let Ok(protocol) = message.try_into_protocol_message() else { return Ok(None) };
+        if matches!(protocol.content_type(), openmls::prelude::ContentType::Application) {
+            return Ok(None);
+        }
+        let processed = self.mls.process_message(provider, protocol).map_err(mls)?;
+        Ok(LeafCertificate::from_credential(processed.credential()).ok())
     }
 
     /// A message from the worker, in order: checked, then used. A commit
@@ -588,13 +741,13 @@ mod tests {
     #[test]
     fn people_talk_and_a_claktory_reads_but_never_speaks_in_a_conversation() {
         let mut w = world();
-        let said = w.groups[0].send(&w.phone.provider, &w.phone.me, b"hi Ana").unwrap();
+        let said = w.groups[0].send(&w.phone.provider, &w.phone.me, &w.pins, b"hi Ana").unwrap();
         for (n, end) in [(1, &w.ipad), (2, &w.mini)] {
             let Incoming::Application { from, content } = w.groups[n].process(&end.provider, &w.pins, &said).unwrap() else { panic!() };
             assert_eq!((from.account(), from.leaf_id(), content.as_slice()), ("matt", "phone", b"hi Ana".as_slice()));
         }
         // The Claktory won't send there, and if it did, nobody takes it (H1).
-        assert!(w.groups[2].send(&w.mini.provider, &w.mini.me, b"psst").is_err());
+        assert!(w.groups[2].send(&w.mini.provider, &w.mini.me, &w.pins, b"psst").is_err());
         let forced = w.groups[2].mls.create_message(&w.mini.provider, &w.mini.me.key, b"psst").unwrap().tls_serialize_detached().unwrap();
         let dropped = w.groups[1].process(&w.ipad.provider, &w.pins, &forced);
         assert_eq!(dropped.err().map(|e| e.to_string()), Some("refused: a Claktory doesn't send messages in a conversation".to_owned()));
@@ -633,8 +786,8 @@ mod tests {
     #[test]
     fn a_message_that_raced_a_commit_is_still_read() {
         let mut w = world();
-        let raced = w.groups[1].send(&w.ipad.provider, &w.ipad.me, b"sent at epoch 1").unwrap();
-        let older = w.groups[1].send(&w.ipad.provider, &w.ipad.me, b"also at epoch 1").unwrap();
+        let raced = w.groups[1].send(&w.ipad.provider, &w.ipad.me, &w.pins, b"sent at epoch 1").unwrap();
+        let older = w.groups[1].send(&w.ipad.provider, &w.ipad.me, &w.pins, b"also at epoch 1").unwrap();
         for _ in 0..PAST_EPOCHS {
             let update = w.groups[0].update(&w.phone.provider, &w.phone.me).unwrap();
             w.groups[0].merge_pending(&w.phone.provider).unwrap();
@@ -736,7 +889,7 @@ mod tests {
         let commit = commit.tls_serialize_detached().unwrap();
         assert!(matches!(w.groups[1].process(&w.ipad.provider, &w.pins, &commit).unwrap(), Incoming::Committed { epoch: 2 }));
         assert_eq!(w.groups[0].members(&w.pins).len(), 2);
-        let later = w.groups[0].send(&w.phone.provider, &w.phone.me, b"after").unwrap();
+        let later = w.groups[0].send(&w.phone.provider, &w.phone.me, &w.pins, b"after").unwrap();
         assert!(w.groups[2].process(&w.mini.provider, &w.pins, &later).is_err(), "removed: can't read what came after");
         let _ = &w.chat;
     }
@@ -758,16 +911,24 @@ mod tests {
             provider: Libcrux::default(),
             me: Me::new(LeafKey::from_secret(&w.ipad.me.key.secret()), w.ipad.me.certificate.clone()).unwrap(),
         };
-        let (mut back, out) = Group::rejoin(&fresh.provider, &fresh.me, &w.pins, w.chat.clone(), &info).unwrap();
+        // Not from another group's GroupInfo, the same people in it.
+        let mut other = Group::create(&w.phone.provider, &w.phone.me, w.chat.clone(), b"conversation-2").unwrap();
+        let added = other.add(&w.phone.provider, &w.phone.me, &w.pins, &[w.ipad.me.key_package(&w.ipad.provider).unwrap()]).unwrap();
+        let swapped = added.group_info.unwrap();
+        assert_eq!(
+            Group::rejoin(&fresh.provider, &fresh.me, &w.pins, w.chat.clone(), b"conversation-1", &swapped).err().map(|error| error.to_string()),
+            Some("refused: a GroupInfo of another group than this one".to_owned())
+        );
+        let (mut back, out) = Group::rejoin(&fresh.provider, &fresh.me, &w.pins, w.chat.clone(), b"conversation-1", &info).unwrap();
         back.merge_pending(&fresh.provider).unwrap();
         assert!(matches!(w.groups[0].process(&w.phone.provider, &w.pins, &out.commit).unwrap(), Incoming::Committed { .. }));
         assert_eq!(w.groups[0].members(&w.pins).len(), 3, "the old leaf went");
-        let said = w.groups[0].send(&w.phone.provider, &w.phone.me, b"welcome back").unwrap();
+        let said = w.groups[0].send(&w.phone.provider, &w.phone.me, &w.pins, b"welcome back").unwrap();
         assert!(matches!(back.process(&fresh.provider, &w.pins, &said).unwrap(), Incoming::Application { .. }));
 
         // The Claktory can't rejoin a conversation by itself, and a commit it
         // forces is refused (H1).
-        assert!(Group::rejoin(&w.mini.provider, &w.mini.me, &w.pins, w.chat.clone(), &info).is_err());
+        assert!(Group::rejoin(&w.mini.provider, &w.mini.me, &w.pins, w.chat.clone(), b"conversation-1", &info).is_err());
         let latest = out.group_info.unwrap();
         let MlsMessageBodyIn::GroupInfo(vgi) = read(&latest).unwrap() else { panic!() };
         let other = Libcrux::default();
@@ -858,7 +1019,7 @@ mod tests {
 
         // Under the old key it's inert for Matt's phone, which saw the change:
         // what it says, and what it proposes.
-        let said = w.groups[1].send(&w.ipad.provider, &w.ipad.me, b"from the old key").unwrap();
+        let said = w.groups[1].send(&w.ipad.provider, &w.ipad.me, &w.pins, b"from the old key").unwrap();
         assert!(refusal(w.groups[0].process(&w.phone.provider, &r.pins, &said)).contains("was replaced"));
         let leaving = w.groups[1].leave(&w.ipad.provider, &w.ipad.me).unwrap();
         assert!(refusal(w.groups[0].process(&w.phone.provider, &r.pins, &leaving)).contains("was replaced"));
@@ -946,12 +1107,650 @@ mod tests {
         assert_eq!(leaves.iter().map(|leaf| leaf.kind).collect::<Vec<_>>(), [LeafKind::Device, LeafKind::Device, LeafKind::Claktory]);
 
         // Moved: she's heard again, under the new key.
-        let said = w.groups[1].send(&w.ipad.provider, &r.me, b"from the new key").unwrap();
+        let said = w.groups[1].send(&w.ipad.provider, &r.me, &r.pins, b"from the new key").unwrap();
         let Incoming::Application { from, content } = w.groups[0].process(&w.phone.provider, &r.pins, &said).unwrap() else { panic!() };
         assert_eq!((from.certificate.identity, content.as_slice()), (r.ana2.public(), b"from the new key".as_slice()));
     }
 
     fn moved_end(me: &Me) -> End {
         End { provider: Libcrux::default(), me: Me::new(LeafKey::from_secret(&me.key.secret()), me.certificate.clone()).unwrap() }
+    }
+
+    /// Row 611 (Fugo's a′): Matt's self group holds his phone and his
+    /// tablet. He locks a lost device out from the phone, which makes a new
+    /// security key and moves to it; the tablet, kept but offline, stays
+    /// under the old one. The phone then adds a new phone ("new"), under the
+    /// new key, from the KeyPackages it put up. Returns the phone's group,
+    /// the tablet's (still at the epoch before), the new phone, its pins
+    /// (the new key, the old one replaced, and the new list) and the
+    /// phone's commits (the move, then the Add, with its Welcome).
+    struct Kept {
+        tablet: End,
+        at_tablet: Group,
+        new: End,
+        pins: Pins,
+        matt2: IdentityKey,
+        moved: Outgoing,
+        added: Outgoing,
+    }
+
+    fn kept(on_new_list: bool, stray: Option<&IdentityKey>) -> Kept {
+        kept_in(GroupKind::SelfGroup { account: "matt".to_owned() }, on_new_list, stray)
+    }
+
+    /// As `kept`, in a group of `kind`: in a channel, the kept leaf is its
+    /// Claktory ("mini"), not the tablet.
+    fn kept_in(kind: GroupKind, on_new_list: bool, stray: Option<&IdentityKey>) -> Kept {
+        let matt = IdentityKey::generate().unwrap();
+        let list = |identity: &IdentityKey, version: u64, leaves: Vec<Listed>| {
+            DeviceList { account_id: "matt".to_owned(), version, created_ms: 1, leaves }.sign(identity).unwrap().to_bytes().unwrap()
+        };
+        let phone = end(&matt, LeafKind::Device, "matt", "phone");
+        let tablet = match kind {
+            GroupKind::Channel { .. } => end(&matt, LeafKind::Claktory, "matt", &claktory_leaf_id("mini", 1)),
+            _ => end(&matt, LeafKind::Device, "matt", "tablet"),
+        };
+        let mut old = Pins::default();
+        old.first_contact("matt", matt.public()).unwrap();
+        old.accept_list("matt", &list(&matt, 1, vec![listed(&phone), listed(&tablet)])).unwrap();
+        let mut at_phone = Group::create(&phone.provider, &phone.me, kind.clone(), b"self-1").unwrap();
+        let out = at_phone.add(&phone.provider, &phone.me, &old, &[tablet.me.key_package(&tablet.provider).unwrap()]).unwrap();
+        at_phone.merge_pending(&phone.provider).unwrap();
+        let at_tablet = Group::join(&tablet.provider, &old, kind.clone(), b"self-1", &out.welcome.unwrap()).unwrap();
+
+        // A new key on the phone; the tablet kept on the new list, or not.
+        let matt2 = IdentityKey::generate().unwrap();
+        let phone2 = phone.me.recertified(LeafCertificate::issue(&matt2, phone.me.certificate.leaf.clone()).unwrap()).unwrap();
+        let new = end(&matt2, LeafKind::Device, "matt", "new-phone");
+        let mut pins = old.clone();
+        pins.key_changed("matt", matt2.public()).unwrap();
+        let mut leaves = vec![listed(&phone), listed(&new)];
+        if on_new_list {
+            leaves.push(listed(&tablet));
+        }
+        pins.accept_list("matt", &list(&matt2, 1, leaves)).unwrap();
+        let moved = at_phone.update_certificate(&phone.provider, &phone2).unwrap();
+        at_phone.merge_pending(&phone.provider).unwrap();
+
+        // A leaf under a key nobody pinned, which the phone took in as
+        // `stray` vouched for it.
+        if let Some(stray) = stray {
+            let intruder = end(stray, LeafKind::Device, "matt", "intruder");
+            let mut vouched = Pins::default();
+            vouched.first_contact("matt", stray.public()).unwrap();
+            vouched.accept_list("matt", &list(stray, 1, vec![listed(&intruder)])).unwrap();
+            let out = at_phone.add(&phone.provider, &phone2, &vouched, &[intruder.me.key_package(&intruder.provider).unwrap()]).unwrap();
+            at_phone.merge_pending(&phone.provider).unwrap();
+            drop(out);
+        }
+        let added = at_phone.add(&phone.provider, &phone2, &pins, &[new.me.key_package(&new.provider).unwrap()]).unwrap();
+        at_phone.merge_pending(&phone.provider).unwrap();
+        Kept { tablet, at_tablet, new, pins, matt2, moved, added }
+    }
+
+    /// A device kept at a new key, offline: the new phone joins at once,
+    /// past its leaf under the old key, which stays inert (what it says,
+    /// proposes or commits but its own move is refused); it moves later and
+    /// the new phone takes that in.
+    #[test]
+    fn a_new_device_joins_past_a_kept_device_still_under_the_old_key() {
+        let Kept { tablet, mut at_tablet, new, pins, matt2, moved, added } = kept(true, None);
+        let kind = GroupKind::SelfGroup { account: "matt".to_owned() };
+        let mut at_new = Group::join(&new.provider, &pins, kind, b"self-1", &added.welcome.unwrap()).unwrap();
+        assert_eq!(at_new.present(&pins).iter().filter(|member| member.is_ok()).count(), 3);
+        assert_eq!(at_new.members(&pins).iter().filter(|member| member.is_err()).count(), 1, "the tablet isn't a full member yet");
+
+        // The tablet comes online: it takes the phone's move and the Add in.
+        for commit in [&moved.commit, &added.commit] {
+            assert!(matches!(at_tablet.process(&tablet.provider, &pins, commit).unwrap(), Incoming::Committed { .. }));
+        }
+        // Under the old key it's inert for the new phone.
+        let said = at_tablet.send(&tablet.provider, &tablet.me, &pins, b"from the old key").unwrap();
+        assert!(refusal(at_new.process(&new.provider, &pins, &said)).contains("was replaced"));
+        let leaving = at_tablet.leave(&tablet.provider, &tablet.me).unwrap();
+        assert!(refusal(at_new.process(&new.provider, &pins, &leaving)).contains("was replaced"));
+        at_tablet.mls.clear_pending_proposals(tablet.provider.storage()).unwrap();
+        let plain = at_tablet.update(&tablet.provider, &tablet.me).unwrap();
+        at_tablet.clear_pending(&tablet.provider).unwrap();
+        assert!(refusal(at_new.process(&new.provider, &pins, &plain.commit)).contains("was replaced"));
+
+        // Its own move goes through, and then it's a member like any other.
+        let tablet2 = tablet.me.recertified(LeafCertificate::issue(&matt2, tablet.me.certificate.leaf.clone()).unwrap()).unwrap();
+        let move_tablet = at_tablet.update_certificate(&tablet.provider, &tablet2).unwrap();
+        at_tablet.merge_pending(&tablet.provider).unwrap();
+        assert!(matches!(at_new.process(&new.provider, &pins, &move_tablet.commit).unwrap(), Incoming::Committed { .. }));
+        assert!(at_new.members(&pins).iter().all(Result::is_ok));
+    }
+
+    /// A leaf under the old key that the new list doesn't name (one a thief
+    /// could have made with the stolen key) still stops the join: it has to
+    /// be swept first.
+    #[test]
+    fn a_stray_leaf_under_the_old_key_still_stops_a_join() {
+        let Kept { new, pins, added, .. } = kept(false, None);
+        let kind = GroupKind::SelfGroup { account: "matt".to_owned() };
+        let refused = Group::join(&new.provider, &pins, kind, b"self-1", &added.welcome.unwrap()).err().map(|error| error.to_string());
+        assert_eq!(refused.as_deref(), Some("refused: matt's certificate is from a security key that was replaced"));
+    }
+
+    /// A leaf under a key never pinned for its account isn't a kept device,
+    /// whatever its list says: the join is refused.
+    #[test]
+    fn a_leaf_under_a_key_never_pinned_stops_a_join() {
+        let stray = IdentityKey::generate().unwrap();
+        let Kept { new, pins, added, .. } = kept(true, Some(&stray));
+        let kind = GroupKind::SelfGroup { account: "matt".to_owned() };
+        let refused = Group::join(&new.provider, &pins, kind, b"self-1", &added.welcome.unwrap());
+        assert!(matches!(refused, Err(Error::UnknownIdentity { ref account }) if account == "matt"), "{:?}", refused.err());
+    }
+
+    /// The same for a Claktory the person kept (Fugo): in its channel, still
+    /// under the old key until a device enrolls it again, it doesn't stop a
+    /// new device joining while the new list names it; one the new list
+    /// doesn't name still does.
+    #[test]
+    fn a_new_device_joins_a_channel_past_its_kept_claktory_still_under_the_old_key() {
+        let channel = GroupKind::Channel { account: "matt".to_owned(), claktory_id: "mini".to_owned() };
+        let Kept { new, pins, added, .. } = kept_in(channel.clone(), true, None);
+        let at_new = Group::join(&new.provider, &pins, channel.clone(), b"self-1", &added.welcome.unwrap()).unwrap();
+        assert!(at_new.present(&pins).iter().all(Result::is_ok));
+        assert_eq!(at_new.members(&pins).iter().filter(|member| member.is_err()).count(), 1, "the Claktory isn't a full member yet");
+
+        let Kept { new, pins, added, .. } = kept_in(channel.clone(), false, None);
+        let refused = Group::join(&new.provider, &pins, channel, b"self-1", &added.welcome.unwrap()).err().map(|error| error.to_string());
+        assert_eq!(refused.as_deref(), Some("refused: matt's certificate is from a security key that was replaced"));
+    }
+
+    /// Row 630: Matt lost his only device's keys and started over on it, as
+    /// the same leaf id with a new leaf key, under a new identity he alone
+    /// lists (and, `kept`, a tablet he kept, still under the old key). His
+    /// device never pinned the old key; Ana took the change in.
+    struct StartOver {
+        w: World,
+        fresh: End,
+        /// The fresh device's pins: its own new key and list, Ana's.
+        mine: Pins,
+        /// Ana's, after the change.
+        hers: Pins,
+        info: Vec<u8>,
+    }
+
+    fn start_over(kept: bool) -> StartOver {
+        let mut w = world();
+        let list = |identity: &IdentityKey, account: &str, version: u64, leaves: Vec<Listed>| {
+            DeviceList { account_id: account.to_owned(), version, created_ms: 1, leaves }.sign(identity).unwrap().to_bytes().unwrap()
+        };
+        let tablet = kept.then(|| {
+            let tablet = end(&w.matt, LeafKind::Device, "matt", "tablet");
+            w.pins.accept_list("matt", &list(&w.matt, "matt", 2, vec![listed(&w.phone), listed(&w.mini), listed(&tablet)])).unwrap();
+            let out = w.groups[0].add(&w.phone.provider, &w.phone.me, &w.pins, &[tablet.me.key_package(&tablet.provider).unwrap()]).unwrap();
+            w.groups[0].merge_pending(&w.phone.provider).unwrap();
+            for (n, end) in [(1, &w.ipad), (2, &w.mini)] {
+                w.groups[n].process(&end.provider, &w.pins, &out.commit).unwrap();
+            }
+            w.groups.push(Group::join(&tablet.provider, &w.pins, w.chat.clone(), b"conversation-1", &out.welcome.unwrap()).unwrap());
+            tablet
+        });
+        // The GroupInfo the worker keeps.
+        let update = w.groups[0].update(&w.phone.provider, &w.phone.me).unwrap();
+        w.groups[0].merge_pending(&w.phone.provider).unwrap();
+        for n in 1..w.groups.len() {
+            let end = [&w.phone, &w.ipad, &w.mini, tablet.as_ref().unwrap_or(&w.ipad)][n];
+            w.groups[n].process(&end.provider, &w.pins, &update.commit).unwrap();
+        }
+        let info = update.group_info.unwrap();
+
+        let matt2 = IdentityKey::generate().unwrap();
+        let fresh = end(&matt2, LeafKind::Device, "matt", "phone");
+        let mut leaves = vec![listed(&fresh)];
+        leaves.extend(tablet.iter().map(listed));
+        let new_list = list(&matt2, "matt", 1, leaves);
+        let mut mine = Pins::default();
+        mine.first_contact("matt", matt2.public()).unwrap();
+        mine.accept_list("matt", &new_list).unwrap();
+        mine.first_contact("ana", w.ana.public()).unwrap();
+        mine.accept_list("ana", &list(&w.ana, "ana", 1, vec![listed(&w.ipad)])).unwrap();
+        let mut hers = w.pins.clone();
+        hers.key_changed("matt", matt2.public()).unwrap();
+        hers.accept_list("matt", &new_list).unwrap();
+        StartOver { w, fresh, mine, hers, info }
+    }
+
+    /// What a member's own client does with MLS alone, past every check
+    /// (a thief's, say): takes a commit in, or reads a message.
+    fn unchecked_take(group: &mut Group, provider: &Libcrux, bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let message = MlsMessageIn::tls_deserialize_exact(bytes).unwrap().try_into_protocol_message().unwrap();
+        let processed = group.mls.process_message(provider, message).map_err(|error| format!("{error:?}"))?;
+        match processed.into_content() {
+            ProcessedMessageContent::StagedCommitMessage(staged) => {
+                group.mls.merge_staged_commit(provider, *staged).map_err(|error| format!("{error:?}"))?;
+                Ok(None)
+            }
+            ProcessedMessageContent::ApplicationMessage(message) => Ok(Some(message.into_bytes())),
+            _ => Ok(None),
+        }
+    }
+
+    /// Row 630 (Fugo's mechanism): the fresh device rejoins the same group
+    /// past its own dead leaves (the old phone's, the old Claktory's) and
+    /// takes them out in its next commit; between the two, nobody sends.
+    /// Ana takes both commits and the two go on chatting in the same group,
+    /// while the old phone (a thief's, checks or not) reads nothing after.
+    #[test]
+    fn a_device_that_started_over_rejoins_takes_its_dead_leaves_out_and_the_chat_goes_on() {
+        let StartOver { mut w, fresh, mine, hers, info, .. } = start_over(false);
+        let (mut at_fresh, out) = Group::rejoin(&fresh.provider, &fresh.me, &mine, w.chat.clone(), b"conversation-1", &info).unwrap();
+        at_fresh.merge_pending(&fresh.provider).unwrap();
+        let dead: Vec<(String, LeafKind)> = at_fresh.dead(&mine, &fresh.me).into_iter().map(|dead| (dead.leaf.leaf_id, dead.leaf.kind)).collect();
+        assert_eq!(dead, [("phone".to_owned(), LeafKind::Device), (claktory_leaf_id("mini", 1), LeafKind::Claktory)]);
+
+        // Ana takes the rejoin; the old phone, past its checks, too.
+        assert!(matches!(w.groups[1].process(&w.ipad.provider, &hers, &out.commit).unwrap(), Incoming::Committed { .. }));
+        assert_eq!(unchecked_take(&mut w.groups[0], &w.phone.provider, &out.commit), Ok(None));
+        // Until the dead leaves are out, neither side sends.
+        let held = w.groups[1].send(&w.ipad.provider, &w.ipad.me, &hers, b"too soon");
+        assert!(matches!(held, Err(Error::Waiting { ref account, reason: validation::Held::Replaced }) if account == "matt"), "{held:?}");
+        assert_eq!(w.groups[1].waiting(&hers, &w.ipad.me).as_deref(), Some("matt"));
+        assert!(matches!(at_fresh.send(&fresh.provider, &fresh.me, &mine, b"too soon"), Err(Error::Waiting { .. })));
+
+        // The removal: one ordinary commit, which Ana takes.
+        let removal = at_fresh.remove_dead(&fresh.provider, &fresh.me, &mine).unwrap().expect("dead leaves to take out");
+        at_fresh.merge_pending(&fresh.provider).unwrap();
+        assert!(matches!(w.groups[1].process(&w.ipad.provider, &hers, &removal.commit).unwrap(), Incoming::Committed { .. }));
+        assert_eq!(unchecked_take(&mut w.groups[0], &w.phone.provider, &removal.commit), Ok(None));
+        assert!(at_fresh.dead(&mine, &fresh.me).is_empty());
+        assert!(at_fresh.remove_dead(&fresh.provider, &fresh.me, &mine).unwrap().is_none(), "nothing more to take out");
+        let left: Vec<_> = w.groups[1].members(&hers).into_iter().map(|member| member.unwrap().leaf_id().to_owned()).collect();
+        assert_eq!(left, ["ipad", "phone"], "Ana, and the new phone, under the same leaf id, and Ana");
+        assert_eq!((at_fresh.group_id(), at_fresh.epoch()), (w.groups[1].group_id(), w.groups[1].epoch()), "the same group");
+
+        // The first message after: Ana's new phone reads it, the old phone can't.
+        let said = w.groups[1].send(&w.ipad.provider, &w.ipad.me, &hers, b"welcome back").unwrap();
+        let Incoming::Application { content, .. } = at_fresh.process(&fresh.provider, &mine, &said).unwrap() else { panic!() };
+        assert_eq!(content, b"welcome back");
+        assert!(unchecked_take(&mut w.groups[0], &w.phone.provider, &said).is_err(), "the old phone was taken out");
+        let back = at_fresh.send(&fresh.provider, &fresh.me, &mine, b"thanks").unwrap();
+        let Incoming::Application { from, content } = w.groups[1].process(&w.ipad.provider, &hers, &back).unwrap() else { panic!() };
+        assert_eq!((from.certificate.identity, content.as_slice()), (fresh.me.certificate.identity, b"thanks".as_slice()));
+    }
+
+    /// The old phone wasn't taken out (no removal commit yet, or the device
+    /// never got it): Ana sends nothing, so it reads nothing new; once the
+    /// removal is in, it reads nothing either.
+    #[test]
+    fn an_old_key_device_reads_nothing_sent_after_a_start_over() {
+        let StartOver { mut w, fresh, mine, hers, info, .. } = start_over(false);
+        let (mut at_fresh, out) = Group::rejoin(&fresh.provider, &fresh.me, &mine, w.chat.clone(), b"conversation-1", &info).unwrap();
+        at_fresh.merge_pending(&fresh.provider).unwrap();
+        w.groups[1].process(&w.ipad.provider, &hers, &out.commit).unwrap();
+        unchecked_take(&mut w.groups[0], &w.phone.provider, &out.commit).unwrap();
+        // Ana's client won't seal anything for the group while it's in.
+        assert!(matches!(w.groups[1].send(&w.ipad.provider, &w.ipad.me, &hers, b"x"), Err(Error::Waiting { .. })));
+        // The removal; the old phone never hears it.
+        let removal = at_fresh.remove_dead(&fresh.provider, &fresh.me, &mine).unwrap().unwrap();
+        at_fresh.merge_pending(&fresh.provider).unwrap();
+        w.groups[1].process(&w.ipad.provider, &hers, &removal.commit).unwrap();
+        let said = w.groups[1].send(&w.ipad.provider, &w.ipad.me, &hers, b"after").unwrap();
+        assert!(unchecked_take(&mut w.groups[0], &w.phone.provider, &said).is_err(), "an epoch it never reached");
+    }
+
+    /// Only the person's own dead leaves: a leaf of Ana's under a key the
+    /// fresh device never pinned stops the rejoin (it isn't dead to it, and
+    /// isn't its to remove), and a removal of Ana's leaf forced past the
+    /// checks is refused by Ana.
+    #[test]
+    fn a_start_over_never_removes_another_persons_leaf() {
+        let StartOver { w, fresh, mine, .. } = start_over(false);
+        // A stray of Ana's account's, added by Matt's old phone.
+        let stray_key = IdentityKey::generate().unwrap();
+        let stray = end(&stray_key, LeafKind::Device, "ana", "ipad-x");
+        let mut vouched = w.pins.clone();
+        vouched.key_changed("ana", stray_key.public()).unwrap();
+        let list = DeviceList { account_id: "ana".to_owned(), version: 1, created_ms: 1, leaves: vec![listed(&stray)] };
+        vouched.accept_list("ana", &list.sign(&stray_key).unwrap().to_bytes().unwrap()).unwrap();
+        let mut forked = Group::load(&w.phone.provider, w.chat.clone(), b"conversation-1").unwrap().unwrap();
+        let added = forked.add(&w.phone.provider, &w.phone.me, &vouched, &[stray.me.key_package(&stray.provider).unwrap()]).unwrap();
+        forked.merge_pending(&w.phone.provider).unwrap();
+        let refused = Group::rejoin(&Libcrux::default(), &fresh.me, &mine, w.chat.clone(), b"conversation-1", &added.group_info.unwrap());
+        assert!(matches!(refused, Err(Error::UnknownIdentity { ref account }) if account == "ana"), "{:?}", refused.err());
+
+        // From the real GroupInfo: Ana's iPad is no dead leaf of Matt's to
+        // take out, and a removal of it forced past the checks is refused.
+        let StartOver { mut w, fresh, mine, hers, info, .. } = start_over(false);
+        let (mut at_fresh, out) = Group::rejoin(&fresh.provider, &fresh.me, &mine, w.chat.clone(), b"conversation-1", &info).unwrap();
+        at_fresh.merge_pending(&fresh.provider).unwrap();
+        w.groups[1].process(&w.ipad.provider, &hers, &out.commit).unwrap();
+        let ana: Vec<_> = at_fresh
+            .mls
+            .members()
+            .filter(|member| LeafCertificate::from_credential(&member.credential).is_ok_and(|c| c.leaf.account_id == "ana"))
+            .map(|member| member.index)
+            .collect();
+        assert!(at_fresh.dead(&mine, &fresh.me).iter().all(|dead| dead.leaf.account_id == "matt"));
+        let (forced, _, _) = at_fresh.mls.remove_members(&fresh.provider, &fresh.me.key, &ana).unwrap();
+        let refused = w.groups[1].process(&w.ipad.provider, &hers, &forced.tls_serialize_detached().unwrap());
+        assert_eq!(refused.err().map(|e| e.to_string()), Some("refused: a device removes only its own person's leaves".to_owned()));
+    }
+
+    /// A device the person kept (on the new list, still under the old key)
+    /// isn't dead: the fresh device rejoins past it, takes out only the
+    /// rest, and Ana's sends aren't held for it.
+    #[test]
+    fn a_start_over_keeps_a_device_its_new_list_names() {
+        let StartOver { mut w, fresh, mine, hers, info, .. } = start_over(true);
+        let (mut at_fresh, out) = Group::rejoin(&fresh.provider, &fresh.me, &mine, w.chat.clone(), b"conversation-1", &info).unwrap();
+        at_fresh.merge_pending(&fresh.provider).unwrap();
+        let dead: Vec<String> = at_fresh.dead(&mine, &fresh.me).into_iter().map(|dead| dead.leaf.leaf_id).collect();
+        assert_eq!(dead, ["phone".to_owned(), claktory_leaf_id("mini", 1)], "not the tablet");
+        w.groups[1].process(&w.ipad.provider, &hers, &out.commit).unwrap();
+        let removal = at_fresh.remove_dead(&fresh.provider, &fresh.me, &mine).unwrap().unwrap();
+        at_fresh.merge_pending(&fresh.provider).unwrap();
+        w.groups[1].process(&w.ipad.provider, &hers, &removal.commit).unwrap();
+        let ids = at_fresh.leaf_ids();
+        assert!(ids.contains(&"tablet".to_owned()) && ids.len() == 3, "{ids:?}");
+        assert_eq!(w.groups[1].waiting(&hers, &w.ipad.me), None);
+        let said = w.groups[1].send(&w.ipad.provider, &w.ipad.me, &hers, b"hi both").unwrap();
+        let Incoming::Application { content, .. } = at_fresh.process(&fresh.provider, &mine, &said).unwrap() else { panic!() };
+        assert_eq!(content, b"hi both");
+    }
+
+    /// Row 654: Matt starts over twice while Ana's iPad is away. Back, it
+    /// holds the first rejoin, under a key it never saw (`UnknownIdentity`)
+    /// even once it has Matt's newest; the service lists that key as
+    /// replaced, the held commit proves it, and it's retired, so the commit
+    /// is refused for good (`Replaced`) and the iPad rejoins the same group,
+    /// where the two chat on.
+    #[test]
+    fn a_friend_behind_two_start_overs_retires_the_key_between_and_rejoins() {
+        let StartOver { mut w, fresh, mine, info, .. } = start_over(false);
+        // The first start-over: its rejoin and removal, which Ana's iPad misses.
+        let (mut at_first, rejoined) = Group::rejoin(&fresh.provider, &fresh.me, &mine, w.chat.clone(), b"conversation-1", &info).unwrap();
+        at_first.merge_pending(&fresh.provider).unwrap();
+        let removal = at_first.remove_dead(&fresh.provider, &fresh.me, &mine).unwrap().unwrap();
+        at_first.merge_pending(&fresh.provider).unwrap();
+
+        // The second, a minute later, from the same phone.
+        let matt3 = IdentityKey::generate().unwrap();
+        let second = end(&matt3, LeafKind::Device, "matt", "phone");
+        // Signed after the first start-over's certificate (made at 1).
+        let list3 = DeviceList { account_id: "matt".to_owned(), version: 1, created_ms: 2, leaves: vec![listed(&second)] };
+        let list3 = list3.sign(&matt3).unwrap().to_bytes().unwrap();
+        let mut theirs = mine.clone();
+        theirs.key_changed("matt", matt3.public()).unwrap();
+        theirs.seen("matt");
+        theirs.accept_list("matt", &list3).unwrap();
+        let (mut at_second, _) =
+            Group::rejoin(&second.provider, &second.me, &theirs, w.chat.clone(), b"conversation-1", &removal.group_info.unwrap()).unwrap();
+        at_second.merge_pending(&second.provider).unwrap();
+        let removed_again = at_second.remove_dead(&second.provider, &second.me, &theirs).unwrap().unwrap();
+        at_second.merge_pending(&second.provider).unwrap();
+
+        // Back, Ana's iPad has Matt's newest key and list, as fetched.
+        let mut hers = w.pins.clone();
+        hers.key_changed("matt", matt3.public()).unwrap();
+        hers.accept_list("matt", &list3).unwrap();
+        let held = w.groups[1].process(&w.ipad.provider, &hers, &rejoined.commit);
+        assert!(matches!(held, Err(Error::UnknownIdentity { ref account }) if account == "matt"), "{held:?}");
+        let signer = w.groups[1].held_signer(&w.ipad.provider, &rejoined.commit).unwrap().expect("a certificate");
+        assert_eq!(signer.identity, fresh.me.certificate.identity);
+        let listed_keys = [w.matt.public().0, fresh.me.certificate.identity.0];
+        assert!(hers.replaced("matt", matt3.public().0, &listed_keys, &signer).unwrap());
+        assert!(!hers.replaced("matt", matt3.public().0, &listed_keys, &signer).unwrap(), "once is enough");
+        assert_eq!(hers.get("matt").unwrap().identity, matt3.public(), "the current key as it was");
+        let refused = w.groups[1].process(&w.ipad.provider, &hers, &rejoined.commit);
+        assert!(matches!(refused, Err(Error::Replaced { ref account }) if account == "matt"), "{refused:?}");
+
+        // It rejoins at the current epoch, and they chat on.
+        let back = moved_end(&w.ipad.me);
+        let (mut at_back, out) =
+            Group::rejoin(&back.provider, &back.me, &hers, w.chat.clone(), b"conversation-1", &removed_again.group_info.unwrap()).unwrap();
+        at_back.merge_pending(&back.provider).unwrap();
+        assert!(matches!(at_second.process(&second.provider, &theirs, &out.commit).unwrap(), Incoming::Committed { .. }));
+        let said = at_second.send(&second.provider, &second.me, &theirs, b"third time lucky").unwrap();
+        let Incoming::Application { content, .. } = at_back.process(&back.provider, &hers, &said).unwrap() else { panic!() };
+        assert_eq!(content, b"third time lucky");
+    }
+
+    /// Matt's keys for the conditions on what the service lists as
+    /// replaced: one he had (`k1`), the next (`k2`), and a certificate
+    /// under `k2` made at 5.
+    struct Keys {
+        k1: IdentityKey,
+        k2: IdentityKey,
+        under_k2: LeafCertificate,
+    }
+
+    fn keys() -> Keys {
+        let (k1, k2) = (IdentityKey::generate().unwrap(), IdentityKey::generate().unwrap());
+        let leaf = Leaf {
+            kind: LeafKind::Device,
+            account_id: "matt".to_owned(),
+            leaf_id: "phone".to_owned(),
+            signature_key: LeafKey::generate().unwrap().public(),
+            name: "phone".to_owned(),
+            created_ms: 5,
+        };
+        let under_k2 = LeafCertificate::issue(&k2, leaf).unwrap();
+        Keys { k1, k2, under_k2 }
+    }
+
+    /// Ana's pins for Matt: `pinned` now, after `before`, with a list it
+    /// signed at `listed_at`.
+    fn pinned(pinned: &IdentityKey, before: &[&IdentityKey], listed_at: u64) -> Pins {
+        let mut pins = Pins::default();
+        let mut keys = before.iter().chain([&pinned]);
+        pins.first_contact("matt", keys.next().unwrap().public()).unwrap();
+        for key in keys {
+            pins.key_changed("matt", key.public()).unwrap();
+        }
+        let list = DeviceList { account_id: "matt".to_owned(), version: 1, created_ms: listed_at, leaves: vec![] };
+        pins.accept_list("matt", &list.sign(pinned).unwrap().to_bytes().unwrap()).unwrap();
+        pins
+    }
+
+    /// Fugo's conditions on what the service lists as replaced: only a key
+    /// a held commit proves is retired (not one listed without one, nor
+    /// another account's), and only one older than the pinned key's list; a
+    /// list naming the current key, pinned or served, is refused whole; and
+    /// a listed key the friend hasn't seen yet stays acceptable later.
+    #[test]
+    fn the_service_retires_only_a_key_a_held_commit_proves() {
+        let Keys { k1, k2, under_k2 } = keys();
+        // Ana pins k3, listed at 10: k2's certificate (5) is older.
+        let k3 = IdentityKey::generate().unwrap();
+        let next = IdentityKey::generate().unwrap();
+        let mut pins = pinned(&k3, &[&k1], 10);
+        let before = pins.clone();
+        let served = k3.public().0;
+
+        // Listed, but no held commit under it: not retired.
+        assert!(!pins.replaced("matt", served, &[next.public().0], &under_k2).unwrap());
+        // Proven, but not listed; or another account's.
+        assert!(!pins.replaced("matt", served, &[k1.public().0], &under_k2).unwrap());
+        assert!(!pins.replaced("ana", served, &[k2.public().0], &under_k2).unwrap());
+        // The current key, pinned or served, listed: refused whole.
+        assert!(pins.replaced("matt", served, &[k2.public().0, k3.public().0], &under_k2).is_err());
+        assert!(pins.replaced("matt", next.public().0, &[k2.public().0, next.public().0], &under_k2).is_err());
+        assert_eq!(pins, before, "nothing changed");
+
+        // Proven and older: retired, with a key not seen yet listed beside
+        // it left alone, and taken later.
+        assert!(pins.replaced("matt", served, &[k2.public().0, next.public().0], &under_k2).unwrap());
+        let pin = pins.get("matt").unwrap();
+        assert!(pin.retired.contains(&k2.public()) && !pin.retired.contains(&next.public()));
+        let was = before.get("matt").unwrap();
+        assert_eq!((pin.identity, pin.verified, pin.changed_unseen), (k3.public(), was.verified, was.changed_unseen), "nothing else");
+        pins.key_changed("matt", next.public()).unwrap();
+        assert_eq!(pins.get("matt").unwrap().identity, next.public());
+
+        // No list taken under the pinned key yet: nothing until there is.
+        let mut unlisted = before.clone();
+        unlisted.key_changed("matt", next.public()).unwrap();
+        assert!(!unlisted.replaced("matt", next.public().0, &[k2.public().0], &under_k2).unwrap());
+    }
+
+    /// Fugo's stale-answer wedge (vi): Matt moved from k1 to k2, and Ana
+    /// still pins k1 and holds a genuine commit under k2. A service serving
+    /// k1 and listing k2 as replaced gets nothing retired (k2's certificate
+    /// is newer than any k1 list), and Ana takes k2 when it reaches her.
+    #[test]
+    fn a_service_serving_an_old_key_cant_retire_the_next_one() {
+        let Keys { k1, k2, under_k2 } = keys();
+        let mut pins = pinned(&k1, &[], 1);
+        assert!(!pins.replaced("matt", k1.public().0, &[k2.public().0], &under_k2).unwrap_or(true));
+        assert!(pins.get("matt").unwrap().retired.is_empty());
+        pins.key_changed("matt", k2.public()).unwrap();
+        assert_eq!(pins.get("matt").unwrap().identity, k2.public());
+    }
+
+    /// Row 202: Matt's tablet, in his conversation with Ana, is reinstalled.
+    /// It keeps its leaf id (its account key) and comes back with a new leaf
+    /// key, under Matt's same security key, which the phone's list v3 names
+    /// in place of the old one. Returns the world (its pins at v3, as every
+    /// endpoint has accepted it), the old tablet's group (the wiped install,
+    /// as someone holding its keys would have it), the new install and the
+    /// GroupInfo the worker keeps.
+    struct Reinstall {
+        w: World,
+        old: End,
+        at_old: Group,
+        back: End,
+        info: Vec<u8>,
+    }
+
+    fn reinstall() -> Reinstall {
+        let mut w = world();
+        let list = |identity: &IdentityKey, version: u64, leaves: Vec<Listed>| {
+            DeviceList { account_id: "matt".to_owned(), version, created_ms: 1, leaves }.sign(identity).unwrap().to_bytes().unwrap()
+        };
+        let old = end(&w.matt, LeafKind::Device, "matt", "tablet");
+        w.pins.accept_list("matt", &list(&w.matt, 2, vec![listed(&w.phone), listed(&w.mini), listed(&old)])).unwrap();
+        let out = w.groups[0].add(&w.phone.provider, &w.phone.me, &w.pins, &[old.me.key_package(&old.provider).unwrap()]).unwrap();
+        w.groups[0].merge_pending(&w.phone.provider).unwrap();
+        for (n, end) in [(1, &w.ipad), (2, &w.mini)] {
+            w.groups[n].process(&end.provider, &w.pins, &out.commit).unwrap();
+        }
+        let mut at_old = Group::join(&old.provider, &w.pins, w.chat.clone(), b"conversation-1", &out.welcome.unwrap()).unwrap();
+        let update = w.groups[0].update(&w.phone.provider, &w.phone.me).unwrap();
+        w.groups[0].merge_pending(&w.phone.provider).unwrap();
+        for (n, end) in [(1, &w.ipad), (2, &w.mini)] {
+            w.groups[n].process(&end.provider, &w.pins, &update.commit).unwrap();
+        }
+        at_old.process(&old.provider, &w.pins, &update.commit).unwrap();
+        // Named exactly, the tablet is never stale.
+        assert!(w.groups[1].stale(&w.pins).is_empty());
+
+        let back = end(&w.matt, LeafKind::Device, "matt", "tablet");
+        assert_ne!(back.me.certificate.leaf.signature_key, old.me.certificate.leaf.signature_key);
+        w.pins.accept_list("matt", &list(&w.matt, 3, vec![listed(&w.phone), listed(&w.mini), listed(&back)])).unwrap();
+        Reinstall { w, old, at_old, back, info: update.group_info.unwrap() }
+    }
+
+    /// The new install rejoins past its former install (stale, not dead:
+    /// it's under Matt's current key), and nobody sends until it's taken it
+    /// out, Ana included, though Ana never removes it herself. It goes by its
+    /// tree index, and the new install, under the same leaf id, stays; the
+    /// old one reads nothing after.
+    #[test]
+    fn a_reinstalled_device_rejoins_past_its_former_install_and_takes_it_out_by_index() {
+        let Reinstall { mut w, old, mut at_old, back, info } = reinstall();
+        let (mut at_back, out) = Group::rejoin(&back.provider, &back.me, &w.pins, w.chat.clone(), b"conversation-1", &info).unwrap();
+        at_back.merge_pending(&back.provider).unwrap();
+        let stale: Vec<[u8; 32]> = at_back.stale(&w.pins).into_iter().map(|stale| stale.leaf.signature_key).collect();
+        assert_eq!(stale, [old.me.certificate.leaf.signature_key], "the former install, by its own key");
+        assert!(at_back.dead(&w.pins, &back.me).is_empty(), "not under a replaced key");
+        for (n, end) in [(0, &w.phone), (1, &w.ipad), (2, &w.mini)] {
+            assert!(matches!(w.groups[n].process(&end.provider, &w.pins, &out.commit).unwrap(), Incoming::Committed { .. }));
+        }
+        assert_eq!(unchecked_take(&mut at_old, &old.provider, &out.commit), Ok(None));
+
+        // Until it's out, nobody sends: not the new install, not Ana.
+        let held = w.groups[1].send(&w.ipad.provider, &w.ipad.me, &w.pins, b"too soon");
+        assert!(
+            matches!(held, Err(Error::Waiting { ref account, reason: validation::Held::Reinstalled }) if account == "matt"),
+            "{held:?}"
+        );
+        assert_eq!(w.groups[1].held(&w.pins, &w.ipad.me), Some(("matt".to_owned(), validation::Held::Reinstalled)));
+        assert_eq!(held.unwrap_err().to_string(), "waiting for matt's reinstalled device to finish");
+        assert!(matches!(at_back.send(&back.provider, &back.me, &w.pins, b"too soon"), Err(Error::Waiting { .. })));
+        // Ana never takes another person's leaf out.
+        assert!(w.groups[1].remove_dead(&w.ipad.provider, &w.ipad.me, &w.pins).unwrap().is_none());
+
+        let removal = at_back.remove_dead(&back.provider, &back.me, &w.pins).unwrap().expect("the former install to take out");
+        at_back.merge_pending(&back.provider).unwrap();
+        for (n, end) in [(0, &w.phone), (1, &w.ipad), (2, &w.mini)] {
+            assert!(matches!(w.groups[n].process(&end.provider, &w.pins, &removal.commit).unwrap(), Incoming::Committed { .. }));
+        }
+        assert!(at_back.stale(&w.pins).is_empty());
+        assert!(at_back.remove_dead(&back.provider, &back.me, &w.pins).unwrap().is_none(), "nothing more to take out");
+        let left: Vec<(String, [u8; 32])> = w.groups[1]
+            .members(&w.pins)
+            .into_iter()
+            .map(|member| {
+                let member = member.unwrap();
+                (member.leaf_id().to_owned(), member.certificate.leaf.signature_key)
+            })
+            .collect();
+        let tablets: Vec<_> = left.iter().filter(|(id, _)| id == "tablet").collect();
+        assert_eq!(tablets, [&("tablet".to_owned(), back.me.certificate.leaf.signature_key)], "{left:?}");
+
+        // Ana's next message: the new install reads it, the old one can't.
+        let said = w.groups[1].send(&w.ipad.provider, &w.ipad.me, &w.pins, b"welcome back").unwrap();
+        let Incoming::Application { content, .. } = at_back.process(&back.provider, &w.pins, &said).unwrap() else { panic!() };
+        assert_eq!(content, b"welcome back");
+        assert!(unchecked_take(&mut at_old, &old.provider, &said).is_err(), "the former install was taken out");
+    }
+
+    /// The person's other device takes a former install out too (its sweep),
+    /// even if the new install never rejoins this group; a friend never does.
+    #[test]
+    fn a_persons_other_device_takes_a_former_install_out_and_a_friend_never_does() {
+        let Reinstall { mut w, back, .. } = reinstall();
+        assert_eq!(w.groups[1].held(&w.pins, &w.ipad.me), Some(("matt".to_owned(), validation::Held::Reinstalled)));
+        assert!(w.groups[1].remove_dead(&w.ipad.provider, &w.ipad.me, &w.pins).unwrap().is_none());
+        let removal = w.groups[0].remove_dead(&w.phone.provider, &w.phone.me, &w.pins).unwrap().expect("the former install");
+        w.groups[0].merge_pending(&w.phone.provider).unwrap();
+        for (n, end) in [(1, &w.ipad), (2, &w.mini)] {
+            w.groups[n].process(&end.provider, &w.pins, &removal.commit).unwrap();
+        }
+        assert!(w.groups[1].leaf_ids().iter().all(|id| id != "tablet"));
+        assert_eq!(w.groups[1].held(&w.pins, &w.ipad.me), None);
+        w.groups[1].send(&w.ipad.provider, &w.ipad.me, &w.pins, b"sendable again").unwrap();
+        // The new install comes in as any added device does.
+        let added = w.groups[0].add(&w.phone.provider, &w.phone.me, &w.pins, &[back.me.key_package(&back.provider).unwrap()]).unwrap();
+        w.groups[0].merge_pending(&w.phone.provider).unwrap();
+        w.groups[1].process(&w.ipad.provider, &w.pins, &added.commit).unwrap();
+        assert!(w.groups[1].leaf_ids().contains(&"tablet".to_owned()));
+    }
+
+    /// The adder's own check (Fugo's condition 1): a KeyPackage from the
+    /// former install (same leaf id, its old key), which a stale worker
+    /// might still hand out, is refused as off the list, with nothing
+    /// staged.
+    #[test]
+    fn a_former_installs_key_package_is_refused_with_nothing_committed() {
+        let Reinstall { mut w, old, .. } = reinstall();
+        let removal = w.groups[0].remove_dead(&w.phone.provider, &w.phone.me, &w.pins).unwrap().unwrap();
+        w.groups[0].merge_pending(&w.phone.provider).unwrap();
+        drop(removal);
+        let epoch = w.groups[0].epoch();
+        let refused = w.groups[0].add(&w.phone.provider, &w.phone.me, &w.pins, &[old.me.key_package(&old.provider).unwrap()]);
+        assert!(matches!(refused, Err(Error::Unlisted { ref account }) if account == "matt"), "{refused:?}");
+        assert_eq!(w.groups[0].epoch(), epoch);
+        assert!(w.groups[0].mls.pending_commit().is_none(), "nothing staged");
+    }
+
+    /// A leaf under a replaced key is dead, never stale: stale is only a
+    /// leaf under its account's current key.
+    #[test]
+    fn a_leaf_under_a_replaced_key_is_dead_not_stale() {
+        let StartOver { mut w, fresh, mine, hers, info, .. } = start_over(false);
+        let (mut at_fresh, out) = Group::rejoin(&fresh.provider, &fresh.me, &mine, w.chat.clone(), b"conversation-1", &info).unwrap();
+        at_fresh.merge_pending(&fresh.provider).unwrap();
+        w.groups[1].process(&w.ipad.provider, &hers, &out.commit).unwrap();
+        assert!(!at_fresh.dead(&mine, &fresh.me).is_empty());
+        assert!(at_fresh.stale(&mine).is_empty());
+        assert!(w.groups[1].stale(&hers).is_empty());
+        assert_eq!(w.groups[1].held(&hers, &w.ipad.me), Some(("matt".to_owned(), validation::Held::Replaced)));
     }
 }

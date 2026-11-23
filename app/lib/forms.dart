@@ -2132,79 +2132,88 @@ class _ExtensionSettings extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    return Container(
-      margin: const EdgeInsets.only(bottom: Space.s),
-      padding: const EdgeInsets.all(Space.m),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(Radii.panel),
-        border: Border.all(color: palette.hairline),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _SwitchRow(
-            leading: ExtensionGlyph(
-              icon: extension.icon,
-              name: extension.name,
-              color: enabled && !limited ? palette.text : palette.textMuted,
-            ),
-            label: extension.name,
-            description: extension.description,
-            strong: true,
-            value: enabled,
-            onChanged: limited ? null : onEnabled,
-          ),
-          // Given secrets work whether or not it's on: say which it has.
-          if (extension.id == 'secrets')
-            Padding(
-              padding: const EdgeInsets.only(
-                top: Space.s,
-                left: Space.l + Space.s,
+    return LayoutBuilder(
+      builder: (context, constraints) => Container(
+        margin: const EdgeInsets.only(bottom: Space.s),
+        // Stacked, the name takes what the card's sides would: a long one
+        // ("Messaging") fits Slide Over's width whole at the largest text.
+        padding: _stacks(context, constraints.maxWidth)
+            ? const EdgeInsets.symmetric(
+                horizontal: Space.xs,
+                vertical: Space.m,
+              )
+            : const EdgeInsets.all(Space.m),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(Radii.panel),
+          border: Border.all(color: palette.hairline),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _SwitchRow(
+              leading: ExtensionGlyph(
+                icon: extension.icon,
+                name: extension.name,
+                color: enabled && !limited ? palette.text : palette.textMuted,
               ),
-              child: AgentSecretsSummary(agentId: agentId),
+              label: extension.name,
+              description: extension.description,
+              strong: true,
+              value: enabled,
+              onChanged: limited ? null : onEnabled,
             ),
-          if (enabled && !limited)
-            for (final option in extension.options)
+            // Given secrets work whether or not it's on: say which it has.
+            if (extension.id == 'secrets')
               Padding(
                 padding: const EdgeInsets.only(
-                  top: Space.m,
+                  top: Space.s,
                   left: Space.l + Space.s,
                 ),
-                child: switch (option.kind) {
-                  ExtensionOptionKind.EXTENSION_OPTION_KIND_AGENTS =>
-                    _AgentListOption(
-                      option: option,
-                      workspace: workspace,
-                      agentId: agentId,
-                      projectId: projectId,
-                      chosen: value(option.id).agentIds,
-                      onChanged: (ids) =>
-                          onOption(option.id, OptionValue(agentIds: ids)),
-                    ),
-                  ExtensionOptionKind.EXTENSION_OPTION_KIND_SWITCH =>
-                    _SwitchRow(
-                      label: option.label,
-                      description: option.description,
-                      value: value(option.id).on,
-                      onChanged: (on) =>
-                          onOption(option.id, OptionValue(on: on)),
-                    ),
-                  ExtensionOptionKind.EXTENSION_OPTION_KIND_CHOICE =>
-                    _ChoiceRow(
-                      option: option,
-                      value: value(option.id).choice,
-                      onChanged: (choice) =>
-                          onOption(option.id, OptionValue(choice: choice)),
-                    ),
-                  // A kind from a newer backend: say so rather than guess.
-                  _ => Text(
-                    '${option.label}: needs a newer Claktory',
-                    style: TypeScale.of(context).caption
-                        .copyWith(color: palette.textFaint),
-                  ),
-                },
+                child: AgentSecretsSummary(agentId: agentId),
               ),
-        ],
+            if (enabled && !limited)
+              for (final option in extension.options)
+                Padding(
+                  padding: const EdgeInsets.only(
+                    top: Space.m,
+                    left: Space.l + Space.s,
+                  ),
+                  child: switch (option.kind) {
+                    ExtensionOptionKind.EXTENSION_OPTION_KIND_AGENTS =>
+                      _AgentListOption(
+                        option: option,
+                        workspace: workspace,
+                        agentId: agentId,
+                        projectId: projectId,
+                        chosen: value(option.id).agentIds,
+                        onChanged: (ids) =>
+                            onOption(option.id, OptionValue(agentIds: ids)),
+                      ),
+                    ExtensionOptionKind.EXTENSION_OPTION_KIND_SWITCH =>
+                      _SwitchRow(
+                        label: option.label,
+                        description: option.description,
+                        value: value(option.id).on,
+                        onChanged: (on) =>
+                            onOption(option.id, OptionValue(on: on)),
+                      ),
+                    ExtensionOptionKind.EXTENSION_OPTION_KIND_CHOICE =>
+                      _ChoiceRow(
+                        option: option,
+                        value: value(option.id).choice,
+                        onChanged: (choice) =>
+                            onOption(option.id, OptionValue(choice: choice)),
+                      ),
+                    // A kind from a newer backend: say so rather than guess.
+                    _ => Text(
+                      '${option.label}: needs a newer Claktory',
+                      style: TypeScale.of(context).caption
+                          .copyWith(color: palette.textFaint),
+                    ),
+                  },
+                ),
+          ],
+        ),
       ),
     );
   }
@@ -2318,6 +2327,12 @@ class _ChoiceRow extends StatelessWidget {
   }
 }
 
+/// Whether a switch's words go under it rather than beside it: narrower
+/// than 400 at the accessibility text sizes (an iPad's Slide Over), so they
+/// take the row's whole width and a name never breaks mid-word.
+bool _stacks(BuildContext context, double width) =>
+    largeText(context) && width < 400;
+
 /// A label and its description beside a switch.
 class _SwitchRow extends StatelessWidget {
   const _SwitchRow({
@@ -2343,47 +2358,57 @@ class _SwitchRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    return Row(
+    final words = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (leading != null) ...[
-          Padding(padding: const EdgeInsets.only(top: 2), child: leading),
-          const SizedBox(width: Space.s),
-        ],
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style:
-                    (strong
-                            ? TypeScale.of(context).label
-                            : TypeScale.of(context).body)
-                        .copyWith(
-                          color: onChanged == null
-                              ? palette.textMuted
-                              : palette.text,
-                        ),
-              ),
-              if (description.isNotEmpty)
-                Text(
-                  description,
-                  style: TypeScale.of(context).caption.copyWith(
-                    color: onChanged == null
-                        ? palette.textFaint
-                        : palette.textMuted,
+        Text(
+          label,
+          style:
+              (strong
+                      ? TypeScale.of(context).label
+                      : TypeScale.of(context).body)
+                  .copyWith(
+                    color: onChanged == null ? palette.textMuted : palette.text,
                   ),
-                ),
-            ],
+        ),
+        if (description.isNotEmpty)
+          Text(
+            description,
+            style: TypeScale.of(context).caption.copyWith(
+              color: onChanged == null ? palette.textFaint : palette.textMuted,
+            ),
           ),
-        ),
-        const SizedBox(width: Space.m),
-        Padding(
-          padding: const EdgeInsets.only(top: 2),
-          child: Toggle(value: value, onChanged: onChanged, label: label),
-        ),
       ],
+    );
+    final toggle = Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Toggle(value: value, onChanged: onChanged, label: label),
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (_stacks(context, constraints.maxWidth)) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            spacing: Space.xs,
+            children: [
+              Row(children: [?leading, const Spacer(), toggle]),
+              words,
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (leading != null) ...[
+              Padding(padding: const EdgeInsets.only(top: 2), child: leading),
+              const SizedBox(width: Space.s),
+            ],
+            Expanded(child: words),
+            const SizedBox(width: Space.m),
+            toggle,
+          ],
+        );
+      },
     );
   }
 }

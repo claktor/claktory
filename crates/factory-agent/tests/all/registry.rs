@@ -146,7 +146,7 @@ async fn the_registry_lists_the_four_providers_and_their_models() {
     assert_eq!(registry.get_model("openai-codex", "gpt-5.6-luna"), Some(catalog_luna()));
     assert!(registry.get_model("openai", "nope").is_none());
     assert!(registry.get_models(Some("nope")).is_empty());
-    assert_eq!(registry.get_models(None).len(), 38 + 8 + 353 + 15);
+    assert_eq!(registry.get_models(None).len(), 38 + 8 + 356 + 15);
     let codex = registry.provider("openai-codex").unwrap();
     assert_eq!(codex.oauth.as_ref().map(|oauth| oauth.name()), Some("OpenAI (ChatGPT Plus/Pro)"));
     assert!(codex.api.is_some() && codex.api_key.is_none());
@@ -270,7 +270,10 @@ async fn stream_fn_resolves_auth_lazily_and_reports_setup_failures_as_error_even
     let model = registry.get_model("fake", "gpt-5.6-luna").unwrap();
     let result = stream(&model, context.clone(), StreamOptions::default()).unwrap().result().await.unwrap();
     assert_eq!(result.stop_reason, StopReason::Error);
-    assert_eq!(result.error_message.as_deref(), Some("Provider is not configured: fake"));
+    // Signed in to no account: the request fails marked as having none
+    // left, which an agent waits out until a sign-in.
+    assert_eq!(result.error_message.as_deref(), Some("You're signed out of Fake."));
+    assert_eq!(factory_agent::accounts::none_left(&result), Some(None));
     assert!(result.content.is_empty());
     stored(dir.path(), "fake", json!({"type": "oauth", "access": "tok", "refresh": "r", "expires": now_ms() + 3_600_000}));
     let options = StreamOptions { session_id: Some("s".into()), headers: vec![("extra".into(), "2".into())], ..StreamOptions::default() };

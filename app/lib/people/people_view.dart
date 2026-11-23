@@ -12,6 +12,8 @@ import '../mobile/metrics.dart';
 import '../mobile/navigation.dart' show PhoneRoutes;
 import '../mobile/presentation.dart';
 import '../protocol/factory/v1/factory.pb.dart' show Workspace;
+import '../scan_code.dart';
+import '../scope.dart';
 import '../user_apps/session.dart';
 import '../your_claktories.dart' show DeviceSignInDialog;
 import 'chat.dart';
@@ -312,9 +314,16 @@ class _PeopleViewState extends State<PeopleView> {
       title: 'People',
       fields: [
         if (_signedOut) ...[
-          Text(
-            problemText(const UserAppError(UserAppProblem.notSignedIn)),
-            style: type.body.copyWith(color: palette.textMuted),
+          // Removed by another of the person's devices, it says so (row
+          // 199), as the service's refusal does at the next sign-in.
+          ListenableBuilder(
+            listenable: AppScope.scope(context).connections.account,
+            builder: (context, _) => Text(
+              AppScope.scope(context).connections.account.removed
+                  ? deviceRemovedText
+                  : problemText(const UserAppError(UserAppProblem.notSignedIn)),
+              style: type.body.copyWith(color: palette.textMuted),
+            ),
           ),
           const SizedBox(height: Space.s),
           Align(
@@ -775,11 +784,34 @@ class _AddFriendFormState extends State<AddFriendForm> {
   String? _actionId;
   String _actionFor = '';
 
+  /// A friend ID's QR code can be scanned here, with the camera (friend
+  /// bug #2): My friend ID shows one.
+  var _canScan = false;
+
   @override
   void initState() {
     super.initState();
     _code.addListener(() => setState(() {}));
     unawaited(_loadMe());
+    unawaited(
+      canOfferScan(context).then((can) {
+        if (mounted && can) setState(() => _canScan = true);
+      }),
+    );
+  }
+
+  /// Scans their friend ID's QR code into the field; Send request is still
+  /// the person's.
+  Future<void> _scan() async {
+    final scanned = await scanCode(
+      context,
+      title: 'Scan their friend ID',
+      check: (text) =>
+          text.contains('add-friend#') && friendIdFrom(text).isNotEmpty
+          ? null
+          : "This isn't a friend ID.",
+    );
+    if (scanned != null && mounted) _code.text = friendIdFrom(scanned);
   }
 
   Future<void> _loadMe() async {
@@ -846,8 +878,9 @@ class _AddFriendFormState extends State<AddFriendForm> {
     return FormFrame(
       title: 'Add a friend',
       body:
-          'Paste or type their friend ID. They see your name and picture '
-          'with your request, nothing else. $dmDisclosure',
+          '${_canScan ? 'Paste, type or scan their friend ID.' : 'Paste or type their friend ID.'} '
+          'They see your name and picture with your request, nothing else. '
+          '$dmDisclosure',
       dirty: _code.text.isNotEmpty,
       fields: [
         Field(
@@ -861,6 +894,17 @@ class _AddFriendFormState extends State<AddFriendForm> {
             onSubmitted: (_) => _send(),
           ),
         ),
+        if (_canScan)
+          Padding(
+            padding: const EdgeInsets.only(bottom: Space.l),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: Button(
+                label: 'Scan code',
+                onPressed: _busy ? null : _scan,
+              ),
+            ),
+          ),
         if (me != null)
           Field(
             label: 'They see',

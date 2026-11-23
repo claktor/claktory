@@ -12,6 +12,8 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart'
 import 'package:factory_app/tunnel/api/dm.dart';
 import 'package:factory_app/tunnel/api/dm_transfer.dart';
 import 'package:factory_app/user_apps/session.dart';
+import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
+    show AnyhowException;
 
 // Fakes for end-to-end messages in widget tests, where the app's Rust
 // isn't loaded: [FakeWorker] keeps the worker's E2 routes (README "End to
@@ -67,6 +69,10 @@ class FakeWorker {
   /// (POST /v1/devices/remove): the service answers them 401 since.
   final signedOut = <String, Set<String>>{};
 
+  /// The listed devices of each account that signed themselves out of it
+  /// (row 671): `GET keys/<own account>` marks them.
+  final accountSignOuts = <String, Set<String>>{};
+
   /// Each account's security keys before the one it has now: the worker
   /// takes none of them again (POST me/keys/rotate).
   final retired = <String, Set<String>>{};
@@ -78,6 +84,9 @@ class FakeWorker {
   /// returns instead, when that's an exception: the service unreachable,
   /// or refusing.
   Object? Function(String route)? refuse;
+
+  /// Devices ("account/leaf") whose sign-in is too old for a new key.
+  final staleSignIn = <String>{};
   var _welcomeId = 0;
 
   int epochOf(String group) => _groups[group]!.epoch;
@@ -124,7 +133,16 @@ class FakeWorker {
     final parts = route.split(' ')[1].split('/');
     switch ((route.split(' ')[0], parts)) {
       case ('GET', ['keys', final who]):
-        return keys[who] ?? _refuse(404, 'not_found');
+        final now = keys[who] ?? _refuse(404, 'not_found');
+        return {
+          ...now,
+          // Oldest first (row 654).
+          if (retired[who] case final old? when old.isNotEmpty)
+            'replaced_identity_keys': [...old],
+          // Only to one of the account's own devices (row 671).
+          if (who == account && (accountSignOuts[who]?.isNotEmpty ?? false))
+            'signed_out': [...accountSignOuts[who]!],
+        };
       case ('PUT', ['me', 'keys']):
         final now = keys[account];
         if ((now?['version'] ?? 0) != body['previous_version']) {
@@ -136,6 +154,21 @@ class FakeWorker {
             body['identity_key'] != now['identity_key']) {
           _refuse(409, 'identity_changed');
         }
+        // A leaf off the list gets no more key packages: its own go
+        // (the worker's keep_listed).
+        final listed = {
+          for (final leaf
+              in (jsonDecode(
+                    utf8.decode(dmUnb64(body['device_list']! as String)),
+                  ) as Map)['leaves']
+                  as List)
+            '$account/${(leaf as Map)['leaf']}',
+        };
+        for (final kept in [packages, lastResort]) {
+          kept.removeWhere(
+            (key, _) => key.startsWith('$account/') && !listed.contains(key),
+          );
+        }
         return keys[account] = {
           'account_id': account,
           'identity_key': identity,
@@ -143,6 +176,10 @@ class FakeWorker {
           'version': body['version'],
         };
       case ('POST', ['me', 'keys', 'rotate']):
+        // A new key from a device signed in long ago (row 630, Fugo).
+        if (staleSignIn.contains('$account/$leaf')) {
+          _refuse(403, 'sign_in_again');
+        }
         final now = keys[account];
         final identity = body['identity_key']! as String;
         if (now == null) _refuse(409, 'not_set_up');
@@ -358,7 +395,11 @@ class FakeDmKeys implements DmKeys {
   }
 
   @override
-  Future<void> delete(DmKeyName name) async => kept.remove(name);
+  Future<void> delete(DmKeyName name) async {
+    // A damaged item goes too, as the keychain deletes it.
+    kept.remove(name);
+    unreadable.remove(name);
+  }
 
   @override
   Future<String> folder() async => '/fake';
@@ -409,6 +450,24 @@ class FakeDmDevice implements DmDevice {
   /// Every process call's outcome, for tests.
   final processed = <DmProcessed>[];
 
+  /// The store deleted ([E2ee] forgetting it): as a new one opens empty.
+  void forget() {
+    setUp = false;
+    account = '';
+    leaf = '';
+    name = '';
+    identity = null;
+    pins.clear();
+    lists.clear();
+    _groups.clear();
+    _history.clear();
+    _outgoing.clear();
+    _views.clear();
+    removedLeaves.clear();
+    usedCodes.clear();
+    removalRow = null;
+  }
+
   String _member() => '$account/$leaf';
 
   @override
@@ -446,6 +505,75 @@ class FakeDmDevice implements DmDevice {
     );
   }
 
+  /// The key [setUpNewKey] replaced, held as retired here.
+  Uint8List? replacedKey;
+
+  @override
+  Future<DmSetUp> setUpNewKey({
+    required List<int> identityKey,
+    required List<int> oldIdentityPublic,
+    required List<Uint8List> replacedIdentityKeys,
+    required String accountId,
+    required String leafId,
+    required String name,
+    required BigInt nowMs,
+  }) async {
+    if (listEqualsInts(_public(identityKey), oldIdentityPublic)) {
+      throw AnyhowException("that's the key the account has");
+    }
+    if (replacedIdentityKeys.any(
+      (key) => listEqualsInts(key, _public(identityKey)),
+    )) {
+      throw AnyhowException("that's the key the account has");
+    }
+    replacedKey = Uint8List.fromList(oldIdentityPublic);
+    replacedBefore = [...replacedIdentityKeys];
+    return setUpFirst(
+      identityKey: identityKey,
+      accountId: accountId,
+      leafId: leafId,
+      name: name,
+      nowMs: nowMs,
+    );
+  }
+
+  /// The keys a start-over here retired before the one it replaced.
+  List<Uint8List> replacedBefore = const [];
+
+  /// Keys retired here because a held commit proved them (row 654), by
+  /// account, base64url.
+  final retiredHere = <String, Set<String>>{};
+
+  @override
+  Future<bool> retireReplaced({
+    required List<int> groupId,
+    required String envelope,
+    required String account,
+    required List<int> served,
+    required List<Uint8List> listed,
+  }) async {
+    final body = readFake(envelope);
+    final key = body['id'];
+    final whose = (body['from'] as String? ?? '').split('/').first;
+    final pinned = pins[account]?.identityPublic;
+    if (listed.any(
+      (each) =>
+          listEqualsInts(each, served) ||
+          (pinned != null && listEqualsInts(each, pinned)),
+    )) {
+      throw AnyhowException(
+        'refused: the service lists a current security key as replaced',
+      );
+    }
+    if (key is! String ||
+        whose != account ||
+        key == dmB64(served) ||
+        !listed.any((each) => dmB64(each) == key)) {
+      return false;
+    }
+    return (retiredHere[account] ??= {}).add(key);
+  }
+
   /// Each account's device list as this device last took it.
   final lists = <String, DmDeviceList>{};
 
@@ -470,17 +598,38 @@ class FakeDmDevice implements DmDevice {
   @override
   DmDeviceList? deviceList({required String account}) => lists[account];
 
+  /// The person's devices removed here or off a list this device took,
+  /// and the codes handed off to, as the Rust keeps them (row 612).
+  final removedLeaves = <String>{};
+  final usedCodes = <String>{};
+
+  /// [list] as [account]'s, keeping the person's leaves it drops as
+  /// removed.
+  DmDeviceList _takeList(String account, DmDeviceList list) {
+    final before = lists[account];
+    if (account == this.account && before != null) {
+      final now = {for (final leaf in list.leaves) leaf.leafId};
+      removedLeaves.addAll([
+        for (final leaf in before.leaves)
+          if (!now.contains(leaf.leafId)) leaf.leafId,
+      ]);
+    }
+    return lists[account] = list;
+  }
+
+  @override
+  Future<void> codeUsed({required String comparison}) async =>
+      usedCodes.add(comparison);
+
   @override
   Future<Uint8List> signDeviceList({
     required BigInt version,
     required BigInt createdMs,
     required List<DmListed> leaves,
   }) async {
-    final list = lists[account] = DmDeviceList(
-      version: version,
-      leaves: leaves,
-    );
-    return _listBytes(list);
+    // Signed only: pinned once the worker takes it ([acceptList]), as the
+    // Rust (row 615).
+    return _listBytes(DmDeviceList(version: version, leaves: leaves));
   }
 
   @override
@@ -502,6 +651,12 @@ class FakeDmDevice implements DmDevice {
   Future<DmHandoffSealed> sealHandoff({required String qr}) async {
     final offer = jsonDecode(qr) as Map<String, Object?>;
     final leaf = offer['leaf']! as String;
+    if (removedLeaves.contains(leaf) ||
+        usedCodes.contains(fakeDigits(jsonEncode(offer)))) {
+      throw AnyhowException(
+        'This code was already used, or is for a device you removed.',
+      );
+    }
     return DmHandoffSealed(
       sealed: Uint8List.fromList(
         utf8.encode(
@@ -679,8 +834,121 @@ class FakeDmDevice implements DmDevice {
   Future<void> keyChanged({
     required String account,
     required List<int> identityPublic,
-  }) async =>
-      pins[account] = _pin(Uint8List.fromList(identityPublic), changed: true);
+  }) async {
+    keyChangedFor.add(account);
+    pins[account] = _pin(Uint8List.fromList(identityPublic), changed: true);
+  }
+
+  /// Accounts whose key changed here: their leaves the new list doesn't
+  /// name are dead (row 630), as are this device's own account's after it
+  /// set up under a new key ([replacedKey]).
+  final keyChangedFor = <String>{};
+
+  bool _dead(String member) {
+    final who = member.split('/').first;
+    final leafId = member.split('/').last;
+    if (claktoryOf(leafId) != null || member == _member()) return false;
+    final changed =
+        keyChangedFor.contains(who) || (who == account && replacedKey != null);
+    return changed && !_listedHere(member);
+  }
+
+  /// The person's devices [removeDeadLeaves] took out, as the Rust keeps
+  /// them.
+  final replaced = <DmMember>[];
+
+  @override
+  Future<DmCommit?> removeDeadLeaves({required List<int> groupId}) async {
+    final here = _groups[dmB64(groupId)]!;
+    final dead = [
+      for (final member in here.members)
+        if (_dead(member) && member.split('/').first == account) member,
+    ];
+    if (dead.isEmpty) return null;
+    for (final member in dead) {
+      final leafId = member.split('/').last;
+      if (replaced.any((each) => each.leafId == leafId)) continue;
+      replaced.add(
+        DmMember(
+          account: account,
+          leafId: leafId,
+          kind: DmLeafKind.device,
+          name: leafId,
+          sinceMs: BigInt.zero,
+        ),
+      );
+    }
+    return removeMembers(
+      groupId: groupId,
+      leafIds: [for (final member in dead) member.split('/').last],
+    );
+  }
+
+  @override
+  Future<List<DmMember>> replacedDevices() async => [...replaced];
+
+  @override
+  Future<void> forgetReplaced({required String leafId}) async =>
+      replaced.removeWhere((each) => each.leafId == leafId);
+
+  @override
+  Future<List<String>> replacedLeaves({required List<int> groupId}) async => [
+    if (replacedKey != null)
+      for (final member in _groups[dmB64(groupId)]?.members ?? const <String>[])
+        if (member.split('/').first == account &&
+            member != _member() &&
+            !_listedHere(member))
+          member.split('/').last,
+  ];
+
+  /// Groups a reinstalled device's former install holds here (row 202), by
+  /// group: whose, and the device's name.
+  final reinstalledIn = <String, ({String account, String device})>{};
+
+  @override
+  Future<String?> reinstalling({required List<int> groupId}) async =>
+      reinstalledIn[dmB64(groupId)]?.device;
+
+  /// In a conversation, the other person when none of their devices is
+  /// a member that passes ([members]) (row 676).
+  String? _notJoined(_Here here) {
+    if (here.kind.kind != DmGroupType.conversation) return null;
+    // A wait for a new security key says so first ([waitingFor]).
+    if (here.members.any(_dead)) return null;
+    for (final account in here.kind.accounts) {
+      if (account == this.account) continue;
+      final present = here.members.any(
+        (member) =>
+            member.split('/').first == account &&
+            claktoryOf(member.split('/').last) == null &&
+            _listedHere(member) &&
+            !_dead(member),
+      );
+      if (!present) return account;
+    }
+    return null;
+  }
+
+  @override
+  Future<DmJoining?> notJoined({required List<int> groupId}) async {
+    final here = _groups[dmB64(groupId)];
+    if (here == null) return null;
+    final account = _notJoined(here);
+    if (account == null) return null;
+    final first = here.members
+        .where((member) => member.split('/').first == this.account)
+        .firstOrNull;
+    return DmJoining(account: account, addsFirst: first == _member());
+  }
+
+  @override
+  Future<String?> waitingFor({required List<int> groupId}) async {
+    if (reinstalledIn[dmB64(groupId)] case final held?) return held.account;
+    for (final member in _groups[dmB64(groupId)]?.members ?? const <String>[]) {
+      if (_dead(member)) return member.split('/').first;
+    }
+    return null;
+  }
 
   @override
   Future<void> seen({required String account}) async =>
@@ -696,15 +964,18 @@ class FakeDmDevice implements DmDevice {
     required List<int> deviceList,
   }) async {
     final json = jsonDecode(utf8.decode(deviceList)) as Map<String, Object?>;
-    lists[account] = DmDeviceList(
-      version: BigInt.from(json['version']! as int),
-      leaves: [
-        for (final leaf in json['leaves']! as List)
-          _listed(
-            (leaf as Map)['leaf']! as String,
-            dmUnb64(leaf['key']! as String),
-          ),
-      ],
+    _takeList(
+      account,
+      DmDeviceList(
+        version: BigInt.from(json['version']! as int),
+        leaves: [
+          for (final leaf in json['leaves']! as List)
+            _listed(
+              (leaf as Map)['leaf']! as String,
+              dmUnb64(leaf['key']! as String),
+            ),
+        ],
+      ),
     );
   }
 
@@ -763,6 +1034,43 @@ class FakeDmDevice implements DmDevice {
     ])..seq = seq;
   }
 
+  /// When set, what a join by external commit throws (a member's checks
+  /// failing, say).
+  Object? Function()? refuseRejoin;
+
+  @override
+  Future<void> noteSkipped({
+    required List<int> groupId,
+    required int seq,
+    required int arrivedMs,
+    required String because,
+  }) async {
+    _history.putIfAbsent(dmB64(groupId), () => [])
+      ..add(
+        DmMessage(
+          seq: seq,
+          mine: false,
+          fromAccount: '',
+          fromLeaf: '',
+          fromKindDevice: false,
+          content: const DmContent(
+            kind: '',
+            clientMessageId: '',
+            extraJson: '',
+          ),
+          arrivedMs: arrivedMs,
+          members: DmMembers(
+            setUpAgain: const [],
+            added: const [],
+            removed: const [],
+            keyChanged: const [],
+            skipped: because,
+          ),
+        ),
+      )
+      ..sort((a, b) => a.seq.compareTo(b.seq));
+  }
+
   @override
   Future<DmCommit> rejoinGroup({
     required List<int> groupId,
@@ -770,6 +1078,7 @@ class FakeDmDevice implements DmDevice {
     required String groupInfo,
     required int seq,
   }) async {
+    if (refuseRejoin?.call() case final refusal?) throw refusal;
     final info = readFake(groupInfo);
     final id = dmB64(groupId);
     final epoch = info['epoch']! as int;
@@ -803,6 +1112,13 @@ class FakeDmDevice implements DmDevice {
     final added = [
       for (final package in keyPackages) readFake(package)['member']! as String,
     ];
+    // As Group::add: each against its account's list as this device took
+    // it (Fugo, row 676).
+    for (final member in added) {
+      if (!_listedHere(member)) {
+        throw StateError("a device that isn't on its account's list");
+      }
+    }
     final members = [...here.members, ...added];
     final commit = fakeEnvelope({
       't': 'commit',
@@ -856,6 +1172,9 @@ class FakeDmDevice implements DmDevice {
       for (final account in here.kind.accounts) {
         if (pins[account]?.canSend == false) throw StateError('key changed');
       }
+    }
+    if (_notJoined(here) case final account?) {
+      throw StateError('waiting for $account to join');
     }
     if (_outgoing[content.clientMessageId] case final kept?) {
       return kept.envelope;
@@ -1000,6 +1319,7 @@ class FakeDmDevice implements DmDevice {
         epoch: BigInt.from(here.epoch),
         why: '',
         handshake: handshake,
+        replaced: false,
       );
       this.processed.add(processed);
       return processed;
@@ -1033,6 +1353,7 @@ class FakeDmDevice implements DmDevice {
             epoch: BigInt.from(here.epoch),
             why: whose,
             handshake: true,
+            replaced: retiredHere[whose]?.contains(key) ?? false,
           );
           processed.add(held);
           return held;
@@ -1055,6 +1376,7 @@ class FakeDmDevice implements DmDevice {
             ),
             arrivedMs: arrivedMs,
             members: DmMembers(
+              setUpAgain: const [],
               added: const [],
               removed: const [],
               keyChanged: [whose],
@@ -1180,15 +1502,18 @@ class FakeDmDevice implements DmDevice {
     identity = public;
     pins[account] = _pin(public);
     final json = jsonDecode(list) as Map<String, Object?>;
-    lists[account] = DmDeviceList(
-      version: BigInt.from(json['version']! as int),
-      leaves: [
-        for (final each in json['leaves']! as List)
-          _listed(
-            (each as Map)['leaf']! as String,
-            dmUnb64(each['key']! as String),
-          ),
-      ],
+    _takeList(
+      account,
+      DmDeviceList(
+        version: BigInt.from(json['version']! as int),
+        leaves: [
+          for (final each in json['leaves']! as List)
+            _listed(
+              (each as Map)['leaf']! as String,
+              dmUnb64(each['key']! as String),
+            ),
+        ],
+      ),
     );
     for (final here in _groups.values) {
       here.moved = false;
@@ -1212,8 +1537,10 @@ class FakeDmDevice implements DmDevice {
   DmRemoval? removalRow;
 
   @override
-  Future<void> beginRemoval({required DmRemoval removal}) async =>
-      removalRow = removal;
+  Future<void> beginRemoval({required DmRemoval removal}) async {
+    removedLeaves.addAll(removal.remove);
+    removalRow = removal;
+  }
 
   @override
   Future<DmRemoval?> removal() async => removalRow;
@@ -1448,6 +1775,10 @@ class FakeHandoff implements DmHandoff {
 /// A person's device in a [FakeWorker]'s world: its keys, its store, and
 /// the engine over both.
 class FakeEndpoint {
+  /// How long each engine made from now waits before trying again (the
+  /// engine's own default unless a test shortens it).
+  static var retryAfter = const Duration(seconds: 5);
+
   /// [route] wraps the worker's calls, to send others elsewhere.
   FakeEndpoint(
     this.worker,
@@ -1465,14 +1796,22 @@ class FakeEndpoint {
         call: route?.call(call) ?? call,
       ),
       keys: keys,
-      open: ({
-        required String path,
-        required List<int> storeKey,
-        required List<int> leafKey,
-        Uint8List? identityKey,
-      }) async => device,
+      open:
+          ({
+            required String path,
+            required List<int> storeKey,
+            required List<int> leafKey,
+            Uint8List? identityKey,
+          }) async {
+            storeKept = true;
+            return device;
+          },
       newSecret: () async => Uint8List.fromList(List.filled(32, ++_secrets)),
-      removeStore: (_) async {},
+      removeStore: (_) async {
+        storeKept = false;
+        device.forget();
+      },
+      storeExists: (_) async => storeKept,
       whoAmI: () async =>
           (accountId: account, name: name ?? leaf, deviceKey: leaf),
       nowMs: () => now,
@@ -1483,6 +1822,7 @@ class FakeEndpoint {
         return transfer;
       },
       admitTransfer: (_) async => admit,
+      retryAfter: retryAfter,
     );
     e2ee = _make();
   }
@@ -1494,8 +1834,25 @@ class FakeEndpoint {
     return e2ee = _make();
   }
 
+  /// Whether this endpoint's store is there: made at its first open, gone
+  /// once removed or at a [reinstall].
+  var storeKept = false;
+
+  /// The app deleted and installed again (row 202): its store gone, its
+  /// key store kept, as an iPhone's keychain keeps it.
+  E2ee reinstall() {
+    e2ee.dispose();
+    storeKept = false;
+    device.forget();
+    return e2ee = _make();
+  }
+
   late final E2ee Function() _make;
   var _secrets = 0;
+
+  /// Makes this endpoint's next secrets differ from another's that made
+  /// [count] already (each counts from one).
+  void skipSecrets(int count) => _secrets += count;
 
   /// The endpoints it bound for history (E8), and whether the relay admits
   /// the next.

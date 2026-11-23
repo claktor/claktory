@@ -256,8 +256,17 @@ class ExtensionPanel extends StatelessWidget {
               children: [
                 WindowDrag(
                   child: Container(
-                    height: titleBarHeight,
-                    padding: const EdgeInsets.fromLTRB(Space.l, 0, Space.s, 0),
+                    // The title bar's height, taller when large text needs
+                    // it (an iPad at accessibility sizes), never cut.
+                    constraints: const BoxConstraints(
+                      minHeight: titleBarHeight,
+                    ),
+                    padding: const EdgeInsets.fromLTRB(
+                      Space.l,
+                      Space.xs,
+                      Space.s,
+                      Space.xs,
+                    ),
                     decoration: BoxDecoration(
                       border: Border(
                         bottom: BorderSide(color: palette.hairline),
@@ -559,8 +568,14 @@ class _ChecklistViewState extends State<ChecklistView> {
     bool finished(ChecklistItem item) =>
         item.status == ChecklistStatus.CHECKLIST_STATUS_DONE ||
         item.status == ChecklistStatus.CHECKLIST_STATUS_DROPPED;
-    int byAdded(ChecklistItem a, ChecklistItem b) =>
-        a.created.compareTo(b.created);
+    // Items added in one call share their millisecond: then by number, as
+    // they were added (List.sort isn't stable past 32: Abbacchio's row
+    // 661).
+    int byAdded(ChecklistItem a, ChecklistItem b) {
+      final added = a.created.compareTo(b.created);
+      return added != 0 ? added : a.id.compareTo(b.id);
+    }
+
     // Everything added each day, for its count; only finished items are
     // listed under it.
     final days = <DateTime, List<ChecklistItem>>{};

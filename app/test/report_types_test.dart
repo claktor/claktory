@@ -243,6 +243,49 @@ void main() {
     expect(harness.last.deleteReportType.id, 'question');
   });
 
+  testWidgets("deleting a kind that's still on says where to turn it off, "
+      "rather than promising pipes stop forwarding it (Zucchero's T6 nit)", (
+    tester,
+  ) async {
+    final snapshot = _workspace();
+    snapshot.pipes.first.forward.typeIds.add('question');
+    snapshot.projects.first.reportForward = PipeForward(
+      recipientId: 'ingrid',
+      typeIds: ['question'],
+    );
+    final harness = await show(tester, workspace: snapshot);
+    showReportType(tester.element(find.text('Omar').first), _question);
+    await settle(tester);
+    await tester.tap(find.text('Delete…'));
+    await settle(tester);
+    expect(find.text('Delete “Question”?'), findsOneWidget);
+    expect(
+      find.text(
+        '“Question” is still forwarded by Acme launch and Factory\'s new '
+        'pipes. Turn it off there first.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Pipes stop forwarding'), findsNothing);
+    await tester.tap(find.text('Delete'));
+    await settle(tester);
+    expect(harness.backend.sent.where((m) => m.hasDeleteReportType()), isEmpty);
+
+    // Turned off there (on another device, say): it can go.
+    final off = harness.backend.workspace.workspace.deepCopy();
+    off.pipes.first.forward.typeIds.remove('question');
+    off.projects.first.clearReportForward();
+    harness.backend.workspace.apply(off);
+    await settle(tester);
+    expect(
+      find.text('No pipe forwards it. Reports already forwarded keep it.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Delete'));
+    await settle(tester);
+    expect(harness.last.deleteReportType.id, 'question');
+  });
+
   testWidgets('a new kind: a name, fields with their caps clamped to '
       "Claktory's ceilings, a list's choices, and the answers", (tester) async {
     final harness = await show(tester);

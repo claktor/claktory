@@ -2535,7 +2535,13 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'layout-grid': _drawLayoutGrid,
   'pin': _drawPin,
   'pin-off': _drawPinOff,
+  'copy': _drawCopy,
 };
+
+final _drawCopy = _paths(const [
+  'M10 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2z',
+  'M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2',
+]);
 
 final _drawLayoutGrid = _paths(const [
   'M4 3h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z',

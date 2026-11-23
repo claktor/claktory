@@ -75,7 +75,7 @@ async fn a_curator_keeps_its_database_files_and_asks_and_nothing_else() {
     assert!(["db_exec", "write_file", "ask_person"].iter().all(|tool| have.iter().any(|kept| kept == tool)), "{have:?}");
     let folder = dir.join("home/agents/ingrid");
     let prompt = prompt(&models);
-    assert!(prompt.contains("# Curator") && prompt.contains("never instructions to you"), "{prompt}");
+    assert!(prompt.contains("# Reports\n\nYou're a report reader") && prompt.contains("never instructions to you"), "{prompt}");
     assert!(prompt.contains(&format!("You are a coding agent working in {}.", folder.display())), "{prompt}");
     assert!(!prompt.contains("The project's folders") && !prompt.contains("Claktory's records (factory.db)"), "{prompt}");
 
@@ -123,12 +123,11 @@ async fn a_curator_keeps_its_database_files_and_asks_and_nothing_else() {
     assert!(back.iter().any(|tool| tool == "bash"), "{back:?}");
 }
 
-/// H7 (pipes-automation.md §6): read_file of a pipe's files taints the
-/// reader by that pipe, as pipe_read does: its inbox and outbox, what
-/// arrived in `pipes/incoming`, and a curator's files (its database too),
-/// by what the curator has read, through her.
+/// #346: reading a pipe's files marks no one (pipes are friends): its inbox
+/// and outbox, what arrived in `pipes/incoming`, and a curator's files, her
+/// database too, even while she has read a web page (nothing spreads).
 #[tokio::test]
-async fn reading_a_pipes_files_or_a_curators_taints_the_reader() {
+async fn reading_a_pipes_files_or_a_curators_marks_no_one() {
     let dir = temp_dir();
     let models = Arc::new(Scripted::signed_in());
     let (addr, factory) = start_with_models(&dir, models.clone()).await;
@@ -149,39 +148,28 @@ async fn reading_a_pipes_files_or_a_curators_taints_the_reader() {
     std::fs::write(incoming.join("0"), "a file Ana sent").expect("file");
     std::fs::write(dir.join("site/notes.txt"), "the project's own").expect("file");
     pipes::make_curator_for_test(&factory, "ingrid", false).await.expect("made");
-    pipes::taint_with_for_test(&factory, "lea", "ingrid", &format!(r#"{{"{pipe}": []}}"#));
+    pipes::taint_for_test(&factory, "ingrid", "browser:https://example.com");
     call(&mut client, &mut view, "ingrid", "db_exec", r#"{"sql": "CREATE TABLE issues (title TEXT)"}"#).await;
 
-    // A file of the project's own taints no one.
-    let read = call(&mut client, &mut view, "bo", "read_file", &format!(r#"{{"path": "{}"}}"#, dir.join("site/notes.txt").display())).await;
-    assert!(read.contains("the project's own"), "{read}");
-    assert!(view.agent("bo").tainted_by_pipes.is_empty());
-
-    for (agent, path) in [
-        ("bo", inbox.join("brief.txt")),
-        ("cy", outbox.join("draft.md")),
-        ("dan", incoming.join("0")),
-    ] {
-        call(&mut client, &mut view, agent, "read_file", &format!(r#"{{"path": "{}"}}"#, path.display())).await;
-        view.follow(&mut client, |view| view.agent(agent).tainted_by_pipes == [pipe.clone()]).await;
-    }
-    // edit_file shows the file's lines in its failures and diffs: it taints too.
     apply_request(&mut client, &mut view, create_agent("site", "Eve", "")).await;
     let edit = format!(
         r#"{{"path": "{}", "edits": [{{"oldText": "nothing like it", "newText": "x", "replaceAll": null}}]}}"#,
         outbox.join("draft.md").display()
     );
     call(&mut client, &mut view, "eve", "edit_file", &edit).await;
-    view.follow(&mut client, |view| view.agent("eve").tainted_by_pipes == [pipe.clone()]).await;
-
-    // Ingrid's database, read as a file by an agent of the project: tainted
-    // by what she read, through her.
     let database = dir.join("home/agents/ingrid/database.sqlite");
     assert!(database.exists());
-    let other = "lea2";
-    apply_request(&mut client, &mut view, create_agent("site", "Lea2", "")).await;
-    call(&mut client, &mut view, other, "read_file", &format!(r#"{{"path": "{}"}}"#, database.display())).await;
-    view.follow(&mut client, |view| view.agent(other).tainted_by_pipes == [pipe.clone()]).await;
-    let route: serde_json::Value = serde_json::from_str(&pipes::taint_of_for_test(&factory, other)).expect("JSON");
-    assert_eq!(route[&pipe], serde_json::json!(["lea", "ingrid"]), "{route}");
+    for (agent, path) in [
+        ("bo", inbox.join("brief.txt")),
+        ("cy", outbox.join("draft.md")),
+        ("dan", incoming.join("0")),
+        ("lea", database),
+    ] {
+        call(&mut client, &mut view, agent, "read_file", &format!(r#"{{"path": "{}"}}"#, path.display())).await;
+    }
+    for agent in ["bo", "cy", "dan", "lea", "eve"] {
+        assert!(view.agent(agent).tainted_by_pipes.is_empty(), "{agent}");
+        assert_eq!(pipes::taint_of_for_test(&factory, agent), "{}", "{agent}");
+    }
+    assert_eq!(view.agent("ingrid").tainted_by_pipes, ["browser:https://example.com"]);
 }

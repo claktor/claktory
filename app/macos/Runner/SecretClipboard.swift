@@ -31,6 +31,12 @@ enum SecretClipboard {
   static let concealedType = "org.nspasteboard.ConcealedType"
   static let transientType = "org.nspasteboard.TransientType"
 
+  /// On the Mac, a copy also carries when it stops working, in a type of
+  /// its own whose name ends in that time (milliseconds since 1970), so
+  /// [sweep] reads only the pasteboard's types, never its text (Fugo's
+  /// ruling on row 181). iOS expires it itself (.expirationDate).
+  static let expiresPrefix = "com.claktory.expires."
+
   #if canImport(Flutter) || canImport(FlutterMacOS)
   static func register(with messenger: FlutterBinaryMessenger) {
     let channel = FlutterMethodChannel(name: channelName, binaryMessenger: messenger)
@@ -51,6 +57,9 @@ enum SecretClipboard {
         }
         clear(token: token)
         result(nil)
+      case "sweep":
+        sweepAndWatch()
+        result(nil)
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -69,11 +78,73 @@ enum SecretClipboard {
       board.clearContents()
       let concealed = NSPasteboard.PasteboardType(concealedType)
       let transient = NSPasteboard.PasteboardType(transientType)
-      board.declareTypes([.string, concealed, transient], owner: nil)
+      let ms = Int64((Date().timeIntervalSince1970 + max(1, seconds)) * 1000)
+      let expires = NSPasteboard.PasteboardType(expiresPrefix + String(ms))
+      board.declareTypes([.string, concealed, transient, expires], owner: nil)
       board.setString(text, forType: .string)
       board.setData(Data(), forType: concealed)
       board.setData(Data(), forType: transient)
+      board.setData(Data(), forType: expires)
       return board.changeCount
+    #endif
+  }
+
+  /// Clears the pasteboard when it holds a copy of ours that has stopped
+  /// working, the app having quit or been away when its clear was due;
+  /// anything else, the person's own copies included, stays. Reads only
+  /// the types. Answers whether it cleared. Nothing on iOS.
+  @discardableResult
+  static func sweep(now: Date = Date(), on board: Pasteboard = .general) -> Bool {
+    #if os(iOS)
+      return false
+    #else
+      let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+      for type in board.types ?? [] where type.rawValue.hasPrefix(expiresPrefix) {
+        guard let expires = Int64(type.rawValue.dropFirst(expiresPrefix.count)),
+          expires <= nowMs
+        else { continue }
+        board.clearContents()
+        return true
+      }
+      return false
+    #endif
+  }
+
+  /// The time a copy of ours still on [board] stops working (ms since
+  /// 1970), when that's still ahead; nil when there's none. Reads only
+  /// the types.
+  static func expiresAhead(now: Date = Date(), on board: Pasteboard = .general) -> Int64? {
+    #if os(iOS)
+      return nil
+    #else
+      let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+      return (board.types ?? [])
+        .filter { $0.rawValue.hasPrefix(expiresPrefix) }
+        .compactMap { Int64($0.rawValue.dropFirst(expiresPrefix.count)) }
+        .filter { $0 > nowMs }
+        .min()
+    #endif
+  }
+
+  #if !os(iOS)
+    /// The one sweep waiting for a copy's expiry, in this process.
+    private static var watch: DispatchWorkItem?
+  #endif
+
+  /// [sweep], then, while a copy of ours still works, another at the
+  /// moment it stops (Zucchero's row 185: a code copied before a relaunch,
+  /// the app in front past its expiry). One waits at a time; each sweep
+  /// replaces it.
+  static func sweepAndWatch() {
+    #if !os(iOS)
+      sweep()
+      watch?.cancel()
+      watch = nil
+      guard let expires = expiresAhead() else { return }
+      let item = DispatchWorkItem { sweepAndWatch() }
+      watch = item
+      let delay = Double(expires) / 1000 - Date().timeIntervalSince1970 + 0.5
+      DispatchQueue.main.asyncAfter(deadline: .now() + max(0.5, delay), execute: item)
     #endif
   }
 

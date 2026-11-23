@@ -12,6 +12,7 @@ import 'forms.dart';
 import 'identity.dart';
 import 'mobile/page_find.dart' show PhonePageFind;
 import 'mobile/composer.dart';
+import 'mobile/device.dart' show hardwareKeyboard;
 import 'mobile/input.dart';
 import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
@@ -1017,27 +1018,42 @@ class _MessageBoxState extends State<MessageBox> {
                                                 onTap: _record,
                                               ),
                                       ],
-                                      if (phone && blocked == null) ...[
-                                        const SizedBox(width: Space.s),
+                                      // A phone has no Enter key; an
+                                      // iPad has one only with a hardware
+                                      // keyboard (the on-screen Return
+                                      // adds a line), so Send is there
+                                      // while it's not.
+                                      if (touch && blocked == null)
                                         ListenableBuilder(
                                           listenable: Listenable.merge([
                                             _text,
                                             AppScope.of(context).attachments,
+                                            hardwareKeyboard,
                                           ]),
-                                          builder: (context, _) => Button(
-                                            label: 'Send',
-                                            primary: true,
-                                            onPressed:
-                                                _text.text.trim().isEmpty &&
-                                                    AppScope.of(context)
-                                                        .attachments
-                                                        .of(target.key)
-                                                        .isEmpty
-                                                ? null
-                                                : _send,
-                                          ),
+                                          builder: (context, _) =>
+                                              !phone && hardwareKeyboard.value
+                                              ? const SizedBox.shrink()
+                                              : Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                        left: Space.s,
+                                                      ),
+                                                  child: Button(
+                                                    label: 'Send',
+                                                    primary: true,
+                                                    onPressed:
+                                                        _text.text
+                                                                .trim()
+                                                                .isEmpty &&
+                                                            AppScope.of(context)
+                                                                .attachments
+                                                                .of(target.key)
+                                                                .isEmpty
+                                                        ? null
+                                                        : _send,
+                                                  ),
+                                                ),
                                         ),
-                                      ],
                                       if (blocked != null)
                                         for (final action
                                             in blocked.actions) ...[

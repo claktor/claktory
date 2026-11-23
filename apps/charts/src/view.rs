@@ -200,7 +200,8 @@ pub fn values(view: &View, dashboard: &Dashboard, now: i64) -> BTreeMap<String, 
 
 /// Runs one query, bound with `values`.
 pub fn query(host: &mut impl Host, query: &Query, values: &BTreeMap<String, Value>, sources: &[DataSource]) -> Outcome {
-    let Some(source) = sources.iter().find(|source| source.id == query.source) else {
+    let asked = crate::source_for(&query.source, sources);
+    let Some(source) = sources.iter().find(|source| source.id == asked) else {
         return Outcome::Failed(format!("Charts doesn't read \"{}\".", query.source));
     };
     if !source.granted {
@@ -210,7 +211,7 @@ pub fn query(host: &mut impl Host, query: &Query, values: &BTreeMap<String, Valu
         Ok(bound) => bound,
         Err(why) => return Outcome::Failed(why),
     };
-    match host.data_query(&query.source, &bound.sql, &Value::Array(bound.params)) {
+    match host.data_query(asked, &bound.sql, &Value::Array(bound.params)) {
         Ok(table) => Outcome::Table(table),
         Err(DataError::NotGranted) => Outcome::NotGranted(source.label.clone()),
         Err(DataError::UnknownSource) => Outcome::Failed("Charts can't read this source any more.".into()),
@@ -342,7 +343,7 @@ pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
     let Some(dashboard) = dashboard else {
         let mut built = vec![json!({
             "id": "empty", "component": "EmptyState", "icon": "chart-column",
-            "title": "No dashboards yet", "body": "Make one to chart what your agents do.",
+            "title": "No dashboards yet", "body": "Tell Rivet what you'd like to chart, and it makes one for you.",
         })];
         button(&mut built, "new", "New dashboard", "new_board", json!({}), "primary");
         add(&mut out, &mut children, "empty", built.drain(..1).collect());
@@ -361,8 +362,8 @@ pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
             "ask",
             vec![json!({
                 "id": "ask", "component": "EmptyState", "icon": "chart-column",
-                "title": "Charts can't read anything yet",
-                "body": "To show your charts, turn on Claktory's records for Charts in Settings → Apps.",
+                "title": "Charts has nothing to show yet",
+                "body": "Tell Rivet what you'd like to see, and it sets Charts up for you. It asks you first before Charts reads anything private, such as conversations.",
             })],
         );
         out.insert(0, json!({"id": "root", "component": "Column", "children": children}));
@@ -593,7 +594,9 @@ pub fn panel_body(id: &str, at: &str, title: &str, viz: &Viz, grid: Grid, outcom
 pub fn panel_data(viz: &Viz, outcome: &Outcome, rows: usize) -> Value {
     match outcome {
         Outcome::Failed(why) => json!({"error": format!("Couldn't run this panel's query: {why}")}),
-        Outcome::NotGranted(label) => json!({"error": format!("To see this panel, turn on {label} for Charts in Settings → Apps.")}),
+        Outcome::NotGranted(label) => {
+            json!({"error": format!("To see this panel, Charts needs to read {label}. Ask Rivet to set it up.")})
+        }
         Outcome::Table(_) if !drawable(&viz.kind) => json!({"error": format!("Charts can't draw \"{}\".", viz.kind)}),
         Outcome::Table(table) if viz.kind == "stat" => stat(table),
         Outcome::Table(table) if viz.kind == "table" => json!({"data": truncate(table, TABLE_ROWS.min(rows))}),

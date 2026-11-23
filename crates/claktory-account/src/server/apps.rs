@@ -31,7 +31,21 @@ fn caller(service: &Service, call: &Call, agent: Option<Actor>) -> Result<Caller
             .filter(|claktory| claktory.revoked_at.is_none())
             .map(|claktory| Registration { claktory_id: claktory.id, epoch: claktory.epoch })
             .collect();
-        return Ok(Caller::Device { account_id: device.account_id, device_key: device.account_key, registrations });
+        // Keys removed from the account: never on its device list again.
+        let removed_devices = db::removed_devices(&service.db(), &device.account_id)?;
+        // The account's devices signed in now: one on its DM list that isn't
+        // is signed out (row 671).
+        let bound_devices = db::devices(&service.db(), &device.account_id)?.into_iter().map(|device| device.account_key).collect();
+        // When it last signed in with a code: a new security key needs it
+        // recent.
+        return Ok(Caller::Device {
+            account_id: device.account_id,
+            device_key: device.account_key,
+            registrations,
+            removed_devices,
+            signed_in_at: device.signed_in,
+            bound_devices: Some(bound_devices),
+        });
     }
     let claktory = api::authenticate(service, call)?;
     Ok(Caller::Backend { account_id: claktory.account_id, claktory_id: claktory.id, epoch: claktory.epoch, agent })
@@ -90,6 +104,60 @@ pub(super) async fn call(service: &Service, call: &Call) -> Result<Reply, ApiErr
     }
     let status = StatusCode::from_u16(status).map_err(|_| unavailable())?;
     Ok(Reply { status, content_type: "application/json", headers: Vec::new(), body })
+}
+
+/// Tells the worker a device signed out of an account at `signed_out`, or
+/// was removed from it (row 671), so its DM KeyPackages put up until then
+/// go and nobody adds it to a group meanwhile. Its sign-out queued that
+/// (`db::unbind_device`, `db::remove_device`), and it's done once the
+/// worker says so; until then it's asked again (`retry_sign_outs`), as a
+/// deleted account's purge is. Meanwhile the account's own devices drop
+/// them when they look at its keys, and claim none for it
+/// (`bound_devices`). Whether the worker heard.
+pub(super) async fn signed_out(service: &Service, account_id: &str, account_key: &str, signed_out: i64, tries: i64) -> bool {
+    let Some(apps) = service.config.user_apps.clone() else { return false };
+    let request = Request::SignedOut { account_id: account_id.to_owned(), account_key: account_key.to_owned(), time: signed_out };
+    let failure = match ipc::ask(&apps.socket, apps.uid, &request, &[]).await {
+        Ok((204, _)) => {
+            if let Err(error) = db::apps_signed_out(&service.db(), account_id, account_key, signed_out) {
+                tracing::error!("a sign-out the worker heard of stays queued, so it hears of it again: {error}");
+            }
+            return true;
+        }
+        Ok((status, _)) => format!("the worker answered {status}"),
+        Err(error) => error.to_string(),
+    };
+    let wait = (60_i64 << tries.clamp(0, 6)).min(3600);
+    if tries >= 10 {
+        tracing::error!(tries = tries + 1, "the worker still hasn't heard of a device's sign-out: {failure}");
+    } else {
+        tracing::warn!(tries = tries + 1, wait, "the worker didn't hear of a device's sign-out yet: {failure}");
+    }
+    if let Err(error) = db::apps_sign_out_failed(&service.db(), account_id, account_key, service.now() + wait) {
+        tracing::error!("couldn't schedule telling the worker of a device's sign-out again: {error}");
+    }
+    false
+}
+
+/// Tells the worker again of the sign-outs that are due: how many it heard.
+pub(super) async fn retry_sign_outs(service: &Service) -> usize {
+    if service.config.user_apps.is_none() {
+        return 0;
+    }
+    let due = match db::apps_sign_outs_due(&service.db(), service.now(), 50) {
+        Ok(due) => due,
+        Err(error) => {
+            tracing::error!("can't read the sign-outs to tell the user-level apps of: {error}");
+            return 0;
+        }
+    };
+    let mut heard = 0;
+    for (account_id, account_key, when, tries) in due {
+        if signed_out(service, &account_id, &account_key, when, tries).await {
+            heard += 1;
+        }
+    }
+    heard
 }
 
 /// Tells the worker an account was deleted, so its apps forget it; its

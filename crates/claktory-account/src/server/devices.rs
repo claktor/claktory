@@ -28,6 +28,18 @@ fn removed() -> ApiError {
     )
 }
 
+/// A key last signed in to another account (row 671), signed in there now
+/// or signed out since: it never signs in to this one, so its direct-message
+/// leaf never spans two accounts. The app makes a new key and starts again
+/// as a new device.
+fn of_another_account() -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        "key_of_another_account",
+        "This device was used with another account. Sign in again to start over as a new device.",
+    )
+}
+
 /// The account key a device-signed request is from, its time and
 /// signature checked and seen only once; signed in or not.
 fn signer(service: &Service, call: &Call) -> Result<String, ApiError> {
@@ -43,10 +55,19 @@ fn signer(service: &Service, call: &Call) -> Result<String, ApiError> {
     Ok(account_key)
 }
 
-/// The signed-in device a request is from; counts as its contact.
+/// The signed-in device a request is from; counts as its contact. A key
+/// that isn't bound but was removed from an account is told so (`403
+/// device_removed`), only once its signature, time and limits passed, so
+/// only whoever holds it learns it; any other is `401 unauthorized`.
 pub(super) fn authenticate(service: &Service, call: &Call) -> Result<db::Device, ApiError> {
     let account_key = signer(service, call)?;
-    let device = db::device(&service.db(), &account_key)?.ok_or_else(unauthorized)?;
+    let Some(device) = db::device(&service.db(), &account_key)? else {
+        if db::key_removed(&service.db(), &account_key)? {
+            service.verified(call, &account_key)?;
+            return Err(removed());
+        }
+        return Err(unauthorized());
+    };
     service.verified(call, &account_key)?;
     db::touch_device(&service.db(), &account_key, service.now())?;
     Ok(device)
@@ -67,6 +88,18 @@ pub(super) async fn sign_in_start(service: &Service, call: &Call) -> Result<Repl
     sign_in_limits(service, &email, &call.ip)?;
     if db::device_removed(&service.db(), &email, &body.account_key)? {
         return Err(removed());
+    }
+    // Signed by the key it names, it's told now, before a code is sent,
+    // that the key is another account's. Unsigned (older apps), it learns
+    // only at verify: a public key alone mustn't tell which account it's
+    // in (row 671, Secco).
+    if call.header("authorization").is_some() {
+        if signer(service, call)? != body.account_key {
+            return Err(unauthorized());
+        }
+        if db::key_of_another_account(&service.db(), &email, &body.account_key)? {
+            return Err(of_another_account());
+        }
     }
     let request = db::Request {
         id: String::new(),
@@ -107,6 +140,7 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
             ));
         }
         db::Bound::Removed => return Err(removed()),
+        db::Bound::OtherAccount => return Err(of_another_account()),
     };
     tracing::info!("device signed in to account {account_id}");
     Ok(Reply::json(&DeviceAccount { account_id, email: request.email, name: request.name.unwrap_or_default() }))
@@ -117,10 +151,14 @@ pub(super) fn me(service: &Service, call: &Call) -> Result<Reply, ApiError> {
     Ok(Reply::json(&account(service, &device)?))
 }
 
-pub(super) fn sign_out(service: &Service, call: &Call) -> Result<Reply, ApiError> {
+pub(super) async fn sign_out(service: &Service, call: &Call) -> Result<Reply, ApiError> {
     let account_key = signer(service, call)?;
-    if db::unbind_device(&mut service.db(), &account_key, None)? {
+    let now = service.now();
+    let apps = service.config.user_apps.is_some();
+    let unbound = db::unbind_device(&mut service.db(), &account_key, None, apps, now)?;
+    if let Some(account) = unbound {
         tracing::info!("device signed out");
+        super::apps::signed_out(service, &account, &account_key, now, 0).await;
     }
     Ok(Reply::json(&serde_json::json!({})))
 }
@@ -132,7 +170,7 @@ pub(super) fn sign_out(service: &Service, call: &Call) -> Result<Reply, ApiError
 /// so it never signs in to the account again (a thief with the device and
 /// the mail can't get its identity back). Only a device of the same
 /// account; never itself (that's sign-out).
-pub(super) fn remove(service: &Service, call: &Call) -> Result<Reply, ApiError> {
+pub(super) async fn remove(service: &Service, call: &Call) -> Result<Reply, ApiError> {
     let device = authenticate(service, call)?;
     let body: DeviceRemove = call.json()?;
     if verifying_key(&body.account_key).is_none() {
@@ -142,9 +180,12 @@ pub(super) fn remove(service: &Service, call: &Call) -> Result<Reply, ApiError> 
         return Err(ApiError::invalid("A device signs itself out with sign-out."));
     }
     service.limit(&[(&format!("remove-device:{}", device.account_key), 3600, REMOVALS_PER_HOUR)])?;
-    let removed = db::remove_device(&mut service.db(), &body.account_key, &device.account_id, service.now())?;
+    let now = service.now();
+    let apps = service.config.user_apps.is_some();
+    let removed = db::remove_device(&mut service.db(), &body.account_key, &device.account_id, apps, now)?;
     if removed {
         tracing::info!("removed: a device of account {}, by another of its devices", device.account_id);
+        super::apps::signed_out(service, &device.account_id, &body.account_key, now, 0).await;
     }
     Ok(Reply::json(&DeviceRemoved { removed }))
 }

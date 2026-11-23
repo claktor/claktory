@@ -42,6 +42,37 @@ enum SecretClipboardCheck {
     SecretClipboard.clear(token: again, on: board)
     check(board.string(forType: .string) == "the person's own", "a later copy stays")
 
+    // Swept (row 181): ours past its time goes; ours still working, and
+    // anything else, stay. Only the types are read.
+    let swept = SecretClipboard.copy("pipe-code-789", seconds: 600, on: board)
+    check(
+      (board.types ?? []).contains { $0.rawValue.hasPrefix(SecretClipboard.expiresPrefix) },
+      "it carries when it stops working")
+    check(!SecretClipboard.sweep(on: board), "not yet: left")
+    if let ahead = SecretClipboard.expiresAhead(on: board) {
+      let inSeconds = Double(ahead) / 1000 - Date().timeIntervalSince1970
+      check(inSeconds > 590 && inSeconds <= 600, "its expiry ahead, to sweep again then")
+    } else {
+      check(false, "its expiry ahead, to sweep again then")
+    }
+    check(
+      SecretClipboard.expiresAhead(now: Date().addingTimeInterval(601), on: board) == nil,
+      "none ahead once past")
+    check(board.string(forType: .string) == "pipe-code-789", "still there while it works")
+    check(
+      SecretClipboard.sweep(now: Date().addingTimeInterval(601), on: board),
+      "past its time: cleared")
+    check(board.string(forType: .string) == nil, "gone once dead")
+    check(board.changeCount != swept, "cleared by the sweep")
+
+    board.clearContents()
+    board.setString("the person's own", forType: .string)
+    check(
+      !SecretClipboard.sweep(now: Date().addingTimeInterval(86400), on: board),
+      "the person's own: never swept")
+    check(board.string(forType: .string) == "the person's own", "the person's own stays")
+    check(SecretClipboard.expiresAhead(on: board) == nil, "nothing of ours ahead")
+
     if failures == 0 { print("SecretClipboardCheck: all passed") }
     exit(failures == 0 ? 0 : 1)
   }

@@ -202,6 +202,13 @@ enum ClientMessage_Body {
   deleteReportType,
   searchConversation,
   transcribeAudio,
+  tryAgainNow,
+  decideAppAccess,
+  undoAppAccessChange,
+  continueOnAlternative,
+  switchBack,
+  undoModelChange,
+  listAppFiles,
   notSet
 }
 
@@ -388,6 +395,13 @@ class ClientMessage extends $pb.GeneratedMessage {
     DeleteReportType? deleteReportType,
     SearchConversation? searchConversation,
     TranscribeAudio? transcribeAudio,
+    TryAgainNow? tryAgainNow,
+    DecideAppAccess? decideAppAccess,
+    UndoAppAccessChange? undoAppAccessChange,
+    ContinueOnAlternative? continueOnAlternative,
+    SwitchBack? switchBack,
+    UndoModelChange? undoModelChange,
+    ListAppFiles? listAppFiles,
   }) {
     final result = ClientMessage._();
     if (id != null) result.id = id;
@@ -586,6 +600,15 @@ class ClientMessage extends $pb.GeneratedMessage {
     if (searchConversation != null)
       result.searchConversation = searchConversation;
     if (transcribeAudio != null) result.transcribeAudio = transcribeAudio;
+    if (tryAgainNow != null) result.tryAgainNow = tryAgainNow;
+    if (decideAppAccess != null) result.decideAppAccess = decideAppAccess;
+    if (undoAppAccessChange != null)
+      result.undoAppAccessChange = undoAppAccessChange;
+    if (continueOnAlternative != null)
+      result.continueOnAlternative = continueOnAlternative;
+    if (switchBack != null) result.switchBack = switchBack;
+    if (undoModelChange != null) result.undoModelChange = undoModelChange;
+    if (listAppFiles != null) result.listAppFiles = listAppFiles;
     return result;
   }
 
@@ -780,6 +803,13 @@ class ClientMessage extends $pb.GeneratedMessage {
     185: ClientMessage_Body.deleteReportType,
     186: ClientMessage_Body.searchConversation,
     187: ClientMessage_Body.transcribeAudio,
+    188: ClientMessage_Body.tryAgainNow,
+    189: ClientMessage_Body.decideAppAccess,
+    191: ClientMessage_Body.undoAppAccessChange,
+    192: ClientMessage_Body.continueOnAlternative,
+    193: ClientMessage_Body.switchBack,
+    194: ClientMessage_Body.undoModelChange,
+    195: ClientMessage_Body.listAppFiles,
     0: ClientMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -966,7 +996,14 @@ class ClientMessage extends $pb.GeneratedMessage {
       184,
       185,
       186,
-      187
+      187,
+      188,
+      189,
+      191,
+      192,
+      193,
+      194,
+      195
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -1337,6 +1374,22 @@ class ClientMessage extends $pb.GeneratedMessage {
         subBuilder: SearchConversation.$_createMessage)
     ..aOM<TranscribeAudio>(187, _omitFieldNames ? '' : 'transcribeAudio',
         subBuilder: TranscribeAudio.$_createMessage)
+    ..aOM<TryAgainNow>(188, _omitFieldNames ? '' : 'tryAgainNow',
+        subBuilder: TryAgainNow.$_createMessage)
+    ..aOM<DecideAppAccess>(189, _omitFieldNames ? '' : 'decideAppAccess',
+        subBuilder: DecideAppAccess.$_createMessage)
+    ..aOM<UndoAppAccessChange>(
+        191, _omitFieldNames ? '' : 'undoAppAccessChange',
+        subBuilder: UndoAppAccessChange.$_createMessage)
+    ..aOM<ContinueOnAlternative>(
+        192, _omitFieldNames ? '' : 'continueOnAlternative',
+        subBuilder: ContinueOnAlternative.$_createMessage)
+    ..aOM<SwitchBack>(193, _omitFieldNames ? '' : 'switchBack',
+        subBuilder: SwitchBack.$_createMessage)
+    ..aOM<UndoModelChange>(194, _omitFieldNames ? '' : 'undoModelChange',
+        subBuilder: UndoModelChange.$_createMessage)
+    ..aOM<ListAppFiles>(195, _omitFieldNames ? '' : 'listAppFiles',
+        subBuilder: ListAppFiles.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1541,6 +1594,13 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(185)
   @$pb.TagNumber(186)
   @$pb.TagNumber(187)
+  @$pb.TagNumber(188)
+  @$pb.TagNumber(189)
+  @$pb.TagNumber(191)
+  @$pb.TagNumber(192)
+  @$pb.TagNumber(193)
+  @$pb.TagNumber(194)
+  @$pb.TagNumber(195)
   ClientMessage_Body whichBody() => _ClientMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -1722,6 +1782,13 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(185)
   @$pb.TagNumber(186)
   @$pb.TagNumber(187)
+  @$pb.TagNumber(188)
+  @$pb.TagNumber(189)
+  @$pb.TagNumber(191)
+  @$pb.TagNumber(192)
+  @$pb.TagNumber(193)
+  @$pb.TagNumber(194)
+  @$pb.TagNumber(195)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -3823,6 +3890,105 @@ class ClientMessage extends $pb.GeneratedMessage {
   void clearTranscribeAudio() => $_clearField(187);
   @$pb.TagNumber(187)
   TranscribeAudio ensureTranscribeAudio() => $_ensure(180);
+
+  /// Try now, beside an agent's or a chat's usage wait (Agent.usage_wait):
+  /// it asks the provider again now. Answered with Ack.
+  @$pb.TagNumber(188)
+  TryAgainNow get tryAgainNow => $_getN(181);
+  @$pb.TagNumber(188)
+  set tryAgainNow(TryAgainNow value) => $_setField(188, value);
+  @$pb.TagNumber(188)
+  $core.bool hasTryAgainNow() => $_has(181);
+  @$pb.TagNumber(188)
+  void clearTryAgainNow() => $_clearField(188);
+  @$pb.TagNumber(188)
+  TryAgainNow ensureTryAgainNow() => $_ensure(181);
+
+  /// The person decides on Rivet's proposal of what an app may read and
+  /// which agents may use it (Entry.app_access): answered with Ack.
+  @$pb.TagNumber(189)
+  DecideAppAccess get decideAppAccess => $_getN(182);
+  @$pb.TagNumber(189)
+  set decideAppAccess(DecideAppAccess value) => $_setField(189, value);
+  @$pb.TagNumber(189)
+  $core.bool hasDecideAppAccess() => $_has(182);
+  @$pb.TagNumber(189)
+  void clearDecideAppAccess() => $_clearField(189);
+  @$pb.TagNumber(189)
+  DecideAppAccess ensureDecideAppAccess() => $_ensure(182);
+
+  /// The person undoes a change to what an app reads or who uses it
+  /// (NeedsYouRecord.app_change_id, AppAccessGiven.change_id): answered
+  /// with AppAccessUndone. Only the person, from their device: no agent
+  /// tool undoes.
+  @$pb.TagNumber(191)
+  UndoAppAccessChange get undoAppAccessChange => $_getN(183);
+  @$pb.TagNumber(191)
+  set undoAppAccessChange(UndoAppAccessChange value) => $_setField(191, value);
+  @$pb.TagNumber(191)
+  $core.bool hasUndoAppAccessChange() => $_has(183);
+  @$pb.TagNumber(191)
+  void clearUndoAppAccessChange() => $_clearField(191);
+  @$pb.TagNumber(191)
+  UndoAppAccessChange ensureUndoAppAccessChange() => $_ensure(183);
+
+  /// Continue on another provider, beside an agent's or a chat's usage wait
+  /// (Agent.usage_wait_alternative): it switches to that model now.
+  /// Answered with Ack.
+  @$pb.TagNumber(192)
+  ContinueOnAlternative get continueOnAlternative => $_getN(184);
+  @$pb.TagNumber(192)
+  set continueOnAlternative(ContinueOnAlternative value) =>
+      $_setField(192, value);
+  @$pb.TagNumber(192)
+  $core.bool hasContinueOnAlternative() => $_has(184);
+  @$pb.TagNumber(192)
+  void clearContinueOnAlternative() => $_clearField(192);
+  @$pb.TagNumber(192)
+  ContinueOnAlternative ensureContinueOnAlternative() => $_ensure(184);
+
+  /// Back to the provider it was switched from, once that has room again
+  /// (Agent.usage_switch.ready). Answered with Ack.
+  @$pb.TagNumber(193)
+  SwitchBack get switchBack => $_getN(185);
+  @$pb.TagNumber(193)
+  set switchBack(SwitchBack value) => $_setField(193, value);
+  @$pb.TagNumber(193)
+  $core.bool hasSwitchBack() => $_has(185);
+  @$pb.TagNumber(193)
+  void clearSwitchBack() => $_clearField(193);
+  @$pb.TagNumber(193)
+  SwitchBack ensureSwitchBack() => $_ensure(185);
+
+  /// Undoes a model change an agent made with models_set
+  /// (NeedsYouRecord.model_change_id): the agent goes back to the model and
+  /// effort it had. Answered with Ack, or an Error saying why not ("Ingrid's
+  /// model changed since, so it was left as it is.", "This was undone
+  /// already.", "This change can't be found."). Only the person, from their
+  /// device: no agent tool undoes.
+  @$pb.TagNumber(194)
+  UndoModelChange get undoModelChange => $_getN(186);
+  @$pb.TagNumber(194)
+  set undoModelChange(UndoModelChange value) => $_setField(194, value);
+  @$pb.TagNumber(194)
+  $core.bool hasUndoModelChange() => $_has(186);
+  @$pb.TagNumber(194)
+  void clearUndoModelChange() => $_clearField(194);
+  @$pb.TagNumber(194)
+  UndoModelChange ensureUndoModelChange() => $_ensure(186);
+
+  /// The files an app that reads files could be given, for "Add a file…".
+  /// Answered with AppFiles.
+  @$pb.TagNumber(195)
+  ListAppFiles get listAppFiles => $_getN(187);
+  @$pb.TagNumber(195)
+  set listAppFiles(ListAppFiles value) => $_setField(195, value);
+  @$pb.TagNumber(195)
+  $core.bool hasListAppFiles() => $_has(187);
+  @$pb.TagNumber(195)
+  void clearListAppFiles() => $_clearField(195);
+  @$pb.TagNumber(195)
+  ListAppFiles ensureListAppFiles() => $_ensure(187);
 }
 
 enum ServerMessage_Body {
@@ -3889,6 +4055,8 @@ enum ServerMessage_Body {
   replyReport,
   conversationMatches,
   audioTranscribed,
+  appAccessUndone,
+  appFiles,
   notSet
 }
 
@@ -3958,6 +4126,8 @@ class ServerMessage extends $pb.GeneratedMessage {
     ReplyReport? replyReport,
     ConversationMatches? conversationMatches,
     AudioTranscribed? audioTranscribed,
+    AppAccessUndone? appAccessUndone,
+    AppFiles? appFiles,
   }) {
     final result = ServerMessage._();
     if (replyTo != null) result.replyTo = replyTo;
@@ -4026,6 +4196,8 @@ class ServerMessage extends $pb.GeneratedMessage {
     if (conversationMatches != null)
       result.conversationMatches = conversationMatches;
     if (audioTranscribed != null) result.audioTranscribed = audioTranscribed;
+    if (appAccessUndone != null) result.appAccessUndone = appAccessUndone;
+    if (appFiles != null) result.appFiles = appFiles;
     return result;
   }
 
@@ -4103,6 +4275,8 @@ class ServerMessage extends $pb.GeneratedMessage {
     66: ServerMessage_Body.replyReport,
     67: ServerMessage_Body.conversationMatches,
     68: ServerMessage_Body.audioTranscribed,
+    69: ServerMessage_Body.appAccessUndone,
+    70: ServerMessage_Body.appFiles,
     0: ServerMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -4172,7 +4346,9 @@ class ServerMessage extends $pb.GeneratedMessage {
       65,
       66,
       67,
-      68
+      68,
+      69,
+      70
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'replyTo', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -4301,6 +4477,10 @@ class ServerMessage extends $pb.GeneratedMessage {
         subBuilder: ConversationMatches.$_createMessage)
     ..aOM<AudioTranscribed>(68, _omitFieldNames ? '' : 'audioTranscribed',
         subBuilder: AudioTranscribed.$_createMessage)
+    ..aOM<AppAccessUndone>(69, _omitFieldNames ? '' : 'appAccessUndone',
+        subBuilder: AppAccessUndone.$_createMessage)
+    ..aOM<AppFiles>(70, _omitFieldNames ? '' : 'appFiles',
+        subBuilder: AppFiles.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -4388,6 +4568,8 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(66)
   @$pb.TagNumber(67)
   @$pb.TagNumber(68)
+  @$pb.TagNumber(69)
+  @$pb.TagNumber(70)
   ServerMessage_Body whichBody() => _ServerMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -4452,6 +4634,8 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(66)
   @$pb.TagNumber(67)
   @$pb.TagNumber(68)
+  @$pb.TagNumber(69)
+  @$pb.TagNumber(70)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -5213,6 +5397,30 @@ class ServerMessage extends $pb.GeneratedMessage {
   void clearAudioTranscribed() => $_clearField(68);
   @$pb.TagNumber(68)
   AudioTranscribed ensureAudioTranscribed() => $_ensure(63);
+
+  /// The answer to UndoAppAccessChange, to the asker only.
+  @$pb.TagNumber(69)
+  AppAccessUndone get appAccessUndone => $_getN(64);
+  @$pb.TagNumber(69)
+  set appAccessUndone(AppAccessUndone value) => $_setField(69, value);
+  @$pb.TagNumber(69)
+  $core.bool hasAppAccessUndone() => $_has(64);
+  @$pb.TagNumber(69)
+  void clearAppAccessUndone() => $_clearField(69);
+  @$pb.TagNumber(69)
+  AppAccessUndone ensureAppAccessUndone() => $_ensure(64);
+
+  /// The answer to ListAppFiles, to the asker only.
+  @$pb.TagNumber(70)
+  AppFiles get appFiles => $_getN(65);
+  @$pb.TagNumber(70)
+  set appFiles(AppFiles value) => $_setField(70, value);
+  @$pb.TagNumber(70)
+  $core.bool hasAppFiles() => $_has(65);
+  @$pb.TagNumber(70)
+  void clearAppFiles() => $_clearField(70);
+  @$pb.TagNumber(70)
+  AppFiles ensureAppFiles() => $_ensure(65);
 }
 
 class Hello extends $pb.GeneratedMessage {
@@ -15238,6 +15446,7 @@ class BundledApp extends $pb.GeneratedMessage {
     $core.String? version,
     $core.String? publisher,
     $core.String? installedVersion,
+    $core.bool? uninstalled,
   }) {
     final result = BundledApp._();
     if (id != null) result.id = id;
@@ -15247,6 +15456,7 @@ class BundledApp extends $pb.GeneratedMessage {
     if (version != null) result.version = version;
     if (publisher != null) result.publisher = publisher;
     if (installedVersion != null) result.installedVersion = installedVersion;
+    if (uninstalled != null) result.uninstalled = uninstalled;
     return result;
   }
 
@@ -15270,6 +15480,7 @@ class BundledApp extends $pb.GeneratedMessage {
     ..aOS(5, _omitFieldNames ? '' : 'version')
     ..aOS(6, _omitFieldNames ? '' : 'publisher')
     ..aOS(7, _omitFieldNames ? '' : 'installedVersion')
+    ..aOB(8, _omitFieldNames ? '' : 'uninstalled')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -15359,6 +15570,19 @@ class BundledApp extends $pb.GeneratedMessage {
   $core.bool hasInstalledVersion() => $_has(6);
   @$pb.TagNumber(7)
   void clearInstalledVersion() => $_clearField(7);
+
+  /// The person uninstalled it, so Claktory doesn't install it again by
+  /// itself: Install (InstallLocalApp with `bundled`) puts it back and
+  /// clears this. A bundled app that's neither installed nor uninstalled is
+  /// being installed, or couldn't be: Install works then too.
+  @$pb.TagNumber(8)
+  $core.bool get uninstalled => $_getBF(7);
+  @$pb.TagNumber(8)
+  set uninstalled($core.bool value) => $_setBool(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasUninstalled() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearUninstalled() => $_clearField(8);
 }
 
 /// Checks for a newer release now, as Claktory does on its own every half
@@ -22589,6 +22813,9 @@ class Agent extends $pb.GeneratedMessage {
     $core.bool? readsReports,
     ContainedSpend? spend,
     $core.int? heldAsks,
+    UsageWaitAlternative? usageWaitAlternative,
+    $core.bool? usageWaitNoOtherProvider,
+    UsageSwitch? usageSwitch,
   }) {
     final result = Agent._();
     if (id != null) result.id = id;
@@ -22641,6 +22868,11 @@ class Agent extends $pb.GeneratedMessage {
     if (readsReports != null) result.readsReports = readsReports;
     if (spend != null) result.spend = spend;
     if (heldAsks != null) result.heldAsks = heldAsks;
+    if (usageWaitAlternative != null)
+      result.usageWaitAlternative = usageWaitAlternative;
+    if (usageWaitNoOtherProvider != null)
+      result.usageWaitNoOtherProvider = usageWaitNoOtherProvider;
+    if (usageSwitch != null) result.usageSwitch = usageSwitch;
     return result;
   }
 
@@ -22721,6 +22953,12 @@ class Agent extends $pb.GeneratedMessage {
     ..aOM<ContainedSpend>(46, _omitFieldNames ? '' : 'spend',
         subBuilder: ContainedSpend.$_createMessage)
     ..aI(47, _omitFieldNames ? '' : 'heldAsks', fieldType: $pb.PbFieldType.OU3)
+    ..aOM<UsageWaitAlternative>(
+        48, _omitFieldNames ? '' : 'usageWaitAlternative',
+        subBuilder: UsageWaitAlternative.$_createMessage)
+    ..aOB(49, _omitFieldNames ? '' : 'usageWaitNoOtherProvider')
+    ..aOM<UsageSwitch>(50, _omitFieldNames ? '' : 'usageSwitch',
+        subBuilder: UsageSwitch.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -23100,9 +23338,10 @@ class Agent extends $pb.GeneratedMessage {
   /// at Fri 18:00". Empty when it isn't held up. Meanwhile `status` stays
   /// WORKING (its run is open; messages queue as usual, and Stop ends it), and
   /// its character sleeps. It asks again by itself at `usage_wait_until_ms`, or
-  /// sooner when the person adds an account, uses a usage reset, tries a key
-  /// again or changes its model. Unrelated to `waiting_seqs`, which are
-  /// questions for the person.
+  /// sooner when the person signs in (again) or out, adds an account, uses a
+  /// usage reset, tries a key again, messages it, changes its model or
+  /// chooses Try now (TryAgainNow), or the usage read sees room. Unrelated to
+  /// `waiting_seqs`, which are questions for the person.
   @$pb.TagNumber(34)
   $core.String get usageWait => $_getSZ(33);
   @$pb.TagNumber(34)
@@ -23124,11 +23363,12 @@ class Agent extends $pb.GeneratedMessage {
   @$pb.TagNumber(35)
   void clearUsageWaitUntilMs() => $_clearField(35);
 
-  /// The pipes whose messages it has read in its current context (as events,
-  /// or with pipe_read), by Pipe.id: it's "tainted" until /clear, and using a
-  /// secret needs the person's approval each time (SecretApproval). Empty when
-  /// it has read none. Other things it read count the same, with a prefix:
-  /// a web page read through browser control as "browser:<origin>".
+  /// What it has read in its current context that may hold a stranger's
+  /// instructions: it's "tainted" until /clear, and using a secret needs the
+  /// person's approval each time (SecretApproval). Since #346 only a web page
+  /// read through browser control counts, as "browser:<origin>"; reading a
+  /// pipe or a direct message marks no one (pipe ids here came from older
+  /// backends). Empty when it has read none.
   @$pb.TagNumber(36)
   $pb.PbList<$core.String> get taintedByPipes => $_getList(35);
 
@@ -23267,6 +23507,486 @@ class Agent extends $pb.GeneratedMessage {
   $core.bool hasHeldAsks() => $_has(46);
   @$pb.TagNumber(47)
   void clearHeldAsks() => $_clearField(47);
+
+  /// Set while it waits on a usage limit or on credit (`usage_wait`, never a
+  /// wait to sign in or for the secrets to unlock) and another signed-in
+  /// provider with room can run its model, or the closest one: what
+  /// ContinueOnAlternative would switch it to.
+  @$pb.TagNumber(48)
+  UsageWaitAlternative get usageWaitAlternative => $_getN(47);
+  @$pb.TagNumber(48)
+  set usageWaitAlternative(UsageWaitAlternative value) => $_setField(48, value);
+  @$pb.TagNumber(48)
+  $core.bool hasUsageWaitAlternative() => $_has(47);
+  @$pb.TagNumber(48)
+  void clearUsageWaitAlternative() => $_clearField(48);
+  @$pb.TagNumber(48)
+  UsageWaitAlternative ensureUsageWaitAlternative() => $_ensure(47);
+
+  /// It waits on a usage limit or on credit and no provider but its own is
+  /// signed in: signing in to another (such as OpenRouter) would let it carry
+  /// on now. False when another is signed in but can't run it.
+  @$pb.TagNumber(49)
+  $core.bool get usageWaitNoOtherProvider => $_getBF(48);
+  @$pb.TagNumber(49)
+  set usageWaitNoOtherProvider($core.bool value) => $_setBool(48, value);
+  @$pb.TagNumber(49)
+  $core.bool hasUsageWaitNoOtherProvider() => $_has(48);
+  @$pb.TagNumber(49)
+  void clearUsageWaitNoOtherProvider() => $_clearField(49);
+
+  /// It runs on another provider because of a ContinueOnAlternative: where
+  /// it came from, and whether that has room again (SwitchBack). Cleared
+  /// when it goes back, or when the person changes its model themselves.
+  @$pb.TagNumber(50)
+  UsageSwitch get usageSwitch => $_getN(49);
+  @$pb.TagNumber(50)
+  set usageSwitch(UsageSwitch value) => $_setField(50, value);
+  @$pb.TagNumber(50)
+  $core.bool hasUsageSwitch() => $_has(49);
+  @$pb.TagNumber(50)
+  void clearUsageSwitch() => $_clearField(50);
+  @$pb.TagNumber(50)
+  UsageSwitch ensureUsageSwitch() => $_ensure(49);
+}
+
+/// What an agent (or a chat) waiting on its provider's usage could continue
+/// on instead (Agent.usage_wait_alternative).
+class UsageWaitAlternative extends $pb.GeneratedMessage {
+  factory UsageWaitAlternative({
+    $core.String? providerName,
+    $core.String? model,
+    $core.String? modelName,
+    $core.bool? sameModel,
+    $core.String? effort,
+    $core.bool? effortChanged,
+    $core.int? othersWaiting,
+  }) {
+    final result = UsageWaitAlternative._();
+    if (providerName != null) result.providerName = providerName;
+    if (model != null) result.model = model;
+    if (modelName != null) result.modelName = modelName;
+    if (sameModel != null) result.sameModel = sameModel;
+    if (effort != null) result.effort = effort;
+    if (effortChanged != null) result.effortChanged = effortChanged;
+    if (othersWaiting != null) result.othersWaiting = othersWaiting;
+    return result;
+  }
+
+  UsageWaitAlternative._();
+
+  factory UsageWaitAlternative.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageWaitAlternative()..mergeFromBuffer(data, registry);
+  factory UsageWaitAlternative.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageWaitAlternative()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UsageWaitAlternative',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UsageWaitAlternative.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'providerName')
+    ..aOS(2, _omitFieldNames ? '' : 'model')
+    ..aOS(3, _omitFieldNames ? '' : 'modelName')
+    ..aOB(4, _omitFieldNames ? '' : 'sameModel')
+    ..aOS(5, _omitFieldNames ? '' : 'effort')
+    ..aOB(6, _omitFieldNames ? '' : 'effortChanged')
+    ..aI(7, _omitFieldNames ? '' : 'othersWaiting',
+        fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageWaitAlternative clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageWaitAlternative copyWith(void Function(UsageWaitAlternative) updates) =>
+      super.copyWith((message) => updates(message as UsageWaitAlternative))
+          as UsageWaitAlternative;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use UsageWaitAlternative() / UsageWaitAlternative.new instead')
+  static UsageWaitAlternative create() => UsageWaitAlternative._();
+  static $pb.GeneratedMessage $_createMessage() => UsageWaitAlternative._();
+  @$core.override
+  UsageWaitAlternative createEmptyInstance() => UsageWaitAlternative._();
+  @$core.pragma('dart2js:noInline')
+  static UsageWaitAlternative getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<UsageWaitAlternative>(
+          UsageWaitAlternative.$_createMessage);
+  static UsageWaitAlternative? _defaultInstance;
+
+  /// The provider, for "Continue on OpenRouter".
+  @$pb.TagNumber(1)
+  $core.String get providerName => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set providerName($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasProviderName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearProviderName() => $_clearField(1);
+
+  /// "<provider>/<model id>" it would run on, such as
+  /// "openrouter/anthropic/claude-opus-4.8".
+  @$pb.TagNumber(2)
+  $core.String get model => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set model($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasModel() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearModel() => $_clearField(2);
+
+  /// The model's name, without OpenRouter's maker prefix: "Claude Opus 4.8".
+  @$pb.TagNumber(3)
+  $core.String get modelName => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set modelName($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasModelName() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearModelName() => $_clearField(3);
+
+  /// The same model it runs on now (matched across providers by name, the
+  /// date left out); false when it's the closest one: the same family at the
+  /// newest version not above it, or else the nearest above.
+  @$pb.TagNumber(4)
+  $core.bool get sameModel => $_getBF(3);
+  @$pb.TagNumber(4)
+  set sameModel($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasSameModel() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearSameModel() => $_clearField(4);
+
+  /// The effort it would run at: its own when the model has it, otherwise
+  /// the highest the model has below it, otherwise its lowest.
+  @$pb.TagNumber(5)
+  $core.String get effort => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set effort($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasEffort() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearEffort() => $_clearField(5);
+
+  /// `effort` isn't the one it runs at now.
+  @$pb.TagNumber(6)
+  $core.bool get effortChanged => $_getBF(5);
+  @$pb.TagNumber(6)
+  set effortChanged($core.bool value) => $_setBool(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasEffortChanged() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearEffortChanged() => $_clearField(6);
+
+  /// How many other agents and chats wait on the same provider and could
+  /// continue elsewhere too (ContinueOnAlternative.all_waiting).
+  @$pb.TagNumber(7)
+  $core.int get othersWaiting => $_getIZ(6);
+  @$pb.TagNumber(7)
+  set othersWaiting($core.int value) => $_setUnsignedInt32(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasOthersWaiting() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearOthersWaiting() => $_clearField(7);
+}
+
+/// Where an agent (or a chat) that continued on another provider came from
+/// (Agent.usage_switch). Kept across restarts.
+class UsageSwitch extends $pb.GeneratedMessage {
+  factory UsageSwitch({
+    $core.String? providerName,
+    $core.String? model,
+    $core.String? modelName,
+    $core.bool? ready,
+    $core.int? othersReady,
+  }) {
+    final result = UsageSwitch._();
+    if (providerName != null) result.providerName = providerName;
+    if (model != null) result.model = model;
+    if (modelName != null) result.modelName = modelName;
+    if (ready != null) result.ready = ready;
+    if (othersReady != null) result.othersReady = othersReady;
+    return result;
+  }
+
+  UsageSwitch._();
+
+  factory UsageSwitch.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageSwitch()..mergeFromBuffer(data, registry);
+  factory UsageSwitch.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UsageSwitch()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UsageSwitch',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UsageSwitch.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'providerName')
+    ..aOS(2, _omitFieldNames ? '' : 'model')
+    ..aOS(3, _omitFieldNames ? '' : 'modelName')
+    ..aOB(4, _omitFieldNames ? '' : 'ready')
+    ..aI(5, _omitFieldNames ? '' : 'othersReady',
+        fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageSwitch clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UsageSwitch copyWith(void Function(UsageSwitch) updates) =>
+      super.copyWith((message) => updates(message as UsageSwitch))
+          as UsageSwitch;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UsageSwitch() / UsageSwitch.new instead')
+  static UsageSwitch create() => UsageSwitch._();
+  static $pb.GeneratedMessage $_createMessage() => UsageSwitch._();
+  @$core.override
+  UsageSwitch createEmptyInstance() => UsageSwitch._();
+  @$core.pragma('dart2js:noInline')
+  static UsageSwitch getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<UsageSwitch>(
+          UsageSwitch.$_createMessage);
+  static UsageSwitch? _defaultInstance;
+
+  /// The provider as its wait named it, for "Back to Claude".
+  @$pb.TagNumber(1)
+  $core.String get providerName => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set providerName($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasProviderName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearProviderName() => $_clearField(1);
+
+  /// "<provider>/<model id>" and the model's name it ran on before.
+  @$pb.TagNumber(2)
+  $core.String get model => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set model($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasModel() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearModel() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get modelName => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set modelName($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasModelName() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearModelName() => $_clearField(3);
+
+  /// That provider has an account with room again: SwitchBack can go.
+  @$pb.TagNumber(4)
+  $core.bool get ready => $_getBF(3);
+  @$pb.TagNumber(4)
+  set ready($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasReady() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearReady() => $_clearField(4);
+
+  /// How many other agents and chats switched from it are ready too
+  /// (SwitchBack.all).
+  @$pb.TagNumber(5)
+  $core.int get othersReady => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set othersReady($core.int value) => $_setUnsignedInt32(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasOthersReady() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearOthersReady() => $_clearField(5);
+}
+
+/// Continue on another provider: an agent (or a chat, by its id) waiting on
+/// its provider's usage switches to its UsageWaitAlternative (model and
+/// effort), and carries on there from its next model call, its conversation
+/// kept, as with any model change. `all_waiting`: every agent and chat
+/// waiting on that provider switches too, each to its own alternative.
+/// INVALID_REQUEST, with a sentence to show, when it isn't waiting or there
+/// is no alternative any more; NOT_FOUND for an unknown agent or chat.
+class ContinueOnAlternative extends $pb.GeneratedMessage {
+  factory ContinueOnAlternative({
+    $core.String? agentId,
+    $core.bool? allWaiting,
+    $core.int? expectedOthers,
+  }) {
+    final result = ContinueOnAlternative._();
+    if (agentId != null) result.agentId = agentId;
+    if (allWaiting != null) result.allWaiting = allWaiting;
+    if (expectedOthers != null) result.expectedOthers = expectedOthers;
+    return result;
+  }
+
+  ContinueOnAlternative._();
+
+  factory ContinueOnAlternative.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ContinueOnAlternative()..mergeFromBuffer(data, registry);
+  factory ContinueOnAlternative.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ContinueOnAlternative()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ContinueOnAlternative',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ContinueOnAlternative.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..aOB(2, _omitFieldNames ? '' : 'allWaiting')
+    ..aI(3, _omitFieldNames ? '' : 'expectedOthers',
+        fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ContinueOnAlternative clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ContinueOnAlternative copyWith(
+          void Function(ContinueOnAlternative) updates) =>
+      super.copyWith((message) => updates(message as ContinueOnAlternative))
+          as ContinueOnAlternative;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ContinueOnAlternative() / ContinueOnAlternative.new instead')
+  static ContinueOnAlternative create() => ContinueOnAlternative._();
+  static $pb.GeneratedMessage $_createMessage() => ContinueOnAlternative._();
+  @$core.override
+  ContinueOnAlternative createEmptyInstance() => ContinueOnAlternative._();
+  @$core.pragma('dart2js:noInline')
+  static ContinueOnAlternative getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ContinueOnAlternative>(
+          ContinueOnAlternative.$_createMessage);
+  static ContinueOnAlternative? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.bool get allWaiting => $_getBF(1);
+  @$pb.TagNumber(2)
+  set allWaiting($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAllWaiting() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAllWaiting() => $_clearField(2);
+
+  /// With `all_waiting`: how many others the person saw waiting
+  /// (UsageWaitAlternative.others_waiting). When as many don't wait now,
+  /// nothing switches: INVALID_REQUEST, saying how many wait now. 0 checks
+  /// nothing (an app from before it).
+  @$pb.TagNumber(3)
+  $core.int get expectedOthers => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set expectedOthers($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasExpectedOthers() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearExpectedOthers() => $_clearField(3);
+}
+
+/// Back to the model and effort an agent (or a chat) had before it continued
+/// on another provider (Agent.usage_switch). `all`: every agent and chat
+/// switched from that provider and ready goes back too. INVALID_REQUEST
+/// when it wasn't switched; NOT_FOUND for an unknown agent or chat.
+class SwitchBack extends $pb.GeneratedMessage {
+  factory SwitchBack({
+    $core.String? agentId,
+    $core.bool? all,
+    $core.int? expectedOthers,
+  }) {
+    final result = SwitchBack._();
+    if (agentId != null) result.agentId = agentId;
+    if (all != null) result.all = all;
+    if (expectedOthers != null) result.expectedOthers = expectedOthers;
+    return result;
+  }
+
+  SwitchBack._();
+
+  factory SwitchBack.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SwitchBack()..mergeFromBuffer(data, registry);
+  factory SwitchBack.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SwitchBack()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SwitchBack',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SwitchBack.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..aOB(2, _omitFieldNames ? '' : 'all')
+    ..aI(3, _omitFieldNames ? '' : 'expectedOthers',
+        fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SwitchBack clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SwitchBack copyWith(void Function(SwitchBack) updates) =>
+      super.copyWith((message) => updates(message as SwitchBack)) as SwitchBack;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SwitchBack() / SwitchBack.new instead')
+  static SwitchBack create() => SwitchBack._();
+  static $pb.GeneratedMessage $_createMessage() => SwitchBack._();
+  @$core.override
+  SwitchBack createEmptyInstance() => SwitchBack._();
+  @$core.pragma('dart2js:noInline')
+  static SwitchBack getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SwitchBack>(SwitchBack.$_createMessage);
+  static SwitchBack? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.bool get all => $_getBF(1);
+  @$pb.TagNumber(2)
+  set all($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAll() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAll() => $_clearField(2);
+
+  /// With `all`: how many others the person saw ready to go back
+  /// (UsageSwitch.others_ready); as ContinueOnAlternative.expected_others.
+  @$pb.TagNumber(3)
+  $core.int get expectedOthers => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set expectedOthers($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasExpectedOthers() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearExpectedOthers() => $_clearField(3);
 }
 
 /// A checklist item that waits on the person (Agent.waiting_items).
@@ -23716,6 +24436,70 @@ class Transcript extends $pb.GeneratedMessage {
   $core.bool hasHasEarlier() => $_has(2);
   @$pb.TagNumber(3)
   void clearHasEarlier() => $_clearField(3);
+}
+
+/// Try now: an agent (or a chat, by its id) waiting out its accounts' usage
+/// limits (Agent.usage_wait) asks its provider again now, and so does every
+/// other agent waiting on that provider. Claktory forgets that the
+/// provider's accounts are spent and reads their usage again. If the
+/// provider still refuses, the wait comes back with its fresh reset time,
+/// for the cost of one refused request. INVALID_REQUEST when it isn't
+/// waiting, NOT_FOUND for an unknown agent or chat.
+class TryAgainNow extends $pb.GeneratedMessage {
+  factory TryAgainNow({
+    $core.String? agentId,
+  }) {
+    final result = TryAgainNow._();
+    if (agentId != null) result.agentId = agentId;
+    return result;
+  }
+
+  TryAgainNow._();
+
+  factory TryAgainNow.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      TryAgainNow()..mergeFromBuffer(data, registry);
+  factory TryAgainNow.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      TryAgainNow()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'TryAgainNow',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: TryAgainNow.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  TryAgainNow clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  TryAgainNow copyWith(void Function(TryAgainNow) updates) =>
+      super.copyWith((message) => updates(message as TryAgainNow))
+          as TryAgainNow;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use TryAgainNow() / TryAgainNow.new instead')
+  static TryAgainNow create() => TryAgainNow._();
+  static $pb.GeneratedMessage $_createMessage() => TryAgainNow._();
+  @$core.override
+  TryAgainNow createEmptyInstance() => TryAgainNow._();
+  @$core.pragma('dart2js:noInline')
+  static TryAgainNow getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<TryAgainNow>(
+          TryAgainNow.$_createMessage);
+  static TryAgainNow? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
 }
 
 /// Earlier entries of an agent's transcript, answered with EntryPage to the
@@ -24772,6 +25556,7 @@ enum Entry_Kind {
   askPerson,
   pipeStart,
   appGrant,
+  appAccess,
   notSet
 }
 
@@ -24796,6 +25581,7 @@ class Entry extends $pb.GeneratedMessage {
     $fixnum.Int64? repliedTo,
     PipeStart? pipeStart,
     AppGrantProposal? appGrant,
+    AppAccessProposal? appAccess,
   }) {
     final result = Entry._();
     if (seq != null) result.seq = seq;
@@ -24817,6 +25603,7 @@ class Entry extends $pb.GeneratedMessage {
     if (repliedTo != null) result.repliedTo = repliedTo;
     if (pipeStart != null) result.pipeStart = pipeStart;
     if (appGrant != null) result.appGrant = appGrant;
+    if (appAccess != null) result.appAccess = appAccess;
     return result;
   }
 
@@ -24845,13 +25632,14 @@ class Entry extends $pb.GeneratedMessage {
     16: Entry_Kind.askPerson,
     18: Entry_Kind.pipeStart,
     19: Entry_Kind.appGrant,
+    20: Entry_Kind.appAccess,
     0: Entry_Kind.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'Entry',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
       createEmptyInstance: Entry.$_createMessage)
-    ..oo(0, [3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 18, 19])
+    ..oo(0, [3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'seq', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
     ..aInt64(2, _omitFieldNames ? '' : 'timestampMs')
@@ -24890,6 +25678,8 @@ class Entry extends $pb.GeneratedMessage {
         subBuilder: PipeStart.$_createMessage)
     ..aOM<AppGrantProposal>(19, _omitFieldNames ? '' : 'appGrant',
         subBuilder: AppGrantProposal.$_createMessage)
+    ..aOM<AppAccessProposal>(20, _omitFieldNames ? '' : 'appAccess',
+        subBuilder: AppAccessProposal.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -24927,6 +25717,7 @@ class Entry extends $pb.GeneratedMessage {
   @$pb.TagNumber(16)
   @$pb.TagNumber(18)
   @$pb.TagNumber(19)
+  @$pb.TagNumber(20)
   Entry_Kind whichKind() => _Entry_KindByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(3)
   @$pb.TagNumber(4)
@@ -24943,6 +25734,7 @@ class Entry extends $pb.GeneratedMessage {
   @$pb.TagNumber(16)
   @$pb.TagNumber(18)
   @$pb.TagNumber(19)
+  @$pb.TagNumber(20)
   void clearKind() => $_clearField($_whichOneof(0));
 
   /// Position in the transcript; unique per agent and never reused.
@@ -25103,7 +25895,7 @@ class Entry extends $pb.GeneratedMessage {
   @$pb.TagNumber(14)
   DevicePairing ensureDevicePairing() => $_ensure(13);
 
-  /// An agent that has read a pipe wants to use a secret (see
+  /// An agent wants to use a secret that needs the person's approval (see
   /// SecretApproval).
   @$pb.TagNumber(15)
   SecretApproval get secretApproval => $_getN(14);
@@ -25170,6 +25962,20 @@ class Entry extends $pb.GeneratedMessage {
   void clearAppGrant() => $_clearField(19);
   @$pb.TagNumber(19)
   AppGrantProposal ensureAppGrant() => $_ensure(18);
+
+  /// Rivet proposes what one of Claktory's apps (Charts, say) may read and
+  /// which agents may use it (its apps_propose_access tool): see
+  /// AppAccessProposal.
+  @$pb.TagNumber(20)
+  AppAccessProposal get appAccess => $_getN(19);
+  @$pb.TagNumber(20)
+  set appAccess(AppAccessProposal value) => $_setField(20, value);
+  @$pb.TagNumber(20)
+  $core.bool hasAppAccess() => $_has(19);
+  @$pb.TagNumber(20)
+  void clearAppAccess() => $_clearField(20);
+  @$pb.TagNumber(20)
+  AppAccessProposal ensureAppAccess() => $_ensure(19);
 }
 
 /// Something other than the person prompting the agent: Factory itself,
@@ -25777,9 +26583,10 @@ class Proposal extends $pb.GeneratedMessage {
   @$pb.TagNumber(5)
   void clearDecidedAtMs() => $_clearField(5);
 
-  /// The pipes the agent had read when it proposed (Agent.tainted_by_pipes),
-  /// each with the agents it came through: what it proposes may come from
-  /// the other side. Empty when it had read none.
+  /// What the agent had read when it proposed (Agent.tainted_by_pipes): what
+  /// it proposes may come from someone else. Since #346 only a web page
+  /// (PipeTaint.kind "browser"); pipes on older proposals. Empty when it had
+  /// read none.
   @$pb.TagNumber(6)
   $pb.PbList<PipeTaint> get taint => $_getList(5);
 }
@@ -26054,7 +26861,7 @@ class DismissPipeStart extends $pb.GeneratedMessage {
 /// seq is in Rivet's Agent.waiting_seqs, so it shows in Needs you. Nothing
 /// is given until the person approves it (DecideAppGrant); then the account
 /// service makes the grant, and the entry is sent again with its state.
-/// Only Rivet proposes, never one that has read a pipe, and only for an
+/// Only Rivet proposes, never one that has read a web page, and only for an
 /// agent of this Claktory, which is named by id and by the incarnation it
 /// had when proposed: deleted and made again, it's another agent, and the
 /// proposal fails.
@@ -26280,9 +27087,10 @@ class AppGrantProposal extends $pb.GeneratedMessage {
   @$pb.TagNumber(14)
   void clearGrantId() => $_clearField(14);
 
-  /// The agent it would give access has read a pipe: messages from another
-  /// Claktory, which may hold someone else's instructions. Set when proposed
-  /// and again when decided. The card says so, loudest for dm.send.
+  /// The agent it would give access has read something that may hold
+  /// someone else's instructions (Agent.tainted_by_pipes: since #346 a web
+  /// page; a pipe on older cards). Set when proposed and again when decided.
+  /// The card says so, loudest for dm.send.
   @$pb.TagNumber(15)
   $core.bool get granteeReadPipes => $_getBF(14);
   @$pb.TagNumber(15)
@@ -26550,6 +27358,399 @@ class DecideAppGrant extends $pb.GeneratedMessage {
   $core.bool hasComment() => $_has(3);
   @$pb.TagNumber(4)
   void clearComment() => $_clearField(4);
+}
+
+/// Rivet's proposal of what an installed app may read and which agents may
+/// use it, for what the person wants (charted, say): shown in Rivet's
+/// conversation after the call (apps_set_access, when what it gives needs
+/// the person's approval; apps_propose_access before), and while PENDING its
+/// seq is in Rivet's Agent.waiting_seqs, so it shows in Needs you. Nothing
+/// is given until the person approves it (DecideAppAccess), and then
+/// exactly what it shows: the sources are added to what the app reads, and
+/// each agent gets its scopes, in place of those it had. Only Rivet
+/// proposes; one that has read a web page always makes a card.
+class AppAccessProposal extends $pb.GeneratedMessage {
+  factory AppAccessProposal({
+    $core.String? id,
+    $core.String? appId,
+    $core.String? appName,
+    $core.Iterable<AppDataSource>? sources,
+    $core.Iterable<AppGrant>? agents,
+    $core.String? reason,
+    AppGrantState? state,
+    $fixnum.Int64? createdMs,
+    $fixnum.Int64? decidedMs,
+    $core.String? comment,
+    $core.String? error,
+    $core.Iterable<$core.String>? agentsReadPipes,
+    $core.String? digest,
+    $core.String? publisher,
+    AppTier? tier,
+    $core.Iterable<$core.String>? hosts,
+    $core.Iterable<$core.String>? agentsReadingPipes,
+    $core.Iterable<AppSubscription>? subscriptions,
+    $core.Iterable<$core.String>? cardRules,
+  }) {
+    final result = AppAccessProposal._();
+    if (id != null) result.id = id;
+    if (appId != null) result.appId = appId;
+    if (appName != null) result.appName = appName;
+    if (sources != null) result.sources.addAll(sources);
+    if (agents != null) result.agents.addAll(agents);
+    if (reason != null) result.reason = reason;
+    if (state != null) result.state = state;
+    if (createdMs != null) result.createdMs = createdMs;
+    if (decidedMs != null) result.decidedMs = decidedMs;
+    if (comment != null) result.comment = comment;
+    if (error != null) result.error = error;
+    if (agentsReadPipes != null) result.agentsReadPipes.addAll(agentsReadPipes);
+    if (digest != null) result.digest = digest;
+    if (publisher != null) result.publisher = publisher;
+    if (tier != null) result.tier = tier;
+    if (hosts != null) result.hosts.addAll(hosts);
+    if (agentsReadingPipes != null)
+      result.agentsReadingPipes.addAll(agentsReadingPipes);
+    if (subscriptions != null) result.subscriptions.addAll(subscriptions);
+    if (cardRules != null) result.cardRules.addAll(cardRules);
+    return result;
+  }
+
+  AppAccessProposal._();
+
+  factory AppAccessProposal.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppAccessProposal()..mergeFromBuffer(data, registry);
+  factory AppAccessProposal.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppAccessProposal()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AppAccessProposal',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AppAccessProposal.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'appId')
+    ..aOS(3, _omitFieldNames ? '' : 'appName')
+    ..pPM<AppDataSource>(4, _omitFieldNames ? '' : 'sources',
+        subBuilder: AppDataSource.$_createMessage)
+    ..pPM<AppGrant>(5, _omitFieldNames ? '' : 'agents',
+        subBuilder: AppGrant.$_createMessage)
+    ..aOS(6, _omitFieldNames ? '' : 'reason')
+    ..aE<AppGrantState>(7, _omitFieldNames ? '' : 'state',
+        enumValues: AppGrantState.values)
+    ..aInt64(8, _omitFieldNames ? '' : 'createdMs')
+    ..aInt64(9, _omitFieldNames ? '' : 'decidedMs')
+    ..aOS(10, _omitFieldNames ? '' : 'comment')
+    ..aOS(11, _omitFieldNames ? '' : 'error')
+    ..pPS(12, _omitFieldNames ? '' : 'agentsReadPipes')
+    ..aOS(13, _omitFieldNames ? '' : 'digest')
+    ..aOS(14, _omitFieldNames ? '' : 'publisher')
+    ..aE<AppTier>(15, _omitFieldNames ? '' : 'tier', enumValues: AppTier.values)
+    ..pPS(16, _omitFieldNames ? '' : 'hosts')
+    ..pPS(17, _omitFieldNames ? '' : 'agentsReadingPipes')
+    ..pPM<AppSubscription>(18, _omitFieldNames ? '' : 'subscriptions',
+        subBuilder: AppSubscription.$_createMessage)
+    ..pPS(19, _omitFieldNames ? '' : 'cardRules')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppAccessProposal clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppAccessProposal copyWith(void Function(AppAccessProposal) updates) =>
+      super.copyWith((message) => updates(message as AppAccessProposal))
+          as AppAccessProposal;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AppAccessProposal() / AppAccessProposal.new instead')
+  static AppAccessProposal create() => AppAccessProposal._();
+  static $pb.GeneratedMessage $_createMessage() => AppAccessProposal._();
+  @$core.override
+  AppAccessProposal createEmptyInstance() => AppAccessProposal._();
+  @$core.pragma('dart2js:noInline')
+  static AppAccessProposal getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AppAccessProposal>(
+          AppAccessProposal.$_createMessage);
+  static AppAccessProposal? _defaultInstance;
+
+  /// Unique in this Claktory.
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get appId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set appId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAppId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAppId() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get appName => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set appName($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasAppName() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearAppName() => $_clearField(3);
+
+  /// The data it would let the app read, each as the app asks for it
+  /// (label, holds, private; granted false).
+  @$pb.TagNumber(4)
+  $pb.PbList<AppDataSource> get sources => $_getList(3);
+
+  /// The agents it would let use the app, each with its scopes
+  /// (AppInfo.scopes' ids).
+  @$pb.TagNumber(5)
+  $pb.PbList<AppGrant> get agents => $_getList(4);
+
+  /// Why, in Rivet's words: what the person wants to see.
+  @$pb.TagNumber(6)
+  $core.String get reason => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set reason($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasReason() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearReason() => $_clearField(6);
+
+  @$pb.TagNumber(7)
+  AppGrantState get state => $_getN(6);
+  @$pb.TagNumber(7)
+  set state(AppGrantState value) => $_setField(7, value);
+  @$pb.TagNumber(7)
+  $core.bool hasState() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearState() => $_clearField(7);
+
+  @$pb.TagNumber(8)
+  $fixnum.Int64 get createdMs => $_getI64(7);
+  @$pb.TagNumber(8)
+  set createdMs($fixnum.Int64 value) => $_setInt64(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasCreatedMs() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearCreatedMs() => $_clearField(8);
+
+  /// When it was decided; 0 while PENDING.
+  @$pb.TagNumber(9)
+  $fixnum.Int64 get decidedMs => $_getI64(8);
+  @$pb.TagNumber(9)
+  set decidedMs($fixnum.Int64 value) => $_setInt64(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasDecidedMs() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearDecidedMs() => $_clearField(9);
+
+  /// The person's comment on deciding it, either way; may be empty.
+  @$pb.TagNumber(10)
+  $core.String get comment => $_getSZ(9);
+  @$pb.TagNumber(10)
+  set comment($core.String value) => $_setString(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasComment() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearComment() => $_clearField(10);
+
+  /// FAILED: why, in plain words (the app was uninstalled or changed, an
+  /// agent was deleted).
+  @$pb.TagNumber(11)
+  $core.String get error => $_getSZ(10);
+  @$pb.TagNumber(11)
+  set error($core.String value) => $_setString(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasError() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearError() => $_clearField(11);
+
+  /// The agents on it that have read something that may hold someone else's
+  /// instructions (Agent.tainted_by_pipes: since #346 a web page; a pipe on
+  /// older cards): the card warns.
+  @$pb.TagNumber(12)
+  $pb.PbList<$core.String> get agentsReadPipes => $_getList(11);
+
+  /// What the person approves: DecideAppAccess sends it back, and an
+  /// approval of anything else is refused.
+  @$pb.TagNumber(13)
+  $core.String get digest => $_getSZ(12);
+  @$pb.TagNumber(13)
+  set digest($core.String value) => $_setString(12, value);
+  @$pb.TagNumber(13)
+  $core.bool hasDigest() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearDigest() => $_clearField(13);
+
+  /// The app as proposed, so the card reads the same once it's gone: its
+  /// publisher, tier and the hosts it may reach (none: no internet).
+  @$pb.TagNumber(14)
+  $core.String get publisher => $_getSZ(13);
+  @$pb.TagNumber(14)
+  set publisher($core.String value) => $_setString(13, value);
+  @$pb.TagNumber(14)
+  $core.bool hasPublisher() => $_has(13);
+  @$pb.TagNumber(14)
+  void clearPublisher() => $_clearField(14);
+
+  @$pb.TagNumber(15)
+  AppTier get tier => $_getN(14);
+  @$pb.TagNumber(15)
+  set tier(AppTier value) => $_setField(15, value);
+  @$pb.TagNumber(15)
+  $core.bool hasTier() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearTier() => $_clearField(15);
+
+  @$pb.TagNumber(16)
+  $pb.PbList<$core.String> get hosts => $_getList(15);
+
+  /// Deprecated (#346): reading what an app reads marks no one, so this is
+  /// always empty from new backends. Older cards may still have it: the
+  /// agents that would read, through the app, messages another Claktory
+  /// wrote.
+  @$pb.TagNumber(17)
+  $pb.PbList<$core.String> get agentsReadingPipes => $_getList(16);
+
+  /// The app's events each agent on it would hear (apps_set_access's
+  /// hears), in place of those it heard: one per event kind, with the
+  /// agents on the card that would hear it. Unlisted agents keep theirs.
+  @$pb.TagNumber(18)
+  $pb.PbList<AppSubscription> get subscriptions => $_getList(17);
+
+  /// Why this needed the person's approval rather than Rivet applying it,
+  /// each one of Claktory's sentences (never Rivet's words): "Charts can
+  /// reach example.com on the internet, so giving it data or agents needs
+  /// your approval." Show each one. When Rivet itself has read another
+  /// Claktory's words, that sentence ("Rivet has read messages from another
+  /// Claktory, which may hold someone else's instructions, …") is always the
+  /// first, so the app can set it apart; the rest follow in Claktory's order
+  /// (private data, the internet, then each agent). Empty on cards from
+  /// before (apps_propose_access).
+  @$pb.TagNumber(19)
+  $pb.PbList<$core.String> get cardRules => $_getList(18);
+}
+
+/// The person's decision on an AppAccessProposal in Rivet's conversation.
+/// Answered with Ack once it's decided; the entry comes back decided. An
+/// approval whose digest isn't the proposal's is refused and the card shown
+/// again.
+class DecideAppAccess extends $pb.GeneratedMessage {
+  factory DecideAppAccess({
+    $core.String? agentId,
+    $fixnum.Int64? seq,
+    $core.bool? approve,
+    $core.String? comment,
+    $core.String? digest,
+  }) {
+    final result = DecideAppAccess._();
+    if (agentId != null) result.agentId = agentId;
+    if (seq != null) result.seq = seq;
+    if (approve != null) result.approve = approve;
+    if (comment != null) result.comment = comment;
+    if (digest != null) result.digest = digest;
+    return result;
+  }
+
+  DecideAppAccess._();
+
+  factory DecideAppAccess.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DecideAppAccess()..mergeFromBuffer(data, registry);
+  factory DecideAppAccess.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DecideAppAccess()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DecideAppAccess',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: DecideAppAccess.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'seq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOB(3, _omitFieldNames ? '' : 'approve')
+    ..aOS(4, _omitFieldNames ? '' : 'comment')
+    ..aOS(5, _omitFieldNames ? '' : 'digest')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DecideAppAccess clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DecideAppAccess copyWith(void Function(DecideAppAccess) updates) =>
+      super.copyWith((message) => updates(message as DecideAppAccess))
+          as DecideAppAccess;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use DecideAppAccess() / DecideAppAccess.new instead')
+  static DecideAppAccess create() => DecideAppAccess._();
+  static $pb.GeneratedMessage $_createMessage() => DecideAppAccess._();
+  @$core.override
+  DecideAppAccess createEmptyInstance() => DecideAppAccess._();
+  @$core.pragma('dart2js:noInline')
+  static DecideAppAccess getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DecideAppAccess>(
+          DecideAppAccess.$_createMessage);
+  static DecideAppAccess? _defaultInstance;
+
+  /// Whose conversation shows it: Rivet's.
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  /// The entry's seq.
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get seq => $_getI64(1);
+  @$pb.TagNumber(2)
+  set seq($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSeq() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSeq() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.bool get approve => $_getBF(2);
+  @$pb.TagNumber(3)
+  set approve($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasApprove() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearApprove() => $_clearField(3);
+
+  /// The person's comment, told to Rivet as theirs, with either answer; may
+  /// be empty. 2,000 characters at most.
+  @$pb.TagNumber(4)
+  $core.String get comment => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set comment($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasComment() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearComment() => $_clearField(4);
+
+  /// With `approve`: AppAccessProposal.digest, as the card showed it.
+  @$pb.TagNumber(5)
+  $core.String get digest => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set digest($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasDigest() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearDigest() => $_clearField(5);
 }
 
 class DevicePairing extends $pb.GeneratedMessage {
@@ -31735,9 +32936,9 @@ class SecretRequest extends $pb.GeneratedMessage {
   @$pb.TagNumber(20)
   $pb.PbList<SecretImport> get imports => $_getList(19);
 
-  /// The asking agent had read a pipe, a direct message or a web page when
-  /// it asked (as AppGrantProposal.grantee_read_pipes): what it asks for may
-  /// come from someone else.
+  /// The asking agent had read a web page when it asked (a pipe or a direct
+  /// message, before #346; as AppGrantProposal.grantee_read_pipes): what it
+  /// asks for may come from someone else.
   @$pb.TagNumber(21)
   $core.bool get askerReadPipes => $_getBF(20);
   @$pb.TagNumber(21)
@@ -31826,8 +33027,8 @@ class SecretImport extends $pb.GeneratedMessage {
   void clearVariable() => $_clearField(1);
 
   /// Its canonical absolute path, exactly as Claktory resolved it, not
-  /// escaped: the card shows the home folder as ~/ and control, bidi and
-  /// zero-width characters as visible \u{…}. Claktory refuses a path
+  /// escaped: the card shows it in full, never shortened (no ~/), with
+  /// control, bidi and zero-width characters as visible \u{…}. Claktory refuses a path
   /// through a symbolic link, so this is the file itself.
   @$pb.TagNumber(2)
   $core.String get path => $_getSZ(1);
@@ -36171,6 +37372,8 @@ class AppInfo extends $pb.GeneratedMessage {
     $core.String? publisherKey,
     $core.Iterable<AppViewSpec>? views,
     $core.Iterable<AppDataSource>? sources,
+    $core.bool? bundled,
+    $core.bool? readsFiles,
   }) {
     final result = AppInfo._();
     if (id != null) result.id = id;
@@ -36193,6 +37396,8 @@ class AppInfo extends $pb.GeneratedMessage {
     if (publisherKey != null) result.publisherKey = publisherKey;
     if (views != null) result.views.addAll(views);
     if (sources != null) result.sources.addAll(sources);
+    if (bundled != null) result.bundled = bundled;
+    if (readsFiles != null) result.readsFiles = readsFiles;
     return result;
   }
 
@@ -36237,6 +37442,8 @@ class AppInfo extends $pb.GeneratedMessage {
         subBuilder: AppViewSpec.$_createMessage)
     ..pPM<AppDataSource>(20, _omitFieldNames ? '' : 'sources',
         subBuilder: AppDataSource.$_createMessage)
+    ..aOB(21, _omitFieldNames ? '' : 'bundled')
+    ..aOB(22, _omitFieldNames ? '' : 'readsFiles')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -36410,6 +37617,31 @@ class AppInfo extends $pb.GeneratedMessage {
   /// for (every agent, when it asks for any).
   @$pb.TagNumber(20)
   $pb.PbList<AppDataSource> get sources => $_getList(19);
+
+  /// One of Claktory's own apps that this release ships (BundledApp):
+  /// Claktory installs it by itself, granting it nothing, and updates it
+  /// when a newer one ships with nothing new to approve.
+  @$pb.TagNumber(21)
+  $core.bool get bundled => $_getBF(20);
+  @$pb.TagNumber(21)
+  set bundled($core.bool value) => $_setBool(20, value);
+  @$pb.TagNumber(21)
+  $core.bool hasBundled() => $_has(20);
+  @$pb.TagNumber(21)
+  void clearBundled() => $_clearField(21);
+
+  /// Its manifest asks to read files the person chooses ([[data]] kind
+  /// "file"): show "Add a file…", which gives one with GrantAppSource
+  /// (APP_DATA_KIND_FILE says how a file's id reads). `sources` lists only
+  /// the files given.
+  @$pb.TagNumber(22)
+  $core.bool get readsFiles => $_getBF(21);
+  @$pb.TagNumber(22)
+  set readsFiles($core.bool value) => $_setBool(21, value);
+  @$pb.TagNumber(22)
+  $core.bool hasReadsFiles() => $_has(21);
+  @$pb.TagNumber(22)
+  void clearReadsFiles() => $_clearField(22);
 }
 
 /// Data an app reads, only once the person grants it, and always read
@@ -36423,6 +37655,9 @@ class AppDataSource extends $pb.GeneratedMessage {
     $core.String? label,
     $core.String? reason,
     $core.bool? granted,
+    $core.String? holds,
+    $core.bool? private,
+    AppAccessGiven? given,
   }) {
     final result = AppDataSource._();
     if (id != null) result.id = id;
@@ -36431,6 +37666,9 @@ class AppDataSource extends $pb.GeneratedMessage {
     if (label != null) result.label = label;
     if (reason != null) result.reason = reason;
     if (granted != null) result.granted = granted;
+    if (holds != null) result.holds = holds;
+    if (private != null) result.private = private;
+    if (given != null) result.given = given;
     return result;
   }
 
@@ -36454,6 +37692,10 @@ class AppDataSource extends $pb.GeneratedMessage {
     ..aOS(4, _omitFieldNames ? '' : 'label')
     ..aOS(5, _omitFieldNames ? '' : 'reason')
     ..aOB(6, _omitFieldNames ? '' : 'granted')
+    ..aOS(7, _omitFieldNames ? '' : 'holds')
+    ..aOB(8, _omitFieldNames ? '' : 'private')
+    ..aOM<AppAccessGiven>(9, _omitFieldNames ? '' : 'given',
+        subBuilder: AppAccessGiven.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -36478,7 +37720,10 @@ class AppDataSource extends $pb.GeneratedMessage {
           AppDataSource.$_createMessage);
   static AppDataSource? _defaultInstance;
 
-  /// "factory-records", or "agent:<agent id>"; GrantAppSource names it.
+  /// "activity", "conversations", "agent:<agent id>", "file:<place>:<path>"
+  /// (APP_DATA_KIND_FILE), or "factory-records" (all of Claktory's records:
+  /// offered no more, and listed only where it was granted before);
+  /// GrantAppSource names it.
   @$pb.TagNumber(1)
   $core.String get id => $_getSZ(0);
   @$pb.TagNumber(1)
@@ -36537,6 +37782,42 @@ class AppDataSource extends $pb.GeneratedMessage {
   $core.bool hasGranted() => $_has(5);
   @$pb.TagNumber(6)
   void clearGranted() => $_clearField(6);
+
+  /// What it holds, a line for the person: "Runs, background tasks,
+  /// monitors, checklist counts and token use. No message text."
+  @$pb.TagNumber(7)
+  $core.String get holds => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set holds($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasHolds() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearHolds() => $_clearField(7);
+
+  /// It holds people's words (what you and your agents wrote, or whatever an
+  /// agent keeps in its database): conversations, an agent's database, and
+  /// all of Claktory's records. Shown apart, and when the app can reach the
+  /// internet, the card says this data could leave this computer.
+  @$pb.TagNumber(8)
+  $core.bool get private => $_getBF(7);
+  @$pb.TagNumber(8)
+  set private($core.bool value) => $_setBool(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasPrivate() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearPrivate() => $_clearField(8);
+
+  /// In AppInfo.sources, granted: who gave it and when (AppGrant.given).
+  @$pb.TagNumber(9)
+  AppAccessGiven get given => $_getN(8);
+  @$pb.TagNumber(9)
+  set given(AppAccessGiven value) => $_setField(9, value);
+  @$pb.TagNumber(9)
+  $core.bool hasGiven() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearGiven() => $_clearField(9);
+  @$pb.TagNumber(9)
+  AppAccessGiven ensureGiven() => $_ensure(8);
 }
 
 /// Grants the app the data source `source_id` (AppDataSource.id), or takes
@@ -37280,11 +38561,13 @@ class AppScopeSpec extends $pb.GeneratedMessage {
     $core.String? id,
     $core.String? label,
     $core.Iterable<$core.String>? tools,
+    $core.bool? readsData,
   }) {
     final result = AppScopeSpec._();
     if (id != null) result.id = id;
     if (label != null) result.label = label;
     if (tools != null) result.tools.addAll(tools);
+    if (readsData != null) result.readsData = readsData;
     return result;
   }
 
@@ -37304,6 +38587,7 @@ class AppScopeSpec extends $pb.GeneratedMessage {
     ..aOS(1, _omitFieldNames ? '' : 'id')
     ..aOS(2, _omitFieldNames ? '' : 'label')
     ..pPS(3, _omitFieldNames ? '' : 'tools')
+    ..aOB(4, _omitFieldNames ? '' : 'readsData')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -37350,6 +38634,18 @@ class AppScopeSpec extends $pb.GeneratedMessage {
   /// The tools it gives.
   @$pb.TagNumber(3)
   $pb.PbList<$core.String> get tools => $_getList(2);
+
+  /// Its tools can hand the agent what the app reads from the sources it's
+  /// given (Charts' "Change dashboards", with charts_query): the agent reads
+  /// that data too.
+  @$pb.TagNumber(4)
+  $core.bool get readsData => $_getBF(3);
+  @$pb.TagNumber(4)
+  set readsData($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasReadsData() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearReadsData() => $_clearField(4);
 }
 
 class AppEventKind extends $pb.GeneratedMessage {
@@ -37439,10 +38735,12 @@ class AppGrant extends $pb.GeneratedMessage {
   factory AppGrant({
     $core.String? agentId,
     $core.Iterable<$core.String>? scopes,
+    AppAccessGiven? given,
   }) {
     final result = AppGrant._();
     if (agentId != null) result.agentId = agentId;
     if (scopes != null) result.scopes.addAll(scopes);
+    if (given != null) result.given = given;
     return result;
   }
 
@@ -37461,6 +38759,8 @@ class AppGrant extends $pb.GeneratedMessage {
       createEmptyInstance: AppGrant.$_createMessage)
     ..aOS(1, _omitFieldNames ? '' : 'agentId')
     ..pPS(2, _omitFieldNames ? '' : 'scopes')
+    ..aOM<AppAccessGiven>(3, _omitFieldNames ? '' : 'given',
+        subBuilder: AppAccessGiven.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -37494,6 +38794,558 @@ class AppGrant extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(2)
   $pb.PbList<$core.String> get scopes => $_getList(1);
+
+  /// In AppInfo.grants: who gave this agent its scopes as they are, and
+  /// when; unset when that wasn't recorded (before Claktory kept it, or an
+  /// edit of the settings file).
+  @$pb.TagNumber(3)
+  AppAccessGiven get given => $_getN(2);
+  @$pb.TagNumber(3)
+  set given(AppAccessGiven value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasGiven() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearGiven() => $_clearField(3);
+  @$pb.TagNumber(3)
+  AppAccessGiven ensureGiven() => $_ensure(2);
+}
+
+/// Who changed an app's access to what it is, and when: the last recorded
+/// change that set it (AppInfo's grants and sources).
+class AppAccessGiven extends $pb.GeneratedMessage {
+  factory AppAccessGiven({
+    $core.String? byAgentId,
+    $fixnum.Int64? atMs,
+    $core.String? changeId,
+    $core.bool? byCard,
+  }) {
+    final result = AppAccessGiven._();
+    if (byAgentId != null) result.byAgentId = byAgentId;
+    if (atMs != null) result.atMs = atMs;
+    if (changeId != null) result.changeId = changeId;
+    if (byCard != null) result.byCard = byCard;
+    return result;
+  }
+
+  AppAccessGiven._();
+
+  factory AppAccessGiven.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppAccessGiven()..mergeFromBuffer(data, registry);
+  factory AppAccessGiven.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppAccessGiven()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AppAccessGiven',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AppAccessGiven.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'byAgentId')
+    ..aInt64(2, _omitFieldNames ? '' : 'atMs')
+    ..aOS(3, _omitFieldNames ? '' : 'changeId')
+    ..aOB(4, _omitFieldNames ? '' : 'byCard')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppAccessGiven clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppAccessGiven copyWith(void Function(AppAccessGiven) updates) =>
+      super.copyWith((message) => updates(message as AppAccessGiven))
+          as AppAccessGiven;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AppAccessGiven() / AppAccessGiven.new instead')
+  static AppAccessGiven create() => AppAccessGiven._();
+  static $pb.GeneratedMessage $_createMessage() => AppAccessGiven._();
+  @$core.override
+  AppAccessGiven createEmptyInstance() => AppAccessGiven._();
+  @$core.pragma('dart2js:noInline')
+  static AppAccessGiven getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AppAccessGiven>(
+          AppAccessGiven.$_createMessage);
+  static AppAccessGiven? _defaultInstance;
+
+  /// The admin agent that applied it (Rivet); empty when the person did,
+  /// themselves or by approving Rivet's card (by_card).
+  @$pb.TagNumber(1)
+  $core.String get byAgentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set byAgentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasByAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearByAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get atMs => $_getI64(1);
+  @$pb.TagNumber(2)
+  set atMs($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAtMs() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAtMs() => $_clearField(2);
+
+  /// The change that set it: UndoAppAccessChange names it.
+  @$pb.TagNumber(3)
+  $core.String get changeId => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set changeId($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasChangeId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearChangeId() => $_clearField(3);
+
+  /// The person approved it on Rivet's card (AppAccessProposal).
+  @$pb.TagNumber(4)
+  $core.bool get byCard => $_getBF(3);
+  @$pb.TagNumber(4)
+  set byCard($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasByCard() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearByCard() => $_clearField(4);
+}
+
+/// Undoes a recorded change to an app's access (AppAccessGiven.change_id,
+/// NeedsYouRecord.app_change_id): each source, agent's scopes and events it
+/// changed that are still as it left them go back to what they were before
+/// it; any changed since is left as it is. The undo is a change of its own,
+/// recorded, which can be undone in turn. Answered with AppAccessUndone.
+class UndoAppAccessChange extends $pb.GeneratedMessage {
+  factory UndoAppAccessChange({
+    $core.String? changeId,
+  }) {
+    final result = UndoAppAccessChange._();
+    if (changeId != null) result.changeId = changeId;
+    return result;
+  }
+
+  UndoAppAccessChange._();
+
+  factory UndoAppAccessChange.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UndoAppAccessChange()..mergeFromBuffer(data, registry);
+  factory UndoAppAccessChange.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UndoAppAccessChange()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UndoAppAccessChange',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UndoAppAccessChange.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'changeId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UndoAppAccessChange clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UndoAppAccessChange copyWith(void Function(UndoAppAccessChange) updates) =>
+      super.copyWith((message) => updates(message as UndoAppAccessChange))
+          as UndoAppAccessChange;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core
+      .Deprecated('Use UndoAppAccessChange() / UndoAppAccessChange.new instead')
+  static UndoAppAccessChange create() => UndoAppAccessChange._();
+  static $pb.GeneratedMessage $_createMessage() => UndoAppAccessChange._();
+  @$core.override
+  UndoAppAccessChange createEmptyInstance() => UndoAppAccessChange._();
+  @$core.pragma('dart2js:noInline')
+  static UndoAppAccessChange getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<UndoAppAccessChange>(
+          UndoAppAccessChange.$_createMessage);
+  static UndoAppAccessChange? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get changeId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set changeId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasChangeId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChangeId() => $_clearField(1);
+}
+
+/// See ClientMessage.undo_model_change.
+class UndoModelChange extends $pb.GeneratedMessage {
+  factory UndoModelChange({
+    $core.String? changeId,
+  }) {
+    final result = UndoModelChange._();
+    if (changeId != null) result.changeId = changeId;
+    return result;
+  }
+
+  UndoModelChange._();
+
+  factory UndoModelChange.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UndoModelChange()..mergeFromBuffer(data, registry);
+  factory UndoModelChange.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UndoModelChange()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UndoModelChange',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UndoModelChange.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'changeId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UndoModelChange clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UndoModelChange copyWith(void Function(UndoModelChange) updates) =>
+      super.copyWith((message) => updates(message as UndoModelChange))
+          as UndoModelChange;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UndoModelChange() / UndoModelChange.new instead')
+  static UndoModelChange create() => UndoModelChange._();
+  static $pb.GeneratedMessage $_createMessage() => UndoModelChange._();
+  @$core.override
+  UndoModelChange createEmptyInstance() => UndoModelChange._();
+  @$core.pragma('dart2js:noInline')
+  static UndoModelChange getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<UndoModelChange>(
+          UndoModelChange.$_createMessage);
+  static UndoModelChange? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get changeId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set changeId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasChangeId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChangeId() => $_clearField(1);
+}
+
+/// The CSV and TSV files in the workspace and in every project and project
+/// folder that the app (AppInfo.reads_files) could be given, newest first,
+/// at most 200: each place's files, never through a symbolic link, under a
+/// name starting with ".", in node_modules or target, or (from the
+/// workspace) in a project's own folder, which lists them itself. Refused
+/// for an app that doesn't read files.
+class ListAppFiles extends $pb.GeneratedMessage {
+  factory ListAppFiles({
+    $core.String? appId,
+    $core.String? query,
+  }) {
+    final result = ListAppFiles._();
+    if (appId != null) result.appId = appId;
+    if (query != null) result.query = query;
+    return result;
+  }
+
+  ListAppFiles._();
+
+  factory ListAppFiles.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ListAppFiles()..mergeFromBuffer(data, registry);
+  factory ListAppFiles.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ListAppFiles()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ListAppFiles',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ListAppFiles.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'appId')
+    ..aOS(2, _omitFieldNames ? '' : 'query')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListAppFiles clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListAppFiles copyWith(void Function(ListAppFiles) updates) =>
+      super.copyWith((message) => updates(message as ListAppFiles))
+          as ListAppFiles;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ListAppFiles() / ListAppFiles.new instead')
+  static ListAppFiles create() => ListAppFiles._();
+  static $pb.GeneratedMessage $_createMessage() => ListAppFiles._();
+  @$core.override
+  ListAppFiles createEmptyInstance() => ListAppFiles._();
+  @$core.pragma('dart2js:noInline')
+  static ListAppFiles getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ListAppFiles>(
+          ListAppFiles.$_createMessage);
+  static ListAppFiles? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get appId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set appId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAppId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAppId() => $_clearField(1);
+
+  /// Only those whose label has these words (any case); empty for all.
+  @$pb.TagNumber(2)
+  $core.String get query => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set query($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasQuery() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearQuery() => $_clearField(2);
+}
+
+class AppFiles extends $pb.GeneratedMessage {
+  factory AppFiles({
+    $core.Iterable<AppFileChoice>? files,
+    $core.bool? truncated,
+  }) {
+    final result = AppFiles._();
+    if (files != null) result.files.addAll(files);
+    if (truncated != null) result.truncated = truncated;
+    return result;
+  }
+
+  AppFiles._();
+
+  factory AppFiles.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppFiles()..mergeFromBuffer(data, registry);
+  factory AppFiles.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppFiles()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AppFiles',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AppFiles.$_createMessage)
+    ..pPM<AppFileChoice>(1, _omitFieldNames ? '' : 'files',
+        subBuilder: AppFileChoice.$_createMessage)
+    ..aOB(2, _omitFieldNames ? '' : 'truncated')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppFiles clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppFiles copyWith(void Function(AppFiles) updates) =>
+      super.copyWith((message) => updates(message as AppFiles)) as AppFiles;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AppFiles() / AppFiles.new instead')
+  static AppFiles create() => AppFiles._();
+  static $pb.GeneratedMessage $_createMessage() => AppFiles._();
+  @$core.override
+  AppFiles createEmptyInstance() => AppFiles._();
+  @$core.pragma('dart2js:noInline')
+  static AppFiles getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<AppFiles>(AppFiles.$_createMessage);
+  static AppFiles? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<AppFileChoice> get files => $_getList(0);
+
+  /// There were more than shown (past 200, or more than it looks through):
+  /// say so, and let the person narrow it with the query.
+  @$pb.TagNumber(2)
+  $core.bool get truncated => $_getBF(1);
+  @$pb.TagNumber(2)
+  set truncated($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasTruncated() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearTruncated() => $_clearField(2);
+}
+
+/// A file that could be given. Give it with GrantAppSource (source_id: id),
+/// which checks it again.
+class AppFileChoice extends $pb.GeneratedMessage {
+  factory AppFileChoice({
+    $core.String? id,
+    $core.String? label,
+    $fixnum.Int64? sizeBytes,
+    $fixnum.Int64? modifiedMs,
+    $core.String? why,
+  }) {
+    final result = AppFileChoice._();
+    if (id != null) result.id = id;
+    if (label != null) result.label = label;
+    if (sizeBytes != null) result.sizeBytes = sizeBytes;
+    if (modifiedMs != null) result.modifiedMs = modifiedMs;
+    if (why != null) result.why = why;
+    return result;
+  }
+
+  AppFileChoice._();
+
+  factory AppFileChoice.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppFileChoice()..mergeFromBuffer(data, registry);
+  factory AppFileChoice.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppFileChoice()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AppFileChoice',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AppFileChoice.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'label')
+    ..aInt64(3, _omitFieldNames ? '' : 'sizeBytes')
+    ..aInt64(4, _omitFieldNames ? '' : 'modifiedMs')
+    ..aOS(5, _omitFieldNames ? '' : 'why')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppFileChoice clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppFileChoice copyWith(void Function(AppFileChoice) updates) =>
+      super.copyWith((message) => updates(message as AppFileChoice))
+          as AppFileChoice;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AppFileChoice() / AppFileChoice.new instead')
+  static AppFileChoice create() => AppFileChoice._();
+  static $pb.GeneratedMessage $_createMessage() => AppFileChoice._();
+  @$core.override
+  AppFileChoice createEmptyInstance() => AppFileChoice._();
+  @$core.pragma('dart2js:noInline')
+  static AppFileChoice getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AppFileChoice>(
+          AppFileChoice.$_createMessage);
+  static AppFileChoice? _defaultInstance;
+
+  /// "file:web-site:reports/bugs.csv" (APP_DATA_KIND_FILE).
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  /// "reports/bugs.csv in Web Site".
+  @$pb.TagNumber(2)
+  $core.String get label => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set label($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasLabel() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearLabel() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get sizeBytes => $_getI64(2);
+  @$pb.TagNumber(3)
+  set sizeBytes($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasSizeBytes() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSizeBytes() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get modifiedMs => $_getI64(3);
+  @$pb.TagNumber(4)
+  set modifiedMs($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasModifiedMs() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearModifiedMs() => $_clearField(4);
+
+  /// Set when it shows but can't be given, in Claktory's words ("It's over
+  /// 10 MB, more than an app can read."); show it, and don't offer it.
+  @$pb.TagNumber(5)
+  $core.String get why => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set why($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasWhy() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearWhy() => $_clearField(5);
+}
+
+class AppAccessUndone extends $pb.GeneratedMessage {
+  factory AppAccessUndone({
+    $core.String? changeId,
+    $core.Iterable<$core.String>? kept,
+  }) {
+    final result = AppAccessUndone._();
+    if (changeId != null) result.changeId = changeId;
+    if (kept != null) result.kept.addAll(kept);
+    return result;
+  }
+
+  AppAccessUndone._();
+
+  factory AppAccessUndone.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppAccessUndone()..mergeFromBuffer(data, registry);
+  factory AppAccessUndone.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AppAccessUndone()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AppAccessUndone',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AppAccessUndone.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'changeId')
+    ..pPS(2, _omitFieldNames ? '' : 'kept')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppAccessUndone clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AppAccessUndone copyWith(void Function(AppAccessUndone) updates) =>
+      super.copyWith((message) => updates(message as AppAccessUndone))
+          as AppAccessUndone;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AppAccessUndone() / AppAccessUndone.new instead')
+  static AppAccessUndone create() => AppAccessUndone._();
+  static $pb.GeneratedMessage $_createMessage() => AppAccessUndone._();
+  @$core.override
+  AppAccessUndone createEmptyInstance() => AppAccessUndone._();
+  @$core.pragma('dart2js:noInline')
+  static AppAccessUndone getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AppAccessUndone>(
+          AppAccessUndone.$_createMessage);
+  static AppAccessUndone? _defaultInstance;
+
+  /// The undo's own change; empty when nothing was left to undo.
+  @$pb.TagNumber(1)
+  $core.String get changeId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set changeId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasChangeId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChangeId() => $_clearField(1);
+
+  /// What was left as it is because it changed since, a sentence each for
+  /// the person ("Ingrid's scopes on Charts changed since, so they were
+  /// left as they are.").
+  @$pb.TagNumber(2)
+  $pb.PbList<$core.String> get kept => $_getList(1);
 }
 
 class AppSubscription extends $pb.GeneratedMessage {
@@ -40255,8 +42107,7 @@ class UpdatePipe extends $pb.GeneratedMessage {
 
   /// The members quarantined for it (Pipe.quarantined_ids), all of them;
   /// ids that aren't members are refused. A member left out is released:
-  /// it gets its usual tools back, though it has read the pipe until its
-  /// conversation is cleared (Agent.tainted_by_pipes). Only the person can
+  /// it gets its usual tools back. Only the person can
   /// send this: no agent tool reaches it.
   @$pb.TagNumber(9)
   PipeMembers get quarantined => $_getN(8);
@@ -41032,9 +42883,11 @@ class AddPipeLiaison extends $pb.GeneratedMessage {
   void clearName() => $_clearField(2);
 }
 
-/// An agent that has read a pipe (Agent.tainted_by_pipes) ran a command
-/// with a secret: it didn't run, and waits for the person. Allowed, the
-/// agent may use the secret in one command; it's told either way.
+/// An agent ran a command with a secret that asks the person each time
+/// (SecretInfo.ask_each_time), or after reading a web page
+/// (Agent.tainted_by_pipes; a pipe, before #346): it didn't run, and waits for
+/// the person. Allowed, the agent may use the secret in one command; it's
+/// told either way.
 class SecretApproval extends $pb.GeneratedMessage {
   factory SecretApproval({
     $core.String? agentId,
@@ -41125,7 +42978,8 @@ class SecretApproval extends $pb.GeneratedMessage {
   @$pb.TagNumber(2)
   $pb.PbList<$core.String> get secretNames => $_getList(1);
 
-  /// The pipes it has read, by name.
+  /// What it has read, by name: since #346 a web page's site; pipes on
+  /// older cards. Empty when only ask_each_time_names ask.
   @$pb.TagNumber(3)
   $pb.PbList<$core.String> get pipeNames => $_getList(2);
 
@@ -41192,11 +43046,13 @@ class SecretApproval extends $pb.GeneratedMessage {
   void clearKeepsRunning() => $_clearField(10);
 }
 
-/// A pipe an agent has read, and how: `via_names` are the agents, by name
-/// when it asked, that what it read came through, first the one that read
-/// the pipe itself (each messaged the next); empty when the agent read the
-/// pipe itself. "Website ⇄ Marketing" via ["Liaison", "Bruno"]: Liaison read
-/// it, told Bruno, and Bruno told this agent.
+/// What an agent has read that may hold someone else's instructions: since
+/// #346 a web page (kind "browser"), read by the agent itself; a pipe on
+/// older records. `via_names` are the agents, by name when it asked, that
+/// what it read came through, first the one that read it (each messaged the
+/// next); since #346 a mark never spreads, so it's empty on new records.
+/// "Website ⇄ Marketing" via ["Liaison", "Bruno"]: Liaison read it, told
+/// Bruno, and Bruno told this agent.
 class PipeTaint extends $pb.GeneratedMessage {
   factory PipeTaint({
     $core.String? pipeName,
@@ -41544,10 +43400,10 @@ class AskPerson extends $pb.GeneratedMessage {
   @$pb.TagNumber(7)
   void clearDecidedMs() => $_clearField(7);
 
-  /// The pipes the agent had read when it asked (Agent.tainted_by_pipes),
-  /// each with the agents it came through: what it asks may come from the
-  /// other side ("from Liaison, which reads the pipe with Ana's Claktory").
-  /// Empty when it had read none.
+  /// What the agent had read when it asked (Agent.tainted_by_pipes): what it
+  /// asks may come from someone else. Since #346 only a web page; pipes, with
+  /// the agents they came through, on older asks. Empty when it had read
+  /// none.
   @$pb.TagNumber(8)
   $pb.PbList<PipeTaint> get taint => $_getList(7);
 
@@ -41833,6 +43689,9 @@ class Chat extends $pb.GeneratedMessage {
     $core.bool? modelAvailable,
     $core.String? usageWait,
     $fixnum.Int64? usageWaitUntilMs,
+    UsageWaitAlternative? usageWaitAlternative,
+    $core.bool? usageWaitNoOtherProvider,
+    UsageSwitch? usageSwitch,
   }) {
     final result = Chat._();
     if (id != null) result.id = id;
@@ -41847,6 +43706,11 @@ class Chat extends $pb.GeneratedMessage {
     if (modelAvailable != null) result.modelAvailable = modelAvailable;
     if (usageWait != null) result.usageWait = usageWait;
     if (usageWaitUntilMs != null) result.usageWaitUntilMs = usageWaitUntilMs;
+    if (usageWaitAlternative != null)
+      result.usageWaitAlternative = usageWaitAlternative;
+    if (usageWaitNoOtherProvider != null)
+      result.usageWaitNoOtherProvider = usageWaitNoOtherProvider;
+    if (usageSwitch != null) result.usageSwitch = usageSwitch;
     return result;
   }
 
@@ -41878,6 +43742,12 @@ class Chat extends $pb.GeneratedMessage {
     ..aOB(10, _omitFieldNames ? '' : 'modelAvailable')
     ..aOS(11, _omitFieldNames ? '' : 'usageWait')
     ..aInt64(12, _omitFieldNames ? '' : 'usageWaitUntilMs')
+    ..aOM<UsageWaitAlternative>(
+        13, _omitFieldNames ? '' : 'usageWaitAlternative',
+        subBuilder: UsageWaitAlternative.$_createMessage)
+    ..aOB(14, _omitFieldNames ? '' : 'usageWaitNoOtherProvider')
+    ..aOM<UsageSwitch>(15, _omitFieldNames ? '' : 'usageSwitch',
+        subBuilder: UsageSwitch.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -42017,6 +43887,39 @@ class Chat extends $pb.GeneratedMessage {
   $core.bool hasUsageWaitUntilMs() => $_has(11);
   @$pb.TagNumber(12)
   void clearUsageWaitUntilMs() => $_clearField(12);
+
+  /// As Agent.usage_wait_alternative, usage_wait_no_other_provider and
+  /// usage_switch.
+  @$pb.TagNumber(13)
+  UsageWaitAlternative get usageWaitAlternative => $_getN(12);
+  @$pb.TagNumber(13)
+  set usageWaitAlternative(UsageWaitAlternative value) => $_setField(13, value);
+  @$pb.TagNumber(13)
+  $core.bool hasUsageWaitAlternative() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearUsageWaitAlternative() => $_clearField(13);
+  @$pb.TagNumber(13)
+  UsageWaitAlternative ensureUsageWaitAlternative() => $_ensure(12);
+
+  @$pb.TagNumber(14)
+  $core.bool get usageWaitNoOtherProvider => $_getBF(13);
+  @$pb.TagNumber(14)
+  set usageWaitNoOtherProvider($core.bool value) => $_setBool(13, value);
+  @$pb.TagNumber(14)
+  $core.bool hasUsageWaitNoOtherProvider() => $_has(13);
+  @$pb.TagNumber(14)
+  void clearUsageWaitNoOtherProvider() => $_clearField(14);
+
+  @$pb.TagNumber(15)
+  UsageSwitch get usageSwitch => $_getN(14);
+  @$pb.TagNumber(15)
+  set usageSwitch(UsageSwitch value) => $_setField(15, value);
+  @$pb.TagNumber(15)
+  $core.bool hasUsageSwitch() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearUsageSwitch() => $_clearField(15);
+  @$pb.TagNumber(15)
+  UsageSwitch ensureUsageSwitch() => $_ensure(14);
 }
 
 /// Makes a chat and selects it (Workspace.selected_chat_id, in the Workspace
@@ -44598,6 +46501,12 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     ReportSchema? reportTypeBefore,
     $core.bool? widens,
     $core.Iterable<ReportSchema>? reportTypes,
+    $core.String? appChangeId,
+    $core.bool? undone,
+    $core.String? appId,
+    $core.String? agentReason,
+    $core.String? modelChangeId,
+    $core.String? subjectAgentId,
   }) {
     final result = NeedsYouRecord._();
     if (kind != null) result.kind = kind;
@@ -44617,6 +46526,12 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     if (reportTypeBefore != null) result.reportTypeBefore = reportTypeBefore;
     if (widens != null) result.widens = widens;
     if (reportTypes != null) result.reportTypes.addAll(reportTypes);
+    if (appChangeId != null) result.appChangeId = appChangeId;
+    if (undone != null) result.undone = undone;
+    if (appId != null) result.appId = appId;
+    if (agentReason != null) result.agentReason = agentReason;
+    if (modelChangeId != null) result.modelChangeId = modelChangeId;
+    if (subjectAgentId != null) result.subjectAgentId = subjectAgentId;
     return result;
   }
 
@@ -44657,6 +46572,12 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     ..aOB(16, _omitFieldNames ? '' : 'widens')
     ..pPM<ReportSchema>(17, _omitFieldNames ? '' : 'reportTypes',
         subBuilder: ReportSchema.$_createMessage)
+    ..aOS(18, _omitFieldNames ? '' : 'appChangeId')
+    ..aOB(19, _omitFieldNames ? '' : 'undone')
+    ..aOS(20, _omitFieldNames ? '' : 'appId')
+    ..aOS(21, _omitFieldNames ? '' : 'agentReason')
+    ..aOS(22, _omitFieldNames ? '' : 'modelChangeId')
+    ..aOS(23, _omitFieldNames ? '' : 'subjectAgentId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -44808,7 +46729,7 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
   @$pb.TagNumber(12)
   void clearDecidedMs() => $_clearField(12);
 
-  /// As on the card: the pipes the agent had read when it asked.
+  /// As on the card: what the agent had read when it asked.
   @$pb.TagNumber(13)
   $pb.PbList<PipeTaint> get taint => $_getList(12);
 
@@ -44836,8 +46757,10 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
   @$pb.TagNumber(15)
   ReportSchema ensureReportTypeBefore() => $_ensure(14);
 
-  /// REPORT_TYPE: the edit widened what crosses (report_type's
-  /// widened_fields says where).
+  /// REPORT_TYPE: the edit lets more of the other side's words through: a
+  /// field of text, a list or files that's new or widened (report_type's
+  /// widened_fields says where, facts included: more choices or a wider
+  /// range widen what crosses, but carry no words of theirs).
   @$pb.TagNumber(16)
   $core.bool get widens => $_getBF(15);
   @$pb.TagNumber(16)
@@ -44851,6 +46774,69 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
   /// then, with every field and cap.
   @$pb.TagNumber(17)
   $pb.PbList<ReportSchema> get reportTypes => $_getList(16);
+
+  /// APP_ACCESS: the change, for UndoAppAccessChange; empty when there's
+  /// nothing to undo (a card declined, or one that failed).
+  @$pb.TagNumber(18)
+  $core.String get appChangeId => $_getSZ(17);
+  @$pb.TagNumber(18)
+  set appChangeId($core.String value) => $_setString(17, value);
+  @$pb.TagNumber(18)
+  $core.bool hasAppChangeId() => $_has(17);
+  @$pb.TagNumber(18)
+  void clearAppChangeId() => $_clearField(18);
+
+  /// APP_ACCESS: it was undone since (by a later change).
+  @$pb.TagNumber(19)
+  $core.bool get undone => $_getBF(18);
+  @$pb.TagNumber(19)
+  set undone($core.bool value) => $_setBool(18, value);
+  @$pb.TagNumber(19)
+  $core.bool hasUndone() => $_has(18);
+  @$pb.TagNumber(19)
+  void clearUndone() => $_clearField(19);
+
+  /// APP_ACCESS: the app's id.
+  @$pb.TagNumber(20)
+  $core.String get appId => $_getSZ(19);
+  @$pb.TagNumber(20)
+  set appId($core.String value) => $_setString(19, value);
+  @$pb.TagNumber(20)
+  $core.bool hasAppId() => $_has(19);
+  @$pb.TagNumber(20)
+  void clearAppId() => $_clearField(20);
+
+  /// APP_ACCESS: why, in Rivet's words (apps_set_access's reason): show it
+  /// as Rivet's, under the title, never as Claktory's; empty for the
+  /// person's own changes. MODEL: models_set's reason, the same way.
+  @$pb.TagNumber(21)
+  $core.String get agentReason => $_getSZ(20);
+  @$pb.TagNumber(21)
+  set agentReason($core.String value) => $_setString(20, value);
+  @$pb.TagNumber(21)
+  $core.bool hasAgentReason() => $_has(20);
+  @$pb.TagNumber(21)
+  void clearAgentReason() => $_clearField(21);
+
+  /// MODEL: the change, for UndoModelChange. `undone` says it was undone.
+  @$pb.TagNumber(22)
+  $core.String get modelChangeId => $_getSZ(21);
+  @$pb.TagNumber(22)
+  set modelChangeId($core.String value) => $_setString(21, value);
+  @$pb.TagNumber(22)
+  $core.bool hasModelChangeId() => $_has(21);
+  @$pb.TagNumber(22)
+  void clearModelChangeId() => $_clearField(22);
+
+  /// MODEL: the agent whose model or effort changed.
+  @$pb.TagNumber(23)
+  $core.String get subjectAgentId => $_getSZ(22);
+  @$pb.TagNumber(23)
+  set subjectAgentId($core.String value) => $_setString(22, value);
+  @$pb.TagNumber(23)
+  $core.bool hasSubjectAgentId() => $_has(22);
+  @$pb.TagNumber(23)
+  void clearSubjectAgentId() => $_clearField(23);
 }
 
 /// A Mac app can broker for its Chrome. Sent on every connection, and again
@@ -50068,7 +52054,8 @@ class PipeReport extends $pb.GeneratedMessage {
   @$pb.TagNumber(16)
   void clearReadMs() => $_clearField(16);
 
-  /// What its liaison had read when it wrote it: its pipe, at least.
+  /// What its liaison had read when it wrote it. Since #346 reading a pipe
+  /// marks no one, so it's empty on new reports; older ones name the pipe.
   @$pb.TagNumber(17)
   $pb.PbList<PipeTaint> get taint => $_getList(16);
 

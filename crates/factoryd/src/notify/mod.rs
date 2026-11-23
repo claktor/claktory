@@ -17,7 +17,7 @@
 //! device (SetActive), but an alert, which shows nowhere else; nothing is
 //! pushed for two minutes after.
 //!
-//! An agent that has read a pipe (or is quarantined for one) never puts its
+//! An agent that has read a web page (or is quarantined for a pipe) never puts its
 //! own words on the person's lock screen (threat model, Fugo's change B):
 //! its notifications say only "<agent> has something for you". A pipe's
 //! held messages never carry what the other side wrote.
@@ -429,7 +429,7 @@ pub(crate) struct Note {
     pub who: String,
     /// What it says, in full; empty for nothing more than who.
     pub what: String,
-    /// It's from an agent that has read a pipe: it says only who.
+    /// It's from an agent that has read a web page: it says only who.
     pub tainted: bool,
     /// An alert its agent marked urgent.
     pub urgent: bool,
@@ -720,8 +720,8 @@ fn changes(data: &mut Data, factory: &Factory, inner: &Inner, settings: &Notific
     notes
 }
 
-/// What a Needs-you item says, and whether it carries a pipe's taint of its
-/// own (asked while its agent had read a pipe).
+/// What a Needs-you item says, and whether it carries a taint of its own
+/// (asked while its agent had read a pipe, before #346, or a web page).
 fn waiting_text(kind: Option<&EntryKind>, tainted: bool) -> (String, bool) {
     match kind {
         Some(EntryKind::AskPerson(ask)) => (ask.title.clone(), tainted || !ask.taint.is_empty()),

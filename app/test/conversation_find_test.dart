@@ -2,9 +2,10 @@
 // the bar says which match of how many, goes up to older ones, loads back
 // to one older than what's held, and marks the matches in the text.
 import 'package:factory_app/backend.dart' show RequestFailure;
+import 'package:factory_app/controls.dart' show GlyphButton;
 import 'package:factory_app/conversation_find.dart';
 import 'package:factory_app/find.dart';
-import 'package:factory_app/inbox.dart' show NeedsYouChip;
+import 'package:factory_app/inbox.dart' show NeedsYouChip, NeedsYouList;
 import 'package:factory_app/markdown.dart' show Markdown;
 import 'package:factory_app/message_box.dart' show MessageBox;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -16,6 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'app_test.dart' show builder, workspace;
 import 'harness.dart';
+import 'ipad/as_ipad.dart';
 import 'selection_test.dart' show rightClick;
 
 Entry _user(int seq, String text) => Entry(
@@ -406,6 +408,50 @@ void main() {
       expect(session.field.hasFocus, isTrue);
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
+    // Needs you open as a pane beside the conversation.
+    ViewNode beside() => ViewNode(
+      id: 's1',
+      split: ViewSplit(
+        axis: ViewAxis.VIEW_AXIS_ROW,
+        children: [
+          ViewNode(
+            id: 'chat',
+            leaf: ViewLeaf(kind: 'chat'),
+          ),
+          ViewNode(
+            id: 'v1',
+            leaf: ViewLeaf(kind: 'inbox'),
+          ),
+        ],
+      ),
+    );
+
+    Harness besideNeedsYou() {
+      final harness = Harness(
+        workspace(agents: [builder(working: false)..layout = beside()])
+          ..selectedAgentId = 'a1',
+      );
+      harness.backend.transcript.load(
+        Transcript(agentId: 'a1', entries: [_reply(1, 'Hello there')]),
+      );
+      return harness;
+    }
+
+    FindTarget openTarget(WidgetTester tester) =>
+        tester.widget<FindBar>(find.byType(FindBar)).session.target;
+
+    testWidgets("with Needs you beside it, the header's Find opens the "
+        "conversation's bar, not Needs you's", (tester) async {
+      final harness = besideNeedsYou();
+      await harness.show(tester, size: const Size(1400, 900));
+      await settle(tester);
+      expect(find.byType(NeedsYouList), findsOneWidget);
+      await tester.tap(find.bySemanticsLabel('Find'));
+      await pumpFrames(tester);
+      expect(find.byType(FindBar), findsOneWidget);
+      expect(openTarget(tester), isA<ConversationFind>());
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
     testWidgets("a match older than what's held loads back to it and shows "
         'it; nothing found says so', (tester) async {
       final harness = _harness([
@@ -486,17 +532,17 @@ void main() {
       target.search('x');
       await pumpEventQueue();
       expect(target.countLabel, '1 of 3');
-      expect(gone, [(pipe: false, seq: 9)]);
+      expect(gone, [(pipe: false, seq: 9, queued: null)]);
       target.step(1);
       expect(asked, hasLength(1));
       target.step(1);
       await pumpEventQueue();
       expect(asked.last, (pipe: false, beforeSeq: 7));
       expect(target.countLabel, '3 of 3');
-      expect(gone.last, (pipe: false, seq: 2));
+      expect(gone.last, (pipe: false, seq: 2, queued: null));
       // Round to the newest.
       target.step(1);
-      expect(gone.last, (pipe: false, seq: 9));
+      expect(gone.last, (pipe: false, seq: 9, queued: null));
     });
 
     test('back from the newest goes to the oldest, loading all', () async {
@@ -513,7 +559,7 @@ void main() {
       target.step(-1);
       await pumpEventQueue();
       expect(target.countLabel, '2 of 2');
-      expect(gone.last, (pipe: false, seq: 2));
+      expect(gone.last, (pipe: false, seq: 2, queued: null));
     });
 
     test("in a pipe, its messages and the liaison's conversation in time "
@@ -538,12 +584,12 @@ void main() {
         await pumpEventQueue();
       }
       expect(gone, [
-        (pipe: false, seq: 50),
-        (pipe: true, seq: 8),
-        (pipe: false, seq: 40),
+        (pipe: false, seq: 50, queued: null),
+        (pipe: true, seq: 8, queued: null),
+        (pipe: false, seq: 40, queued: null),
         // The conversation's next page came before the pipe's older one.
-        (pipe: false, seq: 10),
-        (pipe: true, seq: 3),
+        (pipe: false, seq: 10, queued: null),
+        (pipe: true, seq: 3, queued: null),
       ]);
       expect(asked, [
         (pipe: false, beforeSeq: null),
@@ -680,5 +726,118 @@ void main() {
       expect(identical(marked, span), isFalse);
       expect(marked.toPlainText(), span.toPlainText());
     });
+  });
+
+  testWidgets("the messages queued at its end are found too, newest of all "
+      "(Zucchero's row 207)", (tester) async {
+    final harness = _harness([_user(1, 'FYI an old one'), _reply(2, 'Noted.')]);
+    harness.backend.matches = (request) => ConversationMatches(
+      query: request.query,
+      agentId: request.agentId,
+      matches: [_match(1)],
+      total: 1,
+    );
+    harness.backend.queued.apply(
+      QueuedMessages(
+        agentId: 'a1',
+        messages: [
+          QueuedMessage(
+            id: Int64(1),
+            source: 'agent',
+            sender: 'Writer',
+            senderId: 'a3',
+            text: 'FYI the build is green.',
+            quiet: true,
+          ),
+          QueuedMessage(
+            id: Int64(2),
+            source: 'person',
+            text: 'FYI, and fyi again',
+          ),
+        ],
+      ),
+    );
+    await harness.show(tester, size: const Size(1200, 1400));
+    await settle(tester);
+
+    /// The washes in the bubble showing [words].
+    List<(String, bool)> washes(String words) {
+      final found = <(String, bool)>[];
+      for (final element
+          in find
+              .byWidgetPredicate(
+                (widget) =>
+                    widget is RichText &&
+                    widget.text.toPlainText().contains(words),
+              )
+              .evaluate()) {
+        (element.widget as RichText).text.visitChildren((span) {
+          final background = span.style?.backgroundColor;
+          if (span is TextSpan && background != null && span.text != null) {
+            found.add((span.text!, background.a > 0.9));
+          }
+          return true;
+        });
+      }
+      return found;
+    }
+
+    await _command(tester, LogicalKeyboardKey.keyF);
+    await pumpFrames(tester);
+    await _type(tester, 'fyi');
+    // The person's queued message (newest) twice, Writer's once, the
+    // conversation's once.
+    expect(_count(tester), '1 of 4');
+    expect(washes('and fyi again'), [('FYI', false), ('fyi', true)]);
+    expect(washes('the build is green'), [('FYI', false)]);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(_count(tester), '2 of 4');
+    expect(washes('and fyi again'), [('FYI', true), ('fyi', false)]);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(_count(tester), '3 of 4');
+    expect(washes('the build is green'), [('FYI', true)]);
+    // Its "Quiet · read when …" line is no match.
+    expect(washes('read when'), isEmpty);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await pumpFrames(tester);
+    expect(_count(tester), '4 of 4');
+    expect(_washes(tester, 1), [('FYI', true)]);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+  testWidgets("on an iPad, the keyboard's Return goes to the next match, the "
+      "field kept (Zucchero's row 214)", (tester) async {
+    asIPad();
+    final harness = _harness([
+      _user(1, 'Ship it today'),
+      _reply(2, 'I shipped it, and the ship sailed.'),
+    ]);
+    harness.backend.matches = (request) => ConversationMatches(
+      query: request.query,
+      agentId: request.agentId,
+      matches: [_match(2, hits: 2), _match(1)],
+      total: 3,
+    );
+    await harness.show(tester, size: const Size(1180, 820));
+    await settle(tester);
+    // The header's magnifying glass, as Zucchero opened it.
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) => widget is GlyphButton && widget.label == 'Find',
+      ),
+    );
+    await pumpFrames(tester);
+    await _type(tester, 'ship');
+    expect(_count(tester), '1 of 3');
+    final field = tester.widget<FindBar>(find.byType(FindBar)).session.field;
+    expect(field.hasFocus, isTrue);
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pump();
+    expect(_count(tester), '2 of 3');
+    expect(field.hasFocus, isTrue, reason: 'the keyboard stays');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pump();
+    expect(_count(tester), '3 of 3');
   });
 }

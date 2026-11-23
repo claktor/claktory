@@ -154,8 +154,8 @@ async fn rivet_proposes_app_access_and_only_the_persons_approval_gives_it() {
     assert!(first.len() == 32 && first.bytes().all(|b| b.is_ascii_hexdigit()), "{first}");
 
     // Declined, with a comment: Rivet hears it, and nothing is given. Mike
-    // has read a pipe by then, which the card says.
-    factoryd::pipes::taint_with_for_test(&factory, "lea", "mike", r#"{"p1":[]}"#);
+    // has read a web page by then, which the card says.
+    factoryd::pipes::taint_for_test(&factory, "mike", "browser:https://example.com");
     call(&mut client, &mut view, &proposal("mike", &["dm.send"], "c-2")).await;
     let (declined, shown) = card(&view);
     assert!(shown.grantee_read_pipes);
@@ -170,12 +170,12 @@ async fn rivet_proposes_app_access_and_only_the_persons_approval_gives_it() {
     assert!(held(&dir).is_empty());
 
     // Approved: the service holds the grant, for Mike's incarnation. Mike
-    // read a pipe after this card was shown, so the first approval is
+    // read a web page after this card was shown, so the first approval is
     // refused and the card warns; the next is informed.
     assert!(!card_at(&view, seq).grantee_read_pipes);
     let refused = decide(&mut client, &mut view, seq, true, "").await;
     let v1::server_message::Body::Error(error) = refused else { panic!("expected a refusal, got {refused:?}") };
-    assert_eq!(error.message, "Mike has read messages from another Claktory since this was proposed. Look at it again.");
+    assert_eq!(error.message, "Mike has read a page on https://example.com since Rivet suggested this. Look at it again.");
     view.follow(&mut client, |view| card_at(view, seq).grantee_read_pipes).await;
     assert_eq!((card_at(&view, seq).state(), held(&dir).len()), (State::Pending, 0));
     let reply = decide(&mut client, &mut view, seq, true, "").await;
@@ -216,7 +216,7 @@ async fn rivet_proposes_app_access_and_only_the_persons_approval_gives_it() {
     decide(&mut client, &mut view, stale, true, "").await;
     view.follow(&mut client, |view| card_at(view, stale).state() == State::Failed).await;
     let shown = card_at(&view, stale);
-    assert_eq!(shown.error, "Mike was deleted since this was proposed, so nothing was given.");
+    assert_eq!(shown.error, "Mike was deleted since Rivet suggested this, so nothing was given.");
     assert!(held(&dir).is_empty());
     call(&mut client, &mut view, &proposal("Mike", &["dm.read"], "c-1")).await;
     let second = incarnation(&dir, "mike").expect("the new Mike's incarnation");
@@ -259,9 +259,9 @@ async fn only_an_untainted_rivet_of_a_signed_in_claktory_proposes() {
 
     let refused = call(&mut client, &mut view, &proposal("Mike", &["dm.read"], "c-1")).await;
     assert!(refused.starts_with("This Claktory isn't signed in to the person's account"), "{refused}");
-    factoryd::pipes::taint_with_for_test(&factory, "lea", "rivet", r#"{"p1":[]}"#);
+    factoryd::pipes::taint_for_test(&factory, "rivet", "browser:https://example.com");
     let refused = call(&mut client, &mut view, &proposal("Mike", &["dm.read"], "c-1")).await;
-    assert!(refused.starts_with("You've read a pipe, so you can't propose access"), "{refused}");
+    assert!(refused.starts_with("You've read a page on https://example.com, so you can't propose access"), "{refused}");
     assert!(view.entries.iter().all(|entry| !matches!(entry.kind, Some(Kind::AppGrant(_)))), "no card");
     assert_eq!(incarnation(&dir, "mike"), None, "none made for nothing");
 }

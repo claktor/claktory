@@ -7,8 +7,9 @@
 //! The person's messages after a PENDING one wait behind it, so the agent
 //! reads them in the order they were sent; events don't. One that FAILED
 //! holds nothing up, and waits for RetryVoiceMessage or
-//! DiscardVoiceMessage. What's waiting, and how far it got, is kept in the
-//! store, so a restart carries on with it.
+//! DiscardVoiceMessage; one under 5 seconds with no speech in it is
+//! dropped instead, as if discarded. What's waiting, and how far it got,
+//! is kept in the store, so a restart carries on with it.
 //!
 //! One worker transcribes, oldest first across agents, with one
 //! `claktory-speech serve` kept running while there's work (it holds the
@@ -389,14 +390,32 @@ fn read(factory: &Arc<Factory>, job: &Job, duration_ms: u64) {
     factory.broadcast_workspace(&inner);
 }
 
-/// Done or failed: the agent gets its words, or the person sees why not. A
-/// message discarded meanwhile, or failed for want of the model, stays so.
+/// A recording this short with no speech in it was most likely made by
+/// mistake: it's dropped rather than left failed. A longer silent one may
+/// be a microphone that isn't working, which the person should see.
+const SILENT_MS: u64 = 5_000;
+
+/// Done or failed: the agent gets its words, or the person sees why not; a
+/// short one with no speech in it vanishes, as if discarded. A message
+/// discarded meanwhile, or failed for want of the model, stays so.
 fn finish(factory: &Arc<Factory>, job: &Job, outcome: Result<Heard, Failure>) {
     let redactor = factory.redaction.current();
     let mut inner = factory.lock();
     let Some(runtime) = inner.agents.get_mut(&job.agent) else { return };
-    let Some(queued) = runtime.queue.iter_mut().find(|queued| queued.id == job.id) else { return };
+    let Some(at) = runtime.queue.iter().position(|queued| queued.id == job.id) else { return };
+    let queued = &mut runtime.queue[at];
     let Some(voice) = queued.voice.as_mut().filter(|voice| voice.state == State::Pending) else { return };
+    if let Err(failure) = &outcome
+        && failure.code == "no_speech"
+        && voice.duration_ms < SILENT_MS
+    {
+        tracing::info!(agent = %job.agent, duration_ms = voice.duration_ms, "a short voice message with no speech was dropped");
+        let dropped = runtime.queue.remove(at);
+        factory.settle(&[dropped], crate::store::Outcome::Dropped);
+        // The person's messages after it no longer wait for it.
+        factory.wake(&mut inner, &job.agent);
+        return;
+    }
     match outcome {
         Ok(heard) => {
             tracing::info!(agent = %job.agent, duration_ms = heard.duration_ms, "a voice message was transcribed");

@@ -610,7 +610,7 @@ pub(crate) fn delete(factory: &Arc<Factory>, id: &str, by: &str) -> Result<(), S
             Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
             None => String::new(),
         };
-        return Err(format!("\"{}\" is still on for {places}: turn it off there first.", schema.name));
+        return Err(format!("“{}” is still forwarded by {places}. Turn it off there first.", schema.name));
     }
     {
         let mut db = factory.store.db();

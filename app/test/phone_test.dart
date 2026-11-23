@@ -296,6 +296,45 @@ void main() {
     expect(find.byKey(const ValueKey('camera')), findsOneWidget);
   });
 
+  testWidgets('friend bug #2: a refused camera, then Paste: Scan code '
+      'instead leads back to Open Settings, and scans once allowed', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(Workspace(), localBackend: false);
+    harness.camera.state = CameraAccess.denied;
+    await harness.show(tester, size: phone);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Paste code instead'));
+    await pumpFrames(tester);
+    expect(find.text('Open Settings'), findsNothing);
+    await tester.tap(find.text('Scan code instead'));
+    await pumpFrames(tester);
+    expect(find.text('Open Settings'), findsOneWidget);
+    await tester.tap(find.text('Open Settings'));
+    await tester.pump();
+    expect(harness.camera.settingsOpened, 1);
+    // Allowed in Settings, then back in Claktory: the camera.
+    harness.camera.state = CameraAccess.granted;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await pumpFrames(tester);
+    expect(find.byKey(const ValueKey('camera')), findsOneWidget);
+  });
+
+  testWidgets('a restricted camera, then Paste: no Scan code instead', (
+    tester,
+  ) async {
+    final harness = Harness(Workspace(), localBackend: false);
+    harness.camera.state = CameraAccess.restricted;
+    await harness.show(tester, size: phone);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Paste code instead'));
+    await pumpFrames(tester);
+    expect(find.text('Scan code instead'), findsNothing);
+  });
+
   testWidgets('a restricted camera says to paste instead, with no Settings', (
     tester,
   ) async {

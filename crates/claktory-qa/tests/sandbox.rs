@@ -197,3 +197,93 @@ fn agents_in_a_sandbox_run_on_the_scripted_model() {
     }
     ok(root, &["down", "two"]);
 }
+
+/// Whether the factoryd beside claktory-qa has the QA provider override
+/// (built with factoryd's qa-provider feature, as scripts/qa.sh builds it).
+fn qa_build() -> bool {
+    let factoryd = Path::new(QA).parent().expect("bin").join("factoryd");
+    let bytes = std::fs::read(factoryd).unwrap_or_default();
+    let var = b"FACTORY_QA_ANTHROPIC_URL";
+    bytes.windows(var.len()).any(|window| window == var)
+}
+
+/// `up --claude`: Claude signed in, fake, on qa-model's Anthropic side. A
+/// factoryd without the QA override (the workspace's own build, as a
+/// release) is refused before anything reaches Anthropic. With it (built
+/// as `cargo build -p factoryd -p claktory-qa --features
+/// factoryd/qa-provider`, or by scripts/qa.sh), an agent runs on Claude,
+/// waits at the usage limit `limit` sets, carries on at Try now once it's
+/// lifted, and by itself once it resets.
+#[test]
+fn a_fake_claude_sign_in_reaches_its_usage_limit() {
+    if !built() {
+        return;
+    }
+    let root = Root(std::env::temp_dir().join(format!("claktory-qa-claude-{}", std::process::id())));
+    let root = root.0.as_path();
+    if !qa_build() {
+        let (code, json) = qa(root, &["up", "four", "--no-account", "--claude"]);
+        assert_eq!(code, 1, "{json}");
+        assert!(json["message"].as_str().is_some_and(|message| message.contains("QA provider override")), "{json}");
+        assert!(!root.join("four").exists(), "nothing is left of it");
+        return;
+    }
+    let up = ok(root, &["up", "three", "--no-account", "--claude"]);
+    assert_eq!((&up["model"], &up["claude"]["account"]), (&Value::from("anthropic/claude-haiku-4-5"), &Value::from("claude@example.test")));
+    assert!(refused(root, &["send", "three", "StartLogin", r#"{"provider_id": "anthropic"}"#]).contains("no real model"));
+    ok(root, &["send", "three", "CreateProject", r#"{"name": "Site"}"#]);
+    ok(root, &["send", "three", "CreateAgent", r#"{"project_id": "site", "name": "Lea"}"#]);
+    assert_eq!(ok(root, &["workspace", "three", "agents[name=Lea].model_available"])["value"], true);
+    let lea = ok(root, &["workspace", "three", "agents[name=Lea].id"])["value"].as_str().expect("id").to_owned();
+
+    // On Claude's wire: the script's answers, tools and all.
+    assert_eq!(ok(root, &["ask", "three", "Lea", "Hello"])["reply"], "OK: Hello");
+    let ran = ok(root, &["ask", "three", "Lea", r#"call bash {"command": "echo hi from claude"}"#]);
+    assert!(ran["reply"].as_str().is_some_and(|reply| reply.ends_with("answered: hi from claude")), "{ran}");
+    let asked = ok(root, &["model", "three", "--agent", "Lea", "--last", "1"]);
+    assert_eq!(asked["requests"][0]["wire"], "anthropic", "{asked}");
+    // Who's signed in, as Anthropic says.
+    let account = ok(root, &["workspace", "three", "providers[id=anthropic].accounts[0].label"]);
+    assert_eq!(account["value"], "claude@example.test");
+
+    // At its limit: Lea waits, saying until when; Try now once it's lifted.
+    let waiting_until = |root: &Path| -> u64 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let value = ok(root, &["workspace", "three", "agents[name=Lea].usage_wait_until_ms"])["value"].clone();
+            let ms = value.as_str().and_then(|ms| ms.parse::<u64>().ok()).or_else(|| value.as_u64()).unwrap_or(0);
+            if ms > 0 || std::time::Instant::now() > deadline {
+                return ms;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    };
+    let replied = |root: &Path, text: &str, secs: u64| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        loop {
+            let last = ok(root, &["transcript", "three", "Lea", "--last", "1"]);
+            if last["entries"][0]["assistant"]["text"] == text {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "no {text:?} after {secs} s: {last}");
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    };
+    let until = ok(root, &["limit", "three", "--for", "600"])["limited_until_ms"].as_u64().expect("until");
+    ok(root, &["send", "three", "SendMessage", &format!(r#"{{"agent_id": "{lea}", "text": "Still there?"}}"#)]);
+    let waits = waiting_until(root);
+    assert!(waits >= until - 1000, "Lea waits until {waits}, the limit resets at {until}");
+    assert!(ok(root, &["workspace", "three", "agents[name=Lea].usage_wait"])["value"].as_str().is_some_and(|wait| !wait.is_empty()));
+    ok(root, &["limit", "three", "--off"]);
+    ok(root, &["send", "three", "TryAgainNow", &format!(r#"{{"agent_id": "{lea}"}}"#)]);
+    replied(root, "OK: Still there?", 60);
+
+    // And by itself, once the limit resets.
+    ok(root, &["limit", "three", "--for", "3"]);
+    ok(root, &["send", "three", "SendMessage", &format!(r#"{{"agent_id": "{lea}", "text": "And now?"}}"#)]);
+    assert!(waiting_until(root) > 0, "Lea waits");
+    replied(root, "OK: And now?", 120);
+    let env = Command::new(QA).args(["env", "three"]).env("CLAKTORY_QA_ROOT", root).output().expect("env");
+    assert!(String::from_utf8_lossy(&env.stdout).contains("export FACTORY_QA_ANTHROPIC_URL='http://127.0.0.1:"));
+    ok(root, &["down", "three"]);
+}

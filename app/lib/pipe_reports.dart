@@ -572,10 +572,21 @@ String? forwardApprovalLine(
   final to = _nameOf(workspace, pipe.forward.recipientId);
   final counts = pipe.reports;
   return (
-    'Reports from $from to $to: ${counts.today} today, room for '
-        '${counts.roomToday} more',
+    'Reports from $from to $to: ${counts.today} today, '
+        '${reportRoomText(pipe)}',
     counts.refusedToday,
   );
+}
+
+/// "room for 27 more" while the day's limit is what's left; "room for 4
+/// more this hour" while the hour's is tighter (Abbacchio's row 645:
+/// PipeReportCounts.room_today is the lesser of the two).
+String reportRoomText(Pipe pipe) {
+  final counts = pipe.reports;
+  final perDay = pipe.forward.limits.perDay;
+  final dayRoom = perDay > counts.today ? perDay - counts.today : 0;
+  final hour = perDay > 0 && counts.roomToday < dayRoom;
+  return 'room for ${counts.roomToday} more${hour ? ' this hour' : ''}';
 }
 
 /// The quiet counts about a pipe's reports and its agent, each a sentence:
@@ -705,8 +716,7 @@ class _PipeReportsStripState extends State<PipeReportsStrip> {
             TextSpan(
               text:
                   '  to ${_nameOf(workspace, recipient)} · '
-                  '${counts.today} today, room for '
-                  '${counts.roomToday} more',
+                  '${counts.today} today, ${reportRoomText(pipe)}',
               style: TextStyle(color: palette.textFaint),
             ),
         ],
@@ -1364,7 +1374,7 @@ class _StopReadingReportsFieldState extends State<StopReadingReportsField> {
   var _busy = false;
   String? _error;
 
-  void _start(List<Pipe> feeding) => setState(() {
+  void _start(List<String> feeding) => setState(() {
     _error = null;
     _refused = feeding.isNotEmpty;
     _confirming = feeding.isEmpty;
@@ -1396,6 +1406,23 @@ class _StopReadingReportsFieldState extends State<StopReadingReportsField> {
     final workspace = AppScope.of(context).workspace.workspace;
     final name = widget.agent.name;
     final feeding = pipesFeeding(workspace, widget.agent.id);
+    // What still forwards to it, which the backend refuses a stop over:
+    // its pipes, and projects whose new pipes would (Abbacchio's row 645).
+    final defaults = [
+      for (final project in workspace.projects)
+        if (project.hasReportForward() &&
+            project.reportForward.recipientId == widget.agent.id)
+          project,
+    ];
+    final places = [
+      for (final pipe in feeding) pipe.name,
+      for (final project in defaults) '${project.name}’s new pipes',
+    ];
+    final where = defaults.isEmpty
+        ? 'each pipe’s settings'
+        : feeding.isEmpty
+        ? 'the project’s settings'
+        : 'each pipe’s and the project’s settings';
     final caption = type.caption.copyWith(color: palette.textMuted);
     return Padding(
       padding: const EdgeInsets.only(bottom: Space.l),
@@ -1427,16 +1454,15 @@ class _StopReadingReportsFieldState extends State<StopReadingReportsField> {
               alignment: Alignment.centerLeft,
               child: Button(
                 label: 'Stop reading reports…',
-                onPressed: () => _start(feeding),
+                onPressed: () => _start(places),
               ),
             ),
           ],
-          if (_refused && feeding.isNotEmpty && !_confirming) ...[
+          if (_refused && places.isNotEmpty && !_confirming) ...[
             const SizedBox(height: Space.xs),
             Text(
-              '$name still gets reports from '
-              '${_andList([for (final pipe in feeding) pipe.name])}. Choose '
-              'another agent for them in each pipe’s settings first.',
+              '$name still gets reports from ${_andList(places)}. Choose '
+              'another agent for them in $where first.',
               style: type.caption.copyWith(color: palette.danger),
             ),
           ],

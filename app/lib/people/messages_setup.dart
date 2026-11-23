@@ -1,20 +1,25 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import '../controls.dart';
+import '../device_account.dart' show DeviceAccount;
 import '../devices.dart' show QrCode, pairedOn, thisDeviceKind;
 import '../extensions.dart' show dayLabel;
 import '../forms.dart' show FormFrame;
 import '../identity.dart';
-import '../mobile/lines.dart' show ActionLine;
+import '../message_time.dart' show clockTime;
+import '../mobile/lines.dart' show ActionLine, ControlsLine;
 import '../mobile/metrics.dart' show TypeScale;
 import '../scanner.dart';
 import '../scope.dart';
 import '../tunnel/api/dm.dart' show DmHandoffSealed;
 import '../tunnel/api/dm_transfer.dart';
 import '../visible_codes.dart' show proseCodes;
+import '../your_claktories.dart' show DeviceSignInForm;
 import 'e2ee.dart';
+import '../user_apps/session.dart' show UserAppError, UserAppProblem;
 import 'secret_clipboard.dart';
 
 // E5: People's part for end-to-end messages on this device (dms-e2ee §2,
@@ -162,6 +167,71 @@ class _AddThis extends StatefulWidget {
 }
 
 class _AddThisState extends State<_AddThis> {
+  /// Starting over with a new security key ([E2ee.startNewKey]).
+  var _starting = false;
+  String? _startOverError;
+
+  /// The new key waits for a fresh sign-in (Sign in again…).
+  var _signInFirst = false;
+
+  Future<void> _noOtherDevice() async {
+    var sure = false;
+    await showModal(
+      context,
+      (context, close) => FormFrame(
+        title: 'Start over on this $thisDeviceKind?',
+        body:
+            'This $thisDeviceKind gets a new security key and starts with no '
+            'messages. Your earlier messages stay with your friends.\n\n'
+            'Your friends see that your security key changed, and anyone '
+            'who verified you will need to again.\n\n'
+            'Any other device that still has your old key stops getting '
+            'messages until you add it again.',
+        fields: const [],
+        error: null,
+        submitLabel: 'Start over',
+        onSubmit: () {
+          sure = true;
+          close();
+        },
+        onCancel: close,
+      ),
+    );
+    if (sure) await _startOver();
+  }
+
+  /// Signed in again: then the new key, which the person already chose.
+  Future<void> _signInThenStartOver() async {
+    if (!await _signInAgain(
+          context,
+          'For your security, sign in again to start over.',
+        ) ||
+        !mounted) {
+      return;
+    }
+    setState(() => _signInFirst = false);
+    await _startOver();
+  }
+
+  Future<void> _startOver() async {
+    setState(() {
+      _starting = true;
+      _startOverError = null;
+    });
+    final stop = await widget.e2ee.startNewKey();
+    if (!mounted) return;
+    setState(() => _starting = false);
+    switch (stop) {
+      case null:
+        return;
+      case DmStartOverStop.signInAgain:
+        // Signed in long ago (a found device, say): a fresh sign-in first.
+        setState(() => _signInFirst = true);
+      case DmStartOverStop.failed:
+        setState(() => _startOverError = "That didn't work. Try again.");
+    }
+  }
+
   /// Whether this device can copy its code safely; until then, and where
   /// it can't, no Copy code.
   var _canCopy = false;
@@ -292,6 +362,31 @@ class _AddThisState extends State<_AddThis> {
             'Waiting for your other device…',
             style: type.caption.copyWith(color: palette.textFaint),
           ),
+          // All devices lost, or a reinstall on the only one (dms-e2ee §2,
+          // Abbacchio's row 630): a new security key here, never a dead end.
+          const SizedBox(height: Space.s),
+          Button(
+            label: 'No other device?',
+            onPressed: _starting ? null : _noOtherDevice,
+          ),
+          if (_signInFirst) ...[
+            const SizedBox(height: Space.s),
+            ActionLine(
+              lead: Text(
+                'For your security, sign in again to start over.',
+                style: type.body.copyWith(color: palette.text),
+              ),
+              action: Button(
+                label: 'Sign in again…',
+                primary: true,
+                onPressed: _signInThenStartOver,
+              ),
+            ),
+          ],
+          if (_startOverError case final error?) ...[
+            const SizedBox(height: Space.xs),
+            Text(error, style: type.caption.copyWith(color: palette.danger)),
+          ],
           if (_canCopy && code != null) ...[
             const SizedBox(height: Space.m),
             Button(
@@ -308,6 +403,102 @@ class _AddThisState extends State<_AddThis> {
               style: type.caption.copyWith(color: palette.textFaint),
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A fresh sign-in before a new security key (403 sign_in_again, Fugo):
+/// the device's own sign-in, again, saying why ([intro]). True once it
+/// went through.
+Future<bool> _signInAgain(BuildContext context, String intro) async {
+  var done = false;
+  await showModal(
+    context,
+    (context, close) => _SignInAgain(
+      intro: intro,
+      close: (signedIn) {
+        done = signedIn;
+        close();
+      },
+    ),
+  );
+  return done;
+}
+
+class _SignInAgain extends StatefulWidget {
+  const _SignInAgain({required this.intro, required this.close});
+
+  final String intro;
+  final void Function(bool signedIn) close;
+
+  @override
+  State<_SignInAgain> createState() => _SignInAgainState();
+}
+
+class _SignInAgainState extends State<_SignInAgain> {
+  DeviceAccount? _account;
+
+  /// The emailed code was asked for: its sign-in finishing closes this.
+  var _asked = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final account = AppScope.scope(context).connections.account;
+    if (account == _account) return;
+    _account?.removeListener(_changed);
+    _account = account..addListener(_changed);
+  }
+
+  @override
+  void dispose() {
+    _account?.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    final account = _account!;
+    if (account.awaitingCode != null) {
+      _asked = true;
+    } else if (_asked && account.signedIn) {
+      widget.close(true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: Space.s,
+            runSpacing: Space.s,
+            children: [
+              Text(
+                'Sign in again',
+                style: type.emphasis.copyWith(color: palette.text),
+              ),
+              Button(label: 'Cancel', onPressed: () => widget.close(false)),
+            ],
+          ),
+          const SizedBox(height: Space.l),
+          // Only the account this device is signed in to: a mistyped
+          // address would sign it in to another (Abbacchio's row 644).
+          DeviceSignInForm(
+            intro: widget.intro,
+            email: switch (_account?.email) {
+              final email? when email.isNotEmpty => email,
+              _ => null,
+            },
+          ),
         ],
       ),
     );
@@ -431,6 +622,11 @@ class _DevicesState extends State<_Devices> {
   /// leaf, with the names they claim.
   Map<String, String> _strays = const {};
 
+  /// The person's devices a start-over took out (under the key it
+  /// replaced), by leaf with their names: never signed out until the
+  /// person removes them (Fugo, row 630).
+  Map<String, String> _replaced = const {};
+
   /// The account's Claktories by id, to name those still to finish a new
   /// security key; null until read (or when they can't be).
   Map<String, String>? _claktories;
@@ -441,6 +637,8 @@ class _DevicesState extends State<_Devices> {
     widget.e2ee.addListener(_read);
     _read();
     unawaited(_readClaktories());
+    // Which of them signed out, as the service says now (row 671).
+    unawaited(widget.e2ee.readSignedOut());
   }
 
   Future<void> _readClaktories() async {
@@ -471,10 +669,12 @@ class _DevicesState extends State<_Devices> {
     try {
       final devices = await widget.e2ee.devices();
       final strays = await widget.e2ee.notFullyRemoved();
+      final replaced = await widget.e2ee.replacedDevices();
       if (mounted) {
         setState(() {
           _devices = devices;
           _strays = strays;
+          _replaced = replaced;
         });
       }
     } catch (_) {
@@ -534,15 +734,19 @@ class _DevicesState extends State<_Devices> {
     ),
   );
 
-  Future<void> _remove(DmOwnDevice device) => showModal(
-    context,
-    (context, close) => _RemoveDevice(
-      e2ee: widget.e2ee,
-      leafId: device.leafId,
-      name: device.name.isEmpty ? 'this device' : device.name,
-      close: close,
-    ),
-  );
+  Future<void> _remove(DmOwnDevice device) {
+    final since = deviceSince(context, device, _devices);
+    return showModal(
+      context,
+      (context, close) => _RemoveDevice(
+        e2ee: widget.e2ee,
+        leafId: device.leafId,
+        name: device.name.isEmpty ? 'this device' : device.name,
+        since: since,
+        close: close,
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -558,33 +762,38 @@ class _DevicesState extends State<_Devices> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // Each named in full, with since when to tell two of the same
+          // name apart; the buttons go under it when they don't fit beside
+          // it (Zucchero's row 198).
           for (final device in devices)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: Space.xs),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      device.name.isEmpty ? 'A device' : device.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: type.body.copyWith(color: palette.text),
-                    ),
-                  ),
-                  if (device.here)
-                    Text(
-                      'This device',
-                      style: type.caption.copyWith(color: palette.textFaint),
-                    )
-                  else ...[
-                    Button(
-                      label: 'Lost or stolen…',
-                      onPressed: () => _lost(device),
-                    ),
-                    const SizedBox(width: Space.xs),
-                    Button(label: 'Remove…', onPressed: () => _remove(device)),
-                  ],
-                ],
+              child: ActionLine(
+                lead: _DeviceName(
+                  name: device.name,
+                  since: deviceSince(context, device, devices),
+                  signedOut:
+                      !device.here &&
+                      widget.e2ee.signedOut.contains(device.leafId),
+                ),
+                action: device.here
+                    ? Text(
+                        'This device',
+                        style: type.caption.copyWith(color: palette.textFaint),
+                      )
+                    : ControlsLine(
+                        gap: Space.xs,
+                        children: [
+                          Button(
+                            label: 'Lost or stolen…',
+                            onPressed: () => _lost(device),
+                          ),
+                          Button(
+                            label: 'Remove…',
+                            onPressed: () => _remove(device),
+                          ),
+                        ],
+                      ),
               ),
             ),
           // Off the list, still in a group: a removal that stopped part-way
@@ -616,6 +825,37 @@ class _DevicesState extends State<_Devices> {
                 ),
               ),
             ),
+          // A start-over took these out: they had the old key, and are
+          // still signed in to the account until the person removes them.
+          if (_replaced.isNotEmpty) ...[
+            const SizedBox(height: Space.s),
+            Text(
+              'Still on your old security key',
+              style: type.caption.copyWith(
+                color: palette.textMuted,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            for (final MapEntry(key: leaf, value: name) in _replaced.entries)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: Space.xs),
+                child: ActionLine(
+                  lead: Text(
+                    name.isEmpty ? 'A device' : proseCodes(name),
+                    style: type.body.copyWith(color: palette.text),
+                  ),
+                  action: Button(
+                    label: 'Remove…',
+                    onPressed: () => _remove((
+                      leafId: leaf,
+                      name: name,
+                      here: false,
+                      sinceMs: 0,
+                    )),
+                  ),
+                ),
+              ),
+          ],
           ?_underWay(palette, type),
           // After a new security key: each Claktory until the app connects
           // to it, when it takes the key (Fugo, Ghiaccio).
@@ -625,6 +865,18 @@ class _DevicesState extends State<_Devices> {
               child: Text(
                 'Connect to ${_claktories?[id] ?? 'your Claktory'} once to '
                 'finish your new security key there.',
+                style: type.caption.copyWith(color: palette.textMuted),
+              ),
+            ),
+          // A device of the person's under their old key holds a chat back
+          // (Abbacchio's row 611); this one joins by itself once it moves.
+          if (widget.e2ee.waitingForOtherDevices)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: Space.xs),
+              child: Text(
+                "Some of your chats can't come to this device yet. Open "
+                'Claktory on your other devices so they can update, and '
+                "they'll come here on their own.",
                 style: type.caption.copyWith(color: palette.textMuted),
               ),
             ),
@@ -658,7 +910,7 @@ class _AddDevice extends StatefulWidget {
   State<_AddDevice> createState() => _AddDeviceState();
 }
 
-class _AddDeviceState extends State<_AddDevice> {
+class _AddDeviceState extends State<_AddDevice> with WidgetsBindingObserver {
   CameraAccess? _access;
   DmHandoffSealed? _found;
   String? _error;
@@ -672,7 +924,22 @@ class _AddDeviceState extends State<_AddDevice> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     unawaited(_ask());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  // Back from Settings, the camera may be allowed now (friend bug #2).
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _found == null) {
+      unawaited(_ask());
+    }
   }
 
   Future<void> _ask() async {
@@ -700,6 +967,9 @@ class _AddDeviceState extends State<_AddDevice> {
           _error = null;
         });
       }
+    } on DmCodeRefused {
+      // Used already, or for a device removed (Abbacchio's row 612).
+      if (mounted) setState(() => _error = DmCodeRefused.message);
     } catch (_) {
       if (mounted) {
         setState(
@@ -730,7 +1000,20 @@ class _AddDeviceState extends State<_AddDevice> {
     try {
       await widget.e2ee.addDevice(found);
       widget.close();
-    } catch (_) {
+    } catch (error) {
+      if (error is UserAppError &&
+          error.problem == UserAppProblem.removedDevice) {
+        // Removed on another device, which this one didn't know yet
+        // (Abbacchio's row 617): Try again would fail the same way.
+        if (mounted) {
+          setState(() {
+            _busy = false;
+            _found = null;
+            _error = DmCodeRefused.message;
+          });
+        }
+        return;
+      }
       if (mounted) {
         setState(() {
           _busy = false;
@@ -823,10 +1106,28 @@ class _AddDeviceState extends State<_AddDevice> {
               },
             ),
           )
-        else if (_access != null)
+        else if (_access == CameraAccess.denied) ...[
+          // Refused so far: how to allow it, as the scanner says it.
           Text(
-            "This $thisDeviceKind can't scan. Copy the code on your new "
-            'device and choose Paste code instead.',
+            defaultTargetPlatform == TargetPlatform.android
+                ? 'To scan, allow Claktory to use the camera in Settings.'
+                : 'To scan, allow camera access in Settings → Claktory.',
+            style: type.body.copyWith(color: palette.text),
+          ),
+          const SizedBox(height: Space.s),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: Button(
+              label: 'Open Settings',
+              primary: true,
+              onPressed: () => unawaited(camera.openSettings()),
+            ),
+          ),
+        ] else if (_access != null)
+          // None, or one the person can't allow (Screen Time).
+          Text(
+            "The camera isn't available on this $thisDeviceKind. Copy the "
+            'code on your new device and choose Paste code instead.',
             style: type.body.copyWith(color: palette.textMuted),
           ),
         const SizedBox(height: Space.s),
@@ -852,12 +1153,17 @@ class _RemoveDevice extends StatefulWidget {
     required this.e2ee,
     required this.leafId,
     required this.name,
+    this.since = '',
     required this.close,
   });
 
   final E2ee e2ee;
   final String leafId;
   final String name;
+
+  /// Since when it's been the person's ("Since Mon 16 Nov"), to tell it
+  /// from another of the same name; empty when that isn't known.
+  final String since;
   final VoidCallback close;
 
   @override
@@ -899,8 +1205,9 @@ class _RemoveDeviceState extends State<_RemoveDevice> {
 
   @override
   Widget build(BuildContext context) => FormFrame(
-    title: 'Remove ${widget.name}?',
+    title: 'Remove ${proseCodes(widget.name)}?',
     body:
+        '${widget.since.isEmpty ? '' : '${widget.since}.\n\n'}'
         'It stops getting new messages and is signed out of your '
         'Claktory account. If you sign in on it again, it starts over as a '
         'new device.\n\n'
@@ -952,6 +1259,10 @@ class _ChangeKeyState extends State<_ChangeKey> {
   String get _name =>
       widget.lost.name.isEmpty ? 'This device' : widget.lost.name;
 
+  /// Since when the lost device has been the person's, to tell it from
+  /// another of the same name.
+  String get _lostSince => deviceSince(context, widget.lost, widget.devices);
+
   /// [leaf]'s name, kept with the Lock out to say which device it is once
   /// it's off the list.
   String _nameOf(String leaf) =>
@@ -991,18 +1302,38 @@ class _ChangeKeyState extends State<_ChangeKey> {
         DmKeyChange.failed =>
           "Your new security key isn't finished. Try again to carry on where "
               'it stopped.',
+        DmKeyChange.signInAgain =>
+          'For your security, sign in again to change your security key.',
       };
+      _signInFirst = stopped == DmKeyChange.signInAgain;
     });
+  }
+
+  /// A new key wants a recent sign-in (row 630): signed in again, it
+  /// carries on where it stopped.
+  var _signInFirst = false;
+
+  Future<void> _signInThenGo() async {
+    if (!await _signInAgain(
+          context,
+          'For your security, sign in again to change your security key.',
+        ) ||
+        !mounted) {
+      return;
+    }
+    setState(() => _signInFirst = false);
+    await _go();
   }
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final now = DateTime.now();
     return FormFrame(
-      title: 'Lock out ${widget.lost.name.isEmpty ? 'this device' : _name}?',
+      title:
+          'Lock out ${widget.lost.name.isEmpty ? 'this device' : proseCodes(_name)}?',
       body:
+          '${_lostSince.isEmpty ? '' : '$_lostSince.\n\n'}'
           '$_name is removed and signed out of your Claktory account, and '
           "you get a new security key, so $_name can't read new messages. "
           'Your friends see your security key change.\n\n'
@@ -1039,20 +1370,11 @@ class _ChangeKeyState extends State<_ChangeKey> {
                       CheckMark(on: _keep.contains(device.leafId)),
                       const SizedBox(width: Space.s),
                       Expanded(
-                        child: Text(
-                          device.name.isEmpty ? 'A device' : device.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: type.body.copyWith(color: palette.text),
+                        child: _DeviceName(
+                          name: device.name,
+                          since: deviceSince(context, device, widget.devices),
                         ),
                       ),
-                      if (device.sinceMs > 0)
-                        Text(
-                          'Since ${_sinceDay(dayLabel(DateTime.fromMillisecondsSinceEpoch(device.sinceMs), now))}',
-                          style: type.caption.copyWith(
-                            color: palette.textFaint,
-                          ),
-                        ),
                     ],
                   ),
                 ),
@@ -1066,8 +1388,16 @@ class _ChangeKeyState extends State<_ChangeKey> {
         ],
       ],
       error: _error,
-      submitLabel: _error == null ? 'Lock out' : 'Try again',
-      onSubmit: _busy ? null : _go,
+      submitLabel: _signInFirst
+          ? 'Sign in again…'
+          : _error == null
+          ? 'Lock out'
+          : 'Try again',
+      onSubmit: _busy
+          ? null
+          : _signInFirst
+          ? _signInThenGo
+          : _go,
       onCancel: widget.close,
     );
   }
@@ -1097,3 +1427,77 @@ String _sinceDay(String label) => switch (label) {
   'Yesterday' => 'yesterday',
   _ => label,
 };
+
+/// Since when [device] has been one of the person's: "Since Mon 16 Nov",
+/// with the time too when another of [devices] has its name, so two Macs
+/// both called "Mac Studio" read apart (Zucchero's row 198); empty when it
+/// isn't known.
+String deviceSince(
+  BuildContext context,
+  DmOwnDevice device,
+  List<DmOwnDevice> devices,
+) {
+  if (device.sinceMs <= 0) return '';
+  final day = _sinceDay(
+    dayLabel(
+      DateTime.fromMillisecondsSinceEpoch(device.sinceMs),
+      DateTime.now(),
+    ),
+  );
+  final twin = devices.any(
+    (other) => other.leafId != device.leafId && other.name == device.name,
+  );
+  if (!twin) return 'Since $day';
+  final time = clockTime(
+    device.sinceMs,
+    h24: MediaQuery.maybeAlwaysUse24HourFormatOf(context) ?? true,
+  );
+  return 'Since $day at $time';
+}
+
+/// A device's name, whole (wrapped, never cut short), and since when it's
+/// been the person's under it.
+class _DeviceName extends StatelessWidget {
+  const _DeviceName({
+    required this.name,
+    required this.since,
+    this.signedOut = false,
+  });
+
+  final String name;
+  final String since;
+
+  /// It signed out of the person's Claktory account (row 671): still on
+  /// their list until they remove it.
+  final bool signedOut;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(
+                text: name.isEmpty ? 'A device' : proseCodes(name),
+                style: TextStyle(color: palette.text),
+              ),
+              if (signedOut)
+                TextSpan(
+                  text: '  Signed out',
+                  style: type.caption.copyWith(color: palette.textMuted),
+                ),
+            ],
+          ),
+          style: type.body,
+        ),
+        if (since.isNotEmpty)
+          Text(since, style: type.caption.copyWith(color: palette.textFaint)),
+      ],
+    );
+  }
+}

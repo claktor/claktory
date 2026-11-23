@@ -100,6 +100,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "highlight",
             "memory",
             "memory:factory",
+            "models",
             "monitors",
             "move",
             "pipes",
@@ -123,8 +124,9 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
     assert!(rivet.options["admin"].on && !rivet.options["reachable"].on, "Rivet is the admin agent, and no one messages it");
     assert!(view.agent("rivet").extensions[9].enabled && !builder[9].enabled, "a new Factory's Rivet points at things");
     assert!(view.agent("rivet").extensions[7].enabled && !builder[7].enabled, "admins add the person's devices");
-    assert!(view.agent("rivet").extensions[13].enabled && !builder[13].enabled, "admins move Claktory for the person");
-    assert!(view.agent("rivet").extensions[14].enabled && !builder[14].enabled, "admins start pipes for the person");
+    assert!(view.agent("rivet").extensions[12].enabled && !builder[12].enabled, "admins put agents on models for the person");
+    assert!(view.agent("rivet").extensions[14].enabled && !builder[14].enabled, "admins move Claktory for the person");
+    assert!(view.agent("rivet").extensions[15].enabled && !builder[15].enabled, "admins start pipes for the person");
     assert!(view.agent("rivet").extensions[1].enabled && !builder[1].enabled, "admins propose app access for the person");
     assert!(builder[4].enabled, "comments on unless turned off");
     assert!(

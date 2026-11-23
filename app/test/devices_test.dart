@@ -1,15 +1,18 @@
 import 'dart:async';
 
+import 'package:factory_app/agent_view.dart' show AgentView;
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/controls.dart' show Button, showModal;
 import 'package:factory_app/devices.dart' show FactoryChooser, QrCode;
 import 'package:factory_app/links.dart' show pairingFingerprint;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/scanner.dart' show CameraAccess;
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/settings_view.dart';
 import 'package:factory_app/sidebar.dart' show Sidebar;
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -57,6 +60,7 @@ Finder labeled(String label) => find.byWidgetPredicate(
 
 void main() {
   _claktoryCodes();
+  _scanInChooser();
 
   group('pairing codes', () {
     test('read host, port, key, pin and name', () {
@@ -466,6 +470,16 @@ void main() {
     await tester.enterText(find.byType(EditableText).last, 'nonsense');
     await tester.pump();
     expect(find.text("That isn't a Claktory code."), findsOneWidget);
+    // Another of Claktory's codes says what it is (friend bug #2).
+    await tester.enterText(
+      find.byType(EditableText).last,
+      'claktory-pipe://?i=abc',
+    );
+    await tester.pump();
+    expect(
+      find.textContaining("That's a pipe invite, not a code to connect this "),
+      findsOneWidget,
+    );
     await tester.enterText(find.byType(EditableText).last, _code);
     await tester.pump();
     // Asked first, as every way a code comes in is (Fugo): its
@@ -513,6 +527,75 @@ void main() {
     expect(harness.backend.target, isNull);
     expect(harness.backend.refused.value, isNull);
     expect(harness.connections.saved, [target], reason: 'still known');
+  });
+}
+
+/// Friend bug #2: on a phone with a camera, Connect to another Claktory
+/// offers Scan code; a code read there asks first, as a pasted one does.
+void _scanInChooser() {
+  testWidgets('on a phone the chooser scans a code, asking first', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final code = 'factory://?t=${'b' * 64}&name=mac-mini&e=${'d' * 64}';
+    final harness = Harness(workspace());
+    harness.camera.state = CameraAccess.granted;
+    await harness.show(tester, size: const Size(390, 844));
+    await pumpFrames(tester);
+    unawaited(
+      showModal(
+        tester.element(find.byType(AgentView).first),
+        (context, close) => FactoryChooser(close: close),
+      ),
+    );
+    await pumpFrames(tester);
+    expect(
+      find.textContaining('Scan or paste the code', findRichText: true),
+      findsOneWidget,
+    );
+    await tester.ensureVisible(find.text('Scan code'));
+    await pumpFrames(tester);
+    await tester.tap(find.text('Scan code'));
+    await pumpFrames(tester);
+    // Over the chooser's sheet, the camera.
+    expect(find.byKey(const ValueKey('camera')), findsOneWidget);
+    expect(
+      tester.getRect(find.byKey(const ValueKey('camera'))).top,
+      lessThan(844),
+    );
+    harness.camera.scan('WIFI:S:home;;');
+    await pumpFrames(tester);
+    expect(find.textContaining("That's not a Claktory code"), findsOneWidget);
+    harness.camera.scan(code);
+    await pumpFrames(tester);
+    expect(find.byKey(const ValueKey('camera')), findsNothing);
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    expect(harness.connections.current, isNull);
+    await tester.tap(find.text('Connect').last);
+    await pumpFrames(tester);
+    expect(harness.connections.current, parsePairingCode(code));
+  });
+
+  testWidgets('without a camera the chooser offers only Paste', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(workspace());
+    harness.camera.state = CameraAccess.restricted;
+    await harness.show(tester, size: const Size(390, 844));
+    await pumpFrames(tester);
+    unawaited(
+      showModal(
+        tester.element(find.byType(AgentView).first),
+        (context, close) => FactoryChooser(close: close),
+      ),
+    );
+    await pumpFrames(tester);
+    expect(find.text('Scan code'), findsNothing);
+    expect(
+      find.textContaining('Paste the code from', findRichText: true),
+      findsOneWidget,
+    );
   });
 }
 

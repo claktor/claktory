@@ -46,6 +46,22 @@ pub enum Caller {
         /// The account's Claktories signed in now, each with its
         /// registration's epoch: a grant made under another epoch is dead.
         registrations: Vec<Registration>,
+        /// The device keys removed from the account (lost, stolen, given
+        /// away): never on its device list again, nor handed off to.
+        /// Missing from an older service: none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed_devices: Vec<String>,
+        /// When this device last signed in with an emailed code (Unix
+        /// seconds, the service's clock): a new security key needs it
+        /// recent (row 630). Missing from an older service: never.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signed_in_at: Option<i64>,
+        /// The account's device keys signed in now (row 671): a device on
+        /// its DM list whose key isn't one signed out, or was removed. None
+        /// from an older service: not known, so nothing is taken for
+        /// signed out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bound_devices: Option<Vec<String>>,
     },
     /// The person, signed in at the account page (claktory.com/account)
     /// with an emailed code, on no device of the account's.
@@ -112,6 +128,10 @@ pub enum Request {
     /// Forget everything of an account, which was deleted (its calls no
     /// longer authenticate, so this may come late).
     PurgeAccount { account_id: String, time: i64 },
+    /// A device signed out of an account, or was removed from it (row 671):
+    /// nobody may add it to a group meanwhile, so its KeyPackages go. It
+    /// puts new ones up when it signs back in. 204 when done.
+    SignedOut { account_id: String, account_key: String, time: i64 },
 }
 
 #[derive(Serialize, Deserialize, Debug)]

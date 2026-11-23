@@ -353,7 +353,9 @@ async fn with_every_account_at_its_limit_the_request_fails_saying_when_the_first
 
     let error = ask(&registry, &notes, &claude(&server.base_url), StreamOptions::default()).await.expect_err("all out");
     assert!(error.starts_with("All your Claude accounts reached their usage limit; the first to reset is b@x.com, "), "{error}");
-    assert!(error.ends_with("(in 2 h)."), "{error}");
+    // When, as a time: never "in 2 h", which would be wrong once the message is read later.
+    let at = factory_agent::accounts::local_time((now + 2 * 3600) * 1000).expect("a time");
+    assert!(error.ends_with(&format!("b@x.com, {at}.")), "{error}");
     // Not retried: it's a usage limit.
     assert!(!factory_agent::guard::recoverable_response(&error), "{error}");
     assert_eq!(server.tokens("/v1/messages"), [claude_token("a"), claude_token("b")]);
@@ -496,7 +498,8 @@ async fn one_account_over_its_limit_fails_as_a_usage_limit_without_a_note() {
 
     let error = ask(&registry, &notes, &claude(&server.base_url), StreamOptions::default()).await.expect_err("out");
     assert!(error.starts_with("Your Claude account reached its usage limit; it resets "), "{error}");
-    assert!(error.ends_with("(in 1 h 30 min)."), "{error}");
+    let at = factory_agent::accounts::local_time(resets * 1000).expect("a time");
+    assert!(error.ends_with(&format!("it resets {at}.")), "{error}");
     assert_eq!(*said.lock(), [AccountNote::Exhausted]);
 }
 

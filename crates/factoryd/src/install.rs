@@ -253,7 +253,7 @@ fn put_in(setup: &Setup, found: &Found) -> Result<Report, Report> {
             crate::update::write_executable(&installed, &bytes).map_err(copying)?;
         }
     }
-    // Claktory's own apps (`apps/*.clapp`), for Settings → Apps to offer
+    // Claktory's own apps (`apps/*.clapp`), for the Marketplace's Apps tab to offer
     // (`apps::bundled`): data, so in the bundle's Resources (codesign
     // refuses data in Helpers); updates bring theirs in their release
     // folders.

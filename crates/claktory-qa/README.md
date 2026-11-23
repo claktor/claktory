@@ -26,7 +26,8 @@ claktory-qa refuses rather than reaching anything real:
   computer's files, so `StartLogin`, `cli login` and `cli provider` are
   refused. For agents that run, start the sandbox with `--model`: they use
   qa-model, which answers from a script you write (see "Agents that run"
-  below).
+  below). With `--claude`, Claude is signed in too, fake, on qa-model (see
+  "Claude at its usage limit").
 - **Environment:** factoryd starts with an empty environment (no API keys, no
   `FACTORY_*` but its own) and a home folder of its own.
 - **Machine name:** a sandbox never shows this computer's name (on a device
@@ -241,6 +242,53 @@ A rule fits when all of the conditions it has hold:
 **Careful:** the tools a script calls run for real, as you, on this computer
 (`bash` included), so keep the commands harmless, or run the sandbox in a
 container (next section). qa-model itself reaches nothing.
+
+## Claude at its usage limit: `--claude`
+
+`up NAME --claude` signs the sandbox in to Claude, fake, on qa-model, so you
+can see what a Claude subscription does at its usage limit: an agent waits
+for the reset, Try now asks again, and it carries on once there's room
+(#332, friend bug #3). Every agent, Rivet included, runs on
+`anthropic/claude-haiku-4-5`, answered from the script as above (with
+`--script FILE`, or the built-in answers).
+
+```sh
+Q=scripts/qa.sh
+$Q up qa1 --claude --no-account
+$Q send qa1 CreateProject '{"name": "Site"}'; $Q send qa1 CreateAgent '{"project_id": "site", "name": "Lea"}'
+$Q ask qa1 Lea 'Hello'                      # "OK: Hello", on Claude's wire
+$Q limit qa1 --for 600                      # at its limit, resetting in 10 minutes
+$Q send qa1 SendMessage '{"agent_id": "lea", "text": "Still there?"}'
+$Q workspace qa1 'agents[name=Lea].usage_wait'           # why Lea waits
+$Q workspace qa1 'agents[name=Lea].usage_wait_until_ms'  # until when
+$Q limit qa1 --off                          # room again, as after a plan upgrade
+$Q send qa1 TryAgainNow '{"agent_id": "lea"}'   # or Try now in the app: Lea answers
+$Q limit qa1 --for 20                       # or let it reset by itself: Lea carries on
+```
+
+- **The limit:** `limit NAME --for SECS` puts the account at its usage limit
+  until SECS from now. Every model request is refused as Anthropic refuses
+  one at the limit (a 429 that says when it resets), and the account's usage
+  reads its five-hour window as full until then. At that time it answers
+  again by itself. `limit NAME --off` lifts it at once, as upgrading the plan
+  would, but Claktory only notices when it asks again: at Try now, when you
+  message the agent, or at its usage read each minute while an agent waits.
+- **The account:** Claude Max 5x, `claude@example.test`, as Settings →
+  Providers shows it. `up` prints it as `claude`, with `limited_until_ms`.
+- **What it is:** qa-model answers Anthropic's wire too (messages, usage,
+  profile, the sign-in's token), and the sandbox's `auth.json` holds a sign-in
+  with fixed, obviously fake tokens that only qa-model accepts. factoryd
+  reaches it through `FACTORY_QA_ANTHROPIC_URL` (in `env NAME`).
+- **Only a QA build:** that variable is read only by a factoryd built with
+  the `qa-provider` feature, which `scripts/qa.sh` builds sandboxes with. A
+  release build can't have it (it doesn't compile), and even a QA build takes
+  only an address on this computer, never with the real Claktories' homes or
+  ports, and won't start otherwise. A factoryd without it is refused by `up
+  --claude` before anything starts. Commits from before it have no
+  `--claude`, and neither does `--container`.
+- **Seeing it in the app:** Claktory Dev built against the sandbox's port
+  (as in the integration tests QA runs on the Mac and simulators) shows the
+  wait beside the agent, with Try now.
 
 ## In a container
 

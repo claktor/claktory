@@ -201,6 +201,12 @@ pub(crate) struct Forward {
 }
 
 impl Forward {
+    /// What a pipe or project with none kept forwards, as the app shows
+    /// it: to no one, bug reports.
+    fn unset() -> Forward {
+        Forward { types: vec![schema::BUG_REPORT.to_owned()], ..Forward::default() }
+    }
+
     fn to_proto(&self) -> v1::PipeForward {
         v1::PipeForward {
             recipient_id: self.recipient.clone(),
@@ -323,7 +329,7 @@ pub(crate) fn set_forward(
     let before = forward(factory, target);
     let types = match types {
         Some(types) => chosen_types(factory, types)?,
-        None => before.as_ref().map_or_else(|| vec![schema::BUG_REPORT.to_owned()], |before| before.types.clone()),
+        None => before.clone().unwrap_or_else(Forward::unset).types,
     };
     let project = match target {
         Target::Pipe(id) => {
@@ -380,13 +386,16 @@ fn write_forward(
     by: &str,
     deleted: bool,
 ) -> Result<(), String> {
-    let changed = before.as_ref().is_none_or(|before| before.recipient != recipient);
-    let types_changed = before.as_ref().is_none_or(|before| before.types != types);
+    // Never kept, it's compared with what the app showed: a first save
+    // changes only what the person changed.
+    let shown = before.clone().unwrap_or_else(Forward::unset);
+    let changed = shown.recipient != recipient;
+    let types_changed = shown.types != types;
     let limits = limits.or_else(|| before.as_ref().map(|before| before.limits)).unwrap_or_default();
     if !changed && !types_changed && before.as_ref().is_some_and(|before| before.limits == limits) {
         return Ok(());
     }
-    let types_before = before.as_ref().map(|before| versions(factory, &before.types)).unwrap_or_else(|| "[]".to_owned());
+    let types_before = versions(factory, &shown.types);
     let types_now = versions(factory, types);
     let revision = match target {
         Target::Pipe(_) => before.as_ref().map_or(0, |before| before.revision) + u32::from(changed),
@@ -622,14 +631,39 @@ pub(crate) fn reads_reports(factory: &Factory, agent: &str) -> Vec<String> {
     statement.query_map([agent], |row| row.get(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
 }
 
-/// A forward, a pipe's or a project's, names `agent`.
-pub(crate) fn recipient_anywhere(factory: &Factory, agent: &str) -> bool {
-    factory
-        .store
-        .db()
-        .query_row("SELECT 1 FROM pipe_handoff_forwards WHERE recipient = ?1 LIMIT 1", [agent], |_| Ok(()))
-        .optional()
-        .map_or(true, |found| found.is_some())
+/// Where reports still go to `agent`, for the person: the pipes (by their
+/// names, as the app shows them) and projects' new pipes whose forward
+/// names it, pipes first. A
+/// closed or deleted pipe forwards nothing, nor a deleted project's
+/// default, so they don't count. None when it can't be read.
+pub(crate) fn forwarding_to(factory: &Factory, agent: &str) -> Option<Vec<String>> {
+    let rows: Vec<(String, String)> = {
+        let db = factory.store.db();
+        let result = db.prepare("SELECT kind, target FROM pipe_handoff_forwards WHERE recipient = ?1 ORDER BY target").and_then(
+            |mut statement| statement.query_map([agent], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>(),
+        );
+        match result {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error, "could not read where reports go");
+                return None;
+            }
+        }
+    };
+    let (mut pipes, mut projects) = (Vec::new(), Vec::new());
+    for (kind, target) in rows {
+        if kind == "pipe" {
+            if let Some(record) = factory.pipes.get(&target).filter(|record| record.state != super::State::Closed) {
+                pipes.push(record.name.clone());
+            }
+        } else if let Some(project) = factory.lock().config.project(&target).map(|project| project.name.clone()) {
+            projects.push(format!("{project}'s new pipes"));
+        }
+    }
+    pipes.sort();
+    projects.sort();
+    pipes.extend(projects);
+    Some(pipes)
 }
 
 /// How an agent is told of a pipe: the person's own name for it, else its
@@ -796,10 +830,9 @@ pub(crate) fn submit(factory: &Arc<Factory>, submission: &Submission<'_>) -> Str
         Ok(files) => files,
         Err(refusal) => return refused(refusal),
     };
-    let mut taint = factory.pipes.taint_of(submission.liaison);
-    taint.entry(record.id.clone()).or_default();
     let fields = serde_json::to_string(&checked.fields).unwrap_or_default();
-    let taint = serde_json::to_string(&taint).unwrap_or_default();
+    // Reading a report marks no one since #346; the column stays, empty.
+    let taint = "{}".to_owned();
     let after_seq = i64::try_from(record.next_seq.saturating_sub(1)).unwrap_or(0);
     let text_bytes = i64::try_from(checked.text_bytes).unwrap_or(i64::MAX);
     let kept = {

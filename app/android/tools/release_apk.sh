@@ -10,7 +10,7 @@
 # (tools/lint.sh) runs first over the exported source, and any error stops
 # the build.
 #
-#   app/android/tools/release_apk.sh v0.1.15 [REBUILD] --key FILE --out DIR [--bundle [--upload-key FILE]]
+#   app/android/tools/release_apk.sh v0.1.15 [REBUILD] --key FILE [--keystore P12] --out DIR [--bundle [--upload-key FILE]]
 #
 # VERSION is Claktory's (vMAJOR.MINOR.PATCH), stamped into the app
 # (FACTORY_VERSION, which its version checks and footer read) and its
@@ -22,6 +22,10 @@
 # signs the APK, and the bundle too unless --upload-key names another
 # key's properties: Play's upload key, which then signs only the bundle
 # (Play signs what it installs with the app key, our release key).
+# --keystore names the release key's keystore over FILE's storeFile: the
+# vault hands a command both files at fresh temporary paths, which no
+# storeFile can name. Passwords are never printed: Gradle reads them from
+# FILE, and keytool here from the environment.
 #
 # Needs JAVA_HOME and ANDROID_HOME (app/android/toolchain.properties' JDK
 # and SDK). Builds the commit checked out where it's run (the current
@@ -36,11 +40,12 @@
 # the bundletool-all-*.jar beside the SDK folder.
 set -euo pipefail
 
-usage="usage: release_apk.sh vMAJOR.MINOR.PATCH [REBUILD] --key FILE --out DIR [--bundle [--upload-key FILE]]"
-version="" rebuild=0 key="" out="" bundle=0 upload_key="" 
+usage="usage: release_apk.sh vMAJOR.MINOR.PATCH [REBUILD] --key FILE [--keystore P12] --out DIR [--bundle [--upload-key FILE]]"
+version="" rebuild=0 key="" keystore="" out="" bundle=0 upload_key="" 
 while (($#)); do
   case "$1" in
     --key) key="$2"; shift 2 ;;
+    --keystore) keystore="$2"; shift 2 ;;
     --out) out="$2"; shift 2 ;;
     --bundle) bundle=1; shift ;;
     --upload-key) upload_key="$2"; shift 2 ;;
@@ -57,6 +62,10 @@ code=$((major * 10000000 + minor * 100000 + patch * 100 + rebuild))
 [[ -f "$key" ]] || { echo "No key properties at $key" >&2; exit 2; }
 # The build runs in another folder: the key by its full path.
 key="$(cd "$(dirname "$key")" && pwd)/$(basename "$key")"
+if [[ -n "$keystore" ]]; then
+  [[ -f "$keystore" ]] || { echo "No keystore at $keystore" >&2; exit 2; }
+  keystore="$(cd "$(dirname "$keystore")" && pwd)/$(basename "$keystore")"
+fi
 if [[ -n "$upload_key" ]]; then
   ((bundle)) || { echo "--upload-key signs the bundle: it needs --bundle" >&2; exit 2; }
   [[ -f "$upload_key" ]] || { echo "No key properties at $upload_key" >&2; exit 2; }
@@ -101,13 +110,14 @@ echo "Building Claktory $version (versionCode $code) from $commit"
 # Lint is a gate (DESIGN.md §1): all of it, over the exported source, not
 # only the release build's fatal checks.
 "$app/android/tools/lint.sh" || { echo "Lint found errors: not building." >&2; exit 1; }
-build() { # apk | appbundle, KEY
-  (cd "$app" && ORG_GRADLE_PROJECT_claktoryKeyProperties="$2" flutter build "$1" --release \
+build() { # apk | appbundle, KEY[, KEYSTORE]
+  (cd "$app" && ORG_GRADLE_PROJECT_claktoryKeyProperties="$2" ORG_GRADLE_PROJECT_claktoryKeyStore="${3:-}" \
+    flutter build "$1" --release \
     --flavor prod --target-platform android-arm64,android-x64 \
     --build-name "${version#v}" --build-number "$code" \
     --dart-define=FACTORY_VERSION="$version")
 }
-build apk "$key"
+build apk "$key" "$keystore"
 apk="$app/build/app/outputs/flutter-apk/app-prod-release.apk"
 
 python3 "$app/android/tools/check_artifact.py" "$apk"
@@ -125,7 +135,7 @@ cat "$out/$name.sha256"
 "$build_tools/apksigner" verify --print-certs "$out/$name" | sed -n 's/.*certificate SHA-256 digest: /signing certificate SHA-256: /p'
 
 if ((bundle)); then
-  build appbundle "${upload_key:-$key}"
+  if [[ -n "$upload_key" ]]; then build appbundle "$upload_key"; else build appbundle "$key" "$keystore"; fi
   aab="$app/build/app/outputs/bundle/prodRelease/app-prod-release.aab"
   python3 "$app/android/tools/check_artifact.py" --bundletool "$bundletool" "$aab"
   # Not -strict: a self-signed key (the release key is one) with no

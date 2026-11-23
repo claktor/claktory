@@ -723,8 +723,14 @@ class _ExpandedPaneState extends State<ExpandedPane> {
         : Space.m + controls.leading;
     final band = WindowDrag(
       child: Container(
-        height: titleBarHeight,
-        padding: EdgeInsets.only(left: lights, right: Space.m),
+        // The title bar's height, taller when large text needs it.
+        constraints: const BoxConstraints(minHeight: titleBarHeight),
+        padding: EdgeInsets.only(
+          left: lights,
+          right: Space.m,
+          top: Space.xs,
+          bottom: Space.xs,
+        ),
         decoration: BoxDecoration(
           color: palette.sidebar,
           border: Border(bottom: BorderSide(color: palette.hairline)),
@@ -809,7 +815,8 @@ class _ExpandedPaneState extends State<ExpandedPane> {
 }
 
 /// A 28px capsule in the expanded pane's band, like the agent bar's back
-/// chip: what's at its start, then [label].
+/// chip: what's at its start, then [label]. Taller when large text needs
+/// it.
 class _BandChip extends StatelessWidget {
   const _BandChip({
     required this.label,
@@ -832,8 +839,13 @@ class _BandChip extends StatelessWidget {
         onTap: onTap,
         builder: (context, hovered) => AnimatedContainer(
           duration: Motion.fast,
-          height: 28,
-          padding: const EdgeInsets.only(left: Space.s - 2, right: Space.s + 2),
+          constraints: const BoxConstraints(minHeight: 28),
+          padding: const EdgeInsets.only(
+            left: Space.s - 2,
+            right: Space.s + 2,
+            top: 2,
+            bottom: 2,
+          ),
           decoration: BoxDecoration(
             color: hovered ? palette.selected : palette.canvas,
             borderRadius: BorderRadius.circular(14),
@@ -1383,29 +1395,56 @@ class PaneHeader extends StatelessWidget {
     final titleStyle = TextStyles.label.copyWith(color: palette.text);
     // Expand's or ×'s width with its gap: a finger's target on touch.
     final button = (touch ? Metrics.of(context).target : 28) + 2;
+    // The title's room, which the viewer's controls never take: as wide as
+    // it is, up to the start of a name, so a narrow pane keeps saying what
+    // it shows (Abbacchio's rows 521 and 545).
+    final titleRoom = () {
+      final painter = TextPainter(
+        text: TextSpan(text: title, style: titleStyle),
+        textDirection: Directionality.of(context),
+        textScaler: MediaQuery.textScalerOf(context),
+        maxLines: 1,
+      )..layout();
+      final width = painter.width;
+      painter.dispose();
+      return math.min(width, 96.0);
+    }();
     Widget named({required bool withDetails}) => Row(
       children: [
         SizedBox(width: 14, child: Center(child: glyph(palette.textMuted))),
         const SizedBox(width: Space.s),
-        Flexible(
-          child: Text(
-            title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: titleStyle,
-          ),
-        ),
-        if (withDetails && details.isNotEmpty) ...[
-          const SizedBox(width: Space.s),
-          Flexible(
-            child: Text(
-              details,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
+        // The title first: the details beside it give way before it does.
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, constraints) => Row(
+              children: [
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: constraints.maxWidth),
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: titleStyle,
+                  ),
+                ),
+                if (withDetails && details.isNotEmpty)
+                  Flexible(
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: Space.s),
+                      child: Text(
+                        details,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyles.caption.copyWith(
+                          color: palette.textFaint,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
-        ],
+        ),
       ],
     );
     final chip = DefaultTextStyle(
@@ -1447,8 +1486,8 @@ class PaneHeader extends StatelessWidget {
               if (controls.isNotEmpty)
                 // A narrow pane clips the viewer's controls at their end
                 // (the first, the most used, stay) rather than overflowing:
-                // the glyph (and the gaps beside the title), Expand and ×
-                // always show.
+                // the glyph (and the gaps beside the title), the start of
+                // the title, Expand and × always show.
                 ConstrainedBox(
                   constraints: BoxConstraints(
                     maxWidth: math.max(
@@ -1457,7 +1496,8 @@ class PaneHeader extends StatelessWidget {
                           (onExpand == null ? 0 : button) -
                           (onClose == null ? 0 : button) -
                           14 -
-                          2 * Space.s,
+                          2 * Space.s -
+                          titleRoom,
                     ),
                   ),
                   child: UnconstrainedBox(

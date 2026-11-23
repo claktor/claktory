@@ -125,6 +125,13 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
   /// Once per turn of the main loop, however often it scrolls; after
   /// whatever moved it (a reload's answer goes first).
   private func scrolled() {
+    // The person moving the page: the header follows it again, not the
+    // find's match.
+    if matchPage != nil, let scroll = scrollView,
+      scroll.isTracking || scroll.isDragging || scroll.isDecelerating || scroll.isZooming
+    {
+      matchPage = nil
+    }
     guard !pageCheck else { return }
     pageCheck = true
     DispatchQueue.main.async { [weak self] in
@@ -235,8 +242,10 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
         if let region = InkRegion.rect(args["region"]), args["match"] as? Bool == true {
           showMatch(Self.pageRect(region, on: page), on: page, n: n)
         } else if let region = InkRegion.rect(args["region"]) {
+          matchPage = nil
           pdf.go(to: Self.pageRect(region, on: page), on: page)
         } else {
+          matchPage = nil
           pdf.go(to: page)
         }
       }
@@ -427,6 +436,7 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
     searches += 1
     found = [:]
     currentMatch = nil
+    matchPage = nil
     // The old version's overlays say nothing more.
     for canvas in canvases.values { canvas.delegate = nil }
     canvases.removeAll()
@@ -481,31 +491,24 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
 
   private struct Match {
     let page: Int
-    let range: NSRange
     let region: CGRect
     let text: String
+    /// Its washes, a line each, in its page overlay's space.
+    let lines: [CGRect]
   }
 
   /// A find's matches by page (1-based), in the page overlay's space.
   private(set) var found: [Int: [CGRect]] = [:]
 
-  /// Shows [selections] as the find's highlights, in place of the last:
-  /// each page's overlay washes its own (InkCanvas.found).
-  func highlight(_ selections: [PDFSelection]?) {
+  /// Shows [washes] (page 1-based, overlay space) as the find's
+  /// highlights, in place of the last: each page's overlay washes its own
+  /// (InkCanvas.found).
+  func highlight(_ washes: [(page: Int, rect: CGRect)]) {
     var byPage: [Int: [CGRect]] = [:]
-    for selection in selections ?? [] {
-      for line in selection.selectionsByLine() {
-        for page in line.pages {
-          guard let n = pdf.document.map({ $0.index(for: page) + 1 }) else { continue }
-          let crop = page.bounds(for: .cropBox)
-          let r = Self.tightBounds(of: line, on: page)
-          byPage[n, default: []].append(
-            CGRect(x: r.minX - crop.minX, y: crop.maxY - r.maxY, width: r.width, height: r.height))
-        }
-      }
-    }
+    for wash in washes { byPage[wash.page, default: []].append(wash.rect) }
     found = byPage
     currentMatch = nil
+    matchPage = nil
     for (n, canvas) in canvases {
       canvas.found = byPage[n] ?? []
       canvas.current = nil
@@ -515,16 +518,22 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
   /// The find's current match (page 1-based, in its overlay's space).
   private(set) var currentMatch: (page: Int, rect: CGRect)?
 
+  /// The page of the match gone to, which the header names until the
+  /// person scrolls (Zucchero's row 137: raised high near a page's foot,
+  /// the match left the next page filling more of the view, and the
+  /// header named that one).
+  private(set) var matchPage: Int?
+
   /// Goes to a find's match [rect] (page space) on [page]: marked apart
   /// from the others, and brought into the view's upper part, where a find
   /// bar and keyboard at its foot leave it in sight (Zucchero's row 91:
   /// PDFKit's go(to:) left a match under them, the view thinking it shown).
   /// A match already well in sight stays where it is.
   func showMatch(_ rect: CGRect, on page: PDFPage, n: Int) {
-    let crop = page.bounds(for: .cropBox)
-    let mark = CGRect(
-      x: rect.minX - crop.minX, y: crop.maxY - rect.maxY, width: rect.width, height: rect.height)
+    let mark = Self.overlayRect(rect, on: page)
     currentMatch = (n, mark)
+    matchPage = n
+    defer { if currentPage != lastPage { pageChanged() } }
     for (index, canvas) in canvases { canvas.current = index == n ? mark : nil }
     guard let scroll = scrollView, pdf.bounds.height > 0 else {
       return pdf.go(to: rect, on: page)
@@ -551,19 +560,60 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
     if offset != scroll.contentOffset { scroll.setContentOffset(offset, animated: false) }
   }
 
-  /// A match's bounds on [page]: the union of its characters'. A
-  /// selection's own bounds, and its lines', can take in far more, such as
-  /// the whole column of lines in a monospaced report (Zucchero's row 91).
+  /// A match's bounds on [page] (page space): the union of its
+  /// characters', each as PDFKit selects it. A selection's own bounds, and
+  /// its lines', can take in far more (the whole column of lines in a
+  /// monospaced report, Zucchero's row 91), and PDFPage.characterBounds
+  /// can be a line or a character away across (row 117). Some PDFs place
+  /// a line's first few characters far too wide: those count as wide as
+  /// the rest, so a match starting a line is washed from its own start.
+  /// Some make every character as tall as the page: then the height is
+  /// characterBounds', which keeps to the line.
   static func tightBounds(of selection: PDFSelection, on page: PDFPage) -> CGRect {
     let range = selection.range(at: 0, on: page)
-    var bounds = CGRect.null
-    if range.location != NSNotFound {
-      for i in range.location..<(range.location + range.length) {
-        let glyph = page.characterBounds(at: i)
-        if !glyph.isEmpty { bounds = bounds.union(glyph) }
+    guard range.location != NSNotFound, range.length > 0, range.length <= 500 else {
+      return selection.bounds(for: page)
+    }
+    let indices = range.location..<(range.location + range.length)
+    let glyphs = indices.map {
+      page.selection(for: NSRange(location: $0, length: 1))?.bounds(for: page) ?? .null
+    }
+    let placed = glyphs.filter { !$0.isNull && $0.width > 0 && $0.height > 0 }
+    guard !placed.isEmpty else { return selection.bounds(for: page) }
+    // The characters' usual width: of those as wide as another, within a
+    // seventh, since a line's misplaced first few can be most of a match.
+    let widths = placed.map(\.width)
+    let alike = widths.filter { w in widths.filter { abs($0 - w) <= w / 7 }.count > 1 }.sorted()
+    let width = alike.isEmpty ? widths.sorted()[widths.count / 2] : alike[alike.count / 2]
+    let height = placed.map(\.height).sorted()[placed.count / 2]
+    let sound = glyphs.indices.filter {
+      let g = glyphs[$0]
+      return !g.isNull && g.width >= width * 0.4 && g.width <= width * 1.75 && g.height > 0
+        && g.height <= height * 2.5
+    }
+    guard let first = sound.first, let last = sound.last else {
+      return selection.bounds(for: page)
+    }
+    var bounds = sound.reduce(CGRect.null) { $0.union(glyphs[$1]) }
+    let before = CGFloat(first), after = CGFloat(glyphs.count - 1 - last)
+    bounds.origin.x -= before * width
+    bounds.size.width += (before + after) * width
+    if height > width * 6 {
+      let ink = indices.map { page.characterBounds(at: $0) }.filter { $0.height > 0 }
+      if let low = ink.map(\.minY).min(), let high = ink.map(\.maxY).max(), high > low {
+        let pad = (high - low) * 0.05
+        bounds.origin.y = low - pad
+        bounds.size.height = high - low + 2 * pad
       }
     }
-    return bounds.isNull ? selection.bounds(for: page) : bounds
+    return bounds
+  }
+
+  /// [r] (page space) in [page]'s overlay space: from its CropBox's top
+  /// left, y down.
+  static func overlayRect(_ r: CGRect, on page: PDFPage) -> CGRect {
+    let crop = page.bounds(for: .cropBox)
+    return CGRect(x: r.minX - crop.minX, y: crop.maxY - r.maxY, width: r.width, height: r.height)
   }
 
   /// Finds the text in a copy of the document of its own, off the main
@@ -574,7 +624,7 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
     let query = (args["query"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     let limit = max(1, min(args["max_results"] as? Int ?? 200, 1000))
     guard !query.isEmpty, let url else {
-      highlight(nil)
+      highlight([])
       return result(["query": query, "matches": [], "truncated": false])
     }
     searching.async { [weak self] in
@@ -589,11 +639,17 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
           }
           let line = selection.copy() as? PDFSelection ?? selection
           line.extendForLineBoundaries()
+          let lines = selection.selectionsByLine().flatMap { line in
+            line.pages.filter { $0 == page }.map {
+              Self.overlayRect(Self.tightBounds(of: line, on: $0), on: $0)
+            }
+          }
           matches.append(
             Match(
-              page: copy.index(for: page), range: selection.range(at: 0, on: page),
+              page: copy.index(for: page),
               region: Self.region(Self.tightBounds(of: selection, on: page), on: page),
-              text: (line.string ?? query).trimmingCharacters(in: .whitespacesAndNewlines)))
+              text: (line.string ?? query).trimmingCharacters(in: .whitespacesAndNewlines),
+              lines: lines))
         }
       }
       DispatchQueue.main.async {
@@ -601,10 +657,7 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
         guard generation == self.searches else {
           return result(["query": query, "matches": [], "truncated": false, "superseded": true])
         }
-        self.highlight(
-          matches.compactMap { m in
-            self.pdf.document?.page(at: m.page)?.selection(for: m.range)
-          })
+        self.highlight(matches.flatMap { m in m.lines.map { (page: m.page + 1, rect: $0) } })
         result([
           "query": query, "truncated": truncated,
           "matches": matches.map {
@@ -619,6 +672,7 @@ final class PaperView: InkSurface, PDFPageOverlayViewProvider, PDFViewDelegate {
   /// view's middle, which in a tall, narrow window is often the second of
   /// two whole pages.
   private var currentPage: Int {
+    if let page = matchPage { return page }
     if let doc = pdf.document, let scroll = scrollView, doc.pageCount > 0, Self.atEnd(scroll) {
       return doc.pageCount
     }

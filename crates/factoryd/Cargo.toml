@@ -79,6 +79,12 @@ zeroize = "1.9"
 zstd = "0.14"
 toml = "1.2.1"
 
+[features]
+# QA only: the Anthropic subscription at qa-model on this computer, for
+# claktory-qa's sandboxes (factory-agent's qa-provider; scripts/qa.sh builds
+# with it, a release can't).
+qa-provider = ["factory-agent/qa-provider"]
+
 [dev-dependencies]
 # A local account service to sign in at (tests/all/account.rs).
 claktory-account = { path = "../claktory-account" }

@@ -12,6 +12,8 @@ import 'changelog.dart';
 import 'chats.dart' show ChatView, selectedChat;
 import 'compatibility.dart';
 import 'connect_step.dart';
+import 'connection.dart' show Connection;
+import 'devices.dart' show FactoryChooser;
 import 'map.dart';
 import 'pairing.dart';
 import 'marketplace.dart';
@@ -592,9 +594,28 @@ class NoAgentView extends StatelessWidget {
   Widget build(BuildContext context) {
     final backend = AppScope.of(context);
     return ListenableBuilder(
-      listenable: Listenable.merge([backend.workspace, backend.connected]),
+      listenable: Listenable.merge([
+        backend.workspace,
+        backend.connected,
+        backend.refused,
+      ]),
       builder: (context, _) {
         final workspace = backend.workspace.workspace;
+        // Turned away (a code that expired, a device removed there): it
+        // won't connect by trying, so it says so, as the drawer does, with
+        // the way to another Claktory (Zucchero's row 220).
+        if (backend.refused.value case final refused?
+            when !backend.connected.value) {
+          return _EmptyState(
+            title: Connection(backend).line,
+            body: refused,
+            action: 'Switch Claktory…',
+            onAction: () => showModal(
+              context,
+              (context, close) => FactoryChooser(close: close),
+            ),
+          );
+        }
         // Until this Claktory's workspace is here, nothing is known about
         // it: an empty one isn't "no agents yet".
         if (!backend.connected.value || !backend.workspace.received) {

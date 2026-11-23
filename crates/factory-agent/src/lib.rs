@@ -1,6 +1,11 @@
 //! Factory's coding agent: a sequential tool loop over streaming model providers, with
 //! per-agent model choice, coding tools, credential storage and automatic context compaction.
 
+// Fugo's guard for qa-model's fake Claude sign-in (#332 tooling): the
+// override of Anthropic's address never goes into a release build.
+#[cfg(all(feature = "qa-provider", not(debug_assertions)))]
+compile_error!("the QA provider override never goes into a release build");
+
 pub mod accounts;
 pub mod agent;
 pub mod auth;

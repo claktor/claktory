@@ -86,6 +86,9 @@ impl Factory {
             if let Err(error) = crate::user_apps::cleared(&self.store, id) {
                 tracing::warn!(agent = %id, %error, "could not decline its proposals of app access");
             }
+            if let Err(error) = crate::apps::access::cleared(&self.store, id) {
+                tracing::warn!(agent = %id, %error, "could not decline its proposals of what apps read");
+            }
             self.broadcast_workspace(&inner);
         }
         // And the add-secret cards it opened, and what it was finding for

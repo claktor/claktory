@@ -201,8 +201,11 @@ final class PaperPane: NSView, PDFViewDelegate {
       if let page = pdf.document?.page(at: n - 1) {
         if let region = PaperCore.region(args["region"]) {
           let rect = PaperCore.pageRect(region, on: page)
-          if args["match"] as? Bool == true { markMatch(rect, on: page) }
           pdf.go(to: rect, on: page)
+          if args["match"] as? Bool == true {
+            markMatch(rect, on: page)
+            clearOfTheBar(rect, on: page)
+          }
         } else {
           pdf.go(to: page)
         }
@@ -233,9 +236,41 @@ final class PaperPane: NSView, PDFViewDelegate {
   private var matchShown = false
 
   private func markMatch(_ rect: CGRect, on page: PDFPage) {
-    let match = pdf.highlightedSelections?.first { $0.bounds(for: page).intersects(rect) }
+    // The one nearest [rect]: a selection's own bounds can take in a whole
+    // column of lines, so the first that meets it may be another.
+    func distance(_ selection: PDFSelection) -> CGFloat {
+      guard selection.pages.contains(page) else { return .infinity }
+      let r = PaperCore.tightBounds(of: selection, on: page)
+      return hypot(r.midX - rect.midX, r.midY - rect.midY)
+    }
+    let match = pdf.highlightedSelections?.min { distance($0) < distance($1) }
+      .flatMap { distance($0).isFinite ? $0 : nil }
     matchShown = match != nil
     pdf.setCurrentSelection(match, animate: false)
+  }
+
+  /// Brings a find's match [rect] (page space) down into the view's upper
+  /// part, clear of the find bar floating over the view's top (Abbacchio's
+  /// row 560s: PDFKit's go(to:) stops with it at the very top, under the
+  /// bar). A match already well in sight stays where it is.
+  private func clearOfTheBar(_ rect: CGRect, on page: PDFPage) {
+    guard let document = pdf.documentView, let scroll = document.enclosingScrollView else { return }
+    let clip = scroll.contentView
+    let shown = document.convert(pdf.convert(rect, from: page), from: pdf)
+    var visible = clip.documentVisibleRect
+    // Distances from the view's top, whichever way the document runs.
+    let flipped = document.isFlipped
+    let top = flipped ? shown.minY - visible.minY : visible.maxY - shown.maxY
+    let bottom = flipped ? shown.maxY - visible.minY : visible.maxY - shown.minY
+    let bar: CGFloat = 72
+    guard top < bar || bottom > visible.height * 0.85 else { return }
+    let mid = flipped ? shown.midY : shown.maxY - shown.height / 2
+    let want = bar + (visible.height - bar) * 0.25
+    visible.origin.y = flipped ? mid - want : mid + want - visible.height
+    let low = document.bounds.minY, high = max(low, document.bounds.maxY - visible.height)
+    visible.origin.y = min(max(visible.origin.y, low), high)
+    clip.scroll(to: visible.origin)
+    scroll.reflectScrolledClipView(clip)
   }
 
   /// Finds the text in a copy of the document of its own, off the main

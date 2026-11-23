@@ -99,7 +99,10 @@ if [[ -n "$PARENT" && "$(git rev-parse "$PARENT^{tree}")" == "$(git rev-parse "$
 fi
 
 NEW="$(public_commit "$ROOT" "$SHA" "$VERSION" "$PARENT")"
-"$ROOT/scripts/check-secrets.sh" "$NEW"
+# Its history holds the earlier public commits, so it's judged by main's
+# exceptions, the newest reviewed ones, which may name those commits (v0.1.18:
+# web search's fixtures as v0.1.17 published them, 58bd5c9f).
+"$ROOT/scripts/check-secrets.sh" "$NEW" --config main
 
 if $DRY; then
   echo "would push $VERSION, ${NEW:0:10} with ${SHA:0:10}'s files, to $URL: $what"

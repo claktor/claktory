@@ -142,8 +142,36 @@ struct Row {
     excerpt: String,
     /// REPORT_TYPE and PIPE_FORWARD: the report types it's about.
     types: Types,
+    /// APP_ACCESS: what History shows of it.
+    app: AppAccess,
+    /// MODEL: what History shows of it.
+    model: ModelChange,
     /// All the text a search looks in, lowercase.
     search: String,
+}
+
+/// A change of an app's access (APP_ACCESS), as History shows it.
+#[derive(Default)]
+struct AppAccess {
+    /// The change, to undo it; empty for a card that gave nothing.
+    change: String,
+    undone: bool,
+    app: String,
+    /// Rivet's words, cut.
+    reason: String,
+    /// Its card (AppAccessProposal.id), when it was one.
+    card: String,
+}
+
+/// A model change an agent made (MODEL), as History shows it.
+#[derive(Default)]
+struct ModelChange {
+    change: String,
+    undone: bool,
+    /// Whose model it was.
+    subject: String,
+    /// The changing agent's words, cut.
+    reason: String,
 }
 
 /// A change of report types, as History shows it.
@@ -172,6 +200,8 @@ impl Row {
             seq: 0,
             excerpt: String::new(),
             types: Types::default(),
+            app: AppAccess::default(),
+            model: ModelChange::default(),
             search: String::new(),
         }
     }
@@ -381,19 +411,22 @@ fn from_factory(
          WHERE at >= ?1 AND at < ?2 ORDER BY at DESC, id DESC LIMIT ?3",
         window,
         |row| {
-            let (kind, target, old, new, by): (String, String, String, String, String) = (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?);
+            let (kind, target, old, new, by): (String, String, String, String, String) =
+                (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?);
             let at: i64 = row.get(6)?;
             let id = format!("forward:{}", row.get::<_, i64>(0)?);
             let change = Change { kind: &kind, target: &target, old: &old, new: &new, by: &by, kept: row.get(7)? };
             if kind == "type" {
                 let mut found = Row::new(Kind::ReportType, id, by.clone(), Outcome::Changed, at, at);
-                let version = |text: &str| text.parse::<u32>().ok().and_then(|version| crate::pipes::handoff::types::load_version(db, &target, version));
+                let version = |text: &str| {
+                    text.parse::<u32>().ok().and_then(|version| crate::pipes::handoff::types::load_version(db, &target, version))
+                };
                 let (made, before) = (version(&new), version(&old));
                 found.title = cut(&type_title(&change, made.as_ref(), before.as_ref(), names), MAX_TITLE);
                 let searched: Vec<String> = made.iter().chain(before.iter()).map(|schema| schema.name.clone()).collect();
                 let proto = |schema: &crate::pipes::handoff::schema::Schema| crate::pipes::handoff::schema::to_proto(schema);
                 found.types = Types {
-                    widens: !new.is_empty() && made.as_ref().is_some_and(|made| !made.widened.is_empty()),
+                    widens: !new.is_empty() && made.as_ref().is_some_and(|made| made.widens_words()),
                     // A deletion shows the version it ended at.
                     made: made.as_ref().or(before.as_ref()).map(proto),
                     before: if new.is_empty() { None } else { before.as_ref().map(proto) },
@@ -423,6 +456,84 @@ fn from_factory(
                 found.pipe = target;
             }
             Ok(found.searched(&[]))
+        },
+    )?);
+    from_app_access(db, window, names, found)?;
+    from_model_changes(db, window, names, found)?;
+    Ok(())
+}
+
+/// The model changes agents made with models_set
+/// (`extensions::models`): Claktory's sentence, the agent's reason apart.
+fn from_model_changes(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
+    let changes = crate::extensions::models::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
+    let capped = changes.len() > MAX_SCAN as usize;
+    let rows = changes
+        .into_iter()
+        .take(MAX_SCAN as usize)
+        .map(|change| {
+            let mut row = Row::new(Kind::Model, change.id.to_string(), change.by.clone(), Outcome::Changed, change.at, change.at);
+            row.title = cut(&change.title(names), MAX_TITLE);
+            row.model = ModelChange {
+                change: change.id.to_string(),
+                undone: change.undone.is_some(),
+                subject: change.agent.clone(),
+                reason: cut(&change.reason, MAX_REPLY),
+            };
+            row.searched(&[&change.reason, &change.model_after, &change.name_after])
+        })
+        .collect();
+    found.add((rows, capped));
+    Ok(())
+}
+
+/// Changes to what an app reads and who uses it (apps::changes), and
+/// Rivet's cards for them that the person declined or that failed: titles
+/// are Claktory's sentences, and Rivet's reason stays apart, as its words.
+fn from_app_access(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
+    let names: std::collections::BTreeMap<String, String> = names.iter().map(|(id, name)| (id.clone(), name.clone())).collect();
+    let changes = crate::apps::changes::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
+    let capped = changes.len() > MAX_SCAN as usize;
+    let mut rows = Vec::new();
+    for change in changes.into_iter().take(MAX_SCAN as usize) {
+        let card = change.via == crate::apps::changes::Via::Card;
+        // A card's change shows in Rivet's conversation, at its card.
+        let (agent, asked) = if card {
+            db.query_row("SELECT agent, created FROM app_access_proposals WHERE id = ?1", [&change.reference], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap_or_else(|_| (String::new(), change.at))
+        } else {
+            (change.by.clone(), change.at)
+        };
+        let outcome = if card { Outcome::Approved } else { Outcome::Changed };
+        let mut row = Row::new(Kind::AppAccess, change.id.to_string(), agent, outcome, asked, change.at);
+        row.title = cut(&change.title(&names), MAX_TITLE);
+        row.app = AppAccess {
+            change: change.id.to_string(),
+            undone: change.undone_by.is_some(),
+            app: change.app.clone(),
+            reason: cut(&change.reason, MAX_REPLY),
+            card: if card { change.reference.clone() } else { String::new() },
+        };
+        rows.push(row.searched(&[&change.labels.app, &change.reason]));
+    }
+    found.add((rows, capped));
+    found.add(self::rows(
+        db,
+        "SELECT id, agent, app, card, state, created, decided, comment FROM app_access_proposals
+         WHERE state IN ('declined', 'failed') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
+        window,
+        |row| {
+            let outcome = if row.get::<_, String>(4)? == "declined" { Outcome::Denied } else { Outcome::Failed };
+            let id: String = row.get(0)?;
+            let mut found = Row::new(Kind::AppAccess, id.clone(), row.get(1)?, outcome, row.get(5)?, row.get(6)?);
+            let card: Vec<u8> = row.get(3)?;
+            let card = <v1::AppAccessProposal as prost::Message>::decode(card.as_slice()).unwrap_or_default();
+            found.title = cut(&crate::apps::access::title(&card, &names), MAX_TITLE);
+            found.reply = cut(&row.get::<_, String>(7)?, MAX_REPLY);
+            found.app = AppAccess { app: row.get(2)?, reason: cut(&card.reason, MAX_REPLY), card: id, ..AppAccess::default() };
+            Ok(found.searched(&[&card.app_name, &card.reason]))
         },
     )?);
     Ok(())
@@ -459,7 +570,9 @@ fn forward_title(change: &Change<'_>, names: &HashMap<String, String>, projects:
         "project" if change.kept => format!("{} was deleted, so {}'s new pipes forward reports to no one", change.old, project()),
         "project" => format!("{who} set {}'s new pipes to forward reports to {to}{instead}", project()),
         _ if change.new.is_empty() => format!("{who} let {} stop reading reports", name(change.target)),
-        _ if change.kept => format!("{who} let {} read reports ({}'s earlier conversation is kept)", name(change.target), name(change.target)),
+        _ if change.kept => {
+            format!("{who} let {} read reports ({}'s earlier conversation is kept)", name(change.target), name(change.target))
+        }
         _ => format!("{who} let {} read reports, starting a fresh conversation", name(change.target)),
     }
 }
@@ -484,12 +597,15 @@ fn type_title(
     names: &HashMap<String, String>,
 ) -> String {
     let who = if change.by.is_empty() { "You".to_owned() } else { names.get(change.by).cloned().unwrap_or_else(|| change.by.to_owned()) };
-    let name = |schema: Option<&crate::pipes::handoff::schema::Schema>| schema.map_or_else(|| change.target.to_owned(), |schema| type_names(&[schema]));
+    let name = |schema: Option<&crate::pipes::handoff::schema::Schema>| {
+        schema.map_or_else(|| change.target.to_owned(), |schema| type_names(&[schema]))
+    };
     match (change.old.is_empty(), change.new.is_empty()) {
         (true, _) => format!("{who} made the report type {}", name(made)),
         (false, true) => format!("{who} deleted the report type {}", name(before)),
         _ if made.zip(before).is_some_and(|(made, before)| made.name != before.name) => {
-            let only_renamed = made.zip(before).is_some_and(|(made, before)| made.fields == before.fields && made.outcomes == before.outcomes);
+            let only_renamed =
+                made.zip(before).is_some_and(|(made, before)| made.fields == before.fields && made.outcomes == before.outcomes);
             if only_renamed {
                 format!("{who} renamed the report type {} to {}", name(before), name(made))
             } else {
@@ -572,6 +688,19 @@ fn card(entries: &[v1::Entry], row: &Row) -> Option<(u64, Vec<v1::PipeTaint>)> {
             (Some(Entry::SecretApproval(approval)), Kind::SecretUse) if approval.id == row.id => approval.taint.clone(),
             (Some(Entry::PipeStart(start)), Kind::PipeStart) if start.id == row.id => Vec::new(),
             (Some(Entry::AppGrant(proposal)), Kind::AppGrant) if proposal.id == row.id => Vec::new(),
+            (Some(Entry::AppAccess(proposal)), Kind::AppAccess) if !row.app.card.is_empty() && proposal.id == row.app.card => Vec::new(),
+            (Some(Entry::ToolCall(call)), Kind::AppAccess)
+                if row.app.card.is_empty()
+                    && !row.app.change.is_empty()
+                    && crate::apps::access::change_of(call).as_deref() == Some(row.app.change.as_str()) =>
+            {
+                Vec::new()
+            }
+            (Some(Entry::ToolCall(call)), Kind::Model)
+                if crate::extensions::models::change_of(call).as_deref() == Some(row.model.change.as_str()) =>
+            {
+                Vec::new()
+            }
             _ => return None,
         };
         Some((entry.seq, taint))
@@ -672,6 +801,12 @@ impl Factory {
                     report_type_before: row.types.before,
                     widens: row.types.widens,
                     report_types: row.types.enabled,
+                    app_change_id: row.app.change,
+                    undone: row.app.undone || row.model.undone,
+                    app_id: row.app.app,
+                    agent_reason: if row.kind == Kind::Model { row.model.reason } else { row.app.reason },
+                    model_change_id: row.model.change,
+                    subject_agent_id: row.model.subject,
                 }
             })
             .collect();
@@ -744,10 +879,20 @@ mod tests {
         let renamed = crate::pipes::handoff::schema::Schema { name: "Recipe".into(), version: 2, ..recipe.clone() };
         let mut changed = renamed.clone();
         changed.fields.pop();
-        let change = |old: &'static str, new: &'static str, by: &'static str| Change { kind: "type", target: "task_request", old, new, by, kept: false };
+        let change = |old: &'static str, new: &'static str, by: &'static str| Change {
+            kind: "type",
+            target: "task_request",
+            old,
+            new,
+            by,
+            kept: false,
+        };
         let title = |change: Change<'_>, made, before| type_title(&change, made, before, &names);
         assert_eq!(title(change("", "1", ""), Some(&recipe), None), "You made the report type \u{201C}Task request\u{201D}");
-        assert_eq!(title(change("1", "2", "rivet"), Some(&renamed), Some(&recipe)), "Rivet renamed the report type \u{201C}Task request\u{201D} to \u{201C}Recipe\u{201D}");
+        assert_eq!(
+            title(change("1", "2", "rivet"), Some(&renamed), Some(&recipe)),
+            "Rivet renamed the report type \u{201C}Task request\u{201D} to \u{201C}Recipe\u{201D}"
+        );
         assert_eq!(
             title(change("1", "2", ""), Some(&changed), Some(&recipe)),
             "You changed the report type \u{201C}Task request\u{201D} and renamed it \u{201C}Recipe\u{201D}"

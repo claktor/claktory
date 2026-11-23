@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
+import 'chats.dart' show selectedChat;
 import 'connections.dart';
 import 'drafts.dart';
 import 'history.dart';
@@ -8,6 +9,7 @@ import 'identity.dart';
 import 'layout.dart';
 import 'login.dart';
 import 'panes.dart' show pagePane, withPage;
+import 'pipes.dart' show selectedPipe;
 import 'protocol/factory/v1/factory.pb.dart' show Agent;
 import 'scanner.dart';
 import 'update.dart';
@@ -87,10 +89,18 @@ class AppScope extends InheritedWidget {
       openPage(context, AppPage.changelog);
 
   /// The agent whose layout [page]s open in: the selected one on a Mac;
-  /// none on a phone, where they're pages of their own.
-  static Agent? _besideAgent(BuildContext context) => isPhoneLayout(context)
-      ? null
-      : scope(context).backend.workspace.selectedAgent;
+  /// none on a phone, where they're pages of their own, nor while a pipe or
+  /// a chat shows in its place, where they'd open out of sight beside it
+  /// (Abbacchio's row 638): they take the pipe's or chat's place instead.
+  static Agent? _besideAgent(BuildContext context) {
+    if (isPhoneLayout(context)) return null;
+    final store = scope(context).backend.workspace;
+    final workspace = store.workspace;
+    if (selectedPipe(workspace) != null || selectedChat(workspace) != null) {
+      return null;
+    }
+    return store.selectedAgent;
+  }
 
   /// Shows [page] (Settings, the Marketplace, What's new). On a Mac it's a
   /// pane right of the selected agent's conversation, so the two are read

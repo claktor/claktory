@@ -13,6 +13,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
 import 'panes_test.dart' show beside, showPanes;
+import 'phone_sizes_test.dart' show loadGeist;
 
 FileContent _file(String path, String body, {String sha = 'v1'}) => FileContent(
   path: path,
@@ -141,6 +142,82 @@ void main() {
     await pumpFrames(tester);
     expect(_count(tester), '1 of 3');
     expect(_washes(tester, _rich('# A **')), [('needle', true)]);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+  testWidgets('formatted: a match far along a wide table or code block is '
+      'scrolled to sideways in its own scroll, and stays in sight shown '
+      'Plain (Abbacchio row 652)', (tester) async {
+    // Real widths: Plain's lines measure the monospaced font's.
+    await tester.runAsync(loadGeist);
+    final wide = 'x' * 300;
+    final essay = [
+      '# Notes',
+      for (var i = 0; i < 120; i++) 'Paragraph $i.',
+      '| $wide WIDEMARK | y |\n|---|---|\n| a | b |',
+      '```\n$wide CODEMARK\n```',
+    ].join('\n\n');
+    await showPanes(
+      tester,
+      beside('text', '/w/wide.md'),
+      files: {'/w/wide.md': _file('/w/wide.md', essay)},
+    );
+    await settle(tester);
+    await tester.pump();
+
+    Future<void> inSight(String mark) async {
+      final paragraph = tester.renderObject<RenderParagraph>(_rich(mark).last);
+      final text = paragraph.text.toPlainText();
+      final at = text.indexOf(mark);
+      final box = paragraph
+          .getBoxesForSelection(
+            TextSelection(baseOffset: at, extentOffset: at + mark.length),
+          )
+          .first
+          .toRect()
+          .shift(paragraph.localToGlobal(Offset.zero));
+      Rect scroll(AxisDirection direction) {
+        final box = tester.renderObject<RenderBox>(
+          find
+              .ancestor(
+                of: _rich(mark).last,
+                matching: find.byWidgetPredicate(
+                  (widget) =>
+                      widget is Scrollable && widget.axisDirection == direction,
+                ),
+              )
+              .first,
+        );
+        return box.localToGlobal(Offset.zero) & box.size;
+      }
+
+      final across = scroll(AxisDirection.right);
+      expect(box.left, greaterThanOrEqualTo(across.left), reason: mark);
+      expect(box.right, lessThanOrEqualTo(across.right), reason: mark);
+      final down = scroll(AxisDirection.down);
+      expect(box.top, greaterThanOrEqualTo(down.top), reason: mark);
+      expect(box.bottom, lessThanOrEqualTo(down.bottom), reason: mark);
+    }
+
+    await _openFind(tester, _rich('Paragraph 0.'));
+    await _type(tester, 'WIDEMARK');
+    expect(_count(tester), '1 of 1');
+    await inSight('WIDEMARK');
+    await _type(tester, 'CODEMARK');
+    expect(_count(tester), '1 of 1');
+    await inSight('CODEMARK');
+
+    // Shown Plain, the find stays on it, in sight there too.
+    await tester.tap(find.text('Plain'));
+    await pumpFrames(tester);
+    expect(_count(tester), '1 of 1');
+    expect(_rich('CODEMARK'), findsOneWidget);
+    await inSight('CODEMARK');
+
+    // And back (Abbacchio's row 655).
+    await tester.tap(find.text('Formatted'));
+    await pumpFrames(tester);
+    expect(_count(tester), '1 of 1');
+    await inSight('CODEMARK');
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
   testWidgets("a formatted file that can't be commented on still opens its "

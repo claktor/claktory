@@ -6,7 +6,8 @@
 //! sender's run at the time (bound by Claktory: what that run read is
 //! context, not a confirmed reply), the messages it answers (`reply_to`,
 //! each checked to be an agent's message the sender received), why it was
-//! sent as the sender said (`intent`), and the sender's pipe taint then.
+//! sent as the sender said (`intent`), and the sender's pipe taint then
+//! (`{}` since #346: nothing a sender read reaches anyone).
 //! Rows from before it keep NULLs there: unknown, never clean. An agent
 //! reads each message's number (`msg="…"` on its event) to answer it.
 //!
@@ -15,9 +16,8 @@
 //! `messages`, so nothing queues it, wakes the lead, or delivers it again
 //! after a restart. The lead hears how many came only when it runs anyway
 //! (in Claktory's note before its next step) and reads them with
-//! `agents_copies`. A copy keeps the sender's taint as it was, and hands it
-//! on to whoever reads it, whatever either agent did since. It grants
-//! nothing: the sender must be able to message its lead.
+//! `agents_copies`. It grants nothing: the sender must be able to message
+//! its lead.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -31,7 +31,6 @@ use serde_json::json;
 
 use crate::config::{AgentConfig, Config};
 use crate::factory::{Factory, RequestError};
-use crate::pipes::Taint;
 use crate::store::Store;
 use crate::transcript::now_ms;
 
@@ -117,11 +116,11 @@ pub(crate) fn send_id() -> String {
     crate::vault::crypto::random::<16>().iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// What the sender records now: the send's id, its run, its taint.
+/// What the sender records now: the send's id and its run. Its taint is
+/// `{}`: since #346 what a sender read never reaches those it messages.
 pub(crate) fn sent(factory: &Factory, sender: &str) -> Sent {
     let sender_run = factory.lock().agents.get(sender).and_then(|runtime| runtime.run);
-    let taint = serde_json::to_string(&factory.pipes.taint_of(sender)).unwrap_or_else(|_| "{}".to_owned());
-    Sent { send_id: send_id(), sender_run, taint }
+    Sent { send_id: send_id(), sender_run, taint: "{}".to_owned() }
 }
 
 /// `said`, checked before anything is sent: a known intent, and each
@@ -246,12 +245,11 @@ struct Row {
     to: Vec<String>,
     reply_to: Vec<u64>,
     intent: String,
-    taint: String,
     created: i64,
     read: bool,
 }
 
-const COLUMNS: &str = "id, sender_id, sender, text, to_ids, reply_to, intent, taint, created, read";
+const COLUMNS: &str = "id, sender_id, sender, text, to_ids, reply_to, intent, created, read";
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
     Ok(Row {
@@ -262,9 +260,8 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         to: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
         reply_to: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default(),
         intent: row.get(6)?,
-        taint: row.get(7)?,
-        created: row.get(8)?,
-        read: row.get::<_, Option<i64>>(9)?.is_some(),
+        created: row.get(7)?,
+        read: row.get::<_, Option<i64>>(8)?.is_some(),
     })
 }
 
@@ -295,8 +292,7 @@ pub(crate) fn tool(factory: &Arc<Factory>, agent: &str) -> Tool {
     )
 }
 
-/// The copies `reader` asked for, as text; each reaches it with the taint
-/// its sender had when it sent it. Unread ones then count as read.
+/// The copies `reader` asked for, as text. Unread ones then count as read.
 fn read(factory: &Arc<Factory>, reader: &str, args: &ReadArgs) -> Result<ToolResult, String> {
     let limit = args.limit.unwrap_or(MAX_READ).clamp(1, MAX_READ);
     let rows: Vec<Row> = {
@@ -317,23 +313,9 @@ fn read(factory: &Arc<Factory>, reader: &str, args: &ReadArgs) -> Result<ToolRes
         let none = if args.all { "No agent has sent you a quiet copy." } else { "No unread quiet copies. all: true lists the latest ones again." };
         return Ok(ToolResult::text(none, json!({"copies": []})));
     }
-    // What a pipe brought reaches the reader with the copy, as it was when
-    // sent; a copy whose taint can't be read isn't given at all.
-    let mut checked = Vec::with_capacity(rows.len());
-    for copy in &rows {
-        match serde_json::from_str::<Taint>(&copy.taint) {
-            Ok(taint) => {
-                if !taint.is_empty() {
-                    crate::pipes::agents::taint_with(factory, &copy.sender_id, reader, &taint);
-                }
-                checked.push(true);
-            }
-            Err(error) => {
-                tracing::error!(copy = copy.id, %reader, %error, "a quiet copy's taint can't be read, so it's left out");
-                checked.push(false);
-            }
-        }
-    }
+    // Every copy is given: since #346 nothing a sender read reaches its
+    // readers (its `taint` column is kept, `{}` from then on).
+    let checked = vec![true; rows.len()];
     let unread: Vec<i64> = rows.iter().filter(|copy| !copy.read).map(|copy| copy.id).collect();
     if !unread.is_empty() {
         let db = factory.store.db();

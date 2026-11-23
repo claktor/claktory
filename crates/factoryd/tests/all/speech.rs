@@ -202,8 +202,9 @@ async fn a_damaged_download_is_thrown_away() {
 /// A stand-in for `claktory-speech` that serves: a "recording" is a text
 /// file of what was said. "no speech" fails as the real one does, "die"
 /// ends it, "long…" is a recording of 10 minutes and 1 ms (and then says
-/// nothing more, as if transcribing it), and "wait …" waits for a `.go`
-/// file beside it before saying "…". Each start adds a line to `starts`.
+/// nothing more, as if transcribing it), "silent N" is N ms with no
+/// speech in it, and "wait …" waits for a `.go` file beside it before
+/// saying "…". Each start adds a line to `starts`.
 fn serving(dir: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt as _;
     let path = dir.join("speech-serve");
@@ -222,6 +223,10 @@ while IFS= read -r line; do
   [ "$said" = die ] && exit 1
   case "$said" in
   long*) echo "{\"id\":$id,\"decoded\":true,\"duration_ms\":600001}"; continue;;
+  silent*)
+    echo "{\"id\":$id,\"decoded\":true,\"duration_ms\":${said#silent }}"
+    echo "{\"id\":$id,\"code\":\"no_speech\",\"error\":\"Didn't hear any speech.\"}"
+    continue;;
   esac
   echo "{\"id\":$id,\"decoded\":true,\"duration_ms\":41200}"
   case "$said" in
@@ -373,6 +378,39 @@ async fn a_voice_message_that_fails_holds_nothing_up_and_can_be_retried_or_disca
     assert!(Path::new(&silent.path).exists());
     let typed = view.queued.as_ref().map(|queued| queued.agent_id.clone());
     assert_eq!(typed.as_deref(), Some("ops"));
+}
+
+#[tokio::test]
+async fn a_short_voice_message_with_no_speech_vanishes_and_a_longer_one_says_so() {
+    let dir = temp_dir();
+    let models = Scripted::signed_in();
+    let requests = models.requests.clone();
+    let (_factory, mut client, mut view, _server) = ready(&dir, models).await;
+
+    // Under 5 seconds of silence: dropped, never reaching the agent, and
+    // what's typed after it goes on; the recording stays.
+    let short = recording(&dir, "ops", "Voice.m4a", "silent 4999");
+    apply_request(&mut client, &mut view, voice("ops", short.clone())).await;
+    apply_request(&mut client, &mut view, send_message("ops", "Anyway, hi.")).await;
+    view.follow(&mut client, |view| {
+        view.entries.iter().any(|entry| matches!(&entry.kind, Some(Kind::User(user)) if user.text == "Anyway, hi.")) && idle(view)
+    })
+    .await;
+    assert!(queued(&view).is_empty(), "nothing left for the person: {:?}", queued(&view));
+    let users: Vec<_> = view.entries.iter().filter(|entry| matches!(entry.kind, Some(Kind::User(_)))).collect();
+    assert_eq!(users.len(), 1, "only the typed message is in the conversation");
+    let prompts: Vec<String> = requests.lock().expect("lock").iter().map(|request| request.prompt.clone()).collect();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert!(prompts[0].contains("Anyway, hi.") && !prompts[0].contains("voice="), "{prompts:?}");
+    assert!(Path::new(&short.path).exists());
+
+    // 5 seconds or more: it may be the microphone, so the person sees it.
+    apply_request(&mut client, &mut view, voice("ops", recording(&dir, "ops", "Voice 2.m4a", "silent 5000"))).await;
+    view.follow(&mut client, |view| queued(view) == [(String::new(), Some(v1::TranscriptionState::Failed))]).await;
+    let why = view.queued.as_ref().expect("the queue").messages[0].transcription.clone().expect("a voice message");
+    assert_eq!((why.error_code.as_str(), why.duration_ms), ("no_speech", 5_000));
+    assert_eq!(view.agent("ops").queued_messages, 1, "it waits for the person");
+    assert_eq!(requests.lock().expect("lock").len(), 1, "the agent wasn't given it");
 }
 
 #[tokio::test]

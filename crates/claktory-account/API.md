@@ -390,39 +390,60 @@ Errors: `400 invalid_email`, `400 invalid_request`, `403 device_removed`
 (this key was removed from that account; no code is sent),
 `429 rate_limited`, `503 email_unavailable`.
 
+It may be device signed, by the key in `account_key` (the same headers and
+signature as verify; another key is `401 unauthorized`). Signed, it's also
+answered `403 key_of_another_account` (no code is sent) when the key last
+signed in to another account than this email's, or than a new one's: signed
+in there now or signed out since (row 671). A key never spans two accounts,
+so neither does its DM leaf (the key). The app makes a new account key and
+starts again, as a new device. Unsigned (older apps), it learns
+that only at verify, so that a public key alone never tells which account
+it's in.
+
 #### `POST /v1/devices/sign-in/verify` (device signed, by the key that started it)
 `{"request_id", "code"}` → `200 {"account_id", "email", "name"}`. Makes the
-account if it's new and binds the account key to it (from another account,
-it moves, and the old account's assertions for it leave the allowlist).
-Errors: `400 wrong_code`, `410 code_expired`, `401 unauthorized` (another
-key, which spends none of the code's tries), `403 too_many_devices` (30 per
-account), `403 device_removed` (the key was removed after the code was sent;
-the code is spent).
+account if it's new and binds the account key to it. The service keeps the
+account each key last signed in to, past its sign-out, until the account is
+deleted (in Download My Data as `device_keys`). Errors: `400 wrong_code`,
+`410 code_expired`, `401 unauthorized` (another key, which spends none of
+the code's tries), `403 too_many_devices` (30 per account), `403
+device_removed` (the key was removed after the code was sent; the code is
+spent), `403 key_of_another_account` (the key last signed in to another
+account; the code is spent; the app makes a new key and asks for a new
+code).
 
 #### `GET /v1/devices/me` (device signed)
-`200 {"account_id", "email", "name"}`, or `401 unauthorized` when the key isn't
-bound: never signed in, signed out, or removed (at claktory.com/account or
-by another device).
+`200 {"account_id", "email", "name"}`, `401 unauthorized` when the key isn't
+bound (never signed in, or signed out), or `403 device_removed` when it was
+removed (at claktory.com/account or by another device). Every device-signed
+call answers so: the signature, its time and the key's limits are checked
+first, so only whoever holds a removed key learns it was removed; a bad,
+stale or replayed signature is `401` whatever the key.
 
 #### `POST /v1/devices/sign-out` (device signed)
 `{}` → `200 {}`: the key is unbound (also when it wasn't bound), and the
-device keys of its assertions leave the allowlist.
+device keys of its assertions leave the allowlist. The DMs' worker is told,
+and drops its leaf's KeyPackages, so nobody adds it to a conversation
+meanwhile (queued with the sign-out and asked again until it answers, as a
+deleted account's purge is); the account's other devices see it in `signed_out`
+of `GET /v1/apps/dms/keys/<account>` until it signs back in or they remove it.
 
 #### `POST /v1/devices/remove` (device signed)
 `{"account_key": b64}` → `200 {"removed": true}`: another device of the
 same account (lost, stolen, given away) is signed out, as removing it at
 claktory.com/account does: its key is unbound, so this service and the
-apps behind it (DMs' worker) answer it `401 unauthorized` from then on, and
-the device keys of its assertions leave the allowlist. A DM device's leaf id
-is its account key. The key is also remembered for good, as when it's
+apps behind it (DMs' worker) refuse it from then on (this service with `403
+device_removed`, the worker `401 unauthorized`), and
+the device keys of its assertions leave the allowlist; the DMs' worker drops
+its KeyPackages, as at sign-out. A DM device's leaf id is its account key. The key is also remembered for good, as when it's
 removed at claktory.com/account (never when a device signs itself out): it
 never signs in to this account again, even with a right code, and is
 answered `403 device_removed` (message: "This device was removed from your
 account. Sign in again to start over as a new device."). The app then
 deletes what it kept for that account (its DM store) and makes a new account
 key, which signs in as a new device and joins DMs only through a hand-off
-from a device already in. Only this account is closed to it; other accounts
-aren't. The removed keys are in Download My Data, and go when the account is
+from a device already in. Other accounts are closed to it
+too (`403 key_of_another_account`): it last signed in to this one. The removed keys are in Download My Data, and go when the account is
 deleted. `{"removed": false}` when that key isn't (or is no longer) one of
 this account's devices, so a retry is no error, and another account's
 devices are never touched; the key is remembered all the same (a device
@@ -466,7 +487,7 @@ it's from:
   agents: `?agent=<id>&incarnation=<incarnation>` on the call, which its
   signature covers, both once;
 - a person's device-signed request (`Device`), with the account's Claktories
-  signed in now and their epochs. A device names no agent.
+  signed in now and their epochs, and its devices signed in now. A device names no agent.
 
 What the worker answers is passed on only as JSON with an app's status, and
 signed like every answer. Without a worker (`--user-apps SOCKET
@@ -524,7 +545,9 @@ Requests, friends and blocks, device signed only too:
   current group, at most 5 epochs old → `{"message_id", "seq",
   "accepted_ms"}` once stored (a retry answers the same); `409 epoch`
   (`{"epoch"}`, the group's now) for an older one, `409 not_set_up` before
-  the group exists; `GET
+  the group exists, `409 waiting_for_friend` while the group hasn't held a
+  device of each of the two people since the message's epoch (nothing
+  kept); `GET
   /v1/apps/dms/conversations/<id>/messages?after=|before=&limit=` → a page
   of history, each message's `envelope` and `epoch`;
 - end to end (MLS, the worker a delivery service that can't read what it
@@ -552,7 +575,8 @@ Requests, friends and blocks, device signed only too:
   the person's device approves (`POST /v1/apps/dms/proposals/<id>/approve`
   `{"revision", "proposal_digest", "envelope"}`: the digest it was shown,
   SHA-256 of the proposal's bytes, and what it showed sealed again in the
-  conversation's group; `409 epoch` or `409 not_set_up` as for a message)
+  conversation's group; `409 epoch`, `409 not_set_up` or `409
+  waiting_for_friend` as for a message)
   or declines; the backend never can;
 - `GET /v1/apps/dms/conversations/<id>/agent-drafts` and `DELETE …/<id>`:
   the drafts agents left the person, and closing one.
@@ -576,7 +600,7 @@ Sign in with an emailed code; lists the account's Claktories (name, version,
 platform, last contact, recent unlocks with their IP, and what their
 check-ins sent: place, counts, agent hours in the last 7 days, tokens per
 model in the last 30); **Remove** a Claktory (what `revoked` means above); the devices signed in
-(name, platform, last seen), each with **Remove** (its key is unbound, and never signs in to the account again: `403 device_removed`);
+(name, platform, last seen), each with **Remove** (its key is unbound, and never signs in to the account again: `403 device_removed`; the DMs' worker drops its KeyPackages);
 **Agents' access**, the grants agents on its Claktories hold in the user-level
 apps (agent, Claktory, app, what it may do, how many conversations, since
 when), each with **Remove**, asked of the user-apps worker, so it works with
@@ -615,6 +639,7 @@ Emails now draw the mark in HTML and load nothing (Gmail hides remote images).
 | 403 | `too_many_claktories` | |
 | 403 | `too_many_devices` | |
 | 403 | `device_removed` | this device's key was removed from the account (by another of its devices, or at claktory.com/account); it never signs in to that account again |
+| 403 | `key_of_another_account` | this device's key last signed in to another account (signed in there now, or signed out since); it never signs in to this one: make a new key |
 | 403 | `wrong_endpoint` | not this Claktory's registered backend endpoint |
 | 403 | `unsupported_email` | an email a pipe statement can't carry (not printable ASCII, or claktory.com's own) |
 | 404 | `not_found` | |

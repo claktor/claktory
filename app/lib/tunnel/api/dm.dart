@@ -7,9 +7,9 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `add_group`, `apply_view`, `become_leaf`, `bytes32`, `change_group`, `change_pins`, `commit`, `committed`, `delete_row`, `envelope_json`, `from_content`, `group_kind`, `group_row`, `json`, `keep_rotation`, `keep`, `listed_ids`, `load`, `member_line`, `merge_own`, `message`, `of`, `openmls_group_id`, `pending_commit`, `place`, `read_envelope`, `read_row`, `read_view`, `recertify`, `refusal`, `roster`, `rotated_pins`, `safety`, `save_pins`, `save_row`, `snapshot`, `sql`, `state`, `store`, `take`, `to_content`, `unchecked`, `view_name`
+// These functions are ignored because they are not marked as `pub`: `add_group`, `apply_view`, `become_leaf`, `bytes32`, `change_group`, `change_pins`, `commit`, `committed`, `delete_row`, `envelope_json`, `from_content`, `group_kind`, `group_row`, `has`, `holds`, `json`, `keep_rotation`, `keep`, `listed_ids`, `load`, `member_line`, `merge_own`, `message`, `not_joined`, `note_removed`, `of`, `openmls_group_id`, `pending_commit`, `place`, `read_envelope`, `read_row`, `read_view`, `recertify`, `refusal`, `roster`, `rotated_pins`, `safety`, `save_pins`, `save_row`, `set_up`, `snapshot`, `sql`, `state`, `store`, `take`, `to_content`, `unchecked`, `view_name`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Kept`, `PendingRow`, `Pending`, `Snapshot`, `State`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `try_from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `try_from`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// 32 new random bytes: a key for the platform key store (the identity,
@@ -41,6 +41,10 @@ abstract class DmDevice implements RustOpaqueInterface {
 
   /// Keeps [removal] as the one under way, in place of any before.
   Future<void> beginRemoval({required DmRemoval removal});
+
+  /// The code whose digits are [comparison] was handed off to: it's
+  /// refused from now on.
+  Future<void> codeUsed({required String comparison});
 
   /// The worker refused this device's commit (another came first): drop
   /// it; the change can be made again on the new epoch.
@@ -106,6 +110,9 @@ abstract class DmDevice implements RustOpaqueInterface {
   /// Forgets [group_id]: its MLS state, history and what waits to go
   /// (revoked, unfriended, signed out).
   Future<void> forgetGroup({required List<int> groupId});
+
+  /// [leaf_id] was removed (signed out): no longer listed as replaced.
+  Future<void> forgetReplaced({required String leafId});
 
   /// Every group this device is in.
   Future<List<DmGroup>> groups();
@@ -180,6 +187,22 @@ abstract class DmDevice implements RustOpaqueInterface {
   /// §2.1): the one commit a leaf under a replaced key may make there.
   Future<DmCommit> moveGroup({required List<int> groupId});
 
+  /// The other person in the conversation [group_id] when none of their
+  /// devices is in yet (row 676), and whether this device adds them
+  /// first. None for any other group, or once they're in.
+  Future<DmJoining?> notJoined({required List<int> groupId});
+
+  /// A line in [group_id]'s history at [seq] (the first one this device
+  /// didn't read): what was sent from there until it joined again was
+  /// skipped, because [because]'s security key changed ("" for another
+  /// cause). Row 654: a device that can't read messages says so.
+  Future<void> noteSkipped({
+    required List<int> groupId,
+    required PlatformInt64 seq,
+    required PlatformInt64 arrivedMs,
+    required String because,
+  });
+
   /// Opens the store at [path] with its seal key [store_key], as the leaf
   /// [leaf_key], with the person's identity [identity_key] once this device
   /// has it. None when the store was made with another seal key: start
@@ -243,6 +266,11 @@ abstract class DmDevice implements RustOpaqueInterface {
     required PlatformInt64 arrivedMs,
   });
 
+  /// The device whose former install holds [group_id] (row 202): its
+  /// name, when what [waiting_for] waits for is a reinstall; None
+  /// otherwise.
+  Future<String?> reinstalling({required List<int> groupId});
+
   /// Joins [group_id] again from the worker's GroupInfo ([group_info],
   /// an envelope's JSON), with an external commit for the worker; the
   /// feed goes on after [seq]. For a device whose state broke or that
@@ -257,10 +285,41 @@ abstract class DmDevice implements RustOpaqueInterface {
   /// The removal under way on this device, if any.
   Future<DmRemoval?> removal();
 
+  /// After a start-over's rejoin (row 630): one commit taking every dead
+  /// leaf of the person's out of [group_id] (under a key other than this
+  /// device's, on no list of the new one), so none holds the new epoch's
+  /// secrets. None when there's none.
+  Future<DmCommit?> removeDeadLeaves({required List<int> groupId});
+
   /// Removes the leaves [leaf_ids] from [group_id].
   Future<DmCommit> removeMembers({
     required List<int> groupId,
     required List<String> leafIds,
+  });
+
+  /// The person's devices a start-over took out of their groups (under
+  /// the key it replaced), until the person removes them.
+  Future<List<DmMember>> replacedDevices();
+
+  /// The person's own leaves in [group_id] under a security key other
+  /// than this device's (a key replaced since), by leaf id, unchecked:
+  /// never signed out by a sweep (Fugo: a surviving old device is the
+  /// person's alarm when someone else started over), and shown apart.
+  Future<List<String>> replacedLeaves({required List<int> groupId});
+
+  /// The commit or proposal [envelope] held in [group_id] proves that
+  /// [account] replaced the key its leaf is under, which the worker lists
+  /// in [listed] (GET keys' replaced_identity_keys, with [served] its
+  /// current key): that key is retired here, so the commit is known as
+  /// one this device can never take (row 654). Only what a held commit
+  /// proves, and nothing when the list names a current key (Fugo: no
+  /// wedge against the friend's next key). Whether a key was retired.
+  Future<bool> retireReplaced({
+    required List<int> groupId,
+    required String envelope,
+    required String account,
+    required List<int> served,
+    required List<Uint8List> listed,
   });
 
   /// The rotation under way on this device, if any.
@@ -305,8 +364,32 @@ abstract class DmDevice implements RustOpaqueInterface {
     required BigInt nowMs,
   });
 
+  /// No other device (dms-e2ee §2, "All devices lost"; row 630): sets
+  /// up this device as [set_up_first] does, under a new identity
+  /// [identity_key] that replaces the account's [old_identity_public]
+  /// (as the worker serves it), held as retired here from the start, as
+  /// a key change would leave it (Ghiaccio): leaves under the old key
+  /// are the dead ones, and a Claktory enrolled under it can be enrolled
+  /// again. [replaced_identity_keys]: the keys the account replaced
+  /// before that one, oldest first (GET keys' list), retired too, so
+  /// leaves and Claktories under any of them are known after more than
+  /// one start-over (row 654; Fugo: only here, for the person's own
+  /// account, and refused whole if the list names the new key).
+  Future<DmSetUp> setUpNewKey({
+    required List<int> identityKey,
+    required List<int> oldIdentityPublic,
+    required List<Uint8List> replacedIdentityKeys,
+    required String accountId,
+    required String leafId,
+    required String name,
+    required BigInt nowMs,
+  });
+
   /// The person's device list at [version] (one more than the last),
-  /// signed, and taken into this device's own pins.
+  /// signed. Not pinned here: that's [accept_list] once the worker took
+  /// it, so a list it refused (or never heard) never counts as seen, and
+  /// the next one another device puts at that version is taken
+  /// (Abbacchio's row 615).
   Future<Uint8List> signDeviceList({
     required BigInt version,
     required BigInt createdMs,
@@ -352,6 +435,11 @@ abstract class DmDevice implements RustOpaqueInterface {
   /// What the person's devices keep of the conversation [group_id]: its
   /// draft, read position and deletion, through the self group.
   Future<DmView> view({required List<int> groupId});
+
+  /// The account whose device under a replaced key, on no list of the new
+  /// one, is still in [group_id]: nothing is sent there until it's out
+  /// (Fugo, row 630). None when nothing holds it.
+  Future<String?> waitingFor({required List<int> groupId});
 }
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<DmHandoff>>
@@ -644,6 +732,31 @@ class DmHandoffSealed {
           comparison == other.comparison;
 }
 
+/// A conversation the other person isn't in yet (row 676): none of their
+/// devices passes the checks there, so nothing is sent until one does.
+class DmJoining {
+  /// Whose devices it waits for.
+  final String account;
+
+  /// This device adds them first: it's the person's member with the
+  /// lowest leaf index there (the creator, unless it left), so the
+  /// person's devices don't each spend the friend's key packages (Fugo).
+  final bool addsFirst;
+
+  const DmJoining({required this.account, required this.addsFirst});
+
+  @override
+  int get hashCode => account.hashCode ^ addsFirst.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DmJoining &&
+          runtimeType == other.runtimeType &&
+          account == other.account &&
+          addsFirst == other.addsFirst;
+}
+
 /// What kind of leaf: one of the person's devices, or one of their
 /// Claktories.
 enum DmLeafKind { device, claktory }
@@ -724,14 +837,34 @@ class DmMembers {
   /// anything said under it (Fugo).
   final List<String> keyChanged;
 
+  /// What was sent here between the last message this device read and
+  /// this line was skipped: it joined the group again past it, and
+  /// can't read it (row 654, Fugo: never silent). Some(account) when
+  /// that account's security key changed meanwhile ("" for any other
+  /// cause); None for a line about members.
+  final String? skipped;
+
+  /// Leaves back under their id with a new signature key: the device
+  /// installed again (row 202). One line each ("Ana set up a device
+  /// again: iPhone", Trish); its former install leaving under that id
+  /// says nothing.
+  final List<DmMember> setUpAgain;
+
   const DmMembers({
     required this.added,
     required this.removed,
     required this.keyChanged,
+    this.skipped,
+    required this.setUpAgain,
   });
 
   @override
-  int get hashCode => added.hashCode ^ removed.hashCode ^ keyChanged.hashCode;
+  int get hashCode =>
+      added.hashCode ^
+      removed.hashCode ^
+      keyChanged.hashCode ^
+      skipped.hashCode ^
+      setUpAgain.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -740,7 +873,9 @@ class DmMembers {
           runtimeType == other.runtimeType &&
           added == other.added &&
           removed == other.removed &&
-          keyChanged == other.keyChanged;
+          keyChanged == other.keyChanged &&
+          skipped == other.skipped &&
+          setUpAgain == other.setUpAgain;
 }
 
 /// A message in a group's history, as this device keeps it.
@@ -905,12 +1040,18 @@ class DmProcessed {
   /// fallen out of step and should rejoin.
   final bool handshake;
 
+  /// Held, and never to be taken here: a commit or proposal from a leaf
+  /// under a security key [why]'s account replaced (row 654). This
+  /// device rejoins the group past it.
+  final bool replaced;
+
   const DmProcessed({
     required this.outcome,
     this.message,
     required this.epoch,
     required this.why,
     required this.handshake,
+    required this.replaced,
   });
 
   @override
@@ -919,7 +1060,8 @@ class DmProcessed {
       message.hashCode ^
       epoch.hashCode ^
       why.hashCode ^
-      handshake.hashCode;
+      handshake.hashCode ^
+      replaced.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -930,7 +1072,8 @@ class DmProcessed {
           message == other.message &&
           epoch == other.epoch &&
           why == other.why &&
-          handshake == other.handshake;
+          handshake == other.handshake &&
+          replaced == other.replaced;
 }
 
 /// A removal the person confirmed (Remove…, or Lock out with a new

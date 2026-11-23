@@ -9,13 +9,25 @@
 # that apply are the committed, reviewed ones; findings are printed redacted,
 # with the rule, file, line and commit.
 #
-#   scripts/check-secrets.sh [REV]     REV defaults to HEAD
+#   scripts/check-secrets.sh [REV] [--config CONFIG_REV]
+#                                      REV defaults to HEAD
+#
+# --config reads .gitleaks.toml from CONFIG_REV instead of REV: for a public
+# release commit (scripts/push-source.sh), whose history holds earlier public
+# commits that main's newer, reviewed exceptions may name, while its own files
+# carry the release's older .gitleaks.toml.
 #
 # Needs gitleaks 8.25 or later: brew install gitleaks.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-REV="${1:-HEAD}"
+REV="HEAD" CONFIG_REV=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config) CONFIG_REV="${2:?--config needs a commit}"; shift 2 ;;
+    *) REV="$1"; shift ;;
+  esac
+done
 
 command -v gitleaks >/dev/null || {
   echo "the secret check needs gitleaks: brew install gitleaks" >&2
@@ -31,8 +43,10 @@ fi
 SHA="$(git -C "$ROOT" rev-parse --verify "$REV^{commit}")"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-git -C "$ROOT" show "$SHA:.gitleaks.toml" >"$WORK/factory.toml" 2>/dev/null || {
-  echo "$REV has no .gitleaks.toml; the secret check needs it" >&2
+CONFIG_SHA="$SHA"
+[[ -z "$CONFIG_REV" ]] || CONFIG_SHA="$(git -C "$ROOT" rev-parse --verify "$CONFIG_REV^{commit}")"
+git -C "$ROOT" show "$CONFIG_SHA:.gitleaks.toml" >"$WORK/factory.toml" 2>/dev/null || {
+  echo "${CONFIG_REV:-$REV} has no .gitleaks.toml; the secret check needs it" >&2
   exit 1
 }
 

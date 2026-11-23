@@ -425,12 +425,72 @@ struct InkTests {
       PaperView.pageRect(try #require(InkRegion.rect(last["region"])), on: page5), from: page5)
     let height = paper.pdf.bounds.height
     #expect(shown.minY >= 0 && shown.maxY <= height * 0.5, "\(shown) in \(height)")
+    // The header names the match's page until the person scrolls or goes
+    // elsewhere (Zucchero's row 137).
+    #expect(paper.matchPage == 5 && paper.statusText?.page == 5)
+    _ = await events.call("goToPage", ["page_1based": 3])
+    await Self.settle(0.3)
+    #expect(paper.matchPage == nil && paper.statusText?.page == 3)
+    _ = await events.call(
+      "goToPage", ["page_1based": 5, "region": last["region"]!, "match": true])
     // Cleared: nothing on any page.
     _ = await events.call("search", ["query": ""])
     #expect(paper.liveCanvases.allSatisfy { $0.current == nil })
     #expect(paper.found.isEmpty)
     #expect(paper.liveCanvases.allSatisfy { $0.found.isEmpty && $0.foundLayer == nil })
     _ = window
+  }
+
+  /// A report as macOS prints one: a block of monospaced lines, each
+  /// starting "Line N of page P:" (Zucchero's field-guide.pdf, row 117),
+  /// where PDFPage.characterBounds lands a line away.
+  static func report() throws -> PDFDocument {
+    let lines = (1...40).map { "Line \($0) of page 1: notes on birds, trees and weather near the river." }
+    let data = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792)).pdfData {
+      context in
+      context.beginPage()
+      (lines.joined(separator: "\n") as NSString).draw(
+        in: CGRect(x: 54, y: 54, width: 504, height: 700),
+        withAttributes: [.font: UIFont(name: "Menlo-Regular", size: 12)!])
+    }
+    return try #require(PDFDocument(data: data))
+  }
+
+  @available(iOS 16.0, *)
+  @Test func aMatchsBoundsAreItsOwnCharacters() throws {
+    let doc = try Self.report()
+    let page = try #require(doc.page(at: 0))
+    let advance = ("M" as NSString).size(
+      withAttributes: [.font: UIFont(name: "Menlo-Regular", size: 12)!]
+    ).width
+    for (query, column) in [("Line 30 of page", 0), ("weather", 44), ("Line 3 of", 0)] {
+      let selection = try #require(doc.findString(query, withOptions: [.caseInsensitive]).first)
+      let r = PaperView.tightBounds(of: selection, on: page)
+      let width = CGFloat(query.count) * advance
+      #expect(abs(r.minX - (54 + CGFloat(column) * advance)) < advance / 3, "\(query): \(r)")
+      #expect(abs(r.width - width) < advance / 2, "\(query): \(r) for \(width)")
+      #expect(r.height > 8 && r.height < 20, "\(query): \(r)")
+    }
+  }
+
+  /// A macOS print whose lines' first few characters PDFKit places far
+  /// too wide, each as tall as the page (Zucchero's field-guide.pdf, row
+  /// 117: a match starting a line was washed from the margin to past its
+  /// end). Its text is Menlo-like, 7.2 pt a character, from 16.6 pt in.
+  @available(iOS 16.0, *)
+  @Test func aMatchStartingALineIsWashedFromItsOwnStart() throws {
+    let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+      .appendingPathComponent("fixtures/field-guide.pdf")
+    let doc = try #require(PDFDocument(url: url))
+    for (query, column) in [("Line 30 of page", 0), ("Line 3 of", 0), ("weather", 44)] {
+      for selection in doc.findString(query, withOptions: [.caseInsensitive]).prefix(3) {
+        let page = try #require(selection.pages.first)
+        let r = PaperView.tightBounds(of: selection, on: page)
+        #expect(abs(r.minX - (16.6 + CGFloat(column) * 7.2)) < 2, "\(query): \(r)")
+        #expect(abs(r.width - CGFloat(query.count) * 7.2) < 3, "\(query): \(r)")
+        #expect(r.height > 8 && r.height < 24, "\(query): \(r)")
+      }
+    }
   }
 
   @available(iOS 16.0, *)

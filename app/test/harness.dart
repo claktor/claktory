@@ -199,6 +199,40 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(stopAgent: StopAgent(agentId: agentId)));
 
   @override
+  Future<void> tryAgainNow(String agentId) =>
+      _record(ClientMessage(tryAgainNow: TryAgainNow(agentId: agentId)));
+
+  @override
+  Future<void> continueOnAlternative(
+    String agentId, {
+    bool allWaiting = false,
+    int expectedOthers = 0,
+  }) => _record(
+    ClientMessage(
+      continueOnAlternative: ContinueOnAlternative(
+        agentId: agentId,
+        allWaiting: allWaiting,
+        expectedOthers: expectedOthers,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> switchBack(
+    String agentId, {
+    bool all = false,
+    int expectedOthers = 0,
+  }) => _record(
+    ClientMessage(
+      switchBack: SwitchBack(
+        agentId: agentId,
+        all: all,
+        expectedOthers: expectedOthers,
+      ),
+    ),
+  );
+
+  @override
   Future<void> decideProposal(
     String agentId,
     String proposalId, {
@@ -1190,6 +1224,64 @@ class RecordingBackend extends Backend {
     );
   }
 
+  /// What [undoAppAccessChange] answers; History's records of the change
+  /// it undoes are marked undone, as the backend's would be.
+  var undoAnswer = AppAccessUndone(changeId: 'undo-1');
+
+  /// Set, [undoAppAccessChange] refuses with it.
+  String? refuseUndo;
+
+  @override
+  Future<AppAccessUndone> undoAppAccessChange(String changeId) async {
+    await _record(
+      ClientMessage(
+        undoAppAccessChange: UndoAppAccessChange(changeId: changeId),
+      ),
+    );
+    if (refuseUndo case final why?) throw RequestFailure(why);
+    for (final record in needsYouHistory) {
+      if (record.appChangeId == changeId) record.undone = true;
+    }
+    return undoAnswer;
+  }
+
+  /// What [listAppFiles] answers, filtered by its query's words as the
+  /// backend would.
+  var appFiles = <AppFileChoice>[];
+  var appFilesTruncated = false;
+
+  @override
+  Future<AppFiles> listAppFiles(String appId, {String query = ''}) async {
+    await _record(
+      ClientMessage(
+        listAppFiles: ListAppFiles(appId: appId, query: query),
+      ),
+    );
+    final words = query.toLowerCase().split(RegExp(r'\s+'))
+      ..removeWhere((word) => word.isEmpty);
+    return AppFiles(
+      files: [
+        for (final file in appFiles)
+          if (words.every(file.label.toLowerCase().contains)) file,
+      ],
+      truncated: appFilesTruncated,
+    );
+  }
+
+  /// Set, [undoModelChange] refuses with it.
+  String? refuseModelUndo;
+
+  @override
+  Future<void> undoModelChange(String changeId) async {
+    await _record(
+      ClientMessage(undoModelChange: UndoModelChange(changeId: changeId)),
+    );
+    if (refuseModelUndo case final why?) throw RequestFailure(why);
+    for (final record in needsYouHistory) {
+      if (record.modelChangeId == changeId) record.undone = true;
+    }
+  }
+
   /// What [listQuietCopies] pages through, newest first, as the backend
   /// would.
   var quietCopies = <QuietCopy>[];
@@ -1601,6 +1693,25 @@ class RecordingBackend extends Backend {
         seq: Int64(seq),
         approve: approve,
         comment: comment,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> decideAppAccess(
+    String agentId,
+    int seq, {
+    required bool approve,
+    required String digest,
+    String comment = '',
+  }) => _record(
+    ClientMessage(
+      decideAppAccess: DecideAppAccess(
+        agentId: agentId,
+        seq: Int64(seq),
+        approve: approve,
+        comment: comment,
+        digest: approve ? digest : '',
       ),
     ),
   );

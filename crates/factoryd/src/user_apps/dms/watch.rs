@@ -11,12 +11,11 @@
 //! that far (dm_read), at most 20 times an hour an agent, and only an agent
 //! that is still the one the grant was given to and has Direct messages on.
 
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
-use tokio::sync::Notify;
 
 use super::{APP, ID, peer_of, who};
 use crate::account::apps::{Actor, Problem};
@@ -32,14 +31,9 @@ const IDLE: Duration = Duration::from_secs(60);
 /// Wakes an agent gets an hour from messages, at most.
 const WAKES_AN_HOUR: i64 = 20;
 
-fn notify() -> &'static Notify {
-    static WAKE: OnceLock<Notify> = OnceLock::new();
-    WAKE.get_or_init(Notify::new)
-}
-
 /// Something changed (a grant, a subscription): look again now.
-pub(crate) fn wake() {
-    notify().notify_waiters();
+pub(crate) fn wake(factory: &Factory) {
+    factory.dm_wakes.watch.notify_waiters();
 }
 
 #[derive(Deserialize)]
@@ -90,20 +84,25 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
     tokio::spawn(super::process::monitor(factory.clone()));
     crate::network::ready().await;
     let mut backoff = Duration::from_secs(30);
+    let mut pace = super::pace::Pace::default();
     loop {
         let Some(strong) = factory.upgrade() else { return };
+        let wake = strong.dm_wakes.watch.clone();
         if !wanted(&strong) || strong.account.signed_in_as(&strong.lock().config.account).is_none() {
             drop(strong);
             tokio::select! {
                 () = tokio::time::sleep(IDLE) => {}
-                () = notify().notified() => {}
+                () = wake.notified() => {}
             }
             continue;
         }
+        let asked = tokio::time::Instant::now();
+        let wait = Duration::from_secs(WAIT);
         let pause = match poll(&strong).await {
-            Ok(()) => {
+            Ok(nothing) => {
                 backoff = Duration::from_secs(30);
-                None
+                // Not held at the worker: not again at once.
+                pace.after(super::pace::early(wait, asked.elapsed(), nothing), wait)
             }
             Err(Problem::Refused(410, _)) => {
                 // Too far behind: start again from now.
@@ -121,14 +120,15 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
         if let Some(pause) = pause {
             tokio::select! {
                 () = tokio::time::sleep(pause) => {}
-                () = notify().notified() => {}
+                () = wake.notified() => {}
             }
         }
     }
 }
 
-/// One call: where the events are now, or what happened after the cursor.
-async fn poll(factory: &Arc<Factory>) -> Result<(), Problem> {
+/// One call: where the events are now, or what happened after the cursor;
+/// whether it was a long poll that answered nothing.
+async fn poll(factory: &Arc<Factory>) -> Result<bool, Problem> {
     let since = cursor(factory);
     let query: Vec<(&str, String)> = match &since {
         Some(since) => vec![("since", since.clone()), ("wait", WAIT.to_string())],
@@ -142,7 +142,7 @@ async fn poll(factory: &Arc<Factory>) -> Result<(), Problem> {
         }
     }
     keep_cursor(factory, Some(&events.next_cursor));
-    Ok(())
+    Ok(since.is_some() && events.events.is_empty())
 }
 
 /// Wakes the event's agent, unless it isn't the agent given access any

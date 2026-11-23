@@ -15,6 +15,7 @@ import '../mobile/lines.dart' show ControlsLine;
 import '../mobile/metrics.dart';
 import '../mobile/navigation.dart';
 import '../mobile/presentation.dart' show SheetAction, showActions;
+import '../scope.dart';
 import '../transcript.dart' show Bubble;
 import '../user_apps/session.dart';
 import '../visible_codes.dart' show proseCodes;
@@ -95,6 +96,9 @@ String outgoingLine(OutgoingMessage message, {String friend = ''}) =>
       OutgoingState.refused => switch (message.problem) {
         'closed' => "Not sent: you're no longer friends.",
         'stale' => 'Not sent: this conversation changed. Open it again.',
+        'waitingForFriend' =>
+          "Not sent: ${friend.isEmpty ? 'they' : friend} can't get messages "
+              'in this chat yet. Send it again once they can.',
         'rateLimited' =>
           'Not sent: too many messages for now. Try again later.',
         'storageFull' =>
@@ -115,10 +119,17 @@ List<String> memberLines(
   dm.DmMembers members, {
   required String me,
   required String friend,
+  String here = '',
 }) {
   final who = friend.isEmpty ? 'They' : friend;
   String line(dm.DmMember member, bool added) {
     final mine = member.account == me;
+    // This device itself, removed by another of the person's (row 199):
+    // never "You removed a device" with its own name. Its account and id
+    // both (row 671): a friend's leaf under the same id is the friend's.
+    if (!added && mine && here.isNotEmpty && member.leafId == here) {
+      return 'This device was removed from your account';
+    }
     if (member.kind == dm.DmLeafKind.claktory) {
       final whose = mine ? 'Your' : "$who's";
       return '$whose Claktory ${proseCodes(member.name)} can '
@@ -135,7 +146,26 @@ List<String> memberLines(
       if (account != me)
         "${friend.isEmpty ? 'Their' : "$friend's"} security key changed",
     for (final member in members.added) line(member, true),
+    // Back with a new key: the device installed again (row 202, Trish).
+    for (final member in members.setUpAgain)
+      '${member.account == me ? 'You' : who} set up a device again: '
+          '${proseCodes(member.name)}',
     for (final member in members.removed) line(member, false),
+    // This device joined again past messages it can't read (row 654).
+    if (members.skipped case final because?)
+      switch (because) {
+        '' =>
+          "Some messages sent while this device was away can't be shown "
+              'on it.',
+        _ =>
+          'Some messages sent when '
+              '${because == me
+                  ? 'your'
+                  : friend.isEmpty
+                  ? 'their'
+                  : "$friend's"} '
+              "security key changed can't be shown on this device.",
+      },
   ];
 }
 
@@ -284,6 +314,15 @@ class _ChatViewState extends State<ChatView> {
                 ),
               if (_thread.held)
                 _Held(onRejoin: _thread.heldLong ? _thread.rejoin : null),
+              if (_thread.waitingFor case final account?)
+                _WaitingForKey(
+                  name: account == _thread.e2ee.accountId
+                      ? null
+                      : _thread.conversation.person.name,
+                  device: _thread.reinstalling,
+                ),
+              if (_thread.waitingFor == null && _thread.joining != null)
+                _WaitingToJoin(name: _thread.conversation.person.name),
               if (_thread.keyChanged)
                 _KeyChanged(
                   name: _thread.conversation.person.name,
@@ -307,6 +346,7 @@ class _ChatViewState extends State<ChatView> {
                     members,
                     me: _thread.e2ee.accountId,
                     friend: _thread.conversation.person.name,
+                    here: _thread.e2ee.leafId,
                   ))
                     _QuietLine(line)
                 else
@@ -367,7 +407,26 @@ class _ChatViewState extends State<ChatView> {
             ],
           ),
         ),
-        if (problem != null)
+        // Signed out (removed by another of the person's devices, say):
+        // why nothing can be sent, over what was typed (row 199).
+        if (_thread.writable &&
+            (_thread.e2ee.setup == DmSetup.signedOut ||
+                problem?.problem == UserAppProblem.notSignedIn))
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Space.l),
+            child: ListenableBuilder(
+              listenable: AppScope.scope(context).connections.account,
+              builder: (context, _) => Text(
+                AppScope.scope(context).connections.account.removed
+                    ? deviceRemovedText
+                    : problemText(
+                        const UserAppError(UserAppProblem.notSignedIn),
+                      ),
+                style: type.caption.copyWith(color: palette.textMuted),
+              ),
+            ),
+          )
+        else if (problem != null)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: Space.l),
             child: Text(
@@ -809,6 +868,97 @@ class _Held extends StatelessWidget {
                 ),
               ),
             ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The friend isn't in the conversation yet (row 676): nothing is sent
+/// until a device of theirs is. [name] is the friend's.
+class _WaitingToJoin extends StatelessWidget {
+  const _WaitingToJoin({required this.name});
+
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final who = name.isEmpty ? 'your friend' : proseCodes(name);
+    return Padding(
+      padding: const EdgeInsets.only(top: Space.s),
+      child: Container(
+        padding: const EdgeInsets.all(Space.m),
+        decoration: BoxDecoration(
+          border: Border.all(color: palette.hairline),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Waiting for $who to join this chat.',
+              style: type.body.copyWith(color: palette.text),
+            ),
+            const SizedBox(height: Space.xs),
+            Text(
+              "You can send messages here once they have. It happens when "
+              'Claktory is open on one of their devices.',
+              style: type.caption.copyWith(color: palette.textMuted),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Someone started over on a new security key (row 630, Fugo): the
+/// group waits until their new device takes the devices under the old
+/// one out, and sending waits with it. [name] is the friend's; null for
+/// the person's own.
+class _WaitingForKey extends StatelessWidget {
+  const _WaitingForKey({this.name, this.device});
+
+  final String? name;
+
+  /// A reinstalled device's name, when that's what it waits for (row
+  /// 202); null for a new security key.
+  final String? device;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final whose = switch (name) {
+      null => 'your',
+      '' => 'their',
+      final name => "${proseCodes(name)}'s",
+    };
+    return Padding(
+      padding: const EdgeInsets.only(top: Space.s),
+      child: Container(
+        padding: const EdgeInsets.all(Space.m),
+        decoration: BoxDecoration(
+          border: Border.all(color: palette.hairline),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(switch (device) {
+              null => 'Waiting for $whose new security key to finish.',
+              final device =>
+                'Waiting for $whose ${proseCodes(device)} to finish setting '
+                    'up again.',
+            }, style: type.body.copyWith(color: palette.text)),
+            const SizedBox(height: Space.xs),
+            Text(
+              'You can send messages here again once it has.',
+              style: type.caption.copyWith(color: palette.textMuted),
+            ),
           ],
         ),
       ),

@@ -70,7 +70,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1131020922;
+  int get rustContentHash => 1594251627;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -97,6 +97,11 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiDmDmDeviceBeginRemoval({
     required DmDevice that,
     required DmRemoval removal,
+  });
+
+  Future<void> crateApiDmDmDeviceCodeUsed({
+    required DmDevice that,
+    required String comparison,
   });
 
   Future<void> crateApiDmDmDeviceCommitRefused({
@@ -155,6 +160,11 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiDmDmDeviceForgetGroup({
     required DmDevice that,
     required List<int> groupId,
+  });
+
+  Future<void> crateApiDmDmDeviceForgetReplaced({
+    required DmDevice that,
+    required String leafId,
   });
 
   Future<List<DmGroup>> crateApiDmDmDeviceGroups({required DmDevice that});
@@ -228,6 +238,19 @@ abstract class RustLibApi extends BaseApi {
     required List<int> groupId,
   });
 
+  Future<DmJoining?> crateApiDmDmDeviceNotJoined({
+    required DmDevice that,
+    required List<int> groupId,
+  });
+
+  Future<void> crateApiDmDmDeviceNoteSkipped({
+    required DmDevice that,
+    required List<int> groupId,
+    required PlatformInt64 seq,
+    required PlatformInt64 arrivedMs,
+    required String because,
+  });
+
   Future<DmDevice?> crateApiDmDmDeviceOpen({
     required String path,
     required List<int> storeKey,
@@ -272,6 +295,11 @@ abstract class RustLibApi extends BaseApi {
     required PlatformInt64 arrivedMs,
   });
 
+  Future<String?> crateApiDmDmDeviceReinstalling({
+    required DmDevice that,
+    required List<int> groupId,
+  });
+
   Future<DmCommit> crateApiDmDmDeviceRejoinGroup({
     required DmDevice that,
     required List<int> groupId,
@@ -282,10 +310,33 @@ abstract class RustLibApi extends BaseApi {
 
   Future<DmRemoval?> crateApiDmDmDeviceRemoval({required DmDevice that});
 
+  Future<DmCommit?> crateApiDmDmDeviceRemoveDeadLeaves({
+    required DmDevice that,
+    required List<int> groupId,
+  });
+
   Future<DmCommit> crateApiDmDmDeviceRemoveMembers({
     required DmDevice that,
     required List<int> groupId,
     required List<String> leafIds,
+  });
+
+  Future<List<DmMember>> crateApiDmDmDeviceReplacedDevices({
+    required DmDevice that,
+  });
+
+  Future<List<String>> crateApiDmDmDeviceReplacedLeaves({
+    required DmDevice that,
+    required List<int> groupId,
+  });
+
+  Future<bool> crateApiDmDmDeviceRetireReplaced({
+    required DmDevice that,
+    required List<int> groupId,
+    required String envelope,
+    required String account,
+    required List<int> served,
+    required List<Uint8List> listed,
   });
 
   Future<DmRotation?> crateApiDmDmDeviceRotation({required DmDevice that});
@@ -323,6 +374,17 @@ abstract class RustLibApi extends BaseApi {
   Future<DmSetUp> crateApiDmDmDeviceSetUpFirst({
     required DmDevice that,
     required List<int> identityKey,
+    required String accountId,
+    required String leafId,
+    required String name,
+    required BigInt nowMs,
+  });
+
+  Future<DmSetUp> crateApiDmDmDeviceSetUpNewKey({
+    required DmDevice that,
+    required List<int> identityKey,
+    required List<int> oldIdentityPublic,
+    required List<Uint8List> replacedIdentityKeys,
     required String accountId,
     required String leafId,
     required String name,
@@ -371,6 +433,11 @@ abstract class RustLibApi extends BaseApi {
   });
 
   Future<DmView> crateApiDmDmDeviceView({
+    required DmDevice that,
+    required List<int> groupId,
+  });
+
+  Future<String?> crateApiDmDmDeviceWaitingFor({
     required DmDevice that,
     required List<int> groupId,
   });
@@ -636,6 +703,43 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiDmDmDeviceCodeUsed({
+    required DmDevice that,
+    required String comparison,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_String(comparison, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceCodeUsedConstMeta,
+        argValues: [that, comparison],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceCodeUsedConstMeta => const TaskConstMeta(
+    debugName: "DmDevice_code_used",
+    argNames: ["that", "comparison"],
+  );
+
+  @override
   Future<void> crateApiDmDmDeviceCommitRefused({
     required DmDevice that,
     required List<int> groupId,
@@ -652,7 +756,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 5,
             port: port_,
           );
         },
@@ -690,7 +794,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 6,
             port: port_,
           );
         },
@@ -730,7 +834,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 6,
+            funcId: 7,
             port: port_,
           );
         },
@@ -765,7 +869,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_String(account, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 8)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_box_autoadd_dm_device_list,
@@ -797,7 +901,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 9,
             port: port_,
           );
         },
@@ -831,7 +935,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 10,
             port: port_,
           );
         },
@@ -871,7 +975,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 11,
             port: port_,
           );
         },
@@ -905,7 +1009,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 12,
             port: port_,
           );
         },
@@ -939,7 +1043,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 13,
             port: port_,
           );
         },
@@ -984,7 +1088,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 14,
             port: port_,
           );
         },
@@ -1022,7 +1126,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 15,
             port: port_,
           );
         },
@@ -1062,7 +1166,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 16,
             port: port_,
           );
         },
@@ -1100,7 +1204,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 17,
             port: port_,
           );
         },
@@ -1122,6 +1226,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiDmDmDeviceForgetReplaced({
+    required DmDevice that,
+    required String leafId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_String(leafId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 18,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceForgetReplacedConstMeta,
+        argValues: [that, leafId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceForgetReplacedConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_forget_replaced",
+        argNames: ["that", "leafId"],
+      );
+
+  @override
   Future<List<DmGroup>> crateApiDmDmDeviceGroups({required DmDevice that}) {
     return handler.executeNormal(
       NormalTask(
@@ -1134,7 +1276,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 17,
+            funcId: 19,
             port: port_,
           );
         },
@@ -1166,7 +1308,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_String(leafId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 20)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -1206,7 +1348,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 19,
+            funcId: 21,
             port: port_,
           );
         },
@@ -1243,7 +1385,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 20,
+            funcId: 22,
             port: port_,
           );
         },
@@ -1289,7 +1431,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 23,
             port: port_,
           );
         },
@@ -1340,7 +1482,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 24,
             port: port_,
           );
         },
@@ -1380,7 +1522,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 25,
             port: port_,
           );
         },
@@ -1418,7 +1560,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 24,
+            funcId: 26,
             port: port_,
           );
         },
@@ -1454,7 +1596,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 25,
+            funcId: 27,
             port: port_,
           );
         },
@@ -1492,7 +1634,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 26,
+            funcId: 28,
             port: port_,
           );
         },
@@ -1529,7 +1671,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 27,
+            funcId: 29,
             port: port_,
           );
         },
@@ -1566,7 +1708,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 28,
+            funcId: 30,
             port: port_,
           );
         },
@@ -1603,7 +1745,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 29,
+            funcId: 31,
             port: port_,
           );
         },
@@ -1625,6 +1767,88 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<DmJoining?> crateApiDmDmDeviceNotJoined({
+    required DmDevice that,
+    required List<int> groupId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 32,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_box_autoadd_dm_joining,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceNotJoinedConstMeta,
+        argValues: [that, groupId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceNotJoinedConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_not_joined",
+        argNames: ["that", "groupId"],
+      );
+
+  @override
+  Future<void> crateApiDmDmDeviceNoteSkipped({
+    required DmDevice that,
+    required List<int> groupId,
+    required PlatformInt64 seq,
+    required PlatformInt64 arrivedMs,
+    required String because,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          sse_encode_i_64(seq, serializer);
+          sse_encode_i_64(arrivedMs, serializer);
+          sse_encode_String(because, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 33,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceNoteSkippedConstMeta,
+        argValues: [that, groupId, seq, arrivedMs, because],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceNoteSkippedConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_note_skipped",
+        argNames: ["that", "groupId", "seq", "arrivedMs", "because"],
+      );
+
+  @override
   Future<DmDevice?> crateApiDmDmDeviceOpen({
     required String path,
     required List<int> storeKey,
@@ -1642,7 +1866,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 30,
+            funcId: 34,
             port: port_,
           );
         },
@@ -1680,7 +1904,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 31,
+            funcId: 35,
             port: port_,
           );
         },
@@ -1722,7 +1946,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 32,
+            funcId: 36,
             port: port_,
           );
         },
@@ -1757,7 +1981,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 33,
+            funcId: 37,
             port: port_,
           );
         },
@@ -1792,7 +2016,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_String(account, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 34)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 38)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_box_autoadd_dm_pin,
@@ -1833,7 +2057,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 35,
+            funcId: 39,
             port: port_,
           );
         },
@@ -1877,7 +2101,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 36,
+            funcId: 40,
             port: port_,
           );
         },
@@ -1896,6 +2120,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     debugName: "DmDevice_process",
     argNames: ["that", "groupId", "seq", "envelope", "arrivedMs"],
   );
+
+  @override
+  Future<String?> crateApiDmDmDeviceReinstalling({
+    required DmDevice that,
+    required List<int> groupId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 41,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceReinstallingConstMeta,
+        argValues: [that, groupId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceReinstallingConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_reinstalling",
+        argNames: ["that", "groupId"],
+      );
 
   @override
   Future<DmCommit> crateApiDmDmDeviceRejoinGroup({
@@ -1920,7 +2182,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 37,
+            funcId: 42,
             port: port_,
           );
         },
@@ -1954,7 +2216,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 38,
+            funcId: 43,
             port: port_,
           );
         },
@@ -1971,6 +2233,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiDmDmDeviceRemovalConstMeta =>
       const TaskConstMeta(debugName: "DmDevice_removal", argNames: ["that"]);
+
+  @override
+  Future<DmCommit?> crateApiDmDmDeviceRemoveDeadLeaves({
+    required DmDevice that,
+    required List<int> groupId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 44,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_box_autoadd_dm_commit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceRemoveDeadLeavesConstMeta,
+        argValues: [that, groupId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceRemoveDeadLeavesConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_remove_dead_leaves",
+        argNames: ["that", "groupId"],
+      );
 
   @override
   Future<DmCommit> crateApiDmDmDeviceRemoveMembers({
@@ -1991,7 +2291,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 39,
+            funcId: 45,
             port: port_,
           );
         },
@@ -2013,6 +2313,133 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<List<DmMember>> crateApiDmDmDeviceReplacedDevices({
+    required DmDevice that,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 46,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_dm_member,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceReplacedDevicesConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceReplacedDevicesConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_replaced_devices",
+        argNames: ["that"],
+      );
+
+  @override
+  Future<List<String>> crateApiDmDmDeviceReplacedLeaves({
+    required DmDevice that,
+    required List<int> groupId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 47,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceReplacedLeavesConstMeta,
+        argValues: [that, groupId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceReplacedLeavesConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_replaced_leaves",
+        argNames: ["that", "groupId"],
+      );
+
+  @override
+  Future<bool> crateApiDmDmDeviceRetireReplaced({
+    required DmDevice that,
+    required List<int> groupId,
+    required String envelope,
+    required String account,
+    required List<int> served,
+    required List<Uint8List> listed,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          sse_encode_String(envelope, serializer);
+          sse_encode_String(account, serializer);
+          sse_encode_list_prim_u_8_loose(served, serializer);
+          sse_encode_list_list_prim_u_8_strict(listed, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 48,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceRetireReplacedConstMeta,
+        argValues: [that, groupId, envelope, account, served, listed],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceRetireReplacedConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_retire_replaced",
+        argNames: [
+          "that",
+          "groupId",
+          "envelope",
+          "account",
+          "served",
+          "listed",
+        ],
+      );
+
+  @override
   Future<DmRotation?> crateApiDmDmDeviceRotation({required DmDevice that}) {
     return handler.executeNormal(
       NormalTask(
@@ -2025,7 +2452,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 40,
+            funcId: 49,
             port: port_,
           );
         },
@@ -2056,7 +2483,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 41,
+            funcId: 50,
             port: port_,
           );
         },
@@ -2093,7 +2520,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_String(account, serializer);
           sse_encode_list_prim_u_8_loose(scanned, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 42)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 51)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -2126,7 +2553,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_String(account, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 43)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 52)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_dm_safety,
@@ -2162,7 +2589,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 44,
+            funcId: 53,
             port: port_,
           );
         },
@@ -2200,7 +2627,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 45,
+            funcId: 54,
             port: port_,
           );
         },
@@ -2241,7 +2668,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 46,
+            funcId: 55,
             port: port_,
           );
         },
@@ -2286,7 +2713,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 47,
+            funcId: 56,
             port: port_,
           );
         },
@@ -2315,6 +2742,77 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<DmSetUp> crateApiDmDmDeviceSetUpNewKey({
+    required DmDevice that,
+    required List<int> identityKey,
+    required List<int> oldIdentityPublic,
+    required List<Uint8List> replacedIdentityKeys,
+    required String accountId,
+    required String leafId,
+    required String name,
+    required BigInt nowMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(identityKey, serializer);
+          sse_encode_list_prim_u_8_loose(oldIdentityPublic, serializer);
+          sse_encode_list_list_prim_u_8_strict(
+            replacedIdentityKeys,
+            serializer,
+          );
+          sse_encode_String(accountId, serializer);
+          sse_encode_String(leafId, serializer);
+          sse_encode_String(name, serializer);
+          sse_encode_u_64(nowMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 57,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_dm_set_up,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceSetUpNewKeyConstMeta,
+        argValues: [
+          that,
+          identityKey,
+          oldIdentityPublic,
+          replacedIdentityKeys,
+          accountId,
+          leafId,
+          name,
+          nowMs,
+        ],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceSetUpNewKeyConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_set_up_new_key",
+        argNames: [
+          "that",
+          "identityKey",
+          "oldIdentityPublic",
+          "replacedIdentityKeys",
+          "accountId",
+          "leafId",
+          "name",
+          "nowMs",
+        ],
+      );
+
+  @override
   Future<Uint8List> crateApiDmDmDeviceSignDeviceList({
     required DmDevice that,
     required BigInt version,
@@ -2335,7 +2833,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 48,
+            funcId: 58,
             port: port_,
           );
         },
@@ -2375,7 +2873,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 49,
+            funcId: 59,
             port: port_,
           );
         },
@@ -2418,7 +2916,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 50,
+            funcId: 60,
             port: port_,
           );
         },
@@ -2450,7 +2948,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 51)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 61)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_dm_status,
@@ -2485,7 +2983,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 52,
+            funcId: 62,
             port: port_,
           );
         },
@@ -2519,7 +3017,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 53,
+            funcId: 63,
             port: port_,
           );
         },
@@ -2554,7 +3052,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 54,
+            funcId: 64,
             port: port_,
           );
         },
@@ -2592,7 +3090,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 55,
+            funcId: 65,
             port: port_,
           );
         },
@@ -2629,7 +3127,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 56,
+            funcId: 66,
             port: port_,
           );
         },
@@ -2650,6 +3148,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<String?> crateApiDmDmDeviceWaitingFor({
+    required DmDevice that,
+    required List<int> groupId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDmDevice(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(groupId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 67,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDmDmDeviceWaitingForConstMeta,
+        argValues: [that, groupId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDmDmDeviceWaitingForConstMeta =>
+      const TaskConstMeta(
+        debugName: "DmDevice_waiting_for",
+        argNames: ["that", "groupId"],
+      );
+
+  @override
   String crateApiDmDmHandoffComparison({required DmHandoff that}) {
     return handler.executeSync(
       SyncTask(
@@ -2659,7 +3195,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 57)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 68)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -2688,7 +3224,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 58)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 69)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -2713,7 +3249,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 59,
+            funcId: 70,
             port: port_,
           );
         },
@@ -2744,7 +3280,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 60)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 71)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -2778,7 +3314,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 61,
+            funcId: 72,
             port: port_,
           );
         },
@@ -2811,7 +3347,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 62)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 73)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_prim_u_8_strict,
@@ -2842,7 +3378,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 63)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 74)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -2884,7 +3420,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 64,
+              funcId: 75,
               port: port_,
             );
           },
@@ -2929,7 +3465,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 65,
+            funcId: 76,
             port: port_,
           );
         },
@@ -2960,7 +3496,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 66)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 77)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_u_16,
@@ -2988,7 +3524,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 67)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 78)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_forward_status,
@@ -3020,7 +3556,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 68,
+            funcId: 79,
             port: port_,
           );
         },
@@ -3051,7 +3587,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 69,
+            funcId: 80,
             port: port_,
           );
         },
@@ -3086,7 +3622,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 70,
+            funcId: 81,
             port: port_,
           );
         },
@@ -3118,7 +3654,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 71)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 82)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -3144,7 +3680,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 72)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 83)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_u_16,
@@ -3175,7 +3711,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 73,
+            funcId: 84,
             port: port_,
           );
         },
@@ -3206,7 +3742,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 74)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 85)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_tunnel_status,
@@ -3229,7 +3765,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(key, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 75)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 86)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_prim_u_8_strict,
@@ -3256,7 +3792,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(key, serializer);
           sse_encode_list_prim_u_8_loose(message, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 76)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 87)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_prim_u_8_strict,
@@ -3280,7 +3816,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 77)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 88)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_prim_u_8_strict,
@@ -3303,7 +3839,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_list_prim_u_8_loose(secret, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 78)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 89)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_prim_u_8_strict,
@@ -3328,7 +3864,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 79,
+            funcId: 90,
             port: port_,
           );
         },
@@ -3356,7 +3892,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 80,
+            funcId: 91,
             port: port_,
           );
         },
@@ -3383,7 +3919,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 81,
+            funcId: 92,
             port: port_,
           );
         },
@@ -3407,7 +3943,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 82)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 93)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -3441,7 +3977,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 83,
+            funcId: 94,
             port: port_,
           );
         },
@@ -3473,7 +4009,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(deviceKey, serializer);
           sse_encode_String(endpointId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 84)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 95)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_pairing_ids,
@@ -3500,7 +4036,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 85,
+            funcId: 96,
             port: port_,
           );
         },
@@ -3736,6 +4272,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DmCommit dco_decode_box_autoadd_dm_commit(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_dm_commit(raw);
+  }
+
+  @protected
   DmContent dco_decode_box_autoadd_dm_content(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_dm_content(raw);
@@ -3751,6 +4293,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DmGroupKind dco_decode_box_autoadd_dm_group_kind(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_dm_group_kind(raw);
+  }
+
+  @protected
+  DmJoining dco_decode_box_autoadd_dm_joining(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_dm_joining(raw);
   }
 
   @protected
@@ -3921,6 +4469,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DmJoining dco_decode_dm_joining(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return DmJoining(
+      account: dco_decode_String(arr[0]),
+      addsFirst: dco_decode_bool(arr[1]),
+    );
+  }
+
+  @protected
   DmLeafKind dco_decode_dm_leaf_kind(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return DmLeafKind.values[raw as int];
@@ -3958,12 +4518,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DmMembers dco_decode_dm_members(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return DmMembers(
       added: dco_decode_list_dm_member(arr[0]),
       removed: dco_decode_list_dm_member(arr[1]),
       keyChanged: dco_decode_list_String(arr[2]),
+      skipped: dco_decode_opt_String(arr[3]),
+      setUpAgain: dco_decode_list_dm_member(arr[4]),
     );
   }
 
@@ -4023,14 +4585,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DmProcessed dco_decode_dm_processed(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return DmProcessed(
       outcome: dco_decode_dm_outcome(arr[0]),
       message: dco_decode_opt_box_autoadd_dm_message(arr[1]),
       epoch: dco_decode_u_64(arr[2]),
       why: dco_decode_String(arr[3]),
       handshake: dco_decode_bool(arr[4]),
+      replaced: dco_decode_bool(arr[5]),
     );
   }
 
@@ -4233,6 +4796,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<Uint8List> dco_decode_list_list_prim_u_8_strict(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_list_prim_u_8_strict).toList();
+  }
+
+  @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as List<int>;
@@ -4270,9 +4839,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DmCommit? dco_decode_opt_box_autoadd_dm_commit(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_dm_commit(raw);
+  }
+
+  @protected
   DmDeviceList? dco_decode_opt_box_autoadd_dm_device_list(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_dm_device_list(raw);
+  }
+
+  @protected
+  DmJoining? dco_decode_opt_box_autoadd_dm_joining(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_dm_joining(raw);
   }
 
   @protected
@@ -4637,6 +5218,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DmCommit sse_decode_box_autoadd_dm_commit(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_dm_commit(deserializer));
+  }
+
+  @protected
   DmContent sse_decode_box_autoadd_dm_content(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_dm_content(deserializer));
@@ -4656,6 +5243,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_dm_group_kind(deserializer));
+  }
+
+  @protected
+  DmJoining sse_decode_box_autoadd_dm_joining(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_dm_joining(deserializer));
   }
 
   @protected
@@ -4837,6 +5430,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DmJoining sse_decode_dm_joining(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_account = sse_decode_String(deserializer);
+    var var_addsFirst = sse_decode_bool(deserializer);
+    return DmJoining(account: var_account, addsFirst: var_addsFirst);
+  }
+
+  @protected
   DmLeafKind sse_decode_dm_leaf_kind(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
@@ -4879,10 +5480,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_added = sse_decode_list_dm_member(deserializer);
     var var_removed = sse_decode_list_dm_member(deserializer);
     var var_keyChanged = sse_decode_list_String(deserializer);
+    var var_skipped = sse_decode_opt_String(deserializer);
+    var var_setUpAgain = sse_decode_list_dm_member(deserializer);
     return DmMembers(
       added: var_added,
       removed: var_removed,
       keyChanged: var_keyChanged,
+      skipped: var_skipped,
+      setUpAgain: var_setUpAgain,
     );
   }
 
@@ -4956,12 +5561,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_epoch = sse_decode_u_64(deserializer);
     var var_why = sse_decode_String(deserializer);
     var var_handshake = sse_decode_bool(deserializer);
+    var var_replaced = sse_decode_bool(deserializer);
     return DmProcessed(
       outcome: var_outcome,
       message: var_message,
       epoch: var_epoch,
       why: var_why,
       handshake: var_handshake,
+      replaced: var_replaced,
     );
   }
 
@@ -5206,6 +5813,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<Uint8List> sse_decode_list_list_prim_u_8_strict(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <Uint8List>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_list_prim_u_8_strict(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
@@ -5260,6 +5881,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DmCommit? sse_decode_opt_box_autoadd_dm_commit(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_dm_commit(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   DmDeviceList? sse_decode_opt_box_autoadd_dm_device_list(
     SseDeserializer deserializer,
   ) {
@@ -5267,6 +5899,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_dm_device_list(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  DmJoining? sse_decode_opt_box_autoadd_dm_joining(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_dm_joining(deserializer));
     } else {
       return null;
     }
@@ -5720,6 +6365,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_dm_commit(
+    DmCommit self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_dm_commit(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_dm_content(
     DmContent self,
     SseSerializer serializer,
@@ -5744,6 +6398,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_dm_group_kind(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_dm_joining(
+    DmJoining self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_dm_joining(self, serializer);
   }
 
   @protected
@@ -5901,6 +6564,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_dm_joining(DmJoining self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.account, serializer);
+    sse_encode_bool(self.addsFirst, serializer);
+  }
+
+  @protected
   void sse_encode_dm_leaf_kind(DmLeafKind self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
@@ -5930,6 +6600,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_list_dm_member(self.added, serializer);
     sse_encode_list_dm_member(self.removed, serializer);
     sse_encode_list_String(self.keyChanged, serializer);
+    sse_encode_opt_String(self.skipped, serializer);
+    sse_encode_list_dm_member(self.setUpAgain, serializer);
   }
 
   @protected
@@ -5980,6 +6652,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.epoch, serializer);
     sse_encode_String(self.why, serializer);
     sse_encode_bool(self.handshake, serializer);
+    sse_encode_bool(self.replaced, serializer);
   }
 
   @protected
@@ -6170,6 +6843,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_list_prim_u_8_strict(
+    List<Uint8List> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_list_prim_u_8_strict(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_prim_u_8_loose(
     List<int> self,
     SseSerializer serializer,
@@ -6232,6 +6917,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_dm_commit(
+    DmCommit? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_dm_commit(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_dm_device_list(
     DmDeviceList? self,
     SseSerializer serializer,
@@ -6241,6 +6939,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_dm_device_list(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_dm_joining(
+    DmJoining? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_dm_joining(self, serializer);
     }
   }
 
@@ -6477,6 +7188,11 @@ class DmDeviceImpl extends RustOpaque implements DmDevice {
       .api
       .crateApiDmDmDeviceBeginRemoval(that: this, removal: removal);
 
+  /// The code whose digits are [comparison] was handed off to: it's
+  /// refused from now on.
+  Future<void> codeUsed({required String comparison}) => RustLib.instance.api
+      .crateApiDmDmDeviceCodeUsed(that: this, comparison: comparison);
+
   /// The worker refused this device's commit (another came first): drop
   /// it; the change can be made again on the new epoch.
   Future<void> commitRefused({required List<int> groupId}) => RustLib
@@ -6571,6 +7287,10 @@ class DmDeviceImpl extends RustOpaque implements DmDevice {
   /// (revoked, unfriended, signed out).
   Future<void> forgetGroup({required List<int> groupId}) => RustLib.instance.api
       .crateApiDmDmDeviceForgetGroup(that: this, groupId: groupId);
+
+  /// [leaf_id] was removed (signed out): no longer listed as replaced.
+  Future<void> forgetReplaced({required String leafId}) => RustLib.instance.api
+      .crateApiDmDmDeviceForgetReplaced(that: this, leafId: leafId);
 
   /// Every group this device is in.
   Future<List<DmGroup>> groups() =>
@@ -6684,6 +7404,31 @@ class DmDeviceImpl extends RustOpaque implements DmDevice {
       .api
       .crateApiDmDmDeviceMoveGroup(that: this, groupId: groupId);
 
+  /// The other person in the conversation [group_id] when none of their
+  /// devices is in yet (row 676), and whether this device adds them
+  /// first. None for any other group, or once they're in.
+  Future<DmJoining?> notJoined({required List<int> groupId}) => RustLib
+      .instance
+      .api
+      .crateApiDmDmDeviceNotJoined(that: this, groupId: groupId);
+
+  /// A line in [group_id]'s history at [seq] (the first one this device
+  /// didn't read): what was sent from there until it joined again was
+  /// skipped, because [because]'s security key changed ("" for another
+  /// cause). Row 654: a device that can't read messages says so.
+  Future<void> noteSkipped({
+    required List<int> groupId,
+    required PlatformInt64 seq,
+    required PlatformInt64 arrivedMs,
+    required String because,
+  }) => RustLib.instance.api.crateApiDmDmDeviceNoteSkipped(
+    that: this,
+    groupId: groupId,
+    seq: seq,
+    arrivedMs: arrivedMs,
+    because: because,
+  );
+
   /// Opens the new key's bundle [sealed] (from `me/handoffs`) with the
   /// pending rotation's key: the new identity's secret, for the platform
   /// key store (`identity_next`) before [DmDevice::take_rotation].
@@ -6753,6 +7498,14 @@ class DmDeviceImpl extends RustOpaque implements DmDevice {
     arrivedMs: arrivedMs,
   );
 
+  /// The device whose former install holds [group_id] (row 202): its
+  /// name, when what [waiting_for] waits for is a reinstall; None
+  /// otherwise.
+  Future<String?> reinstalling({required List<int> groupId}) => RustLib
+      .instance
+      .api
+      .crateApiDmDmDeviceReinstalling(that: this, groupId: groupId);
+
   /// Joins [group_id] again from the worker's GroupInfo ([group_info],
   /// an envelope's JSON), with an external commit for the worker; the
   /// feed goes on after [seq]. For a device whose state broke or that
@@ -6774,6 +7527,15 @@ class DmDeviceImpl extends RustOpaque implements DmDevice {
   Future<DmRemoval?> removal() =>
       RustLib.instance.api.crateApiDmDmDeviceRemoval(that: this);
 
+  /// After a start-over's rejoin (row 630): one commit taking every dead
+  /// leaf of the person's out of [group_id] (under a key other than this
+  /// device's, on no list of the new one), so none holds the new epoch's
+  /// secrets. None when there's none.
+  Future<DmCommit?> removeDeadLeaves({required List<int> groupId}) => RustLib
+      .instance
+      .api
+      .crateApiDmDmDeviceRemoveDeadLeaves(that: this, groupId: groupId);
+
   /// Removes the leaves [leaf_ids] from [group_id].
   Future<DmCommit> removeMembers({
     required List<int> groupId,
@@ -6782,6 +7544,42 @@ class DmDeviceImpl extends RustOpaque implements DmDevice {
     that: this,
     groupId: groupId,
     leafIds: leafIds,
+  );
+
+  /// The person's devices a start-over took out of their groups (under
+  /// the key it replaced), until the person removes them.
+  Future<List<DmMember>> replacedDevices() =>
+      RustLib.instance.api.crateApiDmDmDeviceReplacedDevices(that: this);
+
+  /// The person's own leaves in [group_id] under a security key other
+  /// than this device's (a key replaced since), by leaf id, unchecked:
+  /// never signed out by a sweep (Fugo: a surviving old device is the
+  /// person's alarm when someone else started over), and shown apart.
+  Future<List<String>> replacedLeaves({required List<int> groupId}) => RustLib
+      .instance
+      .api
+      .crateApiDmDmDeviceReplacedLeaves(that: this, groupId: groupId);
+
+  /// The commit or proposal [envelope] held in [group_id] proves that
+  /// [account] replaced the key its leaf is under, which the worker lists
+  /// in [listed] (GET keys' replaced_identity_keys, with [served] its
+  /// current key): that key is retired here, so the commit is known as
+  /// one this device can never take (row 654). Only what a held commit
+  /// proves, and nothing when the list names a current key (Fugo: no
+  /// wedge against the friend's next key). Whether a key was retired.
+  Future<bool> retireReplaced({
+    required List<int> groupId,
+    required String envelope,
+    required String account,
+    required List<int> served,
+    required List<Uint8List> listed,
+  }) => RustLib.instance.api.crateApiDmDmDeviceRetireReplaced(
+    that: this,
+    groupId: groupId,
+    envelope: envelope,
+    account: account,
+    served: served,
+    listed: listed,
   );
 
   /// The rotation under way on this device, if any.
@@ -6848,8 +7646,41 @@ class DmDeviceImpl extends RustOpaque implements DmDevice {
     nowMs: nowMs,
   );
 
+  /// No other device (dms-e2ee §2, "All devices lost"; row 630): sets
+  /// up this device as [set_up_first] does, under a new identity
+  /// [identity_key] that replaces the account's [old_identity_public]
+  /// (as the worker serves it), held as retired here from the start, as
+  /// a key change would leave it (Ghiaccio): leaves under the old key
+  /// are the dead ones, and a Claktory enrolled under it can be enrolled
+  /// again. [replaced_identity_keys]: the keys the account replaced
+  /// before that one, oldest first (GET keys' list), retired too, so
+  /// leaves and Claktories under any of them are known after more than
+  /// one start-over (row 654; Fugo: only here, for the person's own
+  /// account, and refused whole if the list names the new key).
+  Future<DmSetUp> setUpNewKey({
+    required List<int> identityKey,
+    required List<int> oldIdentityPublic,
+    required List<Uint8List> replacedIdentityKeys,
+    required String accountId,
+    required String leafId,
+    required String name,
+    required BigInt nowMs,
+  }) => RustLib.instance.api.crateApiDmDmDeviceSetUpNewKey(
+    that: this,
+    identityKey: identityKey,
+    oldIdentityPublic: oldIdentityPublic,
+    replacedIdentityKeys: replacedIdentityKeys,
+    accountId: accountId,
+    leafId: leafId,
+    name: name,
+    nowMs: nowMs,
+  );
+
   /// The person's device list at [version] (one more than the last),
-  /// signed, and taken into this device's own pins.
+  /// signed. Not pinned here: that's [accept_list] once the worker took
+  /// it, so a list it refused (or never heard) never counts as seen, and
+  /// the next one another device puts at that version is taken
+  /// (Abbacchio's row 615).
   Future<Uint8List> signDeviceList({
     required BigInt version,
     required BigInt createdMs,
@@ -6922,6 +7753,14 @@ class DmDeviceImpl extends RustOpaque implements DmDevice {
   /// draft, read position and deletion, through the self group.
   Future<DmView> view({required List<int> groupId}) =>
       RustLib.instance.api.crateApiDmDmDeviceView(that: this, groupId: groupId);
+
+  /// The account whose device under a replaced key, on no list of the new
+  /// one, is still in [group_id]: nothing is sent there until it's out
+  /// (Fugo, row 630). None when nothing holds it.
+  Future<String?> waitingFor({required List<int> groupId}) => RustLib
+      .instance
+      .api
+      .crateApiDmDmDeviceWaitingFor(that: this, groupId: groupId);
 }
 
 @sealed

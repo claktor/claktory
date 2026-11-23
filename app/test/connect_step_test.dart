@@ -108,6 +108,19 @@ void main() {
     await tester.enterText(_field, 'nonsense');
     await pumpFrames(tester);
     expect(find.text("That isn't a Claktory code."), findsOneWidget);
+    // Another of Claktory's codes says what it is (friend bug #2).
+    await tester.enterText(_field, 'claktory-move://?e=abc&s=def');
+    await pumpFrames(tester);
+    expect(
+      find.textContaining(
+        RegExp(
+          "^That's a code for moving Claktory, not a code to connect this "
+          r'\w+\. To get one, on the computer Claktory runs on open '
+          r'Settings → Devices and choose Add a device\.$',
+        ),
+      ),
+      findsOneWidget,
+    );
 
     await tester.enterText(_field, _box);
     await pumpFrames(tester);

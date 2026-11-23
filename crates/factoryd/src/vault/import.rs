@@ -341,7 +341,8 @@ impl Vault {
     pub(crate) fn approved_imports(&self, asked: &[Asked], homes: &[PathBuf]) -> Result<Vec<Opened>, VaultError> {
         let mut reads = Vec::with_capacity(asked.len());
         for file in asked {
-            let changed = || refused(format!("{} changed since it was asked for, so it wasn't imported. Ask for it again.", file.path));
+            let changed =
+                || refused(format!("{} changed since it was asked for, so it wasn't imported. The agent can ask for it again.", file.path));
             let read = read(Path::new(&file.path), homes)?;
             if (read.dev, read.ino, read.size, read.modified_ms) != (file.dev, file.ino, file.size, file.modified_ms) {
                 return Err(changed());

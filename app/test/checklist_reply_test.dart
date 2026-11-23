@@ -5,7 +5,8 @@
 // item it's about, and that opens it.
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/checklist_reply.dart' show ChecklistReply;
-import 'package:factory_app/dictation.dart' show transcribeRecording;
+import 'package:factory_app/dictation.dart'
+    show DictationFailure, dictationError, transcribeRecording;
 import 'package:factory_app/recorder.dart' show deviceRecorder;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
@@ -154,6 +155,55 @@ void main() {
     expect(sent.text, 'Smaller, please.');
     expect(sent.checklistItem, 2);
   });
+
+  for (final (seconds, says) in [(2, false), (6, true)]) {
+    testWidgets('a ${seconds}s recording with no words in it '
+        '${says ? 'says so' : 'goes without a word'} (Matt\'s)', (
+      tester,
+    ) async {
+      final was = deviceRecorder;
+      final recorder = FakeRecorder()..duration = Duration(seconds: seconds);
+      deviceRecorder = recorder;
+      addTearDown(() => deviceRecorder = was);
+      final wasTranscribe = transcribeRecording;
+      transcribeRecording = (backend, recording) async =>
+          throw DictationFailure(
+            dictationError('no_speech'),
+            code: 'no_speech',
+          );
+      addTearDown(() => transcribeRecording = wasTranscribe);
+      final harness = await showWith(
+        tester,
+        workspace(openPanel: 'checklist')
+          ..speechModel = SpeechModel(
+            state: SpeechModelState.SPEECH_MODEL_STATE_READY,
+          ),
+      );
+      harness.backend.extensionView.apply(checklistView());
+      await settle(tester);
+      await tester.tap(find.text('Usage circles'));
+      await settle(tester);
+      await _type(tester, 'Smaller,');
+      await tester.tap(find.bySemanticsLabel('Dictate').last);
+      await io(tester);
+      await tester.tap(
+        find.descendant(
+          of: find.byType(ChecklistReply),
+          matching: find.text('Done'),
+        ),
+      );
+      await io(tester);
+      await pumpFrames(tester);
+      expect(
+        find.text("Didn't catch any words. Try again."),
+        says ? findsOneWidget : findsNothing,
+      );
+      // The recording line is closed, and what was typed is as it was.
+      expect(find.text('Smaller,'), findsOneWidget);
+      expect(find.bySemanticsLabel('Dictate'), findsWidgets);
+      expect(recorder.recordingInto, isNull);
+    });
+  }
 
   testWidgets('in the conversation, the message says which item it is '
       'about, and that opens it', (tester) async {

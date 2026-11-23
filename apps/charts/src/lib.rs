@@ -1,5 +1,5 @@
 //! Claktory's Charts app: dashboards of live charts over the data the
-//! person lets it read (Claktory's records, agents' own databases), drawn
+//! person lets it read (your agents' activity, their own databases), drawn
 //! by Claktory's own chart components (catalog v1's Stat, Chart and Table).
 //!
 //! A dashboard is a definition kept in the app's key-value store
@@ -40,8 +40,21 @@ use view::{Draft, Editor, Form, Scene, View};
 /// The catalog its views are made of.
 pub const CATALOG: &str = "https://claktory.com/a2ui/catalog/v1";
 
-/// Claktory's records (factory.db), as a data source.
+/// Your agents' activity: when they run, their messages, tasks, monitors,
+/// checklist items and token use, never what was written. What the
+/// default dashboard reads.
+pub const ACTIVITY: &str = "activity";
+
+/// All of Claktory's records, as Charts before 0.3 read them: only where
+/// the person granted them before.
 pub const RECORDS: &str = "factory-records";
+
+/// The source a query names, as it reads now: a dashboard made before 0.3
+/// names all of Claktory's records, which reads as Activity where Charts
+/// no longer has them.
+pub fn source_for<'a>(asked: &'a str, sources: &[DataSource]) -> &'a str {
+    if asked == RECORDS && !sources.iter().any(|source| source.id == RECORDS) { ACTIVITY } else { asked }
+}
 
 /// The timer that refreshes open views.
 pub const REFRESH: &str = "refresh";
@@ -363,7 +376,7 @@ impl App {
                     .iter()
                     .filter(|source| source.granted)
                     .map(|source| source.id.clone())
-                    .min_by_key(|id| *id != RECORDS)
+                    .min_by_key(|id| *id != ACTIVITY)
                     .unwrap_or_default();
                 let draft = Draft { source, kind: "timeseries".into(), width: 6, height: 4, ..Draft::default() };
                 data.push(("/editor".to_owned(), draft.data()));

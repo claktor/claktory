@@ -197,7 +197,7 @@ void main() {
     await reveal(tester, find.text('Who and what it says'));
     expect(
       find.text(
-        'If an agent has read messages from another Claktory, what it says '
+        'If an agent has read a web page or answers a pipe, what it says '
         'stays in the app.',
       ),
       findsOneWidget,

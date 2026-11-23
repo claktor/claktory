@@ -12,14 +12,15 @@ import 'browser/browser_view.dart' show BrowserSessionStrip;
 import 'characters/character.dart';
 import 'connection.dart';
 import 'controls.dart';
+import 'conversation_find.dart' show ConversationFind;
 import 'find.dart' show ClearOfFindBar, FindSessions, findShortcut;
 import 'forms.dart';
 import 'identity.dart';
 import 'inbox.dart' show NeedsYouChip, NeedsYouList;
 import 'message_box.dart';
 import 'mobile/agent_marks.dart';
-import 'mobile/drawer.dart' show largeText;
 import 'mobile/header.dart';
+import 'mobile/lines.dart' show ActionLine, ControlsLine;
 import 'mobile/metrics.dart';
 import 'mobile/needs_you_button.dart';
 import 'mobile/presentation.dart' show showPanel;
@@ -28,8 +29,6 @@ import 'panes.dart';
 import 'pipe_reports.dart' show ReadsReportsMark;
 import 'pipes.dart' show PipeLimitMark;
 import 'protocol/factory/v1/factory.pb.dart';
-import 'quiet_copies.dart'
-    show QuietCopiesChip, QuietWaitingChip, showsNewCopies;
 import 'scope.dart';
 import 'settings_view.dart';
 import 'transcript.dart';
@@ -169,12 +168,18 @@ class _AgentViewState extends State<AgentView> {
             // Its browser sessions: waiting, running, just ended.
             BrowserSessionStrip(agentId: agent.id),
             ArchivedLine(agent: agent),
+            // Back to its own provider once it has room (#341).
+            UsageSwitchLine(id: agent.id),
             // One line above the box, so the box never changes as the
             // agent starts and stops: reconnecting, else working with
             // Stop.
             ReconnectingLine(
               otherwise: _working
-                  ? WorkingLine(onStop: _stop, wait: usageWaitLine(agent))
+                  ? WorkingLine(
+                      onStop: _stop,
+                      wait: usageWaitLine(agent),
+                      waiting: agent.id,
+                    )
                   : const SizedBox.shrink(),
             ),
             MessageBox(
@@ -227,7 +232,12 @@ class _AgentViewState extends State<AgentView> {
               : _Header(
                   agent: agent,
                   // The conversation's find, below the header.
-                  onFind: () => FindSessions.instance.within(context)?.open(),
+                  onFind: () => FindSessions.instance
+                      .within(
+                        context,
+                        only: (target) => target is ConversationFind,
+                      )
+                      ?.open(),
                 ),
           // A phone shows one pane at a time: the conversation is the
           // screen, and its viewers open from "…".
@@ -354,17 +364,6 @@ class _Header extends StatelessWidget {
                     ],
                   ),
                 ),
-                // Quiet copies it hasn't read, which open Messaging.
-                if (showsNewCopies(agent)) ...[
-                  const SizedBox(width: Space.l),
-                  // Cut rather than overflow where large text leaves no room.
-                  Flexible(child: QuietCopiesChip(agent: agent)),
-                ],
-                // Quiet messages waiting for it to start working.
-                if (agent.quietWaiting > 0) ...[
-                  const SizedBox(width: Space.s),
-                  Flexible(child: QuietWaitingChip(agent: agent)),
-                ],
                 const SizedBox(width: Space.l),
                 // Find in the conversation: what ⌘F does, for those who
                 // don't know it.
@@ -383,13 +382,17 @@ class _Header extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: Space.s),
-                _ContextMeter(
-                  used: agent.contextTokens.toInt(),
-                  limit: agent.compactAtTokens.toInt(),
-                  label: agent.compactAtTokens.isZero
-                      ? formatTokens(agent.contextTokens)
-                      : '${formatTokens(agent.contextTokens)} / '
-                            '${formatTokens(agent.compactAtTokens)}',
+                // Cut rather than overflow in a narrow pane (a 600-point
+                // window beside the sidebar): its bar goes first.
+                Flexible(
+                  child: _ContextMeter(
+                    used: agent.contextTokens.toInt(),
+                    limit: agent.compactAtTokens.toInt(),
+                    label: agent.compactAtTokens.isZero
+                        ? formatTokens(agent.contextTokens)
+                        : '${formatTokens(agent.contextTokens)} / '
+                              '${formatTokens(agent.compactAtTokens)}',
+                  ),
                 ),
               ],
             ),
@@ -545,11 +548,13 @@ class _BackChip extends StatelessWidget {
               onTap: () => history.goBack(current),
               builder: (context, hovered) => AnimatedContainer(
                 duration: Motion.fast,
-                height: 28,
-                constraints: const BoxConstraints(maxWidth: 180),
+                // 28 tall, taller when large text needs it.
+                constraints: const BoxConstraints(minHeight: 28, maxWidth: 180),
                 padding: const EdgeInsets.only(
                   left: Space.s - 2,
                   right: Space.s + 2,
+                  top: 2,
+                  bottom: 2,
                 ),
                 decoration: BoxDecoration(
                   color: hovered ? palette.selected : palette.canvas,
@@ -603,39 +608,57 @@ class _ContextMeter extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final fraction = limit <= 0 ? 0.0 : (used / limit).clamp(0.0, 1.0);
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (limit > 0) ...[
-          Container(
-            width: 40,
-            height: 4,
-            alignment: Alignment.centerLeft,
-            decoration: BoxDecoration(
-              color: palette.selected,
-              borderRadius: BorderRadius.circular(2),
-            ),
-            child: FractionallySizedBox(
-              widthFactor: fraction,
-              heightFactor: 1,
-              child: DecoratedBox(
+    final text = Text(
+      label,
+      maxLines: 1,
+      softWrap: false,
+      overflow: TextOverflow.ellipsis,
+      style: TypeScale.of(context).caption.copyWith(
+        color: palette.textMuted,
+        fontFeatures: const [FontFeature.tabularFigures()],
+      ),
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // The bar only where the words fit beside it.
+        final painter = TextPainter(
+          text: TextSpan(text: label, style: text.style),
+          textScaler: MediaQuery.textScalerOf(context),
+          textDirection: Directionality.of(context),
+          maxLines: 1,
+        )..layout();
+        final words = painter.width;
+        painter.dispose();
+        final bar = limit > 0 && constraints.maxWidth >= 40 + Space.s + words;
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (bar) ...[
+              Container(
+                width: 40,
+                height: 4,
+                alignment: Alignment.centerLeft,
                 decoration: BoxDecoration(
-                  color: palette.textMuted,
+                  color: palette.selected,
                   borderRadius: BorderRadius.circular(2),
                 ),
+                child: FractionallySizedBox(
+                  widthFactor: fraction,
+                  heightFactor: 1,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: palette.textMuted,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
               ),
-            ),
-          ),
-          const SizedBox(width: Space.s),
-        ],
-        Text(
-          label,
-          style: TypeScale.of(context).caption.copyWith(
-            color: palette.textMuted,
-            fontFeatures: const [FontFeature.tabularFigures()],
-          ),
-        ),
-      ],
+              const SizedBox(width: Space.s),
+            ],
+            Flexible(child: text),
+          ],
+        );
+      },
     );
   }
 }
@@ -839,14 +862,24 @@ const reconnectHint = 'Tries to reconnect now';
 /// live dot, "Working", and Stop (Esc on a Mac). Above the box rather than
 /// in it, so the text being typed never moves as the agent starts and
 /// stops. While usage limits hold it up, what it waits for instead, with
-/// no dot: it isn't working meanwhile.
+/// no dot: it isn't working meanwhile, and Try now beside Stop, to ask
+/// again at once (after upgrading a plan, say), or Sign in… while it waits
+/// for a sign-in.
 class WorkingLine extends StatelessWidget {
-  const WorkingLine({super.key, required this.onStop, this.wait = ''});
+  const WorkingLine({
+    super.key,
+    required this.onStop,
+    this.wait = '',
+    this.waiting = '',
+  });
 
   final VoidCallback onStop;
 
   /// What it waits for (Agent.usage_wait); empty while it works.
   final String wait;
+
+  /// Who waits, an agent's or a chat's id, for Try now; empty for none.
+  final String waiting;
 
   @override
   Widget build(BuildContext context) {
@@ -866,6 +899,19 @@ class WorkingLine extends StatelessWidget {
           ),
           child: Builder(
             builder: (context) {
+              final stop = Button(
+                label: phone ? 'Stop' : 'Stop  esc',
+                onPressed: onStop,
+              );
+              // Held up by usage: what it waits for, and what can be done
+              // about it (#341).
+              if (wait.isNotEmpty && waiting.isNotEmpty) {
+                return UsageWaitActionLine(
+                  wait: wait,
+                  waiting: waiting,
+                  stop: stop,
+                );
+              }
               final words = Row(
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
@@ -882,29 +928,17 @@ class WorkingLine extends StatelessWidget {
                   ),
                 ],
               );
-              final stop = Button(
-                label: phone ? 'Stop' : 'Stop  esc',
-                onPressed: onStop,
-              );
-              // At the largest text, Stop goes under the words, still at
-              // the end, so neither is squeezed into a narrow column.
-              if (phone && largeText(context)) {
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    words,
-                    const SizedBox(height: Space.xs),
-                    stop,
-                  ],
-                );
-              }
-              return Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  Flexible(child: words),
-                  const SizedBox(width: Space.s),
-                  stop,
-                ],
+              final again = wait.isEmpty || waiting.isEmpty
+                  ? null
+                  : TryNow(wait: wait, waiting: waiting);
+              // Where the words and buttons don't fit in a line (the
+              // largest text, a narrow pane), the buttons go under the
+              // words, still at the end, so neither is squeezed.
+              return ActionLine(
+                lead: words,
+                // Try now over Stop where even the whole line can't hold
+                // both (a small phone at the largest text).
+                action: ControlsLine(children: [?again, stop]),
               );
             },
           ),

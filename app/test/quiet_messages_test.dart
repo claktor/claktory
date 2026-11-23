@@ -1,6 +1,6 @@
 // Quiet messages: an agent's message sent with quiet on never interrupts
 // its recipient. It says "Quiet" under it once delivered; while it waits,
-// the agent's header and sidebar row say how many wait, and the
+// the agent's sidebar row says how many wait, and the
 // conversation's queued tail says when it's read; the sender's line says
 // "Sent quietly".
 import 'package:factory_app/phone.dart';
@@ -84,34 +84,29 @@ void main() {
     expect(find.textContaining('Quiet'), findsOneWidget, reason: 'one only');
   });
 
-  testWidgets('the header and sidebar say how many wait, until none do', (
-    tester,
-  ) async {
+  testWidgets('the sidebar says how many wait, until none do; the header '
+      'nothing (Matt)', (tester) async {
     final harness = Harness(_workspace(waiting: 4));
     await harness.show(tester, size: const Size(1400, 1000));
     await settle(tester);
     final name = _name(_workspace());
-    expect(find.text('4 quiet messages'), findsOneWidget);
+    expect(find.text('4 quiet messages'), findsNothing, reason: 'no header');
     expect(find.text('4 quiet'), findsOneWidget, reason: 'its sidebar row');
     expect(
       find.bySemanticsLabel(
-        '4 quiet messages waiting. $name reads them the next time it starts '
-        'working.',
+        RegExp(
+          '4 quiet messages waiting. $name reads them the next time it '
+          'starts working.',
+        ),
       ),
       findsWidgets,
+      reason: 'VoiceOver reads it with the row',
     );
-    // Not a button: tapping it sends nothing.
-    harness.backend.sent.clear();
-    await tester.tap(find.text('4 quiet messages'));
-    await tester.pump();
-    expect(harness.backend.sent, isEmpty);
 
     await harness.apply(tester, _workspace(waiting: 1));
-    expect(find.text('1 quiet message'), findsOneWidget);
+    expect(find.text('1 quiet'), findsOneWidget);
     await harness.apply(tester, _workspace());
-    expect(find.byType(QuietWaitingChip), findsNothing);
     expect(find.text('1 quiet'), findsNothing);
-    expect(find.text('1 quiet message'), findsNothing);
   });
 
   testWidgets("in the sidebar it gives way before a long name's cut", (
@@ -122,7 +117,6 @@ void main() {
         'Bartholomew Featherstonehaugh';
     await Harness(snapshot).show(tester, size: const Size(1400, 1000));
     await settle(tester);
-    expect(find.text('4 quiet messages'), findsOneWidget, reason: 'header');
     expect(find.text('4 quiet'), findsNothing, reason: 'no room in the row');
     expect(
       find.bySemanticsLabel(RegExp('Bartholomew Featherstonehaugh reads them')),
@@ -131,7 +125,7 @@ void main() {
     );
   });
 
-  testWidgets('on iPhone, shorter, and nothing cut at the largest text', (
+  testWidgets('on iPhone, the header says nothing of them (Matt)', (
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -145,7 +139,7 @@ void main() {
     await pumpFrames(tester);
     expect(find.byType(PhoneShell), findsOneWidget);
     expect(tester.takeException(), isNull);
-    expect(find.text('99+ quiet'), findsOneWidget);
+    expect(find.textContaining('quiet'), findsNothing);
   });
 
   testWidgets("one still waiting says when it's read, not Queued", (

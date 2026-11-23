@@ -22,6 +22,8 @@ import 'mobile/popover.dart' show presentPopover;
 import 'account.dart' show askSignIn;
 import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'pairing.dart' show PairingDigits;
+import 'pipe_start.dart' show PipeInviteQr, copyInviteCode, pipeInviteCheck;
+import 'scan_code.dart';
 import 'pipe_reports.dart'
     show ForwardReportsField, PipeReportsStrip, forwardApprovalLine;
 import 'pipe_timeline.dart';
@@ -30,7 +32,7 @@ import 'resources.dart' show formatBytes;
 import 'scope.dart';
 import 'selection.dart';
 import 'state.dart' show PipeChat;
-import 'taint_label.dart' show TaintLabel, taintRead;
+import 'taint_label.dart' show TaintLabel, taintPages, taintRead;
 import 'transcript.dart' show Bubble, userAvatarSize;
 import 'visible_codes.dart' show proseCodes, visibleCodes;
 import 'waiting.dart' show EntryReveal;
@@ -57,12 +59,14 @@ List<Pipe> pipesIn(Workspace workspace, String projectId) => [
 
 /// Who is at the other end, in a few words: their person's name, else their
 /// Claktory's; "the other side" before they've said.
-String pipePeerName(Pipe pipe) {
+String pipePeerName(Pipe pipe, {bool start = false}) {
   final peer = pipe.peer;
   // Their own words: what reorders text shows by its code (Fugo).
   if (peer.ownerName.isNotEmpty) return proseCodes(peer.ownerName);
   if (peer.claktoryName.isNotEmpty) return proseCodes(peer.claktoryName);
-  return 'the other side';
+  // At the start of a sentence, capitalized (Zucchero's row 175: a pipe
+  // whose invite isn't used yet has no name for them).
+  return start ? 'The other side' : 'the other side';
 }
 
 /// Who on this side hears the person's decision on [message], held in
@@ -125,13 +129,6 @@ String pipeLimitText(List<Pipe> pipes) {
       ? 'Limited to the pipe with $names'
       : 'Limited to the pipes with $names';
 }
-
-/// The agents that have read [pipe] (Agent.tainted_by_pipes), in the
-/// sidebar's order.
-List<Agent> pipeReaders(Workspace workspace, Pipe pipe) => [
-  for (final agent in workspace.agents)
-    if (agent.taintedByPipes.contains(pipe.id)) agent,
-];
 
 /// How many things in [pipe] wait for the person: messages held for them
 /// or that no agent answers, its approval, and the loop breaker's Continue.
@@ -199,7 +196,7 @@ String liaisonNameFor(Pipe pipe) => pipe.suggestedLiaisonName.isNotEmpty
 /// While [pipe]'s other side can't be reached: since when and why, when
 /// Claktory knows (Pipe.offline_reason), and that messages wait.
 String pipeOfflineText(Pipe pipe) {
-  final who = pipePeerName(pipe);
+  final who = pipePeerName(pipe, start: true);
   final reason = pipe.offlineReason;
   final since = pipe.offlineSinceMs > 0
       ? ' since ${logTime(DateTime.fromMillisecondsSinceEpoch(pipe.offlineSinceMs.toInt()))}'
@@ -329,7 +326,6 @@ class PipeView extends StatelessWidget {
             onMenu: onMenu,
           ),
           PipeIdentityNotice(pipe: pipe),
-          _Readers(pipe: pipe),
           // Its reports: where they go, and what was forwarded.
           PipeReportsStrip(pipe: pipe),
           Expanded(child: body),
@@ -587,79 +583,6 @@ Future<void> _liaisonActions(BuildContext context, Agent liaison) async {
         context,
         (context, close) => _ClearConversation(agent: liaison, close: close),
       );
-  }
-}
-
-/// Under a pipe's header, the agents that have read it
-/// (Agent.tainted_by_pipes): each with "Has read this pipe" and Clear
-/// conversation…, so the person can start one afresh on purpose. Nothing
-/// when none has.
-class _Readers extends StatelessWidget {
-  const _Readers({required this.pipe});
-
-  final Pipe pipe;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    final store = AppScope.of(context).workspace;
-    final readers = pipeReaders(store.workspace, pipe);
-    if (readers.isEmpty) return const SizedBox.shrink();
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: Space.xl,
-        vertical: Space.xs,
-      ),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: palette.hairline)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          for (final agent in readers)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 2),
-              child: Row(
-                children: [
-                  AgentCharacter(agent: agent, size: 20),
-                  const SizedBox(width: Space.s),
-                  Expanded(
-                    child: Text.rich(
-                      TextSpan(
-                        children: [
-                          TextSpan(
-                            text: agent.name,
-                            style: TextStyle(
-                              color: palette.text,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                          TextSpan(
-                            text: '  Has read this pipe',
-                            style: TextStyle(color: palette.textMuted),
-                          ),
-                        ],
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyles.caption,
-                    ),
-                  ),
-                  const SizedBox(width: Space.s),
-                  Button(
-                    label: 'Clear conversation…',
-                    onPressed: () => showModal(
-                      context,
-                      (context, close) =>
-                          _ClearConversation(agent: agent, close: close),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
   }
 }
 
@@ -1411,7 +1334,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
               const SizedBox(width: Space.xs + 2),
               Expanded(
                 child: Text(
-                  '${pipePeerName(pipe)} wants to connect',
+                  '${pipePeerName(pipe, start: true)} wants to connect',
                   style: TextStyles.caption.copyWith(
                     color: pipeColor,
                     fontWeight: FontWeight.w600,
@@ -1798,10 +1721,16 @@ class _PipeChatViewState extends State<_PipeChatView> {
             child: Padding(
               padding: const EdgeInsets.all(Space.xl),
               child: Text(
-                widget.pipe.state == PipeState.PIPE_STATE_OPEN
-                    ? 'Nothing here yet. Your lead hears each message that '
-                          'comes in, and you can write here too.'
-                    : '',
+                widget.pipe.state != PipeState.PIPE_STATE_OPEN
+                    ? ''
+                    : widget.pipe.leadId.isEmpty
+                    // No lead: no agent hears what comes in (Abbacchio's
+                    // row 638).
+                    ? 'Nothing here yet. No agent hears what comes in until '
+                          'you choose a lead in the pipe’s settings. You can '
+                          'write here too.'
+                    : 'Nothing here yet. Your lead hears each message that '
+                          'comes in, and you can write here too.',
                 textAlign: TextAlign.center,
                 style: TextStyles.body.copyWith(color: palette.textMuted),
               ),
@@ -2285,7 +2214,7 @@ class _PipeFoot extends StatelessWidget {
 /// or before it is.
 Widget? pipeStateBar(BuildContext context, Pipe pipe) {
   final palette = Palette.of(context);
-  final who = pipePeerName(pipe);
+  final who = pipePeerName(pipe, start: true);
   Widget bar(String text, List<Widget> actions) => Container(
     padding: const EdgeInsets.fromLTRB(Space.xl, Space.m, Space.xl, Space.m),
     decoration: BoxDecoration(
@@ -2773,15 +2702,9 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
       );
     }
     if (_letting case final agent?) {
-      final read = agent.taintedByPipes.contains(pipe.id);
       return FormFrame(
         title: 'Let ${agent.name} run commands on this computer?',
-        body: [
-          'It will be able to reach your files, secrets and network.',
-          if (read)
-            'It has read messages from ${pipePeerClaktory(pipe)}, so clear '
-                'its conversation first to start it afresh.',
-        ].join(' '),
+        body: 'It will be able to reach your files, secrets and network.',
         error: null,
         fields: const [],
         submitLabel: 'Let it run commands',
@@ -2858,14 +2781,15 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
         ),
         Field(
           label: 'What it’s for',
-          note: '$who sees this.',
+          note: '${pipePeerName(pipe, start: true)} sees this.',
           child: TextField(controller: _purpose),
         ),
         Field(
           label: 'Instructions',
           note:
               'What your agents should know about this pipe. They get it '
-              'after Claktory’s own safety rules. $who never sees it.',
+              'after Claktory’s own safety rules. '
+              '${pipePeerName(pipe, start: true)} never sees it.',
           child: TextField(
             controller: _prompt,
             minLines: 3,
@@ -3273,8 +3197,22 @@ class _ConnectPipeFormState extends State<ConnectPipeForm> {
   PipeInvitePreview? _preview;
   PipeInvite? _invite;
   var _copied = false;
+
+  /// The invite's code shows as a QR too, to scan in person.
+  var _qr = false;
+
+  /// A code can be scanned here, with the camera (friend bug #2).
+  var _canScan = false;
   var _busy = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    canOfferScan(context).then((can) {
+      if (mounted && can) setState(() => _canScan = true);
+    });
+  }
 
   @override
   void dispose() {
@@ -3282,6 +3220,29 @@ class _ConnectPipeFormState extends State<ConnectPipeForm> {
     _purpose.dispose();
     _code.dispose();
     super.dispose();
+  }
+
+  /// Reads the code pasted or scanned: who it says it's from, to Connect.
+  void _readCode() => _run((backend) async {
+    final preview = await backend.readPipeInvite(_code.text.trim());
+    if (!mounted) return;
+    _name.text = preview.name;
+    setState(() {
+      _preview = preview;
+      _step = _Step.preview;
+    });
+  });
+
+  /// Scans the code someone sent, then reads it as a pasted one is.
+  Future<void> _scan() async {
+    final code = await scanCode(
+      context,
+      title: 'Scan a pipe invite',
+      check: pipeInviteCheck,
+    );
+    if (code == null || !mounted) return;
+    _code.text = code;
+    _readCode();
   }
 
   Future<void> _run(Future<void> Function(Backend backend) request) async {
@@ -3351,7 +3312,9 @@ class _ConnectPipeFormState extends State<ConnectPipeForm> {
           builder: (context, _) => FormFrame(
             title: 'Make an invite',
             error: _error,
-            submitLabel: 'Make invite',
+            // Making one takes a moment (Claktory reaches the relay): it
+            // says so, rather than looking as if the tap did nothing.
+            submitLabel: _busy ? 'Making…' : 'Make invite',
             onSubmit: _busy || _name.text.trim().isEmpty
                 ? null
                 : () => _run((backend) async {
@@ -3394,13 +3357,26 @@ class _ConnectPipeFormState extends State<ConnectPipeForm> {
               'code. It works once, for 10 minutes, and this is the only '
               'time it shows.',
           error: null,
-          submitLabel: 'Done',
-          onSubmit: () {
+          // Copy code where Make invite was, and Done (which opens the
+          // pipe) at the other end: a second tap on Make invite, as the
+          // invite was being made, copies the code rather than closing it
+          // unseen (Zucchero's row 157). It shows only this once.
+          submitLabel: _copied ? 'Copied' : 'Copy code',
+          onSubmit: () async {
+            final pipe = AppScope.of(context).workspace.workspace.pipes
+                .where((pipe) => pipe.id == invite.pipeId)
+                .firstOrNull;
+            await copyInviteCode(
+              invite.code,
+              expiresMs: pipe?.inviteExpiresMs.toInt() ?? 0,
+            );
+            if (mounted) setState(() => _copied = true);
+          },
+          onCancel: () {
             _openInvited(AppScope.of(context));
             widget.close();
           },
-          onCancel: widget.close,
-          cancelLabel: 'Close',
+          cancelLabel: 'Done',
           fields: [
             Container(
               padding: const EdgeInsets.all(Space.m),
@@ -3418,17 +3394,20 @@ class _ConnectPipeFormState extends State<ConnectPipeForm> {
                 ),
               ),
             ),
-            const SizedBox(height: Space.s),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Button(
-                label: _copied ? 'Copied' : 'Copy code',
-                onPressed: () async {
-                  await Clipboard.setData(ClipboardData(text: invite.code));
-                  if (mounted) setState(() => _copied = true);
-                },
+            if (!_qr) ...[
+              const SizedBox(height: Space.s),
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: Button(
+                  label: 'Show QR code',
+                  onPressed: () => setState(() => _qr = true),
+                ),
               ),
-            ),
+            ],
+            if (_qr) ...[
+              const SizedBox(height: Space.l),
+              PipeInviteQr(code: invite.code),
+            ],
           ],
         );
       case _Step.code:
@@ -3436,22 +3415,12 @@ class _ConnectPipeFormState extends State<ConnectPipeForm> {
           listenable: _code,
           builder: (context, _) => FormFrame(
             title: 'Use a pipe code',
-            body: 'Paste the code you were sent.',
+            body: _canScan
+                ? 'Paste the code you were sent, or scan it.'
+                : 'Paste the code you were sent.',
             error: _error,
             submitLabel: 'Continue',
-            onSubmit: _busy || _code.text.trim().isEmpty
-                ? null
-                : () => _run((backend) async {
-                    final preview = await backend.readPipeInvite(
-                      _code.text.trim(),
-                    );
-                    if (!mounted) return;
-                    _name.text = preview.name;
-                    setState(() {
-                      _preview = preview;
-                      _step = _Step.preview;
-                    });
-                  }),
+            onSubmit: _busy || _code.text.trim().isEmpty ? null : _readCode,
             onCancel: () => _go(_Step.choose),
             cancelLabel: 'Back',
             fields: [
@@ -3463,6 +3432,14 @@ class _ConnectPipeFormState extends State<ConnectPipeForm> {
                   placeholder: 'claktory-pipe://…',
                 ),
               ),
+              if (_canScan)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Button(
+                    label: 'Scan code',
+                    onPressed: _busy ? null : _scan,
+                  ),
+                ),
             ],
           ),
         );
@@ -3519,8 +3496,9 @@ class _ConnectPipeFormState extends State<ConnectPipeForm> {
   }
 }
 
-/// An agent that read a pipe ran a command with a secret: Claktory held it
-/// for the person. A sibling of the secret request card.
+/// An agent ran a command with a secret set to ask each time, or after
+/// reading a web page: Claktory held it for the person. A sibling of the
+/// secret request card.
 class SecretApprovalCard extends StatefulWidget {
   const SecretApprovalCard(this.approval, {super.key, required this.seq});
 
@@ -3551,28 +3529,28 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
       ? names.join()
       : '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
 
-  /// What [name] read, by kind ("the pipe Acme and a page on
-  /// https://example.com"); from the pipes' names alone for an older
-  /// backend's card; empty when it read nothing.
+  /// The web pages [name] read ("a page on https://example.com", "3 web
+  /// pages"); empty when it read none. A pipe or direct messages, on a card
+  /// from before #346, no longer count.
   String _read() {
-    final approval = widget.approval;
-    if (approval.taint.isNotEmpty) {
-      return _listed([for (final read in approval.taint) taintRead(read)]);
-    }
-    return approval.pipeNames.isEmpty
-        ? ''
-        : 'the pipe ${approval.pipeNames.join(', ')}';
+    final pages = taintPages(widget.approval.taint);
+    if (pages.isEmpty) return '';
+    return pages.length == 1
+        ? taintRead(pages.single)!
+        : '${pages.length} web pages';
   }
 
-  /// Why Claktory asks: [name] read a pipe, a site or direct messages, or
-  /// the person set some of its secrets to ask each time, or both.
+  /// Why Claktory asks: [name] read a web page, or the person set some of
+  /// its secrets to ask each time, or both.
   String _why(String name) {
     final asks = widget.approval.askEachTimeNames;
     const expect = 'Allow it only if this command is what you expect.';
     final read = _read();
     if (asks.isEmpty) {
-      return '$name has read $read, so Claktory asks you before it uses a '
-          'secret. $expect';
+      return read.isEmpty
+          ? 'Claktory asks you before $name uses a secret. $expect'
+          : '$name has read $read, so Claktory asks you before it uses a '
+                'secret. $expect';
     }
     final set = 'you set ${_listed(asks)} to ask each time';
     return read.isNotEmpty
@@ -3639,8 +3617,7 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
               ),
             ],
           ),
-          // Where the command may come from: the pipes it read, and
-          // through whom.
+          // Where the command may come from: the web pages it read.
           TaintLabel(taint: approval.taint, agent: name),
           const SizedBox(height: Space.xs),
           Text(

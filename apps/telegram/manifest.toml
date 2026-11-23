@@ -1,9 +1,9 @@
 id = "telegram"
 name = "Telegram"
-version = "0.1.0"
+version = "0.1.2"
 world = "claktory:app@1"
 publisher = "claktory"
-description = "Message your agents from Telegram, and let them message you."
+description = "Message your agents from Telegram, and let them message you. Ask Rivet to set it up."
 icon = "send"
 hosts = ["api.telegram.org"]
 storage_mb = 5

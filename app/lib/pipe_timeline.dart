@@ -370,9 +370,15 @@ class _LiaisonPipeBodyState extends State<LiaisonPipeBody> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 ArchivedLine(agent: liaison),
+                // Back to its own provider once it has room (#341).
+                UsageSwitchLine(id: liaison.id),
                 ReconnectingLine(
                   otherwise: _working
-                      ? WorkingLine(onStop: _stop, wait: usageWaitLine(liaison))
+                      ? WorkingLine(
+                          onStop: _stop,
+                          wait: usageWaitLine(liaison),
+                          waiting: liaison.id,
+                        )
                       : const SizedBox.shrink(),
                 ),
                 ?pipeStateBar(context, pipe),
@@ -412,7 +418,13 @@ class _LiaisonPipeBodyState extends State<LiaisonPipeBody> {
                         failed ??
                         (toPipe
                             ? '${pipePeerClaktory(pipe)} sees this.'
-                            : 'Only ${liaison.name} sees this.'),
+                            // The liaison can pass it on (friend bug #1).
+                            : pipe.reviewOutgoing
+                            ? 'Goes to ${liaison.name}. If ${liaison.name} '
+                                  'passes it on to ${pipePeerClaktory(pipe)}, '
+                                  'you approve it first.'
+                            : 'Goes to ${liaison.name}, who can pass it on '
+                                  'to ${pipePeerClaktory(pipe)}.'),
                     failed: failed != null,
                   ),
                 ),

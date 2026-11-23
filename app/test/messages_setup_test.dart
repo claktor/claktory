@@ -7,18 +7,26 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scanner.dart';
 import 'package:factory_app/tunnel/api/dm_transfer.dart';
 import 'package:factory_app/people/secret_clipboard.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
+    show AnyhowException;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'device_confirm_test.dart' show FakeAccountApi, signIn;
 import 'dm_fakes.dart';
 import 'harness.dart';
 
 // People's messages on this device (E5, Trish's words): setting up the
 // first device, a new one's code, adding it by scanning, and removing one.
 
-Future<Harness> _show(WidgetTester tester, E2ee e2ee) async {
-  final harness = Harness(Workspace());
+Future<Harness> _show(
+  WidgetTester tester,
+  E2ee e2ee, {
+  DeviceAccount? account,
+}) async {
+  final harness = Harness(Workspace(), account: account);
   await harness.show(
     tester,
     home: Center(
@@ -53,7 +61,7 @@ class _Clipboard implements SecretClipboard {
   Future<bool> get available async => true;
 
   @override
-  Future<int?> copy(String text) async {
+  Future<int?> copy(String text, {int lasts = SecretClipboard.seconds}) async {
     this.text = text;
     return _ours = ++_writes;
   }
@@ -82,6 +90,98 @@ Future<void> _settle(WidgetTester tester) async {
 }
 
 void main() {
+  group('no other device (row 630)', () {
+    testWidgets('a new security key after the warning, then Your devices', (
+      tester,
+    ) async {
+      final worker = FakeWorker();
+      await _first(worker);
+      final ipad = FakeEndpoint(worker, 'matt', 'ipad')..skipSecrets(100);
+      await ipad.e2ee.start();
+      await _show(tester, ipad.e2ee);
+      await tester.tap(find.text('No other device?'));
+      await _settle(tester);
+      expect(find.textContaining('starts with no messages'), findsOneWidget);
+      expect(
+        find.textContaining('anyone who verified you will need to again'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Start over'));
+      await _settle(tester);
+      expect(ipad.e2ee.setup, DmSetup.ready);
+      expect(find.text('Your devices'), findsOneWidget);
+    });
+
+    testWidgets('the devices with the old key are listed apart, with Remove…', (
+      tester,
+    ) async {
+      final worker = FakeWorker();
+      await _first(worker);
+      final ipad = FakeEndpoint(worker, 'matt', 'ipad')..skipSecrets(100);
+      await ipad.e2ee.start();
+      await ipad.e2ee.startNewKey();
+      await ipad.e2ee.sync();
+      // Taken out of the chats, never signed out on its own (Fugo).
+      expect(worker.signedOut['matt'] ?? const <String>{}, isEmpty);
+      await _show(tester, ipad.e2ee);
+      expect(find.text('Still on your old security key'), findsOneWidget);
+      expect(find.text('mac'), findsOneWidget);
+      await tester.tap(find.text('Remove…'));
+      await _settle(tester);
+      expect(find.text('Remove mac?'), findsOneWidget);
+      await tester.tap(find.text('Remove'));
+      await _settle(tester);
+      expect(worker.signedOut['matt'], {'mac'});
+      expect(find.text('Still on your old security key'), findsNothing);
+      expect(find.text('Remove…'), findsNothing);
+    });
+
+    testWidgets('Cancel changes nothing', (tester) async {
+      final worker = FakeWorker();
+      await _first(worker);
+      final old = worker.keys['matt']!['identity_key'];
+      final ipad = FakeEndpoint(worker, 'matt', 'ipad')..skipSecrets(100);
+      await ipad.e2ee.start();
+      await _show(tester, ipad.e2ee);
+      await tester.tap(find.text('No other device?'));
+      await _settle(tester);
+      await tester.tap(find.text('Cancel'));
+      await _settle(tester);
+      expect(ipad.e2ee.setup, DmSetup.addThisDevice);
+      expect(worker.keys['matt']!['identity_key'], old);
+    });
+
+    testWidgets('a sign-in too old asks to sign in again first', (
+      tester,
+    ) async {
+      final worker = FakeWorker();
+      await _first(worker);
+      final ipad = FakeEndpoint(worker, 'matt', 'ipad')..skipSecrets(100);
+      await ipad.e2ee.start();
+      worker.staleSignIn.add('matt/ipad');
+      final account = DeviceAccount(
+        key: 'k' * 64,
+        open: (_, _) => FakeAccountApi(),
+      );
+      await signIn(account);
+      await _show(tester, ipad.e2ee, account: account);
+      await tester.tap(find.text('No other device?'));
+      await _settle(tester);
+      await tester.tap(find.text('Start over'));
+      await _settle(tester);
+      expect(ipad.e2ee.setup, DmSetup.addThisDevice);
+      expect(
+        find.text('For your security, sign in again to start over.'),
+        findsOneWidget,
+      );
+      // Again with the account it's signed in to, never another (row 644).
+      await tester.tap(find.text('Sign in again…'));
+      await _settle(tester);
+      expect(find.text('matt@example.com'), findsOneWidget);
+      expect(find.byKey(const ValueKey('device-email')), findsNothing);
+    });
+  });
+
   testWidgets('the first device sets up, then lists itself', (tester) async {
     final worker = FakeWorker();
     final phone = FakeEndpoint(worker, 'matt', 'phone', name: 'iPhone');
@@ -147,11 +247,56 @@ void main() {
     await _settle(tester);
     expect(
       find.textContaining(
-        "can't scan. Copy the code on your new device and choose Paste code "
-        'instead.',
+        'Copy the code on your new device and choose Paste code instead.',
       ),
       findsOneWidget,
     );
+    expect(find.text('Open Settings'), findsNothing);
+  });
+
+  testWidgets('a refused camera says how to allow it, with Open Settings, '
+      'and scans once allowed and back (friend bug #2)', (tester) async {
+    final worker = FakeWorker();
+    final phone = FakeEndpoint(worker, 'matt', 'phone', name: 'iPhone');
+    await phone.e2ee.start();
+    await phone.e2ee.setUpFirst();
+    final harness = await _show(tester, phone.e2ee);
+    harness.camera.state = CameraAccess.denied;
+    await tester.tap(find.text('Add a device…'));
+    await _settle(tester);
+    expect(
+      find.text('To scan, allow camera access in Settings → Claktory.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Open Settings'));
+    await _settle(tester);
+    expect(harness.camera.settingsOpened, 1);
+    expect(find.byKey(const ValueKey('camera')), findsNothing);
+    // Allowed in Settings, then back.
+    harness.camera.state = CameraAccess.granted;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await _settle(tester);
+    expect(find.byKey(const ValueKey('camera')), findsOneWidget);
+    expect(find.text('Open Settings'), findsNothing);
+    // Paste stays the other way.
+    expect(find.text('Paste code instead'), findsOneWidget);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets('a restricted camera offers no Settings, only Paste', (
+    tester,
+  ) async {
+    final worker = FakeWorker();
+    final phone = FakeEndpoint(worker, 'matt', 'phone', name: 'iPhone');
+    await phone.e2ee.start();
+    await phone.e2ee.setUpFirst();
+    final harness = await _show(tester, phone.e2ee);
+    harness.camera.state = CameraAccess.restricted;
+    await tester.tap(find.text('Add a device…'));
+    await _settle(tester);
+    expect(find.textContaining("The camera isn't available"), findsOneWidget);
+    expect(find.text('Open Settings'), findsNothing);
+    expect(find.text('Paste code instead'), findsOneWidget);
   });
 
   testWidgets('removing a device asks first', (tester) async {
@@ -179,6 +324,31 @@ void main() {
     expect(worker.signedOut['matt'], {'ipad'});
     expect(find.text('Remove ipad?'), findsNothing);
     expect(find.text('Remove…'), findsNothing);
+  });
+
+  testWidgets('a device that signed out of the account says so, with '
+      'Remove… (row 671)', (tester) async {
+    final worker = FakeWorker();
+    final phone = FakeEndpoint(worker, 'matt', 'phone', name: 'iPhone');
+    await phone.e2ee.start();
+    await phone.e2ee.setUpFirst();
+    final ipad = FakeEndpoint(worker, 'matt', 'ipad', name: 'iPad');
+    await ipad.e2ee.start();
+    final code = await ipad.e2ee.offerThisDevice(platform: 'iPad');
+    await phone.e2ee.addDevice(await phone.e2ee.scanned(code!));
+    await ipad.e2ee.takeHandoff();
+    await phone.e2ee.sync();
+    worker.accountSignOuts['matt'] = {'ipad'};
+
+    await _show(tester, phone.e2ee);
+    expect(find.textContaining('Signed out'), findsOneWidget);
+    expect(find.text('Remove…'), findsOneWidget);
+    await tester.tap(find.text('Remove…'));
+    await _settle(tester);
+    await tester.tap(find.text('Remove'));
+    await _settle(tester);
+    expect(worker.keys['matt']!['version'], 3);
+    expect(find.textContaining('Signed out'), findsNothing);
   });
 
   testWidgets("a sign-out that doesn't go through is said, and tried again", (
@@ -274,13 +444,17 @@ void main() {
     // The laptop, off the list by a build before the fix and nothing kept:
     // still in the self group, so not fully removed.
     final listed = mac.device.deviceList(account: 'matt')!.leaves;
-    await mac.device.signDeviceList(
-      version: BigInt.from(9),
-      createdMs: BigInt.one,
-      leaves: [
-        for (final each in listed)
-          if (each.leafId != 'laptop') each,
-      ],
+    // Signed and taken (pinned once the worker has it).
+    await mac.device.acceptList(
+      account: 'matt',
+      deviceList: await mac.device.signDeviceList(
+        version: BigInt.from(9),
+        createdMs: BigInt.one,
+        leaves: [
+          for (final each in listed)
+            if (each.leafId != 'laptop') each,
+        ],
+      ),
     );
     mac.e2ee.dismissNewKey();
     await _settle(tester);
@@ -422,6 +596,8 @@ void main() {
     tester,
   ) async {
     final phone = FakeEndpoint(FakeWorker(), 'matt', 'phone');
+    // Its store is here: the key was this install's own (row 202).
+    phone.storeKept = true;
     phone.keys.unreadable.add(DmKeyName.leaf);
     await phone.e2ee.start();
     await _show(tester, phone.e2ee);
@@ -474,7 +650,7 @@ void main() {
       await tester.tap(find.text('Add a device…'));
       await _settle(tester);
       expect(
-        find.textContaining("can't scan. Copy the code on your new device"),
+        find.textContaining('Copy the code on your new device and choose'),
         findsOneWidget,
       );
       await tester.tap(find.text('Paste code instead'));
@@ -554,6 +730,94 @@ void main() {
         findsOneWidget,
       );
     });
+
+    testWidgets('a code used already is refused, saying so (row 612)', (
+      tester,
+    ) async {
+      final worker = FakeWorker();
+      final mac = await _first(worker);
+      final ipad = FakeEndpoint(worker, 'matt', 'ipad');
+      await ipad.e2ee.start();
+      final code = await ipad.e2ee.offerThisDevice(platform: 'iPad');
+      await mac.e2ee.addDevice(await mac.e2ee.scanned(code!));
+      clipboard.text = code;
+      await _show(tester, mac.e2ee);
+      await tester.tap(find.text('Add a device…'));
+      await _settle(tester);
+      await tester.tap(find.text('Paste code instead'));
+      await _settle(tester);
+      expect(
+        find.text(
+          'This code was already used, or is for a device you removed.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('The numbers match'), findsNothing);
+    });
+
+    testWidgets('a device the worker says was removed is refused, saying so, '
+        'not Try again (row 617)', (tester) async {
+      final worker = FakeWorker();
+      final mac = await _first(worker);
+      final ipad = FakeEndpoint(worker, 'matt', 'ipad');
+      await ipad.e2ee.start();
+      final code = await ipad.e2ee.offerThisDevice(platform: 'iPad');
+      // Removed from the account on another device this Mac hasn't heard.
+      worker.refuse = (route) => route == 'PUT me/keys'
+          ? AccountServiceError(
+              409,
+              'removed_device',
+              "A device that was removed from your account can't come back "
+                  'on your list.',
+              const {},
+            )
+          : null;
+      clipboard.text = code;
+      await _show(tester, mac.e2ee);
+      await tester.tap(find.text('Add a device…'));
+      await _settle(tester);
+      await tester.tap(find.text('Paste code instead'));
+      await _settle(tester);
+      await tester.tap(find.text('The numbers match'));
+      await _settle(tester);
+      int puts() => worker.log.where((r) => r == 'PUT me/keys').length;
+      final before = puts();
+      await tester.tap(find.text('Add'));
+      await _settle(tester);
+      expect(
+        find.text(
+          'This code was already used, or is for a device you removed.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text("Couldn't add it. Try again."), findsNothing);
+      // Not tried again as if another device had changed the list.
+      expect(puts(), before + 1);
+    });
+
+    testWidgets('a new device a chat is held back from says so under Your '
+        'devices (row 611)', (tester) async {
+      final worker = FakeWorker();
+      final mac = await _first(worker);
+      final ipad = FakeEndpoint(worker, 'matt', 'ipad');
+      await ipad.e2ee.start();
+      final code = await ipad.e2ee.offerThisDevice(platform: 'iPad');
+      await mac.e2ee.addDevice(await mac.e2ee.scanned(code!));
+      ipad.device.refuseRejoin = () => AnyhowException(
+        "refused: matt's certificate is from a security key that was "
+        'replaced',
+      );
+      await ipad.e2ee.takeHandoff();
+      await _show(tester, ipad.e2ee);
+      expect(
+        find.text(
+          "Some of your chats can't come to this device yet. Open Claktory "
+          "on your other devices so they can update, and they'll come here "
+          'on their own.',
+        ),
+        findsOneWidget,
+      );
+    });
   });
 
   group('the history coming over', () {
@@ -610,6 +874,133 @@ void main() {
       expect(find.text('Bringing your messages over…'), findsNothing);
       expect(find.text("Some messages didn't come over."), findsNothing);
     });
+  });
+
+  _yourDevicesOnAPhone();
+}
+
+void _yourDevicesOnAPhone() {
+  group('Your devices on a phone (row 198)', () {
+    const long = 'anas-mac-studio-in-the-office';
+    const other = 'anas-mac-studio-at-home';
+
+    /// The Mac with two others of long names, added on known days, shown
+    /// on a phone at the largest text size.
+    Future<FakeEndpoint> shown(WidgetTester tester) async {
+      final worker = FakeWorker();
+      final mac = await _first(worker);
+      for (final leaf in [long, other]) {
+        final device = FakeEndpoint(worker, 'matt', leaf);
+        await device.e2ee.start();
+        final code = await device.e2ee.offerThisDevice(platform: 'macOS');
+        await mac.e2ee.addDevice(await mac.e2ee.scanned(code!));
+        await device.e2ee.takeHandoff();
+      }
+      await mac.e2ee.sync();
+      mac.device.added['matt/$long'] = DateTime(
+        2026,
+        11,
+        16,
+        14,
+        2,
+      ).millisecondsSinceEpoch;
+      mac.device.added['matt/$other'] = DateTime(
+        2026,
+        11,
+        21,
+        9,
+        30,
+      ).millisecondsSinceEpoch;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.platformDispatcher.textScaleFactorTestValue = 3.1;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final harness = Harness(Workspace());
+      await harness.show(
+        tester,
+        size: const Size(375, 667),
+        home: SingleChildScrollView(
+          child: MessagesSetup(e2ee: mac.e2ee, devices: true),
+        ),
+      );
+      await _settle(tester);
+      return mac;
+    }
+
+    testWidgets('at the largest text each name shows whole, with since '
+        'when, and its buttons fit under it', (tester) async {
+      await shown(tester);
+      for (final name in [long, other]) {
+        final text = tester.widget<Text>(find.text(name));
+        expect(text.maxLines, isNull, reason: 'wraps, never cut short');
+        expect(tester.getRect(find.text(name)).width, greaterThan(0));
+      }
+      expect(find.textContaining('Since '), findsNWidgets(2));
+      for (final label in ['Lost or stolen…', 'Remove…']) {
+        for (final button in find.text(label).evaluate()) {
+          final rect = tester.getRect(find.byWidget(button.widget).first);
+          expect(rect.left, greaterThanOrEqualTo(0));
+          expect(rect.right, lessThanOrEqualTo(375));
+        }
+      }
+      // No overflow stripe anywhere (it would fail the test as it's laid
+      // out), and Remove… opens its dialog, which says since when.
+      await tester.ensureVisible(find.text('Remove…').first);
+      await tester.pump();
+      await tester.tap(find.text('Remove…').first);
+      await _settle(tester);
+      expect(find.textContaining('?'), findsWidgets);
+      expect(find.textContaining('Since '), findsWidgets);
+    });
+  });
+
+  testWidgets('two devices of one name read apart by the time they were '
+      'added (row 198)', (tester) async {
+    late BuildContext context;
+    await tester.pumpWidget(
+      Builder(
+        builder: (built) {
+          context = built;
+          return const SizedBox();
+        },
+      ),
+    );
+    final day = DateTime(2026, 11, 16, 14, 2).millisecondsSinceEpoch;
+    final first = (leafId: 'a', name: 'Mac Studio', here: false, sinceMs: day);
+    final second = (
+      leafId: 'b',
+      name: 'Mac Studio',
+      here: false,
+      sinceMs: day + const Duration(hours: 3).inMilliseconds,
+    );
+    final mini = (leafId: 'c', name: 'Mac mini', here: false, sinceMs: day);
+    final all = [first, second, mini];
+    // The device's own clock, 24-hour or not.
+    expect(
+      deviceSince(context, first, all),
+      allOf(startsWith('Since Mon 16 Nov'), contains(' at ')),
+    );
+    expect(
+      deviceSince(context, second, all),
+      allOf(startsWith('Since Mon 16 Nov'), contains(' at ')),
+    );
+    expect(
+      deviceSince(context, first, all),
+      isNot(deviceSince(context, second, all)),
+    );
+    expect(
+      deviceSince(context, mini, all),
+      allOf(startsWith('Since '), isNot(contains(' at '))),
+    );
+    // Not known: nothing.
+    expect(
+      deviceSince(
+        context,
+        (leafId: 'd', name: 'X', here: false, sinceMs: 0),
+        [first],
+      ),
+      '',
+    );
   });
 }
 

@@ -65,6 +65,7 @@ pub mod update;
 mod uploads;
 mod usage;
 mod usage_report;
+mod usage_switch;
 pub mod user_apps;
 pub mod vault;
 mod waits;

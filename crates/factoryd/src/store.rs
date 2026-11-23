@@ -88,7 +88,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 65] = [
+const MIGRATIONS: [&str; 70] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -217,6 +217,11 @@ ALTER TABLE messages ADD COLUMN checklist_item TEXT;
     crate::extensions::viewer::OPENED,
     crate::extensions::checklist::CARD_ITEMS,
     crate::extensions::checklist::DISMISSED_CARD,
+    crate::apps::bundled::SCHEMA,
+    crate::apps::access::SCHEMA,
+    crate::apps::changes::SCHEMA,
+    crate::usage_switch::SCHEMA,
+    crate::extensions::models::SCHEMA,
 ];
 
 /// A background task as recorded.

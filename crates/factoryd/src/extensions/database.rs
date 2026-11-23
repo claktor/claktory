@@ -136,7 +136,7 @@ fn run(home: &crate::home::Home, target: &Target, kind: Kind, args: &Args) -> Re
     }
 }
 
-async fn call(factory: &Factory, agent: &str, kind: Kind, args: Value) -> Result<ToolResult, String> {
+async fn call(factory: &Arc<Factory>, agent: &str, kind: Kind, args: Value) -> Result<ToolResult, String> {
     let args: Args = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let target = access(factory, agent, args.instance.as_deref(), kind == Kind::Exec)?;
     let instance = if target == Target::Factory { FACTORY.name } else { "" };

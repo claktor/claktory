@@ -36,6 +36,10 @@ pub(crate) struct Tracked {
     unlimited: bool,
     /// An agent on it worked since the last read.
     worked: bool,
+    /// An agent waits for its provider's usage to come back (`crate::waits`):
+    /// every account is read each minute, in use or not, so room the
+    /// provider reports wakes it soon.
+    waiting: bool,
     failed: bool,
     /// The earliest reset after the last read; 0 when none is known.
     next_reset: i64,
@@ -78,7 +82,7 @@ pub(crate) fn due(tracked: &Tracked, working: bool, now: i64) -> bool {
     } else {
         WHILE_IDLE
     };
-    if tracked.next_reset != 0 && now >= tracked.next_reset {
+    if tracked.waiting || (tracked.next_reset != 0 && now >= tracked.next_reset) {
         wait = wait.min(AFTER_WORK);
     }
     if tracked.failed {
@@ -141,9 +145,22 @@ pub(crate) type AccountKey = (String, String);
 impl Factory {
     async fn check_usage(&self, tracked: &mut HashMap<AccountKey, Tracked>) {
         let now = now_ms();
-        let (providers, working, reset) = {
+        let reread: HashSet<String> = std::mem::take(&mut *self.usage_reread.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        let (providers, working, waiting, reset) = {
             let inner = self.lock();
             let mut working = HashSet::new();
+            // Providers an agent or a chat waits on.
+            let mut waiting = HashSet::new();
+            for (id, _) in inner.agents.iter().filter(|(_, runtime)| runtime.usage_wait.is_some()) {
+                let model = inner
+                    .config
+                    .agent(id)
+                    .map(|agent| agent.model.clone())
+                    .or_else(|| self.chats.model_and_name(id).map(|(model, _)| model));
+                if let Some((provider, _)) = model.as_deref().and_then(|model| model.split_once('/')) {
+                    waiting.insert(provider.to_owned());
+                }
+            }
             for (id, runtime) in &inner.agents {
                 if runtime.running
                     && let Some(agent) = inner.config.agent(id)
@@ -159,7 +176,7 @@ impl Factory {
                 .iter()
                 .flat_map(|provider| &provider.accounts)
                 .any(|account| (account.exhausted_until != 0 && account.exhausted_until <= now) || account.out_of_credit);
-            (inner.providers.clone(), working, reset)
+            (inner.providers.clone(), working, waiting, reset)
         };
         if reset {
             self.refresh_models().await;
@@ -187,7 +204,13 @@ impl Factory {
                     *entry = Tracked { signed_in_with, ..Tracked::default() };
                     self.set_usage(&key, None);
                     self.set_plan(&key, None);
+                } else if reread.contains(&id) {
+                    // Signed in to again with the same method (a plan just
+                    // upgraded, say), or Try now: read now, keeping what
+                    // shows until then.
+                    *entry = Tracked { signed_in_with, ..Tracked::default() };
                 }
+                entry.waiting = waiting.contains(&id);
                 let is_working = working.contains(&id) && account == in_use;
                 entry.worked |= is_working;
                 if !due(entry, is_working, now_ms()) {
@@ -437,6 +460,14 @@ mod tests {
         assert!(due(&resets, false, NOW));
         let later = Tracked { next_reset: NOW + 1, ..read_at(NOW - 2 * MINUTE) };
         assert!(!due(&later, false, NOW));
+    }
+
+    #[test]
+    fn while_an_agent_waits_every_account_is_read_each_minute() {
+        let waiting = Tracked { waiting: true, ..read_at(NOW - MINUTE + 1) };
+        assert!(!due(&waiting, false, NOW));
+        assert!(due(&Tracked { waiting: true, ..read_at(NOW - MINUTE) }, false, NOW));
+        assert!(!due(&read_at(NOW - MINUTE), false, NOW));
     }
 
     #[test]

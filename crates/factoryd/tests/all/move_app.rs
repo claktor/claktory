@@ -202,6 +202,52 @@ async fn a_move_called_off_at_the_digits_changes_nothing_and_a_declined_one_says
     assert!(matches!(refused.body, Body::Error(error) if error.message.starts_with("That isn't a receive code")));
 }
 
+/// Abbacchio's row 625: a move that fails in its last round (in frozen mode)
+/// is shown failed after the restart that follows, still saying who started
+/// it and what the other computer is; a failure kept before that still reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_that_failed_in_its_last_round_still_says_who_started_it_and_where_to() {
+    let source = temp_dir();
+    let home = Home::new(source.join("home"));
+    std::fs::create_dir_all(home.root()).unwrap();
+    // Frozen, with a state whose code can't be dialed: the last round fails.
+    let saved = factoryd::move_run::Saved {
+        stage: factoryd::move_run::Stage::Frozen,
+        code: "claktory-move://damaged".into(),
+        target_machine: "hetzner-box".into(),
+        target_os: "linux".into(),
+        target_arch: "x86_64".into(),
+        started_by_agent_id: "rivet".into(),
+        ..Default::default()
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    tokio::time::timeout(WAIT, factoryd::move_run::serve_frozen(listener, &home, saved, None)).await.expect("frozen mode ends");
+
+    // The supervisor starts the Claktory again here: the move shows failed.
+    let (addr, _factory) = start(&source).await;
+    let (_client, workspace, _) = Client::connect(addr).await;
+    let failed = workspace.r#move.expect("the failed move");
+    assert_eq!(failed.phase(), v1::MovePhase::Failed);
+    assert_eq!(
+        (failed.target_machine.as_str(), failed.target_os.as_str(), failed.target_arch.as_str(), failed.started_by_agent_id.as_str()),
+        ("hetzner-box", "linux", "x86_64", "rivet"),
+        "{failed:?}"
+    );
+    assert!(!failed.error.is_empty() && failed.can_cancel, "{failed:?}");
+
+    // A failure kept by an older Claktory reads as before.
+    let older = temp_dir();
+    let older_home = Home::new(older.join("home"));
+    std::fs::create_dir_all(older_home.root()).unwrap();
+    let kept = r#"{"at_ms": 1, "why": "Can't reach box.", "target_machine": "box"}"#;
+    std::fs::write(older_home.root().join("move-failed.json"), kept).unwrap();
+    let (addr, _older_factory) = start(&older).await;
+    let (_client, workspace, _) = Client::connect(addr).await;
+    let failed = workspace.r#move.expect("the failed move");
+    assert_eq!((failed.phase(), failed.target_machine.as_str(), failed.error.as_str()), (v1::MovePhase::Failed, "box", "Can't reach box."));
+    assert_eq!((failed.target_os.as_str(), failed.started_by_agent_id.as_str()), ("", ""));
+}
+
 /// Nora's P2-F4: the source restarts mid-copy (a crash, which the supervisor
 /// answers within a second) while the target still holds the connection
 /// that dropped, and turns new ones away. The source dials again until it

@@ -20,13 +20,14 @@ Every command prints one JSON line: {\"ok\":true,…} or {\"ok\":false,\"error\"
 Exit 0 done, 1 failed, 2 usage, 3 refused (by the sandbox, or as unsafe), 4 the sandbox isn't running.
 
 Sandboxes
-  up [NAME] [--no-account] [--port PORT] [--model] [--script FILE] [--machine-name NAME] [--speech MODEL]
+  up [NAME] [--no-account] [--port PORT] [--model] [--script FILE] [--machine-name NAME] [--speech MODEL] [--claude]
                                            start one: a fresh Claktory on a free port (7500 up), with its
                                            own account service whose emails land in its mail folder; with
                                            --model (or --script), its agents run on qa-model, a scripted model;
                                            it shows the machine name qa-NAME (or --machine-name's), never this computer's;
                                            with --speech, it recognizes speech: the commit's claktory-speech on
-                                           MODEL (a .gguf with its .receipt beside it), copied in
+                                           MODEL (a .gguf with its .receipt beside it), copied in; with --claude,
+                                           Claude is signed in, fake, on qa-model, and its agents run on Claude
   down NAME… | --all | --all-agents [--keep]
                                            end them and delete their folders (--keep keeps the folders); --all
                                            ends only yours (the root is every agent's: each sandbox records who
@@ -55,6 +56,8 @@ Driving one
 
 qa-model (README: the script's rules)
   script NAME FILE                         check a script and make it the sandbox's (read for every request)
+  limit NAME --for SECS | --off            put its fake Claude sign-in (up --claude) at its usage limit, resetting
+                                           in SECS, or lift the limit now, as a plan upgrade would
   model NAME [--agent A] [--last N] [--system]
                                            what qa-model was asked and answered: each request's last message,
                                            tools, the rule that fit and the answer (--system: the system prompt)
@@ -178,7 +181,7 @@ async fn run(args: &[String]) -> Outcome {
     let Some((command, args)) = args.split_first() else { return Err(Failure::usage(USAGE)) };
     match command.as_str() {
         "up" => {
-            let args = Args::parse(args, &["--port", "--script", "--machine-name", "--speech"], &["--no-account", "--model"])?;
+            let args = Args::parse(args, &["--port", "--script", "--machine-name", "--speech"], &["--no-account", "--model", "--claude"])?;
             let port = match args.value("--port") {
                 Some(port) => Some(port.parse().map_err(|_| Failure::usage("--port takes a port number"))?),
                 None => None,
@@ -194,6 +197,7 @@ async fn run(args: &[String]) -> Outcome {
                 model,
                 machine_name: args.value("--machine-name").map(str::to_owned),
                 speech: args.value("--speech").map(std::path::PathBuf::from),
+                claude: args.flag("--claude"),
             };
             let sandbox = sandbox::up(up)?;
             Ok(sandbox.to_json())
@@ -381,12 +385,12 @@ async fn run(args: &[String]) -> Outcome {
             pick(&driver::workspace_json(&connection.workspace), Some("account"))
         }
         "serve-model" => {
-            let args = Args::parse(args, &["--port", "--script", "--log"], &[])?;
+            let args = Args::parse(args, &["--port", "--script", "--log", "--claude"], &[])?;
             let port = args.value("--port").and_then(|port| port.parse().ok()).ok_or_else(|| Failure::usage("serve-model --port PORT"))?;
             sandbox::check_port(port)?;
             let script = args.value("--script").ok_or_else(|| Failure::usage("serve-model --script FILE"))?;
             let log = args.value("--log").ok_or_else(|| Failure::usage("serve-model --log FILE"))?;
-            model::serve(port, script.into(), log.into()).await?;
+            model::serve(port, script.into(), log.into(), args.value("--claude").map(std::path::PathBuf::from)).await?;
             Ok(Value::Null)
         }
         "script" => {
@@ -400,6 +404,24 @@ async fn run(args: &[String]) -> Outcome {
             model::check_script(&text).map_err(Failure::usage)?;
             std::fs::write(sandbox.model_script(), text).map_err(|error| Failure::failed(error.to_string()))?;
             Ok(json!({ "script": sandbox.model_script() }))
+        }
+        "limit" => {
+            let args = Args::parse(args, &["--for"], &["--off"])?;
+            let sandbox = args.name()?;
+            if !sandbox.claude {
+                return Err(Failure::refused(format!("{} has no fake Claude sign-in: start a sandbox with --claude.", sandbox.name)));
+            }
+            let until = match (args.value("--for"), args.flag("--off")) {
+                (Some(secs), false) => {
+                    let secs: u64 = secs.parse().map_err(|_| Failure::usage("--for takes a number of seconds"))?;
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis());
+                    Some(u64::try_from(now).unwrap_or(0) + secs * 1000)
+                }
+                (None, true) => None,
+                _ => return Err(Failure::usage("limit NAME --for SECS, or limit NAME --off")),
+            };
+            model::claude::set_limit(&sandbox.claude_limit(), until).map_err(|error| Failure::failed(error.to_string()))?;
+            Ok(json!({ "limited_until_ms": until }))
         }
         "model" => {
             let args = Args::parse(args, &["--agent", "--last"], &["--system"])?;

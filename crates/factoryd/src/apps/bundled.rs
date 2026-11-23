@@ -1,7 +1,11 @@
 //! Claktory's own apps, shipped with each release (#201): signed .clapp
-//! files in an `apps` folder beside the release's programs, offered in
-//! Settings → Apps with Install, or Update when the installed version is
-//! older. Being in the folder vouches for nothing: each file is read and
+//! files in an `apps` folder beside the release's programs. Claktory
+//! installs each by itself (#333), granting it nothing (no data, no agent),
+//! unless the person uninstalled it (`app_uninstalled`, in factory.db so a
+//! rollback's config.json is untouched), and updates it when a newer one
+//! ships that asks for nothing new but data (which grants nothing either);
+//! otherwise the Marketplace's Apps tab offers Install, or Update when the
+//! installed version is older. Being in the folder vouches for nothing: each file is read and
 //! checked like any other (`Bundle::read`: its signature and manifest), and
 //! offered only when its key is Claktory's own (`CLAKTORY_KEYS`); one that
 //! fails isn't listed, and installing one goes through the same review and
@@ -21,6 +25,13 @@ use factory_protocol::v1;
 use super::bundle::{self, Bundle, Manifest, Tier};
 use crate::config::Config;
 use crate::factory::Factory;
+use crate::store::Store;
+
+pub(crate) const SCHEMA: &str = "
+-- Claktory's own apps (shipped with each release) the person uninstalled:
+-- Claktory doesn't install them again by itself. Installing one clears it.
+CREATE TABLE app_uninstalled (app TEXT PRIMARY KEY, at INTEGER NOT NULL);
+";
 
 /// The folder beside the programs, and the name each app's file has in it.
 const FOLDER: &str = "apps";
@@ -39,6 +50,9 @@ pub(crate) struct Offer {
 #[derive(Default)]
 pub(crate) struct Bundled {
     read: Mutex<Option<Vec<Offer>>>,
+    /// The offers read were installed or updated where they should be
+    /// (`keep_installed`): once each time they're read.
+    kept: std::sync::atomic::AtomicBool,
     /// Tests: the folder to read instead.
     folder: Mutex<Option<PathBuf>>,
 }
@@ -117,6 +131,92 @@ pub(crate) fn read_bytes(path: &std::path::Path) -> Result<(Bundle, Vec<u8>), St
     Ok((bundle, bytes))
 }
 
+/// Whether the person uninstalled the bundled app `id`.
+fn uninstalled(store: &Store, id: &str) -> bool {
+    store.db().query_row("SELECT 1 FROM app_uninstalled WHERE app = ?1", [id], |_| Ok(())).is_ok()
+}
+
+/// Notes that the person uninstalled `id`, one of Claktory's own apps, or
+/// (`gone` false) that it's installed again.
+pub(crate) fn note_uninstalled(factory: &Factory, id: &str, key: &str, gone: bool) {
+    let db = factory.store.db();
+    let done = if !gone {
+        db.execute("DELETE FROM app_uninstalled WHERE app = ?1", [id])
+    } else if factory.apps.bundled.offers(factory).iter().any(|offer| offer.manifest.id == id && offer.key == key) {
+        db.execute("INSERT OR REPLACE INTO app_uninstalled (app, at) VALUES (?1, ?2)", rusqlite::params![id, crate::transcript::now_ms()])
+    } else {
+        return;
+    };
+    if let Err(error) = done {
+        tracing::error!(app = %id, %error, "could not note whether the person uninstalled one of Claktory's apps");
+    }
+}
+
+/// Whether `after` asks for anything `before` didn't but data, which
+/// installing or updating grants nothing of: then the person reviews it.
+fn asks_more(before: &Manifest, after: &Manifest) -> bool {
+    after.hosts.iter().any(|host| !before.hosts.contains(host))
+        || after
+            .scopes
+            .iter()
+            .any(|scope| before.scope(&scope.id).is_none_or(|old| scope.tools.iter().any(|tool| !old.tools.contains(tool))))
+        || after.events.iter().any(|event| before.event(&event.kind).is_none())
+        || after.secrets.iter().any(|secret| before.secret(&secret.name).is_none())
+        || after.memory_mb > before.memory_mb
+        || after.storage_mb > before.storage_mb
+}
+
+/// Installs each bundled app that isn't installed and that the person
+/// didn't uninstall, and updates each that's older when the new one asks
+/// for nothing new but data, through the same checks as any install
+/// (`install_local_app`, its file read and checked again). Nothing is
+/// granted: a new install reads no data and no agent has it. Once each time
+/// the offers are read.
+pub(crate) async fn keep_installed(factory: &Arc<Factory>) {
+    if !factory.apps.available() || factory.apps.bundled.kept.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let offers = factory.apps.bundled.offers(factory);
+    for offer in offers {
+        let id = offer.manifest.id.clone();
+        let installed = factory.lock().config.apps.iter().find(|app| app.id == id).cloned();
+        match &installed {
+            None if uninstalled(&factory.store, &id) => continue,
+            None => {}
+            Some(app) if app.key != offer.key || !newer(&offer.manifest.version, &app.version) => continue,
+            Some(_) => {
+                let more = factory.apps.manifest(&id).is_none_or(|before| asks_more(&before, &offer.manifest));
+                if more {
+                    tracing::info!(app = %id, version = %offer.manifest.version, "a newer bundled app asks for more: offered for the person to review");
+                    continue;
+                }
+            }
+        }
+        let ask = v1::InstallLocalApp { bundled: id.clone(), ..Default::default() };
+        let reviewed = match factory.install_local_app(&ask).await {
+            Ok(Some(reviewed)) => reviewed,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(app = %id, %error, "couldn't read a bundled app to install it");
+                continue;
+            }
+        };
+        let approve = v1::InstallLocalApp { bundled: id.clone(), approve: true, sha256: reviewed.sha256, ..Default::default() };
+        match factory.install_local_app(&approve).await {
+            Ok(_) if installed.is_none() => {
+                tracing::info!(app = %id, version = %offer.manifest.version, "installed one of Claktory's own apps, granting it nothing")
+            }
+            Ok(_) => tracing::info!(app = %id, version = %offer.manifest.version, "updated one of Claktory's own apps"),
+            Err(error) => tracing::warn!(app = %id, %error, "couldn't install a bundled app"),
+        }
+    }
+}
+
+/// Whether the installed `app` is one of the bundled ones (AppInfo.bundled).
+pub(crate) fn is_bundled(factory: &Factory, id: &str, key: &str) -> bool {
+    factory.apps.available() && factory.apps.bundled.offers(factory).iter().any(|offer| offer.manifest.id == id && offer.key == key)
+}
+
 /// Whether app version `candidate` is newer than `than` ("0.2.1" > "0.2.0").
 fn newer(candidate: &str, than: &str) -> bool {
     crate::update::newer(&format!("v{candidate}"), &format!("v{than}"))
@@ -140,8 +240,9 @@ fn offered(offer: &Offer, installed: Option<(&str, &str)>) -> Option<String> {
     }
 }
 
-/// Workspace.bundled_apps: those not installed, or newer than the version
-/// installed from the same publisher; none while apps aren't offered.
+/// Workspace.bundled_apps: those not installed (saying whether the person
+/// uninstalled them), or newer than the version installed from the same
+/// publisher; none while apps aren't offered.
 pub(crate) fn view(factory: &Factory, config: &Config) -> Vec<v1::BundledApp> {
     if !factory.apps.available() {
         return Vec::new();
@@ -162,6 +263,7 @@ pub(crate) fn view(factory: &Factory, config: &Config) -> Vec<v1::BundledApp> {
                 icon: manifest.icon.clone(),
                 version: manifest.version.clone(),
                 publisher: manifest.publisher.clone(),
+                uninstalled: installed.is_none() && uninstalled(&factory.store, &manifest.id),
                 installed_version,
             })
         })
@@ -173,6 +275,8 @@ pub(crate) fn view(factory: &Factory, config: &Config) -> Vec<v1::BundledApp> {
 pub fn set_folder_for_test(factory: &Factory, folder: PathBuf) {
     *factory.apps.bundled.folder.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(folder);
     *factory.apps.bundled.read.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    factory.apps.bundled.kept.store(false, std::sync::atomic::Ordering::Release);
+    factory.apps.poke();
 }
 
 #[cfg(test)]

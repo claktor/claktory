@@ -91,7 +91,7 @@ interface host {
   set-timer: func(name: string, after-ms: u64);
   cancel-timer: func(name: string);
 
-  /// One short line the person sees under the app in Settings → Apps, such
+  /// One short line the person sees under the app in the Marketplace's Apps tab, such
   /// as how to finish its setup; empty clears it.
   set-status: func(text: string);
 

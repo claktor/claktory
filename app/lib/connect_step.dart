@@ -4,9 +4,11 @@ import 'package:flutter/widgets.dart';
 
 import 'connections.dart';
 import 'controls.dart';
+import 'devices.dart' show thisDeviceKind;
 import 'identity.dart';
 import 'links.dart' show confirmPairing;
 import 'name_step.dart' show StepCard;
+import 'pasted_code.dart';
 import 'rail.dart' show ClaktoriesScope;
 import 'scope.dart';
 import 'your_claktories.dart' show YourClaktories;
@@ -106,12 +108,17 @@ class _ConnectStepState extends State<ConnectStep> {
         listenable: _code,
         builder: (context, _) {
           final pasted = _code.text.trim();
-          final target = parsePairingCode(pasted);
+          final target = pastedPairingCode(pasted);
           final usable = target != null && target.tunnelled;
           final error = pasted.isEmpty
               ? null
               : target == null
-              ? "That isn't a Claktory code."
+              ? otherCodeProblem(
+                      pasted,
+                      device: thisDeviceKind,
+                      where: whereItRuns,
+                    ) ??
+                    "That isn't a Claktory code."
               : !target.tunnelled
               ? 'This code is from an older Claktory. Update it, then make '
                     'a new code.'

@@ -24,7 +24,7 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'settings_view.dart' show modelLabel;
 import 'transcript.dart';
-import 'usage_wait.dart' show usageWaitLine;
+import 'usage_wait.dart' show UsageSwitchLine, usageWaitLine;
 
 /// A chat's color: its glyph, its bar's line and the person's bubbles in
 /// it. Slate, no agent's, since a chat is no one in particular; white text
@@ -327,9 +327,11 @@ class _ChatViewState extends State<ChatView> {
     final body = LayoutBuilder(
       builder: (context, constraints) {
         final bottom = [
+          // Back to its own provider once it has room (#341).
+          UsageSwitchLine(id: chat.id),
           ReconnectingLine(
             otherwise: _working
-                ? WorkingLine(onStop: _stop, wait: wait)
+                ? WorkingLine(onStop: _stop, wait: wait, waiting: chat.id)
                 : const SizedBox.shrink(),
           ),
           MessageBox(

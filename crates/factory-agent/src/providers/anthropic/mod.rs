@@ -1,5 +1,7 @@
 pub mod auth;
 pub mod oauth;
+#[cfg(any(test, feature = "qa-provider"))]
+pub mod qa;
 
 use futures_util::StreamExt;
 use hashbrown::HashMap;

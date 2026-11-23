@@ -16,6 +16,7 @@ import 'mobile/device.dart' show loadDeviceCapabilities;
 import 'mobile/platform_policy.dart';
 import 'mobile/push.dart' show HttpPushRelay, IosPushDevice, PushRegistrar;
 import 'notifications.dart';
+import 'people/secret_clipboard.dart' show startClipboardSweeps;
 import 'rail.dart';
 import 'scope.dart';
 import 'setup.dart';
@@ -34,6 +35,9 @@ Future<void> main() async {
   }
   // Third-party licences the app ships, before anything can list them.
   registerLicenses();
+  // Codes copied marked sensitive and now dead come off the clipboard, at
+  // launch and on each return (Fugo's row 181).
+  startClipboardSweeps();
   // What this device is (an iPad, a phone), before the first frame: so
   // nothing lays out as another device first.
   await loadDeviceCapabilities();

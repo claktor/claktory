@@ -1,6 +1,7 @@
 import 'package:factory_app/forms.dart' show AgentSettingsForm;
 import 'package:factory_app/layout.dart' show leaves;
 import 'package:factory_app/map.dart';
+import 'package:factory_app/marketplace.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/screens.dart';
 import 'package:factory_app/settings_view.dart';
@@ -84,6 +85,33 @@ void main() {
     expect(answer(harness).opened, isTrue);
     expect(kinds(harness), ['chat', 'map']);
     expect(find.byType(MapView), findsOneWidget);
+  });
+
+  testWidgets('the Marketplace opens on the tab asked for; an older '
+      'backend\'s settings/apps opens its Apps tab', (tester) async {
+    final harness = await showMac(tester);
+    harness.backend.workspace.apply(
+      harness.backend.workspace.workspace.deepCopy()..appsAvailable = true,
+    );
+    await settle(tester);
+    await touch(tester);
+    harness.backend.screenRequested(request('settings', 'apps'));
+    await settle(tester);
+    expect(answer(harness).opened, isTrue);
+    expect(kinds(harness), ['chat', 'marketplace']);
+    expect(find.byType(MarketplaceView), findsOneWidget);
+    expect(find.text('Install from a file…'), findsOneWidget);
+    expect(harness.backend.marketplaceTab.value, isNull);
+
+    // Another tab, by its id, in the Marketplace already open.
+    harness.backend.screenRequested(request('marketplace', 'skills'));
+    await settle(tester);
+    expect(find.text('No skills yet.'), findsOneWidget);
+    harness.backend.screenRequested(request('marketplace', 'apps'));
+    await settle(tester);
+    expect(find.text('Install from a file…'), findsOneWidget);
+    // The open pane's glow ends.
+    await tester.pump(const Duration(seconds: 2));
   });
 
   testWidgets('an agent\'s conversation opens, and its settings', (

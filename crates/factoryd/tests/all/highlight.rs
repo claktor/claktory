@@ -135,6 +135,14 @@ async fn agents_open_a_screen_in_the_app_the_person_is_using() {
     let said = call(&mut client, &mut view, "lead", r#"call show_screen {"screen":"agent_settings","id":"lead"}"#).await;
     assert!(said.starts_with("tool show_screen: Opened Lead's settings on "), "{said}");
     assert_eq!(*asked.lock().expect("asked"), [("agent_settings".to_owned(), "lead".to_owned(), "lead".to_owned())]);
+    // Apps moved from Settings to the Marketplace: the old way lands there.
+    asked.lock().expect("asked").clear();
+    let said = call(&mut client, &mut view, "lead", r#"call show_screen {"screen":"settings","id":"apps"}"#).await;
+    assert!(said.starts_with("tool show_screen: Opened Marketplace → Apps on "), "{said}");
+    let said = call(&mut client, &mut view, "lead", r#"call show_screen {"screen":"marketplace","id":"apps"}"#).await;
+    assert!(said.starts_with("tool show_screen: Opened Marketplace → Apps on "), "{said}");
+    let both = ("marketplace".to_owned(), "apps".to_owned(), "lead".to_owned());
+    assert_eq!(*asked.lock().expect("asked"), [both.clone(), both]);
     in_use.store(false, Ordering::SeqCst);
     let said = call(&mut client, &mut view, "lead", r#"call show_screen {"screen":"map"}"#).await;
     assert_eq!(
@@ -148,6 +156,10 @@ async fn agents_open_a_screen_in_the_app_the_person_is_using() {
         (r#"{"screen":"settings","id":"secret"}"#, "Settings has no section \"secret\""),
         (r#"{"screen":"agent","id":"nobody"}"#, "No agent has the id \"nobody\"."),
         (r#"{"screen":"map","id":"x"}"#, "the Map takes no id."),
+        (
+            r#"{"screen":"marketplace","id":"plugins"}"#,
+            "The Marketplace has no tab \"plugins\"; use one of templates, skills, extensions, apps.",
+        ),
     ] {
         let said = call(&mut client, &mut view, "lead", &format!("call show_screen {args}")).await;
         assert!(said.contains(why), "{said}");

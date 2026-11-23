@@ -567,3 +567,119 @@ async fn a_message_from_the_person_makes_a_waiting_agent_ask_again() {
     assert!(shown.contains(&"user: carry on".to_owned()), "{shown:?}");
     assert!(now_ms() < resets * 1000, "well before the reset");
 }
+
+/// An agent on a Fable model or not, waiting on account a's limit; storing
+/// false in the flag lifts the mock's limit, as a plan upgrade would.
+async fn waiting(fable: bool) -> (std::path::PathBuf, Arc<Factory>, Client, View, Arc<AtomicBool>, Arc<Mutex<Vec<(String, String)>>>) {
+    let dir = temp_dir();
+    let resets = now_ms() / 1000 + 3 * 3600;
+    let limited = Arc::new(AtomicBool::new(true));
+    let (base_url, seen) = anthropic_with(resets, limited.clone()).await;
+    let factory = Factory::open(crate::common::home(&dir), Arc::new(only_a(&dir, &base_url))).await.expect("open");
+    let (mut client, mut view) = serve(&factory, &dir).await;
+    let model = factory_agent::providers::catalog::models("anthropic")
+        .into_iter()
+        .find(|model| model.id.starts_with("claude-fable") == fable)
+        .expect("a model")
+        .id;
+    let create = Request::CreateAgent(v1::CreateAgent {
+        name: "Builder".into(),
+        model: format!("anthropic/{model}"),
+        effort: "low".into(),
+        ..Default::default()
+    });
+    assert!(matches!(apply_request(&mut client, &mut view, create).await, Body::Ack(_)));
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
+    view.follow(&mut client, |view| builder(view).usage_wait.starts_with("Waiting for your Claude usage to reset at ")).await;
+    assert_eq!(model_requests(&seen), 1);
+    (dir, factory, client, view, limited, seen)
+}
+
+/// Account a, signed in to again as the app would: the same id and label,
+/// a new token, no limit marks.
+fn signed_in_again(dir: &std::path::Path) {
+    let mut again = account("a");
+    again["factoryLabel"] = json!("a@x.com");
+    std::fs::write(dir.join("auth.json"), json!({"anthropic": again}).to_string()).expect("credentials");
+}
+
+async fn answered(client: &mut Client, view: &mut View) {
+    view.follow(client, |view| describe(&view.entries).iter().any(|entry| entry == "assistant: hi")).await;
+    view.follow(client, |view| builder(view).status() == v1::AgentStatus::Idle && builder(view).usage_wait.is_empty()).await;
+}
+
+/// Friend bug #3: signing in to the account again forgets its limits, and
+/// the waiting agent asks again at once, on either pool. Fable's mark isn't
+/// in the providers listing, so there the listing looked the same and the
+/// agent slept on until its reset.
+#[tokio::test]
+async fn signing_in_again_wakes_an_agent_waiting_on_either_pool() {
+    for fable in [true, false] {
+        let (dir, _factory, mut client, mut view, limited, seen) = waiting(fable).await;
+        limited.store(false, Ordering::SeqCst);
+        let before = claude(&view);
+        signed_in_again(&dir);
+        answered(&mut client, &mut view).await;
+        assert_eq!(model_requests(&seen), 2, "fable {fable}");
+        if fable {
+            assert_eq!(claude(&view), before, "the listing shows no change");
+        }
+    }
+}
+
+/// Signed out of its only account while it waits, the agent doesn't fail:
+/// it waits for a sign-in, says so, and carries on with its request after.
+#[tokio::test]
+async fn an_agent_signed_out_while_it_waits_carries_on_after_the_sign_in() {
+    let (dir, _factory, mut client, mut view, limited, seen) = waiting(false).await;
+    limited.store(false, Ordering::SeqCst);
+    let sign_out = Request::SignOut(v1::SignOut { provider_id: "anthropic".into(), account_id: String::new() });
+    assert!(matches!(apply_request(&mut client, &mut view, sign_out).await, Body::Ack(_)));
+    view.follow(&mut client, |view| builder(view).usage_wait == "Waiting for you to sign in to Claude").await;
+    assert_eq!(builder(&view).usage_wait_until_ms, 0);
+    view.follow(&mut client, |view| {
+        describe(&view.entries)
+            .iter()
+            .any(|entry| entry == "notice: You're signed out of Claude. Builder will carry on once you sign in under Settings → Providers.")
+    })
+    .await;
+    assert_eq!(builder(&view).status(), v1::AgentStatus::Working);
+    signed_in_again(&dir);
+    answered(&mut client, &mut view).await;
+    assert_eq!(model_requests(&seen), 2, "the request it held goes once, after the sign-in");
+    assert!(!describe(&view.entries).iter().any(|entry| entry.contains("not configured")), "{:?}", describe(&view.entries));
+}
+
+/// Try now: the agent asks the provider again at once. Refused while it
+/// isn't waiting, and for an agent that isn't there.
+#[tokio::test]
+async fn try_now_asks_again_at_once() {
+    let (_dir, _factory, mut client, mut view, limited, seen) = waiting(true).await;
+    let try_now = || Request::TryAgainNow(v1::TryAgainNow { agent_id: "builder".into() });
+
+    // Still at its limit: one refused request, and it waits again.
+    assert!(matches!(apply_request(&mut client, &mut view, try_now()).await, Body::Ack(_)));
+    let mut tries = 0;
+    while model_requests(&seen) < 2 && tries < 100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tries += 1;
+    }
+    assert_eq!(model_requests(&seen), 2);
+    view.follow(&mut client, |view| builder(view).usage_wait.starts_with("Waiting for your Claude usage to reset at ")).await;
+
+    // Room again: it carries on.
+    limited.store(false, Ordering::SeqCst);
+    assert!(matches!(apply_request(&mut client, &mut view, try_now()).await, Body::Ack(_)));
+    answered(&mut client, &mut view).await;
+    assert_eq!(model_requests(&seen), 3);
+
+    let idle = client.request(try_now()).await;
+    assert!(
+        matches!(idle.body, Body::Error(ref error) if error.code() == ErrorCode::InvalidRequest && error.message == "Builder isn't waiting anymore."),
+        "{:?}",
+        idle.body
+    );
+    let nobody = client.request(Request::TryAgainNow(v1::TryAgainNow { agent_id: "nobody".into() })).await;
+    assert!(matches!(nobody.body, Body::Error(ref error) if error.code() == ErrorCode::NotFound), "{:?}", nobody.body);
+}

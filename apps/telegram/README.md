@@ -12,7 +12,7 @@ host, which gives it only what its manifest asks for and you approve.
   [@BotFather](https://t.me/BotFather) (`/newbot`). Claktory keeps it in the
   vault, granted to the app, never to agents.
 - **Linking:** started, the app makes a one-time code and says in
-  Settings → Apps how to link your chat: open `https://t.me/<bot>?start=<code>`
+  the Marketplace's Apps tab how to link your chat: open `https://t.me/<bot>?start=<code>`
   and tap Start, or send the bot `/start <code>`. From then on it answers
   only that chat, and ignores everyone else.
 - **Your messages:** it long-polls Telegram (`getUpdates`, 25 s at a time,

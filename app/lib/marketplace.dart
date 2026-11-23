@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'apps.dart' show AppsList;
 import 'controls.dart';
 import 'identity.dart';
 import 'mobile/header.dart';
@@ -37,6 +38,13 @@ enum _Kind {
     'Extensions',
     'New things your agents can do, added while Claktory runs.',
     'No extensions yet.',
+  ),
+  apps(
+    'Apps',
+    'Apps add things to Claktory, such as Charts, live charts of what your '
+        "agents do. Tell Rivet what you'd like, and it sets an app up for "
+        'you.',
+    'No apps yet.',
   );
 
   const _Kind(this.title, this.about, this.empty);
@@ -48,10 +56,63 @@ enum _Kind {
 
 class _MarketplaceViewState extends State<MarketplaceView> {
   var _kind = _Kind.templates;
+  ValueNotifier<String?>? _wanted;
 
   @override
-  Widget build(BuildContext context) {
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final wanted = AppScope.of(context).marketplaceTab;
+    if (wanted == _wanted) return;
+    _wanted?.removeListener(_follow);
+    _wanted = wanted..addListener(_follow);
+    // Opened to show a tab: it's built with that one.
+    _kind = _asked() ?? _kind;
+  }
+
+  @override
+  void dispose() {
+    _wanted?.removeListener(_follow);
+    super.dispose();
+  }
+
+  /// The tab asked for ([Backend.marketplaceTab]), if any; it's cleared
+  /// after this frame, so every Marketplace showing switches to it.
+  _Kind? _asked() {
+    final wanted = _wanted;
+    final id = wanted?.value;
+    if (wanted == null || id == null) return null;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (wanted.value == id) wanted.value = null;
+    });
+    return _kinds(context).where((kind) => kind.name == id).firstOrNull;
+  }
+
+  void _follow() {
+    final kind = _asked();
+    if (kind != null && kind != _kind && mounted) {
+      setState(() => _kind = kind);
+    }
+  }
+
+  /// The tabs there are: Apps only where the backend offers them.
+  List<_Kind> _kinds(BuildContext context) => [
+    for (final kind in _Kind.values)
+      if (kind != _Kind.apps ||
+          AppScope.of(context).workspace.workspace.appsAvailable)
+        kind,
+  ];
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    // Apps comes and goes with the backend's offer.
+    listenable: AppScope.of(context).workspace,
+    builder: (context, _) => _build(context),
+  );
+
+  Widget _build(BuildContext context) {
     final palette = Palette.of(context);
+    final kinds = _kinds(context);
+    final shown = kinds.contains(_kind) ? _kind : kinds.first;
     void close() => AppScope.closePage(context);
     // Beside a conversation, the pane's header names and closes it: the
     // bar keeps only the tabs.
@@ -81,10 +142,10 @@ class _MarketplaceViewState extends State<MarketplaceView> {
                   padding: const EdgeInsets.symmetric(horizontal: Space.s),
                   child: Row(
                     children: [
-                      for (final kind in _Kind.values)
+                      for (final kind in kinds)
                         _Tab(
                           title: kind.title,
-                          selected: kind == _kind,
+                          selected: kind == shown,
                           onTap: () => setState(() => _kind = kind),
                         ),
                     ],
@@ -134,10 +195,10 @@ class _MarketplaceViewState extends State<MarketplaceView> {
                                   scrollDirection: Axis.horizontal,
                                   child: Row(
                                     children: [
-                                      for (final kind in _Kind.values)
+                                      for (final kind in kinds)
                                         _Tab(
                                           title: kind.title,
-                                          selected: kind == _kind,
+                                          selected: kind == shown,
                                           onTap: () =>
                                               setState(() => _kind = kind),
                                         ),
@@ -166,42 +227,45 @@ class _MarketplaceViewState extends State<MarketplaceView> {
                       ),
                       children: [
                         Text(
-                          _kind.title,
+                          shown.title,
                           style: TypeScale.of(context).emphasis
                               .copyWith(color: palette.text),
                         ),
                         const SizedBox(height: Space.s),
                         Text(
-                          _kind.about,
+                          shown.about,
                           style: TypeScale.of(context).body
                               .copyWith(color: palette.textMuted),
                         ),
                         const SizedBox(height: Space.xl),
-                        ListenableBuilder(
-                          listenable: AppScope.of(context).workspace,
-                          builder: (context, _) {
-                            final offered = _kind == _Kind.extensions
-                                ? AppScope.of(context)
-                                      .workspace
-                                      .workspace
-                                      .extensions
-                                : const <Extension>[];
-                            if (offered.isEmpty) {
-                              return Text(
-                                _kind.empty,
-                                style: TypeScale.of(context).body
-                                    .copyWith(color: palette.textFaint),
+                        if (shown == _Kind.apps)
+                          const AppsList()
+                        else
+                          ListenableBuilder(
+                            listenable: AppScope.of(context).workspace,
+                            builder: (context, _) {
+                              final offered = shown == _Kind.extensions
+                                  ? AppScope.of(context)
+                                        .workspace
+                                        .workspace
+                                        .extensions
+                                  : const <Extension>[];
+                              if (offered.isEmpty) {
+                                return Text(
+                                  shown.empty,
+                                  style: TypeScale.of(context).body
+                                      .copyWith(color: palette.textFaint),
+                                );
+                              }
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  for (final extension in offered)
+                                    _ExtensionCard(extension: extension),
+                                ],
                               );
-                            }
-                            return Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                for (final extension in offered)
-                                  _ExtensionCard(extension: extension),
-                              ],
-                            );
-                          },
-                        ),
+                            },
+                          ),
                       ],
                     ),
                   ),

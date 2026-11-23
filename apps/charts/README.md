@@ -7,11 +7,17 @@ what its manifest asks for and you approve.
 
 ## How it works
 
-- **Data:** it asks to read Claktory's records (`[[data]]` kind
-  `factory-records`) and, one by one as you choose, agents' own databases
-  (`agent-database`, `agent = "*"`). Nothing is shared until you turn a
-  source on in Settings → Apps, and you can turn it off at any time. Until
-  one is on, its view says how, and it reads nothing.
+- **Data:** it asks to read your agents' activity (`[[data]]` kind
+  `activity`: runs, usage, tasks, monitors, checklists and messages' times,
+  never their text) and, one by one as you choose, agents' own databases
+  (`agent-database`, `agent = "*"`), and CSV or TSV files you choose
+  (`file`: each one table, `rows`, read again at every query). Nothing is
+  shared by default: Rivet sets up what it reads and which agents may change
+  it when you ask (a card asks you first for anything private, such as an
+  agent's database or a file), or you turn a source on in Marketplace →
+  Apps; you can turn it off at any time. Until one is on, its view says how, and it reads nothing. A
+  Claktory that gave it all of Claktory's records (`factory-records`)
+  before keeps that until you turn it off.
 - **Dashboards:** definitions kept in the app's own key-value store
   (`dashboards`, the list; `dashboard/<id>`; `previous/<id>`, the version
   before the current one). Each has a name, the range it opens on

@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:io' show File;
 
 import 'package:flutter/widgets.dart';
 
+import 'app_dock.dart' show openApp;
 import 'attachments.dart' show pickAttachments, pickFiles;
 import 'backend.dart';
 import 'characters/character.dart';
@@ -12,9 +14,11 @@ import 'mobile/metrics.dart';
 import 'mobile/platform_policy.dart';
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
+import 'resources.dart' show formatBytes;
 import 'scope.dart';
 import 'selection.dart';
 import 'usage.dart' show formatAge;
+import 'visible_codes.dart' show proseCodes;
 
 /// The grantee a secret given to an app has in the vault: "app:telegram".
 const appGrantee = 'app:';
@@ -46,11 +50,12 @@ Future<List<int>?> pickAppFile() async {
 /// Stands in for the system's file picker in tests.
 Future<List<int>?> Function()? appFilePicker;
 
-/// Settings → Apps: the apps installed, each with whether it runs, its
-/// setup, the agents it's given to and the events they hear; and
-/// installing one from a file.
-class AppsSettings extends StatelessWidget {
-  const AppsSettings({super.key});
+/// The Marketplace's Apps tab: the apps installed, Claktory's own first,
+/// each with whether it runs, its setup, the agents it's given to and the
+/// events they hear; Claktory's own not installed yet; and installing one
+/// from a file.
+class AppsList extends StatelessWidget {
+  const AppsList({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -59,7 +64,12 @@ class AppsSettings extends StatelessWidget {
       listenable: backend.workspace,
       builder: (context, _) {
         final palette = Palette.of(context);
-        final apps = backend.workspace.workspace.apps;
+        // By name, Claktory's own first.
+        final apps = [
+          ...backend.workspace.workspace.apps,
+        ]..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+        bool own(AppInfo app) =>
+            app.bundled || app.tier == AppTier.APP_TIER_CLAKTORY;
         final bundled = backend.workspace.workspace.bundledApps;
         // A newer version of an installed app updates it from its own row.
         final updates = {
@@ -77,18 +87,30 @@ class AppsSettings extends StatelessWidget {
                 style: TypeScale.of(context).body
                     .copyWith(color: palette.textFaint),
               )
-            else
+            else ...[
               for (final app in apps)
-                AppRow(
-                  key: ValueKey(app.id),
-                  app: app,
-                  update: updates[app.id],
-                ),
-            // Claktory's own apps this release ships, not installed yet (or
-            // newer than one whose row is gone).
-            for (final offer in bundled)
-              if (!updates.containsKey(offer.id))
-                BundledAppRow(key: ValueKey('bundled:${offer.id}'), app: offer),
+                if (own(app))
+                  AppRow(
+                    key: ValueKey(app.id),
+                    app: app,
+                    update: updates[app.id],
+                  ),
+              // Claktory's own apps this release ships, not installed yet
+              // (or newer than one whose row is gone).
+              for (final offer in bundled)
+                if (!updates.containsKey(offer.id))
+                  BundledAppRow(
+                    key: ValueKey('bundled:${offer.id}'),
+                    app: offer,
+                  ),
+              for (final app in apps)
+                if (!own(app))
+                  AppRow(
+                    key: ValueKey(app.id),
+                    app: app,
+                    update: updates[app.id],
+                  ),
+            ],
             const SizedBox(height: Space.s),
             Align(
               alignment: Alignment.centerLeft,
@@ -100,8 +122,8 @@ class AppsSettings extends StatelessWidget {
             const SizedBox(height: Space.l),
             Text(
               'Each app runs walled off from everything else: it reaches '
-              'only the sites you approve and keeps its secrets to itself. '
-              'An agent can use an app only once you give it one.',
+              'only the sites you approve, keeps its secrets to itself, and '
+              "reads only what it's allowed to.",
               style: TypeScale.of(context).caption
                   .copyWith(color: palette.textFaint),
             ),
@@ -329,7 +351,9 @@ class _AppInstallFormState extends State<AppInstallForm> {
         if (permissions.sources.isNotEmpty)
           Field(
             label: 'It asks to read',
-            note: 'Nothing is shared until you turn it on in Settings → Apps.',
+            note:
+                "It reads none of this until it's set up. Ask Rivet to set "
+                'it up: it asks you before the app reads anything private.',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -351,7 +375,7 @@ class _AppInstallFormState extends State<AppInstallForm> {
           ),
         if (permissions.scopes.isNotEmpty)
           Field(
-            label: 'Agents you give it to can',
+            label: 'Agents using it can',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -462,16 +486,56 @@ class _AppRowState extends State<AppRow> {
   var _open = false;
   String? _error;
 
+  /// What the last Undo left as it was, because it changed since.
+  String? _note;
+
+  late final _wanted = AppScope.of(context).marketplaceApp;
+
   AppInfo get app => widget.app;
 
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _wanted.addListener(_reveal);
+      _reveal();
+    });
+  }
+
+  @override
+  void dispose() {
+    _wanted.removeListener(_reveal);
+    super.dispose();
+  }
+
+  /// Asked for (History's own app change): opened and brought into view.
+  void _reveal() {
+    if (!mounted || _wanted.value != app.id) return;
+    _wanted.value = null;
+    setState(() => _open = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) Scrollable.ensureVisible(context, duration: Motion.fast);
+    });
+  }
+
   Future<void> _run(Future<void> Function() request) async {
-    setState(() => _error = null);
+    setState(() {
+      _error = null;
+      _note = null;
+    });
     try {
       await request();
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
     }
   }
+
+  /// Undo beside who gave something: back as it was before that change.
+  void _undo(String changeId) => _run(() async {
+    final note = await undoAppAccess(AppScope.of(context), changeId);
+    if (mounted) setState(() => _note = note);
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -606,35 +670,49 @@ class _AppRowState extends State<AppRow> {
                 // the person.
                 if (!_open)
                   for (final item in missing) _SetupLine(app: app, item: item),
-                if (widget.update case final update?)
+                if (app.views.isNotEmpty || widget.update != null)
                   Padding(
                     padding: const EdgeInsets.only(top: Space.xs),
-                    // Which version it's on, beside the one to update to.
+                    // Open, for an app with views; which version it's on,
+                    // beside the one to update to.
                     child: Wrap(
                       spacing: Space.s,
                       runSpacing: Space.xs,
                       crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
-                        Button(
-                          label: 'Update to v${update.version}',
-                          primary: true,
-                          onPressed: () => showModal(
-                            context,
-                            (context, close) => AppInstallForm(
-                              bundled: update.id,
-                              close: close,
+                        if (app.views.isNotEmpty)
+                          Button(
+                            label: 'Open',
+                            onPressed: () => openApp(context, app),
+                          ),
+                        if (widget.update case final update?) ...[
+                          Button(
+                            label: 'Update to v${update.version}',
+                            primary: true,
+                            onPressed: () => showModal(
+                              context,
+                              (context, close) => AppInstallForm(
+                                bundled: update.id,
+                                close: close,
+                              ),
                             ),
                           ),
-                        ),
-                        Text(
-                          'v${update.installedVersion} installed',
-                          style: TypeScale.of(context).caption
-                              .copyWith(color: palette.textFaint),
-                        ),
+                          Text(
+                            'v${update.installedVersion} installed',
+                            style: TypeScale.of(context).caption
+                                .copyWith(color: palette.textFaint),
+                          ),
+                        ],
                       ],
                     ),
                   ),
                 if (_open) _details(context, palette, backend),
+                if (_note case final note?)
+                  Text(
+                    note,
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textMuted),
+                  ),
                 if (_error != null)
                   Text(
                     _error!,
@@ -666,7 +744,19 @@ class _AppRowState extends State<AppRow> {
           Text('Setup', style: _heading(context, palette)),
           for (final item in app.setup) _SetupLine(app: app, item: item),
         ],
-        if (app.sources.isNotEmpty) ...[
+        // Nothing given yet, as Claktory's own apps start.
+        if (app.grants.isEmpty &&
+            (app.sources.isNotEmpty || app.readsFiles) &&
+            !app.sources.any((source) => source.granted)) ...[
+          const SizedBox(height: Space.s),
+          Text(
+            "${app.name} isn't set up yet. Tell Rivet what you'd like from "
+            'it, and it sets ${app.name} up for you.',
+            style: TypeScale.of(context).body
+                .copyWith(color: palette.textMuted),
+          ),
+        ],
+        if (app.sources.isNotEmpty || app.readsFiles) ...[
           const SizedBox(height: Space.m),
           Text('It can read', style: _heading(context, palette)),
           const SizedBox(height: Space.xs),
@@ -674,8 +764,7 @@ class _AppRowState extends State<AppRow> {
             Padding(
               padding: const EdgeInsets.only(bottom: Space.s),
               child: Text(
-                'Turn on what ${app.name} can read. It can\'t read anything '
-                'else.',
+                "${app.name} can read only what's turned on here.",
                 style: caption,
               ),
             ),
@@ -685,15 +774,38 @@ class _AppRowState extends State<AppRow> {
               padding: const EdgeInsets.only(bottom: Space.s),
               child: _SwitchLine(
                 label: source.label,
+                private: source.private,
                 about: sourceReach(app.name, source, workspace),
                 note: source.reason,
                 value: source.granted,
                 onChanged: (on) => _run(
                   () => backend.grantAppSource(app.id, source.id, granted: on),
                 ),
+                given: source.granted && source.hasGiven()
+                    ? AppAccessGivenLine(
+                        given: source.given,
+                        source: true,
+                        onUndo: _undo,
+                      )
+                    : null,
               ),
             ),
           // Where what it reads can go.
+          // A CSV or TSV file the person picks, for an app that reads files.
+          if (app.readsFiles)
+            Padding(
+              padding: const EdgeInsets.only(bottom: Space.s),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Button(
+                  label: 'Add a file…',
+                  onPressed: () => showModal(
+                    context,
+                    (context, close) => AppFileForm(app: app, close: close),
+                  ),
+                ),
+              ),
+            ),
           if (app.hosts.isNotEmpty) _Warning(sendsTo(app.name, app.hosts)),
         ],
         const SizedBox(height: Space.m),
@@ -707,13 +819,18 @@ class _AppRowState extends State<AppRow> {
           )
         else
           for (final grant in app.grants)
-            _GrantLine(app: app, grant: grant, workspace: workspace),
+            _GrantLine(
+              app: app,
+              grant: grant,
+              workspace: workspace,
+              onUndo: _undo,
+            ),
         if (app.scopes.isNotEmpty && _ungranted(workspace, app).isNotEmpty) ...[
           const SizedBox(height: Space.xs),
           Align(
             alignment: Alignment.centerLeft,
             child: Button(
-              label: 'Give to an agent…',
+              label: 'Let an agent use it…',
               onPressed: () => showModal(
                 context,
                 (context, close) => AppAccessForm(app: app, close: close),
@@ -734,6 +851,7 @@ class _AppRowState extends State<AppRow> {
                 app.tier != AppTier.APP_TIER_CLAKTORY)
               publisherLine(app.tier, app.publisher),
             tierLine(app.tier, app.publisherKey),
+            if (app.bundled) 'Comes with Claktory',
             if (app.installedMs > 0)
               'Installed ${formatAge(app.installedMs.toInt(), DateTime.now())}',
           ].join(' · '),
@@ -750,6 +868,90 @@ class _AppRowState extends State<AppRow> {
             ),
           ),
         ),
+      ],
+    );
+  }
+}
+
+/// Who gave something in an app's access as it is now, and when:
+/// "Given by Rivet", "You approved it", "You gave it" (for a [source],
+/// turned on). Null-free: an agent since deleted is "an agent".
+String appAccessGivenText(
+  Workspace workspace,
+  AppAccessGiven given, {
+  bool source = false,
+}) {
+  final by = given.byAgentId;
+  if (by.isNotEmpty) {
+    final name =
+        workspace.agents.where((agent) => agent.id == by).firstOrNull?.name ??
+        'an agent';
+    return source ? 'Turned on by $name' : 'Given by $name';
+  }
+  if (given.byCard) return 'You approved it';
+  return source ? 'You turned it on' : 'You gave it';
+}
+
+/// Undoes the app access change [changeId]; what to tell the person
+/// after: what was left as it was because it changed since, or null when
+/// it all went back.
+Future<String?> undoAppAccess(Backend backend, String changeId) async {
+  final undone = await backend.undoAppAccessChange(changeId);
+  if (undone.kept.isNotEmpty) return undone.kept.join(' ');
+  if (undone.changeId.isEmpty) {
+    return "Nothing to undo: it's all changed since.";
+  }
+  return null;
+}
+
+/// "Given by Rivet · 2h ago · Undo": who set this part of an app's access
+/// as it is, when, and Undo, which puts back what that change replaced.
+class AppAccessGivenLine extends StatelessWidget {
+  const AppAccessGivenLine({
+    super.key,
+    required this.given,
+    required this.onUndo,
+    this.source = false,
+  });
+
+  final AppAccessGiven given;
+  final ValueChanged<String> onUndo;
+
+  /// A source turned on, rather than an agent's access.
+  final bool source;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final workspace = AppScope.of(context).workspace.workspace;
+    final style = TypeScale.of(context).caption
+        .copyWith(color: palette.textFaint);
+    final at = given.atMs.toInt();
+    return Wrap(
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        Text(
+          [
+            appAccessGivenText(workspace, given, source: source),
+            if (at > 0) formatAge(at, DateTime.now()),
+          ].join(' · '),
+          style: style,
+        ),
+        if (given.changeId.isNotEmpty) ...[
+          Text(' · ', style: style),
+          Semantics(
+            button: true,
+            child: Pressable(
+              onTap: () => onUndo(given.changeId),
+              builder: (context, hovered) => Text(
+                'Undo',
+                style: style.copyWith(
+                  color: hovered ? palette.text : palette.signal,
+                ),
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -851,11 +1053,13 @@ class _GrantLine extends StatelessWidget {
     required this.app,
     required this.grant,
     required this.workspace,
+    required this.onUndo,
   });
 
   final AppInfo app;
   final AppGrant grant;
   final Workspace workspace;
+  final ValueChanged<String> onUndo;
 
   @override
   Widget build(BuildContext context) {
@@ -904,6 +1108,8 @@ class _GrantLine extends StatelessWidget {
                   style: TypeScale.of(context).caption
                       .copyWith(color: palette.textFaint),
                 ),
+                if (grant.hasGiven())
+                  AppAccessGivenLine(given: grant.given, onUndo: onUndo),
               ],
             ),
           ),
@@ -1026,11 +1232,16 @@ class _AppAccessFormState extends State<AppAccessForm> {
         '';
     return FormFrame(
       title: agent == null
-          ? 'Give ${app.name} to an agent'
+          ? 'Let an agent use ${app.name}'
           : '${app.name} for ${agent.name}',
       fields: [
-        // Through the app, an agent reads what the app reads.
-        if (_read(app).isNotEmpty) ...[
+        // Through the app, an agent reads what the app reads: with a scope
+        // that reads it, where the app says which do (AppScopeSpec.reads_data).
+        if (_read(app).isNotEmpty &&
+            (!app.scopes.any((scope) => scope.readsData) ||
+                app.scopes.any(
+                  (scope) => scope.readsData && _scopes.contains(scope.id),
+                ))) ...[
           _Warning(
             'Through ${app.name}, ${name.isEmpty ? 'the agent' : name} can '
             'also read ${_andList(_read(app))}.',
@@ -1151,9 +1362,17 @@ class _SwitchLine extends StatelessWidget {
     this.note,
     this.about,
     this.mono = false,
+    this.private = false,
+    this.given,
   });
 
   final String label;
+
+  /// Who turned it on and when, with Undo, under the rest.
+  final Widget? given;
+
+  /// It holds people's words (AppDataSource.private): marked so.
+  final bool private;
 
   /// What turning it on means, plainly, under the label, before [note].
   final String? about;
@@ -1181,8 +1400,13 @@ class _SwitchLine extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  label,
+                Text.rich(
+                  TextSpan(
+                    children: [
+                      TextSpan(text: label),
+                      if (private) _privateTag(context),
+                    ],
+                  ),
                   style: TypeScale.of(context).body.copyWith(
                     color: onChanged == null ? palette.textMuted : palette.text,
                   ),
@@ -1201,10 +1425,245 @@ class _SwitchLine extends StatelessWidget {
                       fontFamily: mono ? TextStyles.mono : null,
                     ),
                   ),
+                ?given,
               ],
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Add a file…: the CSV and TSV files in the workspace and the projects
+/// that [app] could read (ListAppFiles), newest first, with a search; one
+/// that can't be given says why and can't be chosen. Add gives the chosen
+/// one (GrantAppSource), or says why Claktory refused it.
+class AppFileForm extends StatefulWidget {
+  const AppFileForm({super.key, required this.app, required this.close});
+
+  final AppInfo app;
+  final VoidCallback close;
+
+  @override
+  State<AppFileForm> createState() => _AppFileFormState();
+}
+
+class _AppFileFormState extends State<AppFileForm> {
+  late final Backend _backend = AppScope.of(context);
+  final _search = TextEditingController();
+  Timer? _typing;
+
+  var _files = <AppFileChoice>[];
+  var _truncated = false;
+  var _loading = true;
+  String? _failed;
+
+  /// Which ask is the latest: an answer to an older one is dropped.
+  var _asked = 0;
+
+  AppFileChoice? _chosen;
+  var _busy = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _search.addListener(_searchChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _load();
+    });
+  }
+
+  @override
+  void dispose() {
+    _typing?.cancel();
+    _search.dispose();
+    super.dispose();
+  }
+
+  void _searchChanged() {
+    _typing?.cancel();
+    _typing = Timer(const Duration(milliseconds: 300), () {
+      if (mounted) _load();
+    });
+  }
+
+  Future<void> _load() async {
+    final asked = ++_asked;
+    setState(() {
+      _loading = true;
+      _failed = null;
+    });
+    try {
+      final found = await _backend.listAppFiles(
+        widget.app.id,
+        query: _search.text.trim(),
+      );
+      if (!mounted || asked != _asked) return;
+      setState(() {
+        _files = found.files;
+        _truncated = found.truncated;
+        _loading = false;
+        if (!_files.any((file) => file.id == _chosen?.id)) _chosen = null;
+      });
+    } on RequestFailure catch (failure) {
+      if (!mounted || asked != _asked) return;
+      setState(() {
+        _failed = failure.message;
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _add() async {
+    final chosen = _chosen;
+    if (chosen == null || _busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await _backend.grantAppSource(widget.app.id, chosen.id, granted: true);
+      if (mounted) widget.close();
+    } on RequestFailure catch (failure) {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _error = failure.message;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final caption = type.caption.copyWith(color: palette.textFaint);
+    final query = _search.text.trim();
+    final given = {
+      for (final source in widget.app.sources)
+        if (source.granted) source.id,
+    };
+    return FormFrame(
+      title: 'Add a file to ${widget.app.name}',
+      body:
+          '${widget.app.name} reads the file as it is, each time it needs '
+          'it. CSV and TSV files in your projects and workspace are listed '
+          'here.',
+      dirty: _chosen != null,
+      fields: [
+        TextField(
+          controller: _search,
+          placeholder: 'Search by name or project',
+          semanticsLabel: 'Search files',
+        ),
+        const SizedBox(height: Space.s),
+        if (_failed case final why?)
+          Text(why, style: type.caption.copyWith(color: palette.danger))
+        else if (_files.isEmpty)
+          Text(
+            _loading
+                ? 'Loading…'
+                : query.isEmpty
+                ? 'No CSV or TSV files in your workspace or projects.'
+                : 'No file matches “$query”.',
+            style: type.body.copyWith(color: palette.textMuted),
+          )
+        else
+          for (final file in _files)
+            _FileChoiceRow(
+              file: file,
+              given: given.contains(file.id),
+              chosen: _chosen?.id == file.id,
+              onTap: () => setState(() => _chosen = file),
+            ),
+        if (_truncated) ...[
+          const SizedBox(height: Space.xs),
+          Text(
+            'Only the newest files are listed. Search to find others.',
+            style: caption,
+          ),
+        ],
+      ],
+      error: _error,
+      submitLabel: _busy ? 'Adding…' : 'Add',
+      onSubmit: _chosen == null || _busy ? null : _add,
+      onCancel: widget.close,
+    );
+  }
+}
+
+/// One file in [AppFileForm]: where it is, then its size and when it
+/// changed, or why it can't be given (then it can't be chosen); one the app
+/// reads already says so.
+class _FileChoiceRow extends StatelessWidget {
+  const _FileChoiceRow({
+    required this.file,
+    required this.given,
+    required this.chosen,
+    required this.onTap,
+  });
+
+  final AppFileChoice file;
+  final bool given;
+  final bool chosen;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final open = file.why.isEmpty && !given;
+    final modified = file.modifiedMs.toInt();
+    final about = file.why.isNotEmpty
+        ? file.why
+        : [
+            if (given) 'Already added',
+            formatBytes(file.sizeBytes),
+            if (modified > 0) 'changed ${formatAge(modified, DateTime.now())}',
+          ].join(' · ');
+    return Unselectable(
+      child: Semantics(
+        button: open,
+        selected: chosen,
+        child: Pressable(
+          onTap: open ? onTap : null,
+          builder: (context, hovered) => Container(
+            constraints: BoxConstraints(
+              minHeight: isPhoneLayout(context) ? Touch.target : 40,
+            ),
+            padding: const EdgeInsets.symmetric(
+              horizontal: Space.s,
+              vertical: Space.xs,
+            ),
+            decoration: BoxDecoration(
+              color: chosen
+                  ? palette.selected
+                  : hovered && open
+                  ? palette.hover
+                  : null,
+              borderRadius: BorderRadius.circular(Radii.control),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  proseCodes(file.label),
+                  style: type.body.copyWith(
+                    color: open ? palette.text : palette.textMuted,
+                  ),
+                ),
+                Text(
+                  about,
+                  style: type.caption.copyWith(color: palette.textFaint),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -1431,6 +1890,8 @@ String _andList(List<String> items) => items.length < 2
 /// What app [app] can read from [source], said plainly: Claktory's records
 /// hold every agent's conversations, the person's answers among them.
 String sourceReach(String app, AppDataSource source, Workspace workspace) {
+  // The backend's own line on what it holds, where it says.
+  if (source.holds.isNotEmpty) return source.holds;
   if (source.kind == AppDataKind.APP_DATA_KIND_FACTORY_RECORDS ||
       source.id == 'factory-records') {
     return '$app can read all your agents\' conversations, including your '
@@ -1472,8 +1933,13 @@ class _SourceLine extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            source.label,
+          Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(text: source.label),
+                if (source.private) _privateTag(context),
+              ],
+            ),
             style: TypeScale.of(context).body.copyWith(color: palette.text),
           ),
           Text(
@@ -1492,6 +1958,14 @@ class _SourceLine extends StatelessWidget {
     );
   }
 }
+
+/// "Private" after a source that holds people's words (conversations, an
+/// agent's database), as Rivet's proposal card marks it.
+TextSpan _privateTag(BuildContext context) => TextSpan(
+  text: '  Private',
+  style: TypeScale.of(context).caption
+      .copyWith(color: Palette.of(context).signal, fontWeight: FontWeight.w600),
+);
 
 /// A caution in the signal color, as Settings → Secrets says it's locked.
 class _Warning extends StatelessWidget {

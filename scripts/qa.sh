@@ -10,6 +10,10 @@
 #   scripts/qa.sh up --speech ~/.factory-dev/models/speech/parakeet-tdt-0.6b-v3-Q8_0.gguf
 #                                       speech recognition ready (claktory-speech
 #                                       built once per commit, the model copied in)
+#   scripts/qa.sh up --claude           Claude signed in, fake, on qa-model (factoryd
+#                                       built with the QA provider override, debug only);
+#                                       scripts/qa.sh limit qa1 --for 120 puts it at its
+#                                       usage limit
 #   scripts/qa.sh up --version v0.1.17  a sandbox whose factoryd says it's v0.1.17,
 #                                       as a release's does (built once per commit
 #                                       and version), so apps of other versions
@@ -263,10 +267,14 @@ if ! built; then
     echo "claktory-qa: building $COMMIT (once per commit; the first takes a few minutes)" >&2
     MESSAGES="$ROOT/src/$STAMP.json"
     # No update channel stamped in: a sandbox never looks for releases. No
-    # version either, but the one --version asks for.
+    # version either, but the one --version asks for. With the QA provider
+    # override (qa-provider, debug builds only), where the commit has it:
+    # `up --claude` signs Claude in, fake, on qa-model.
+    FEATURES=()
+    if grep -q '^qa-provider' "$SRC/crates/factoryd/Cargo.toml"; then FEATURES=(--features factoryd/qa-provider); fi
     (cd "$SRC" && env -u FACTORY_UPDATE_URL -u FACTORY_VERSION ${VERSION:+FACTORY_VERSION="$VERSION"} CARGO_TARGET_DIR="$ROOT/target" \
       cargo build --quiet --message-format=json-render-diagnostics \
-      -p factoryd -p claktory-account -p claktory-qa) >"$MESSAGES"
+      -p factoryd -p claktory-account -p claktory-qa ${FEATURES[@]+"${FEATURES[@]}"}) >"$MESSAGES"
     # The proof: every crate of this source compiled in this build, none
     # found fresh from another's, and the three binaries among them.
     ours="$(grep '"reason":"compiler-artifact"' "$MESSAGES" | grep -F "\"package_id\":\"path+file://$SRC/" || true)"

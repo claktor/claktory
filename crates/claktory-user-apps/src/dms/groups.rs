@@ -82,6 +82,14 @@ CREATE TABLE IF NOT EXISTS dm_welcomes (
 );
 CREATE INDEX IF NOT EXISTS dm_welcomes_leaf ON dm_welcomes (account_id, leaf_id);
 CREATE INDEX IF NOT EXISTS dm_welcomes_accepted ON dm_welcomes (accepted);
+-- A conversation's group: the epoch from which both people have had a
+-- device of theirs, on their current list, in it throughout (row 676);
+-- NULL while one of them hasn't. Kept at every commit. No row: a group from
+-- before this was kept, taken as it was until its next commit.
+CREATE TABLE IF NOT EXISTS dm_group_people (
+    group_id BLOB PRIMARY KEY,
+    both_since INTEGER
+) WITHOUT ROWID;
 ";
 
 /// How long a mailbox keeps what it took; a self group, whose traffic is
@@ -215,6 +223,12 @@ fn device_only() -> Refusal {
     Refusal(403, "device_only", "Only your own signed-in devices can do this.".to_owned())
 }
 
+/// `409 waiting_for_friend` (row 676): a conversation's group doesn't hold
+/// both people yet, so nothing goes in that one of them can't read.
+pub fn waiting_for_friend() -> Refusal {
+    Refusal(409, "waiting_for_friend", "Your friend isn't in this conversation yet. Try again once they've joined.".to_owned())
+}
+
 fn not_set_up() -> Refusal {
     Refusal(409, "not_set_up", "Set up messages on one of your devices first.".to_owned())
 }
@@ -274,6 +288,45 @@ fn is_leaf(certificate: &LeafCertificate, leaf: &Leaf) -> bool {
 fn current(db: &Connection, certificate: &LeafCertificate) -> Result<bool, Refusal> {
     let Some(keys) = keys_of(db, &certificate.leaf.account_id)? else { return Ok(false) };
     Ok(certificate.identity == keys.identity && keys.list.names(certificate))
+}
+
+/// Of `people`, those with no device leaf in `public` that their current
+/// device list names (row 676): by leaf id, kind and signature key, so a
+/// leaf moving itself to its account's new security key still counts.
+fn missing(db: &Connection, public: &PublicGroup, people: &[String]) -> Result<Vec<String>, Refusal> {
+    let mut present = BTreeSet::new();
+    for member in public.members() {
+        let Some(certificate) = certified(&member.credential, &member.signature_key) else { continue };
+        let leaf = &certificate.leaf;
+        if leaf.kind != LeafKind::Device || present.contains(&leaf.account_id) || !people.contains(&leaf.account_id) {
+            continue;
+        }
+        let Some(keys) = keys_of(db, &leaf.account_id)? else { continue };
+        let listed = keys.list.list.account_id == leaf.account_id
+            && keys.list.list.leaves.iter().any(|listed| {
+                listed.kind == leaf.kind && listed.leaf_id == leaf.leaf_id && listed.signature_key == leaf.signature_key
+            });
+        if listed {
+            present.insert(leaf.account_id.clone());
+        }
+    }
+    Ok(people.iter().filter(|person| !present.contains(*person)).cloned().collect())
+}
+
+/// Whether an application message at `epoch` may go into `group`: in a
+/// conversation, only once both people have been in it since that epoch or
+/// before (row 676). A group from before this was kept goes as it was until
+/// its next commit.
+pub fn both_in(db: &Connection, group: &Group, epoch: u64) -> rusqlite::Result<bool> {
+    if group.kind != GroupKind::Conversation {
+        return Ok(true);
+    }
+    let since: Option<Option<i64>> =
+        db.query_row("SELECT both_since FROM dm_group_people WHERE group_id = ?1", [&group.id], |row| row.get(0)).optional()?;
+    Ok(match since {
+        None => true,
+        Some(since) => since.is_some_and(|since| epoch as i64 >= since),
+    })
 }
 
 /// Whether the account's current identity made `certificate`, listed or
@@ -522,6 +575,10 @@ fn create(transaction: &Transaction<'_>, keys: &Keys, caller: &Caller, create: C
          group_info, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, ?8, ?9)",
         params![id, kind.name(), subject, account_id, conversation, generation, claktory, envelope.bytes(), now_ms],
     )?;
+    if kind == GroupKind::Conversation {
+        // Only its maker's leaf so far: not both people's yet.
+        transaction.execute("INSERT INTO dm_group_people (group_id, both_since) VALUES (?1, NULL)", [&id])?;
+    }
     let group = load(transaction, &id)?.ok_or_else(|| broken("a group just made isn't there"))?;
     tell(transaction, &group, || Kind::Groups, "", 0, now_ms)?;
     Ok(json!({"group_id": b64(&id), "epoch": 0, "last_seq": 0}))
@@ -632,6 +689,9 @@ fn commit(
     let mut public = PublicGroup::load(provider.storage(), &group_id)
         .map_err(|error| broken(&error.to_string()))?
         .ok_or_else(|| broken("a group's public state is missing"))?;
+    let people = people(transaction, &group)?;
+    let conversation = group.kind == GroupKind::Conversation;
+    let missing_before = if conversation { missing(transaction, &public, &people)? } else { Vec::new() };
     let processed =
         public.process_message(provider.crypto(), message).map_err(|error| invalid(&format!("That commit doesn't apply: {error}.")))?;
     let sender = processed.sender().clone();
@@ -690,6 +750,12 @@ fn commit(
             if !current(transaction, &certificate)? {
                 return Err(invalid("That leaf isn't on the account's device list."));
             }
+            // A conversation's group without the other person yet: their
+            // own devices join it, but the joiner's side, already in, waits
+            // for them to be added, so it never runs ahead of them (row 676).
+            if conversation && !missing_before.contains(&leaf.account) && missing_before.iter().any(|person| *person != leaf.account) {
+                return Err(waiting_for_friend());
+            }
             true
         }
         _ => return Err(invalid("Commits come from members, or from a leaf rejoining.")),
@@ -697,7 +763,6 @@ fn commit(
 
     // What: adds, removes and updates; a Claktory only its own Update; a
     // rejoin only removes its own old leaf.
-    let people = people(transaction, &group)?;
     let mut added = Vec::new();
     // Only Removes of the account's own leaves its current key and list no
     // longer vouch for: a removed device's, or one a new key left behind.
@@ -832,6 +897,24 @@ fn commit(
         "UPDATE dm_groups SET epoch = ?2, group_info = ?3 WHERE group_id = ?1",
         params![group.id, next as i64, info_envelope.bytes()],
     )?;
+    if conversation {
+        // From which epoch both people are in: kept while they stay, from
+        // this one when they're both in now, none while one isn't.
+        let both = missing(transaction, &public, &people)?.is_empty();
+        let since: Option<Option<i64>> = transaction
+            .query_row("SELECT both_since FROM dm_group_people WHERE group_id = ?1", [&group.id], |row| row.get(0))
+            .optional()?;
+        let earlier = match since {
+            Some(since) => since,
+            // A group from before this was kept: as it was.
+            None => missing_before.is_empty().then_some(0),
+        };
+        let both_since = both.then(|| earlier.unwrap_or(next as i64));
+        transaction.execute(
+            "INSERT INTO dm_group_people (group_id, both_since) VALUES (?1, ?2) ON CONFLICT (group_id) DO UPDATE SET both_since = ?2",
+            params![group.id, both_since],
+        )?;
+    }
     if let Some(welcome) = welcome {
         for (reference, account, leaf_id) in welcomed {
             let id = hex(&rand_id());
@@ -1237,6 +1320,7 @@ fn forget(transaction: &Transaction<'_>, id: &[u8]) -> Result<(), Refused> {
     super::keys::forget(transaction, &purpose(id))?;
     transaction.execute("DELETE FROM dm_mailbox WHERE group_id = ?1", [id])?;
     transaction.execute("DELETE FROM dm_welcomes WHERE group_id = ?1", [id])?;
+    transaction.execute("DELETE FROM dm_group_people WHERE group_id = ?1", [id])?;
     transaction.execute("DELETE FROM dm_groups WHERE group_id = ?1", [id])?;
     Ok(())
 }
@@ -1386,7 +1470,7 @@ mod tests {
 
     fn phone_of(account: &str, claktories: &[&str]) -> Caller {
         let registrations = claktories.iter().map(|id| Registration { claktory_id: (*id).into(), epoch: 1 }).collect();
-        Caller::Device { account_id: account.into(), device_key: format!("{account}-phone"), registrations }
+        Caller::Device { account_id: account.into(), device_key: format!("{account}-phone"), registrations, removed_devices: Vec::new(), signed_in_at: None, bound_devices: None }
     }
 
     /// Only a device makes a group, of a subject of its own account's, with
@@ -1531,13 +1615,13 @@ mod tests {
         );
 
         // Ana removes only her own account's leaves, never Bo's.
-        let theirs_removed = ana.with(0, |provider, me| group.remove(provider, me, &["bo-phone"]).expect("made"));
+        let theirs_removed = ana.with(0, |provider, me| group.remove_of(provider, me, "bo", &["bo-phone"]).expect("made"));
         let (status, refused) = post_commit(&mut world, &phone, &id, &theirs_removed);
         assert_eq!((status, &refused["error"]), (403, &json!("not_allowed")), "{refused}");
         ana.with(0, |provider, _| group.clear_pending(provider).expect("cleared"));
 
         // A conversation's messages don't come this way.
-        let sent = ana.with(0, |provider, me| group.send(provider, me, b"hi").expect("sent"));
+        let sent = ana.with(0, |provider, me| group.send(provider, me, &Pins::default(), b"hi").expect("sent"));
         let send = json!({"client_message_id": "m-1", "envelope": env(sent)});
         assert_eq!(call(&mut world, &phone, "POST", &format!("groups/{}/messages", b64(&id)), send).0, 400);
 
@@ -1570,6 +1654,83 @@ mod tests {
         assert_eq!(post_commit(&mut world, &phone, &id, &taken), (200, json!({"seq": 5, "epoch": 4})));
         ana.with(0, |provider, _| group.merge_pending(provider).expect("merged"));
         assert_eq!(group.members(&trust).len(), 2, "Bo's phone is out");
+    }
+
+    /// Row 676: Ana's phone starts the conversation with Bo. Until a device
+    /// of Bo's is in, nothing she says goes in (409 waiting_for_friend,
+    /// nothing kept or counted), and her own Mac doesn't run ahead by
+    /// joining it; Bo's phone does join it. From then on both talk, her Mac
+    /// joins too, and a message from before he was in is still refused.
+    /// Once he's out again, she waits again.
+    #[test]
+    fn a_conversation_takes_messages_only_once_both_people_are_in() {
+        use super::super::bodies::tests::sealed;
+        use super::super::messages::tests::client_id;
+        let mut world = World::new();
+        let (conversation, generation) = friends(&mut world, "ana", "bo");
+        let mut ana = set_up(&mut world, "ana");
+        let mac = ana.add(device("ana", "ana-mac"));
+        assert_eq!(call(&mut world, &ana.caller(0), "PUT", "me/keys", ana.put(false)).0, 200);
+        let bo = set_up(&mut world, "bo");
+        let says = Says::Conversation { people: ["ana".into(), "bo".into()] };
+        let id = [12; 16];
+        let body = json!({"kind": "conversation", "conversation_id": conversation, "contact_generation": generation});
+        let mut group = start(&mut world, &ana, 0, says.clone(), id, body);
+        let (phone, bo_phone) = (ana.caller(0), bo.caller(0));
+        let trust = pins(&[&ana, &bo]);
+        let path = format!("conversations/{conversation}/messages");
+        let say = |n: u32, epoch: u64| json!({"client_message_id": client_id(n), "contact_generation": generation, "envelope": sealed(&id, epoch, "hi")});
+        let kept = |world: &World| -> (i64, i64, i64) {
+            let count = |table: &str| world.db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).expect("count");
+            let last: i64 = world.db.query_row("SELECT last_seq FROM dm_groups WHERE group_id = ?1", [&id[..]], |row| row.get(0)).expect("seq");
+            (count("dm_mailbox"), count("dm_messages"), last)
+        };
+        let info = |world: &mut World, caller: &Caller| {
+            let (status, info) = call(world, caller, "GET", &format!("groups/{}/group-info", b64(&id)), Value::Null);
+            assert_eq!(status, 200, "{info}");
+            bytes_of(&info["group_info"])
+        };
+
+        // Only Ana's phone in: what she says waits, and nothing is kept.
+        let (status, refused) = call(&mut world, &phone, "POST", &path, say(1, 0));
+        assert_eq!((status, refused), (409, json!({"error": "waiting_for_friend", "message": waiting_for_friend().2})));
+        assert_eq!(kept(&world), (0, 0, 0));
+        // Her Mac doesn't join ahead of Bo.
+        let state = info(&mut world, &ana.caller(mac));
+        let (_, early) = ana.with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &state).expect("rejoined"));
+        let (status, refused) = post_commit(&mut world, &ana.caller(mac), &id, &early);
+        assert_eq!((status, &refused["error"]), (409, &json!("waiting_for_friend")), "{refused}");
+        assert_eq!(kept(&world), (0, 0, 0));
+
+        // Bo's phone joins: both are in from epoch 1.
+        let state = info(&mut world, &bo_phone);
+        let (mut theirs, joined) = bo.with(0, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &state).expect("rejoined"));
+        assert_eq!(post_commit(&mut world, &bo_phone, &id, &joined), (200, json!({"seq": 1, "epoch": 1})));
+        bo.with(0, |provider, _| theirs.merge_pending(provider).expect("merged"));
+        ana.with(0, |provider, _| group.process(provider, &trust, &joined.commit).expect("processed"));
+        let (status, receipt) = call(&mut world, &phone, "POST", &path, say(2, 1));
+        assert_eq!(status, 200, "{receipt}");
+        let (status, refused) = call(&mut world, &phone, "POST", &path, say(3, 0));
+        assert_eq!((status, &refused["error"]), (409, &json!("waiting_for_friend")), "said before he was in");
+
+        // Her Mac joins now.
+        let state = info(&mut world, &ana.caller(mac));
+        let (_, later) = ana.with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &state).expect("rejoined"));
+        let (status, taken) = post_commit(&mut world, &ana.caller(mac), &id, &later);
+        assert_eq!((status, &taken["epoch"]), (200, &json!(2)), "{taken}");
+        ana.with(0, |provider, _| group.process(provider, &trust, &later.commit).expect("processed"));
+        bo.with(0, |provider, _| theirs.process(provider, &trust, &later.commit).expect("processed"));
+        assert_eq!(call(&mut world, &bo_phone, "POST", &path, say(4, 2)).0, 200);
+
+        // Bo leaves: she waits again.
+        let leave = bo.with(0, |provider, me| theirs.leave(provider, me).expect("proposed"));
+        assert_eq!(call(&mut world, &bo_phone, "POST", &format!("groups/{}/proposals", b64(&id)), json!({"proposal": env(leave.clone())})).0, 200);
+        ana.with(0, |provider, _| group.process(provider, &trust, &leave).expect("processed"));
+        let taken = ana.with(0, |provider, me| group.update(provider, me).expect("committed"));
+        assert_eq!(post_commit(&mut world, &phone, &id, &taken).1["epoch"], 3);
+        ana.with(0, |provider, _| group.merge_pending(provider).expect("merged"));
+        let (status, refused) = call(&mut world, &phone, "POST", &path, say(5, 3));
+        assert_eq!((status, &refused["error"]), (409, &json!("waiting_for_friend")));
     }
 
     fn out_bytes(out: &Outgoing) -> Vec<u8> {
@@ -1616,12 +1777,12 @@ mod tests {
         });
 
         // It sends there, not in Ana's self group.
-        let sent = ana.with(mac, |provider, me| its.send(provider, me, b"done").expect("sent"));
+        let sent = ana.with(mac, |provider, me| its.send(provider, me, &Pins::default(), b"done").expect("sent"));
         let send = json!({"client_message_id": "c-1", "envelope": env(sent.clone())});
         let path = format!("groups/{}/messages", b64(&channel_id));
         assert_eq!(call(&mut world, &machine, "POST", &path, send.clone()).1["seq"], 2);
         assert_eq!(call(&mut world, &machine, "POST", &path, send).1["seq"], 2, "a retry is the same message");
-        let other = ana.with(mac, |provider, me| its.send(provider, me, b"other").expect("sent"));
+        let other = ana.with(mac, |provider, me| its.send(provider, me, &Pins::default(), b"other").expect("sent"));
         let (status, refused) = call(&mut world, &machine, "POST", &path, json!({"client_message_id": "c-1", "envelope": env(other)}));
         assert_eq!((status, &refused["error"]), (409, &json!("conflict")));
         let self_id = [5; 16];
@@ -1760,7 +1921,7 @@ mod tests {
         let (status, info) = call(&mut world, &ana.caller(mac), "GET", &path, Value::Null);
         assert_eq!(status, 200, "{info}");
         let (mut joined, out) = ana
-            .with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &bytes_of(&info["group_info"])).expect("rejoined"));
+            .with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &bytes_of(&info["group_info"])).expect("rejoined"));
         let bo = set_up(&mut world, "bo");
         assert_eq!(post_commit(&mut world, &bo.caller(0), &id, &out).0, 404, "Bo can't join Ana's self group");
         assert_eq!(post_commit(&mut world, &ana.caller(mac), &id, &out), (200, json!({"seq": 1, "epoch": 1})));
@@ -1769,7 +1930,7 @@ mod tests {
         assert_eq!(group.epoch(), 1);
 
         // In a self group, the devices talk.
-        let sent = ana.with(mac, |provider, me| joined.send(provider, me, b"read 4").expect("sent"));
+        let sent = ana.with(mac, |provider, me| joined.send(provider, me, &Pins::default(), b"read 4").expect("sent"));
         let body = json!({"client_message_id": "r-1", "envelope": env(sent)});
         assert_eq!(call(&mut world, &ana.caller(mac), "POST", &format!("groups/{}/messages", b64(&id)), body).1["seq"], 2);
         let (_, page) = mailbox(&mut world, &ana.caller(0), &id, 1);

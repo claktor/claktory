@@ -109,7 +109,7 @@ pub fn member(kind: &GroupKind, trust: &impl Trust, credential: &Credential, sig
     }
     let account = certificate.leaf.account_id.as_str();
     if trust.retired(account, &certificate.identity) {
-        return Err(refused(format!("{account}'s certificate is from a security key that was replaced")));
+        return Err(Error::Replaced { account: account.to_owned() });
     }
     let Some((identity, list)) = trust.current(account) else {
         return Err(refused(format!("no security key is known for {account} here yet")));
@@ -118,7 +118,7 @@ pub fn member(kind: &GroupKind, trust: &impl Trust, credential: &Credential, sig
         return Err(Error::UnknownIdentity { account: account.to_owned() });
     }
     if !list.is_some_and(|list| list.names(&certificate)) {
-        return Err(refused(format!("{account}'s device list doesn't name this leaf")));
+        return Err(Error::Unlisted { account: account.to_owned() });
     }
     belongs(kind, &certificate)?;
     Ok(Member { certificate })
@@ -291,13 +291,162 @@ fn rotated(
 }
 
 /// Every member of a group being joined (a Welcome, or an external commit
-/// about to be sent), each as `member` checks it.
+/// about to be sent), each as `present` checks it.
 pub fn joined<'a>(
     kind: &GroupKind,
     trust: &impl Trust,
     members: impl IntoIterator<Item = (&'a Credential, &'a [u8])>,
 ) -> Result<Vec<Member>, Error> {
-    members.into_iter().map(|(credential, key)| member(kind, trust, credential, key)).collect()
+    members.into_iter().map(|(credential, key)| present(kind, trust, credential, key)).collect()
+}
+
+/// A leaf a group being joined may hold (row 611, Fugo's a′): one `member`
+/// accepts, or one of the person's devices or Claktories they kept when
+/// they made a new security key, still under the old one until it next
+/// comes online and moves (a Claktory: until a device enrolls it again).
+/// That one only if all of these hold:
+/// - its certificate's identity is one the pins record as its account's
+///   replaced key (never a key they don't know);
+/// - the account's current list, signed by its current identity, names it
+///   (its kind, leaf id and signature key): a kept leaf is carried onto
+///   the new list, a leaf a thief made under the stolen key isn't;
+/// - it belongs in the group (a channel's Claktory is that channel's).
+///
+/// It stays inert all the same: `member` still refuses it, so what it says
+/// and proposes is dropped and it commits only its own move (`rotated`).
+/// Anything else under a replaced key still fails the join, and the joiner
+/// waits until it's swept.
+pub fn present(kind: &GroupKind, trust: &impl Trust, credential: &Credential, signature_key: &[u8]) -> Result<Member, Error> {
+    let error = match member(kind, trust, credential, signature_key) {
+        Ok(member) => return Ok(member),
+        Err(error) => error,
+    };
+    let Ok(certificate) = LeafCertificate::from_credential(credential) else { return Err(error) };
+    let leaf = &certificate.leaf;
+    let account = leaf.account_id.as_str();
+    let kept = matches!(leaf.kind, LeafKind::Device | LeafKind::Claktory)
+        && leaf.signature_key.as_slice() == signature_key
+        && trust.retired(account, &certificate.identity)
+        && listed_now(trust, &certificate);
+    if !kept {
+        return Err(error);
+    }
+    belongs(kind, &certificate)?;
+    Ok(Member { certificate })
+}
+
+/// Whether the account's current list, signed by its current identity,
+/// names this leaf: its kind, leaf id and signature key.
+fn listed_now(trust: &impl Trust, certificate: &LeafCertificate) -> bool {
+    let leaf = &certificate.leaf;
+    trust.current(&leaf.account_id).is_some_and(|(identity, list)| {
+        list.is_some_and(|list| {
+            list.identity == identity
+                && list.list.account_id == leaf.account_id
+                && list.list.leaves.iter().any(|listed| {
+                    listed.kind == leaf.kind && listed.leaf_id == leaf.leaf_id && listed.signature_key == leaf.signature_key
+                })
+        })
+    })
+}
+
+/// A dead leaf, as the endpoint `me` sees it (row 630, Fugo's rulings): a
+/// leaf under a security key its account replaced that the account's
+/// current list doesn't carry over, left behind when the person started
+/// over on a device that had lost its keys (a lost device's, or one a thief
+/// made under the stolen key). That is, its certificate is for its own
+/// signature key, under an identity that isn't the one pinned for its
+/// account now, and the current list doesn't name it; and either
+/// - it's `me`'s own account's, under an identity other than `me`'s: a
+///   device that started over never pinned the key it lost, so it can't
+///   know it as retired; or
+/// - the pins hold its identity as that account's replaced one.
+///
+/// A leaf the person kept (named on the new list) is never dead, nor is a
+/// leaf under a key never pinned for another account. The joiner takes
+/// its own account's out at once (`Group::remove_dead`); until then no
+/// one sends to a group with a dead device in it (`Group::send`).
+pub fn dead(trust: &impl Trust, me: &LeafCertificate, credential: &Credential, signature_key: &[u8]) -> Option<LeafCertificate> {
+    let certificate = LeafCertificate::from_credential(credential).ok()?;
+    let leaf = &certificate.leaf;
+    if leaf.signature_key.as_slice() != signature_key {
+        return None;
+    }
+    let account = leaf.account_id.as_str();
+    if trust.current(account).is_some_and(|(identity, _)| identity == certificate.identity) {
+        return None;
+    }
+    let own = *account == me.leaf.account_id && certificate.identity != me.identity;
+    if !own && !trust.retired(account, &certificate.identity) {
+        return None;
+    }
+    (!listed_now(trust, &certificate)).then_some(certificate)
+}
+
+/// A former install of a device (row 202): a leaf under its account's
+/// current identity whose leaf id that identity's current list names under
+/// another signature key, and which the list doesn't name itself. A
+/// reinstalled device keeps its leaf id (its account key) but comes back
+/// with a new leaf key; only the identity holder could list that id under
+/// it, so the former install is no longer authorised, and its keys may be
+/// in someone else's hands (a phone reinstalled to clean it). Treated as
+/// `dead`: the account's own devices take it out at once by its tree index
+/// (`Group::remove_dead`), never by its id, which the new install shares;
+/// nobody sends to the group until it's out (`Group::send`).
+pub fn stale(trust: &impl Trust, credential: &Credential, signature_key: &[u8]) -> Option<LeafCertificate> {
+    let certificate = LeafCertificate::from_credential(credential).ok()?;
+    let leaf = &certificate.leaf;
+    if leaf.signature_key.as_slice() != signature_key {
+        return None;
+    }
+    let (identity, list) = trust.current(&leaf.account_id)?;
+    let list = list?;
+    if certificate.identity != identity || list.identity != identity || list.list.account_id != leaf.account_id {
+        return None;
+    }
+    let same_id = |listed: &&crate::device_list::Listed| listed.kind == leaf.kind && listed.leaf_id == leaf.leaf_id;
+    let mut named = list.list.leaves.iter().filter(same_id);
+    let relisted = named.clone().any(|listed| listed.signature_key != leaf.signature_key);
+    let itself = named.any(|listed| listed.signature_key == leaf.signature_key);
+    (relisted && !itself).then_some(certificate)
+}
+
+/// Why a group holds sends (`Error::Waiting`, `Group::held`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Held {
+    /// A dead leaf: under a security key its account replaced (`dead`).
+    Replaced,
+    /// A stale leaf: a reinstalled device's former install (`stale`).
+    Reinstalled,
+}
+
+impl std::fmt::Display for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Held::Replaced => "new security key",
+            Held::Reinstalled => "reinstalled device",
+        })
+    }
+}
+
+/// Trust as a device that started over sees it while it rejoins (row 630):
+/// its own account's keys other than its own count as replaced, since it
+/// never pinned the one it lost. So a device the person kept, which its own
+/// new list names, is `present` past the old key, and the rest are `dead`.
+/// Only for checking who's in a group being rejoined.
+pub struct Rejoining<'a, T: Trust> {
+    pub trust: &'a T,
+    pub me: &'a LeafCertificate,
+}
+
+impl<T: Trust> Trust for Rejoining<'_, T> {
+    fn current(&self, account: &str) -> Option<(IdentityPublic, Option<&SignedDeviceList>)> {
+        self.trust.current(account)
+    }
+
+    fn retired(&self, account: &str, key: &IdentityPublic) -> bool {
+        self.trust.retired(account, key) || (account == self.me.leaf.account_id && *key != self.me.identity)
+    }
 }
 
 /// One account's pin, as an endpoint keeps it.
@@ -355,6 +504,42 @@ impl Pins {
                 Ok(())
             }
         }
+    }
+
+    /// Retires `account`'s key the service lists as replaced (GET keys'
+    /// `replaced_identity_keys`) that a commit or proposal this endpoint
+    /// holds proves: `held`, the certificate of the leaf behind it (see
+    /// `Group::held_signer`), verified under that key, so the service can't
+    /// retire a key it doesn't hold a certificate for, such as a friend's
+    /// next one (Fugo's row 654 conditions). Refused whole, nothing changed,
+    /// when the list names the key pinned now or `served` (the response's
+    /// current key). Touches nothing else: not the current key, not
+    /// verified or the notice. Whether it retired a key.
+    ///
+    /// And only a key older than the one pinned now, by the account's own
+    /// signatures: the held leaf's certificate made before the latest list
+    /// the pinned key signed. A service still serving an old key can't list
+    /// the account's real next one as replaced and have it retired from a
+    /// genuine commit under it (Fugo's stale-answer wedge); with no list
+    /// taken yet, nothing is retired until one is.
+    pub fn replaced(&mut self, account: &str, served: [u8; 32], listed: &[[u8; 32]], held: &LeafCertificate) -> Result<bool, Error> {
+        let Some(pin) = self.pins.get_mut(account) else { return Ok(false) };
+        if listed.iter().any(|key| *key == pin.identity.0 || *key == served) {
+            return Err(refused("the service lists a current security key as replaced"));
+        }
+        let key = held.identity;
+        if held.leaf.account_id != account || !listed.contains(&key.0) || key.0 == served || pin.retired.contains(&key) {
+            return Ok(false);
+        }
+        let older = self
+            .lists
+            .get(account)
+            .is_some_and(|list| list.identity == pin.identity && held.leaf.created_ms < list.list.created_ms);
+        if !older {
+            return Ok(false);
+        }
+        pin.retired.push(key);
+        Ok(true)
     }
 
     /// `account`'s security key changed to `identity`: the old one is

@@ -12,6 +12,8 @@
 //!                         model.json     qa-model's script (with --model), read for every request
 //!                         home/models/speech/  the speech model (with --speech), copied in
 //!                         model.jsonl    what qa-model was asked and answered, a line each
+//!                         claude.json    until when the fake Claude sign-in is at its limit (with --claude)
+//!                         home/auth.json the fake Claude sign-in (with --claude): fake tokens only
 //!                         factoryd.log, account.log, model.out
 //! ```
 //!
@@ -175,6 +177,9 @@ pub struct Sandbox {
     /// It recognizes speech (`up --speech`): its factoryd runs the
     /// commit's claktory-speech, on the model copied into its home.
     pub speech: bool,
+    /// Its Claude is signed in, fake (`up --claude`): Anthropic's side of
+    /// qa-model, through a QA build of factoryd, with its agents on Claude.
+    pub claude: bool,
     /// Who made it (`caller`), and when (ms since 1970): `down --all` ends
     /// only the caller's own. Empty and 0 for sandboxes from before.
     pub owner: String,
@@ -206,6 +211,11 @@ impl Sandbox {
         self.dir.join("model.jsonl")
     }
 
+    /// Until when its fake Claude sign-in is at its usage limit (`limit`).
+    pub fn claude_limit(&self) -> PathBuf {
+        self.dir.join("claude.json")
+    }
+
     pub fn running(&self) -> bool {
         alive(self.pid, &self.factoryd())
     }
@@ -219,13 +229,17 @@ impl Sandbox {
             "folder": self.dir,
             "account_service": self.account_service(),
             "mail": self.account_port.map(|_| self.mail()),
-            "model": self.model_port.map(|_| crate::model::MODEL),
+            "model": self.model_port.map(|_| if self.claude { crate::model::claude::MODEL } else { crate::model::MODEL }),
             "model_script": self.model_port.map(|_| self.model_script()),
             "model_log": self.model_port.map(|_| self.model_log()),
             "log": self.dir.join("factoryd.log"),
             "commit": self.commit,
             "machine_name": self.machine_name,
             "speech": self.speech,
+            "claude": self.claude.then(|| json!({
+                "account": crate::model::claude::EMAIL,
+                "limited_until_ms": crate::model::claude::limited_until(&self.claude_limit()),
+            })),
             "owner": self.owner,
             "created_ms": self.created_ms,
         })
@@ -244,6 +258,7 @@ impl Sandbox {
             "commit": self.commit,
             "machine_name": self.machine_name,
             "speech": self.speech,
+            "claude": self.claude,
             "owner": self.owner,
             "created_ms": self.created_ms,
         })
@@ -272,6 +287,7 @@ impl Sandbox {
             bin: PathBuf::from(record.get("bin")?.as_str()?),
             commit: record.get("commit").and_then(Value::as_str).unwrap_or_default().to_owned(),
             speech: record.get("speech").and_then(Value::as_bool).unwrap_or(false),
+            claude: record.get("claude").and_then(Value::as_bool).unwrap_or(false),
             owner: record.get("owner").and_then(Value::as_str).unwrap_or_default().to_owned(),
             created_ms: number("created_ms").unwrap_or(0),
         })
@@ -339,6 +355,9 @@ pub struct Up {
     /// Speech recognition, on this model (a GGUF with its `.receipt`
     /// beside it, as a Claktory keeps it in models/speech).
     pub speech: Option<PathBuf>,
+    /// Claude signed in, fake, on qa-model (which this starts), with every
+    /// agent on Claude: `limit` puts it at its usage limit.
+    pub claude: bool,
 }
 
 /// Starts a sandbox: its account service (unless left out), its settings,
@@ -411,14 +430,17 @@ pub fn up(request: Up) -> Result<Sandbox, Failure> {
         commit: std::env::var("CLAKTORY_QA_COMMIT").unwrap_or_default(),
         machine_name,
         speech: speech.is_some(),
+        claude: request.claude,
         owner: caller(),
         created_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX)),
     };
-    let started = speech
-        .map_or(Ok(()), |(model, receipt)| copy_speech_model(&sandbox.home(), &model, &receipt))
-        .and_then(|()| start(&mut sandbox, request.account, request.model.as_ref(), &ports));
+    let started = speech.map_or(Ok(()), |(model, receipt)| copy_speech_model(&sandbox.home(), &model, &receipt)).and_then(|()| {
+        // Claude's side is qa-model's: it starts with the built-in answers unless given a script.
+        let model = if request.claude { Some(request.model.clone().unwrap_or(None)) } else { request.model.clone() };
+        start(&mut sandbox, request.account, model.as_ref(), &ports)
+    });
     if let Err(failure) = started {
         // Whatever started goes again, and the folder with it.
         stop(&sandbox);
@@ -444,11 +466,18 @@ fn start(sandbox: &mut Sandbox, account: bool, model: Option<&Option<PathBuf>>, 
         let port = free_port(&taken)?;
         taken.push(port);
         let log = log_file(&dir.join("model.out"))?;
-        let child = command(&sandbox.bin.join("claktory-qa"), sandbox)
+        let mut serve = command(&sandbox.bin.join("claktory-qa"), sandbox);
+        serve
             .args(["serve-model", "--port", &port.to_string(), "--script"])
             .arg(sandbox.model_script())
             .arg("--log")
-            .arg(sandbox.model_log())
+            .arg(sandbox.model_log());
+        if sandbox.claude {
+            crate::model::claude::set_limit(&sandbox.claude_limit(), None)
+                .map_err(|error| Failure::failed(format!("Can't write Claude's limit: {error}")))?;
+            serve.arg("--claude").arg(sandbox.claude_limit());
+        }
+        let child = serve
             .stdin(Stdio::null())
             .stdout(log.try_clone().map_err(|error| Failure::failed(error.to_string()))?)
             .stderr(log)
@@ -507,8 +536,31 @@ fn start(sandbox: &mut Sandbox, account: bool, model: Option<&Option<PathBuf>>, 
             Failure::failed(format!("The account service didn't start ({why}). Its log: {}", dir.join("account.log").display()))
         })?;
     }
-    write_settings(&sandbox.home(), sandbox.account_port, sandbox.model_port.is_some())?;
+    let model = match (sandbox.model_port, sandbox.claude) {
+        (Some(_), true) => Some(crate::model::claude::MODEL),
+        (Some(_), false) => Some(crate::model::MODEL),
+        (None, _) => None,
+    };
+    write_settings(&sandbox.home(), sandbox.account_port, model)?;
+    if sandbox.claude {
+        write_claude_sign_in(&sandbox.home())?;
+    }
     launch(sandbox)
+}
+
+/// The fake Claude sign-in, straight into the sandbox's auth.json (only
+/// the sandbox's: its home was checked like the rest), with the fixed fake
+/// tokens qa-model alone accepts.
+fn write_claude_sign_in(home: &Path) -> Result<(), Failure> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(home.join("auth.json"))
+        .map_err(|error| Failure::failed(format!("Can't write the fake Claude sign-in: {error}")))?;
+    file.write_all(crate::model::claude::credentials().to_string().as_bytes())
+        .map_err(|error| Failure::failed(format!("Can't write the fake Claude sign-in: {error}")))
 }
 
 /// Starts the sandbox's factoryd, with the environment it always has, and
@@ -521,6 +573,7 @@ fn launch(sandbox: &mut Sandbox) -> Result<(), Failure> {
     // Kept across restarts, as factoryd keeps its token: the old one is gone
     // by now, so the port answering is the new one.
     let pairing = sandbox.home().join("remote/local-pairing");
+    let logged = std::fs::metadata(dir.join("factoryd.log")).map_or(0, |log| log.len());
     let child = factoryd
         .stdin(Stdio::null())
         .stdout(log.try_clone().map_err(|error| Failure::failed(error.to_string()))?)
@@ -533,6 +586,18 @@ fn launch(sandbox: &mut Sandbox) -> Result<(), Failure> {
     let address = SocketAddr::from(([127, 0, 0, 1], sandbox.port));
     wait_for(START_WAIT, || pairing.is_file() && TcpStream::connect(address).is_ok(), || sandbox.running())
         .map_err(|why| Failure::failed(format!("factoryd didn't start ({why}). Its log: {}", dir.join("factoryd.log").display())))?;
+    // A factoryd built without the QA provider override (a release's, or
+    // not through scripts/qa.sh) would send the fake sign-in to Anthropic:
+    // only one that says it took the override goes on.
+    if sandbox.claude {
+        let log = std::fs::read(dir.join("factoryd.log")).unwrap_or_default();
+        let since = String::from_utf8_lossy(log.get(usize::try_from(logged).unwrap_or(0)..).unwrap_or_default()).into_owned();
+        if !since.contains("QA provider override: http://127.0.0.1:") {
+            return Err(Failure::failed(
+                "This factoryd wasn't built with the QA provider override (factoryd's qa-provider feature), so its Claude can't be qa-model: run it through scripts/qa.sh, which builds it so.",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -600,13 +665,13 @@ fn command(program: &Path, sandbox: &Sandbox) -> Command {
 /// service its own (or nowhere) and the tunnel's relays nowhere, so pipes
 /// and devices connect directly on this computer; with qa-model, every
 /// agent on it, Rivet included.
-fn write_settings(home: &Path, account_port: Option<u16>, model: bool) -> Result<(), Failure> {
+fn write_settings(home: &Path, account_port: Option<u16>, model: Option<&str>) -> Result<(), Failure> {
     let mut config = factoryd::config::Config::default();
-    if model {
-        config.default_model = crate::model::MODEL.to_owned();
+    if let Some(model) = model {
+        config.default_model = model.to_owned();
         config.default_effort = "off".to_owned();
         for agent in &mut config.agents {
-            agent.model = crate::model::MODEL.to_owned();
+            agent.model = model.to_owned();
             agent.effort = "off".to_owned();
         }
     }
@@ -686,7 +751,8 @@ pub fn stop(sandbox: &Sandbox) {
 /// What factoryd's environment always holds, beyond what any program
 /// needs: its home and port, the machine name it shows (so no sandbox
 /// shows this computer's), and with qa-model, OpenRouter pointed at it
-/// with a key that opens nothing.
+/// with a key that opens nothing; with `--claude`, Anthropic too, for a QA
+/// build of factoryd.
 fn environment(sandbox: &Sandbox) -> Vec<(&'static str, String)> {
     let mut environment = vec![
         ("FACTORY_HOME", sandbox.home().display().to_string()),
@@ -699,6 +765,10 @@ fn environment(sandbox: &Sandbox) -> Vec<(&'static str, String)> {
     if let Some(port) = sandbox.model_port {
         environment.push(("OPENROUTER_API_KEY", "qa-model".to_owned()));
         environment.push(("OPENROUTER_BASE_URL", format!("http://127.0.0.1:{port}/v1")));
+        if sandbox.claude {
+            // Read only by a QA build of factoryd, and only for an address on this computer.
+            environment.push(("FACTORY_QA_ANTHROPIC_URL", format!("http://127.0.0.1:{port}")));
+        }
     }
     environment
 }

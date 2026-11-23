@@ -204,6 +204,14 @@ class Backend implements AppViewTransport {
   /// once: Settings scrolls to it and clears it.
   final settingsSection = ValueNotifier<String?>(null);
 
+  /// The Marketplace tab to show next, by its id ("apps"), once: the
+  /// Marketplace switches to it and clears it.
+  final marketplaceTab = ValueNotifier<String?>(null);
+
+  /// The app to open in the Marketplace's Apps tab next, by its id, once:
+  /// its row opens, comes into view and clears it.
+  final marketplaceApp = ValueNotifier<String?>(null);
+
   /// The last file in any agent's panes the backend said changed.
   final fileChanged = ValueNotifier<FileChanged?>(null);
 
@@ -2065,6 +2073,50 @@ class Backend implements AppViewTransport {
   Future<void> stopAgent(String agentId) =>
       _request(ClientMessage(stopAgent: StopAgent(agentId: agentId)));
 
+  /// Has [agentId] (an agent or a chat) waiting out its usage limits ask
+  /// again now: its provider reads its accounts' usage again, and every
+  /// agent waiting on it asks. Refused when it isn't waiting anymore.
+  Future<void> tryAgainNow(String agentId) =>
+      _request(ClientMessage(tryAgainNow: TryAgainNow(agentId: agentId)));
+
+  /// Moves [agentId] (an agent or a chat) waiting on its provider's usage
+  /// to its alternative (Agent.usage_wait_alternative), and with
+  /// [allWaiting] every agent and chat waiting on that provider, each to
+  /// its own: only while as many others wait as the person was shown
+  /// ([expectedOthers]), else refused and none moves. Refused, with a
+  /// sentence to show, when there's none.
+  Future<void> continueOnAlternative(
+    String agentId, {
+    bool allWaiting = false,
+    int expectedOthers = 0,
+  }) => _request(
+    ClientMessage(
+      continueOnAlternative: ContinueOnAlternative(
+        agentId: agentId,
+        allWaiting: allWaiting,
+        expectedOthers: expectedOthers,
+      ),
+    ),
+  );
+
+  /// Puts [agentId] (an agent or a chat) back on the model it had before
+  /// it continued elsewhere (Agent.usage_switch), and with [all] every one
+  /// switched from that provider that's ready: only while as many others
+  /// are as the person was shown ([expectedOthers]).
+  Future<void> switchBack(
+    String agentId, {
+    bool all = false,
+    int expectedOthers = 0,
+  }) => _request(
+    ClientMessage(
+      switchBack: SwitchBack(
+        agentId: agentId,
+        all: all,
+        expectedOthers: expectedOthers,
+      ),
+    ),
+  );
+
   /// Approves or dismisses [agentId]'s proposal to Rivet. Approving sends
   /// Rivet [comment] and the proposal as the person's message; the entry
   /// comes back decided. Refused when it's already decided, or there's no
@@ -2452,6 +2504,44 @@ class Backend implements AppViewTransport {
     }
     return reply.needsYouHistory;
   }
+
+  /// Undoes a recorded change to an app's access (NeedsYouRecord's
+  /// app_change_id, AppAccessGiven's change_id): what's still as it left
+  /// it goes back; the answer says what changed since and was left.
+  Future<AppAccessUndone> undoAppAccessChange(String changeId) async {
+    final reply = await _call(
+      ClientMessage(
+        undoAppAccessChange: UndoAppAccessChange(changeId: changeId),
+      ),
+    );
+    if (!reply.hasAppAccessUndone()) {
+      throw const RequestFailure(
+        "Couldn't tell whether it was undone. Check Marketplace → Apps.",
+      );
+    }
+    return reply.appAccessUndone;
+  }
+
+  /// The CSV and TSV files [appId] could be given (Add a file…), newest
+  /// first, those whose names hold every word of [query].
+  Future<AppFiles> listAppFiles(String appId, {String query = ''}) async {
+    final reply = await _call(
+      ClientMessage(
+        listAppFiles: ListAppFiles(appId: appId, query: query),
+      ),
+    );
+    if (!reply.hasAppFiles()) {
+      throw const RequestFailure("Couldn't list the files. Try again.");
+    }
+    return reply.appFiles;
+  }
+
+  /// Undoes Rivet's change to an agent's model or effort (NeedsYouRecord's
+  /// model_change_id): the model and effort it replaced come back, or
+  /// Claktory says why not (changed since, undone already).
+  Future<void> undoModelChange(String changeId) => _request(
+    ClientMessage(undoModelChange: UndoModelChange(changeId: changeId)),
+  );
 
   /// The quiet copies [agentId] was sent, newest first (`ListQuietCopies`):
   /// [limit] of them (the backend's 20 when 0), older than the copy
@@ -3156,6 +3246,28 @@ class Backend implements AppViewTransport {
     ),
   );
 
+  /// The person's decision on Rivet's proposal at [seq] in [agentId]'s
+  /// conversation of what an app may read and which agents may use it
+  /// (AppAccessProposal): approved, exactly what the card showed ([digest]);
+  /// either way [comment] goes to Rivet.
+  Future<void> decideAppAccess(
+    String agentId,
+    int seq, {
+    required bool approve,
+    required String digest,
+    String comment = '',
+  }) => _request(
+    ClientMessage(
+      decideAppAccess: DecideAppAccess(
+        agentId: agentId,
+        seq: Int64(seq),
+        approve: approve,
+        comment: comment,
+        digest: approve ? digest : '',
+      ),
+    ),
+  );
+
   /// The folders in [path] on the machine Factory runs on: absolute, or
   /// from the home folder ("", "~" or "~/code").
   Future<FolderList> listFolders(String path) async {
@@ -3496,6 +3608,7 @@ class Backend implements AppViewTransport {
       case ServerMessage_Body.needsYouHistory:
       case ServerMessage_Body.usageResetAnswer:
       case ServerMessage_Body.appPermissions:
+      case ServerMessage_Body.appAccessUndone:
       case ServerMessage_Body.pipeInvite:
       case ServerMessage_Body.pipeInvitePreview:
       case ServerMessage_Body.pipeMessagePage:
@@ -3510,6 +3623,7 @@ class Backend implements AppViewTransport {
       case ServerMessage_Body.pipeReportPage:
       case ServerMessage_Body.replyReport:
       case ServerMessage_Body.conversationMatches:
+      case ServerMessage_Body.appFiles:
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.audioTranscribed:
         // To this connection alone, for its transcribeAudio.

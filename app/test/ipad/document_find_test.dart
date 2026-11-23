@@ -5,6 +5,7 @@
 import 'dart:async';
 import 'dart:ui' show Tristate;
 
+import 'package:factory_app/controls.dart' show GlyphButton;
 import 'package:factory_app/ipad/document_find.dart';
 import 'package:factory_app/ipad/ink_surface.dart' show InkSurface;
 import 'package:flutter/services.dart';
@@ -82,6 +83,8 @@ void main() {
     final go = _sent(native, 'goToPage').single;
     expect(go['page_1based'], 4);
     expect(go['region'], {'x': 0.1, 'y': 0.8, 'w': 0.2, 'h': 0.02});
+    // The match marked apart from the others, high in the view.
+    expect(go['match'], isTrue);
     // Beside the page, it stays for the next match, and says which one
     // the page shows.
     expect(find.byKey(const ValueKey('find-panel')), findsOneWidget);
@@ -285,8 +288,27 @@ void main() {
     await _type(tester, 'river');
     await tester.tap(_inPanel(find.text('Page 2')));
     await settle(tester);
-    expect(_sent(native, 'goToPage').single['page_1based'], 2);
+    final go = _sent(native, 'goToPage').single;
+    expect(go['page_1based'], 2);
+    expect(go['match'], isTrue);
     expect(find.byKey(const ValueKey('find-panel')), findsNothing);
+    // The matches stay marked on the page (Zucchero's row 114), and Search
+    // shows lit: it opens on the same search again.
+    final searches = _sent(native, 'search').length;
+    expect(_sent(native, 'search').last['query'], 'river');
+    bool lit() => tester
+        .widget<GlyphButton>(find.byKey(const ValueKey('document-search')))
+        .active;
+    expect(lit(), isTrue);
+    await tester.tap(find.byKey(const ValueKey('document-search')));
+    await settle(tester);
+    expect(_inPanel(find.text('Page 2')), findsOneWidget);
+    expect(_sent(native, 'search'), hasLength(searches));
+    // Closed there, the search ends, marks and all.
+    await tester.tap(find.byKey(const ValueKey('find-close')));
+    await settle(tester);
+    expect(_sent(native, 'search').last['query'], '');
+    expect(lit(), isFalse);
   });
 
   testWidgets('every row is a finger\'s height, at the largest text too', (

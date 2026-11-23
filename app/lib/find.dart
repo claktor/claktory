@@ -202,11 +202,17 @@ class FindSessions {
   }
 
   /// The session of a pane inside [context] (a view whose body can be
-  /// searched, for a button of its own outside the pane), if any.
-  FindSession? within(BuildContext context) {
+  /// searched, for a button of its own outside the pane), if any; with
+  /// [only], the one whose target it picks (the conversation's, not a pane
+  /// beside it such as Needs you).
+  FindSession? within(
+    BuildContext context, {
+    bool Function(FindTarget target)? only,
+  }) {
     for (final session in _sessions.value.reversed) {
       final scope = session._scope;
       if (!scope.mounted) continue;
+      if (only != null && !only(session.target)) continue;
       var inside = false;
       scope.context.visitAncestorElements((element) {
         if (element == context) inside = true;
@@ -600,6 +606,13 @@ class FindBar extends StatelessWidget {
         focusNode: session.field,
         placeholder: target.placeholder,
         semanticsLabel: target.placeholder,
+        // Where Return comes as the keyboard's action rather than a key the
+        // bindings above see (an iPad's, on screen or not), it goes to the
+        // next match too, the field kept (Zucchero's row 214). A key they
+        // take never reaches the field: no step twice.
+        textInputAction: TextInputAction.search,
+        onSubmitted: (_) => step(1),
+        onEditingComplete: () {},
       ),
     );
     final count = ListenableBuilder(
@@ -938,14 +951,20 @@ class LocalFind extends FindTarget {
   }
 
   /// What the pane holds changed (a file read again): found again, staying
-  /// on the same occurrence where it can, without moving.
-  void refresh() {
+  /// on the same occurrence where it can, without moving; or, shown
+  /// another way ([reveal]: a file's Formatted and Plain), brought into
+  /// sight there.
+  void refresh({bool reveal = false}) {
     if (_query.isEmpty) return;
     final before = _found;
     final was = _current;
     _find();
     _current = _found.isEmpty ? -1 : was.clamp(0, _found.length - 1);
-    _mark();
+    if (reveal) {
+      _go();
+    } else {
+      _mark();
+    }
     // Told only when what's found changed: a pane refreshes after every
     // build, which mustn't build it again.
     if (_current != was || !listEquals(before, _found)) notifyListeners();

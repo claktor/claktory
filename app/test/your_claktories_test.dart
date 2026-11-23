@@ -2,6 +2,7 @@ import 'package:factory_app/account.dart' show openAccountPage, privacyPage;
 import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/device_account.dart';
 import 'package:factory_app/connections.dart' show parsePairingCode;
+import 'package:factory_app/people/e2ee.dart' show e2eeFor;
 import 'package:factory_app/phone.dart' show PairScreen;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
@@ -13,6 +14,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'device_confirm_test.dart' show FakeAccountApi, home, signIn;
+import 'dm_fakes.dart';
 import 'harness.dart';
 
 Future<bool> launchUrlForTests(Uri url) async => true;
@@ -104,6 +106,39 @@ void main() {
     });
   });
 
+  testWidgets('signing in again with the address fixed: only that account, '
+      'never another (row 644)', (tester) async {
+    final api = FakeAccountApi();
+    final account = DeviceAccount(key: 'k' * 64, open: (_, _) => api);
+    await signIn(account);
+    final harness = Harness(Workspace(), account: account);
+    await harness.show(
+      tester,
+      home: const Center(
+        child: SizedBox(
+          width: 480,
+          child: DeviceSignInForm(
+            intro: 'For your security, sign in again to start over.',
+            email: 'matt@example.com',
+          ),
+        ),
+      ),
+    );
+    await pumpFrames(tester);
+    expect(find.byKey(const ValueKey('device-email')), findsNothing);
+    expect(find.text('matt@example.com'), findsOneWidget);
+    await tester.tap(find.text('Send code'));
+    await pumpFrames(tester);
+    expect(
+      find.text(
+        'Enter the 6-digit code sent to matt@example.com. It works for 15 '
+        'minutes.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Use a different email'), findsNothing);
+  });
+
   testWidgets('a phone already signed in starts at its Claktories, and '
       'signs out', (tester) async {
     await phone(tester, signedIn: true);
@@ -112,6 +147,135 @@ void main() {
     await tester.tap(find.text('Sign out'));
     await pumpFrames(tester);
     expect(find.byKey(const ValueKey('device-email')), findsOneWidget);
+  });
+
+  group('signing out with messages here (row 671)', () {
+    tearDown(() => e2eeFor = null);
+
+    Future<(Harness, DeviceAccount)> phone_(WidgetTester tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final api = FakeAccountApi();
+      var made = 0;
+      final account = DeviceAccount(
+        key: 'k' * 64,
+        open: (_, _) => api,
+        makeKey: () => '${++made}' * 64,
+      );
+      await signIn(account);
+      final harness = Harness(
+        Workspace(),
+        localBackend: false,
+        account: account,
+      );
+      await harness.show(tester, size: const Size(393, 852));
+      await pumpFrames(tester);
+      return (harness, account);
+    }
+
+    Future<FakeEndpoint> ready(FakeWorker worker, String leaf) async {
+      final endpoint = FakeEndpoint(worker, 'matt', leaf);
+      await endpoint.e2ee.start();
+      await endpoint.e2ee.setUpFirst();
+      return endpoint;
+    }
+
+    testWidgets('with other devices: says they keep them, then leaves and '
+        'deletes them here, as a new device next time', (tester) async {
+      final worker = FakeWorker();
+      final phone = FakeEndpoint(worker, 'matt', 'phone');
+      final mac = await ready(worker, 'mac');
+      await phone.e2ee.start();
+      final code = await phone.e2ee.offerThisDevice(platform: 'iPhone');
+      await mac.e2ee.addDevice(await mac.e2ee.scanned(code!));
+      await phone.e2ee.takeHandoff();
+      e2eeFor = (_) => phone.e2ee;
+      final (_, account) = await phone_(tester);
+      final key = account.key;
+
+      await tester.tap(find.text('Sign out'));
+      await pumpFrames(tester);
+      expect(find.text('Sign out of your Claktory account?'), findsOneWidget);
+      expect(
+        find.text(
+          'Your messages will be deleted from this iPhone. Your other '
+          'devices keep them, and you can add this iPhone again from one '
+          'of them.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Delete messages'), findsNothing);
+      await tester.tap(find.text('Sign out').last);
+      await pumpFrames(tester);
+      expect(account.signedIn, isFalse);
+      expect(account.key, isNot(key), reason: 'a new device next time');
+      expect(phone.keys.kept, isEmpty);
+      expect(phone.storeKept, isFalse);
+      expect(worker.keys['matt']!['version'], 3);
+      expect(find.text('Sign out of your Claktory account?'), findsNothing);
+    });
+
+    testWidgets('the only device: they stay, locked, unless Delete messages '
+        'is on, which says what it costs', (tester) async {
+      final worker = FakeWorker();
+      final phone = await ready(worker, 'phone');
+      e2eeFor = (_) => phone.e2ee;
+      final (_, account) = await phone_(tester);
+      final key = account.key;
+
+      await tester.tap(find.text('Sign out'));
+      await pumpFrames(tester);
+      expect(
+        find.text(
+          'This is the only device with your messages. They stay on this '
+          'iPhone, locked, until you sign in again with this account.',
+        ),
+        findsOneWidget,
+      );
+      const note =
+          "Your security key is deleted too. Next time you'll start over, "
+          'and your friends will see your security key change.';
+      expect(find.text(note), findsNothing);
+      await tester.tap(find.text('Delete messages from this iPhone'));
+      await pumpFrames(tester);
+      expect(find.text(note), findsOneWidget);
+      expect(find.text('Sign out and delete'), findsOneWidget);
+      await tester.tap(find.text('Sign out and delete'));
+      await pumpFrames(tester);
+      expect(account.signedIn, isFalse);
+      expect(account.key, key);
+      expect(phone.keys.kept, isEmpty);
+      expect(phone.storeKept, isFalse);
+    });
+
+    testWidgets('the only device, Delete messages off: signed out, nothing '
+        'here deleted', (tester) async {
+      final worker = FakeWorker();
+      final phone = await ready(worker, 'phone');
+      e2eeFor = (_) => phone.e2ee;
+      final (_, account) = await phone_(tester);
+      final kept = {...phone.keys.kept.keys};
+      await tester.tap(find.text('Sign out'));
+      await pumpFrames(tester);
+      await tester.tap(find.text('Sign out').last);
+      await pumpFrames(tester);
+      expect(account.signedIn, isFalse);
+      expect(phone.keys.kept.keys, kept);
+      expect(phone.storeKept, isTrue);
+    });
+
+    testWidgets('Cancel signs nothing out', (tester) async {
+      final worker = FakeWorker();
+      final phone = await ready(worker, 'phone');
+      e2eeFor = (_) => phone.e2ee;
+      final (_, account) = await phone_(tester);
+      await tester.tap(find.text('Sign out'));
+      await pumpFrames(tester);
+      await tester.tap(find.text('Cancel'));
+      await pumpFrames(tester);
+      expect(account.signedIn, isTrue);
+      expect(phone.storeKept, isTrue);
+    });
   });
 
   testWidgets('App Store: a phone signed in with no Claktory yet can delete '

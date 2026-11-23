@@ -629,7 +629,8 @@ async fn test_24_a_removed_device_reaches_the_worker_no_more() {
     instance.advance(1);
 
     // With the identity it holds, it lists itself alone, or rotates to a
-    // key of its own; it reads anything: 401, every time.
+    // key of its own; it reads anything: refused, every time, by the service
+    // before the worker (403 device_removed: only the key's holder learns it).
     let itself = json!({"device_list": list(2, &[(&stolen, 2)]), "version": 2, "previous_version": 1});
     let rotate = json!({"identity_key": b64([9; 32]), "device_list": list(1, &[(&stolen, 2)]), "version": 1});
     for (method, path, body) in [
@@ -640,10 +641,217 @@ async fn test_24_a_removed_device_reaches_the_worker_no_more() {
         ("GET", &format!("/v1/apps/dms/keys/{account}") as &str, None),
     ] {
         let answer = instance.device_signed(&stolen, method, path, body.as_ref(), None).await;
-        assert_eq!((answer.status, answer.error().as_str()), (401, "unauthorized"), "{path}");
+        assert_eq!((answer.status, answer.error().as_str()), (403, "device_removed"), "{path}");
     }
     assert!(instance.relay_allowlist(None, &instance.relay_bearer).await.json::<Allowlist>().endpoints.is_empty());
     // The account's keys are as the phone left them.
     let keys = instance.device_signed(&phone, "GET", &format!("/v1/apps/dms/keys/{account}"), None, None).await.value();
     assert_eq!((keys["version"].as_i64(), keys["device_list"].as_str()), (Some(1), first["device_list"].as_str()), "{keys}");
+
+    // Row 612: the worker hears which keys were removed, so the phone
+    // itself can't put the stolen one back on the list (a used add code),
+    // nor hand anything off to it.
+    let whoami = instance.device_signed(&phone, "GET", "/v1/apps/whoami", None, None).await.value();
+    assert_eq!(whoami["removed_devices"], json!([stolen.account_key()]), "{whoami}");
+    let again = json!({"device_list": list(2, &[(&phone, 1), (&stolen, 2)]), "version": 2, "previous_version": 1});
+    let answer = instance.device_signed(&phone, "PUT", "/v1/apps/dms/me/keys", Some(&again), None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (409, "removed_device"), "{}", answer.text());
+    let handoff = json!({"to": stolen.account_key(), "sealed": b64([7; 64])});
+    let answer = instance.device_signed(&phone, "POST", "/v1/apps/dms/me/handoffs", Some(&handoff), None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (409, "removed_device"), "{}", answer.text());
+}
+
+/// Row 630 (Fugo): the worker hears when a device last signed in with an
+/// emailed code, and makes no new security key on a sign-in older than 15
+/// minutes. Signing in again on the same device (same key: not a new
+/// device, nothing removed) makes it recent.
+#[tokio::test]
+async fn test_25_a_new_security_key_needs_a_recent_sign_in() {
+    use claktory_dm_crypto::certificate::LeafKind;
+    use claktory_dm_crypto::device_list::{DeviceList, Listed};
+    use claktory_dm_crypto::identity::IdentityKey;
+
+    let dir = tempfile::tempdir().expect("a folder");
+    let socket = worker(dir.path(), uid(dir.path()));
+    let instance = with_apps(Some(socket), uid(dir.path())).await;
+    let phone = Device::new("192.0.2.88");
+    let signed_in = instance.now();
+    let account = instance.sign_in_device(&phone, "matt@example.com", "Matt's iPhone").await.account_id;
+    let whoami = instance.device_signed(&phone, "GET", "/v1/apps/whoami", None, None).await.value();
+    assert_eq!(whoami["signed_in_at"], json!(signed_in), "{whoami}");
+
+    let list = |identity: &IdentityKey, n: u8| {
+        let leaves = vec![Listed { kind: LeafKind::Device, leaf_id: phone.account_key(), signature_key: [n; 32] }];
+        let signed = DeviceList { account_id: account.clone(), version: 1, created_ms: 1, leaves }.sign(identity).expect("signed");
+        b64(signed.to_bytes().expect("bytes"))
+    };
+    let first = IdentityKey::generate().expect("a key");
+    let put = json!({"identity_key": b64(first.public().0), "device_list": list(&first, 1), "version": 1, "previous_version": 0});
+    assert_eq!(instance.device_signed(&phone, "PUT", "/v1/apps/dms/me/keys", Some(&put), None).await.status, 200);
+
+    // An hour on, the device lost its keys and starts over: not yet.
+    instance.advance(3600);
+    let second = IdentityKey::generate().expect("a key");
+    let rotate = json!({"identity_key": b64(second.public().0), "device_list": list(&second, 2), "version": 1});
+    let answer = instance.device_signed(&phone, "POST", "/v1/apps/dms/me/keys/rotate", Some(&rotate), None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "sign_in_again"), "{}", answer.text());
+
+    // Signed in again with a code, on the same key: the same device, now
+    // recent, and the new key is taken.
+    let created: i64 = rusqlite::Connection::open(&instance.db)
+        .expect("the database")
+        .query_row("SELECT created FROM devices WHERE account_key = ?1", [phone.account_key()], |row| row.get(0))
+        .expect("the device");
+    let again = instance.sign_in_device(&phone, "matt@example.com", "Matt's iPhone").await;
+    assert_eq!(again.account_id, account);
+    let whoami = instance.device_signed(&phone, "GET", "/v1/apps/whoami", None, None).await.value();
+    assert_eq!((&whoami["signed_in_at"], &whoami["removed_devices"]), (&json!(instance.now()), &Value::Null), "{whoami}");
+    let still: i64 = rusqlite::Connection::open(&instance.db)
+        .expect("the database")
+        .query_row("SELECT created FROM devices WHERE account_key = ?1", [phone.account_key()], |row| row.get(0))
+        .expect("the device");
+    assert_eq!(still, created, "the same device");
+    instance.advance(1);
+    let answer = instance.device_signed(&phone, "POST", "/v1/apps/dms/me/keys/rotate", Some(&rotate), None).await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+}
+
+/// Row 671: Matt's Mac signs out. The worker hears it from the service and
+/// drops its KeyPackages at once, and his phone sees it signed out in his
+/// DM keys (with the normal Remove…); signed back in, it isn't. Removed by
+/// the phone or at the account page, the same.
+#[tokio::test]
+async fn test_26_a_signed_out_device_s_key_packages_go_and_its_account_sees_it() {
+    use claktory_dm_crypto::certificate::LeafKind;
+    use claktory_dm_crypto::device_list::{DeviceList, Listed};
+    use claktory_dm_crypto::identity::IdentityKey;
+
+    let dir = tempfile::tempdir().expect("a folder");
+    let socket = worker(dir.path(), uid(dir.path()));
+    let instance = with_apps(Some(socket), uid(dir.path())).await;
+    let phone = Device::new("192.0.2.89");
+    let account = instance.sign_in_device(&phone, "matt@example.com", "Matt's iPhone").await.account_id;
+    let mac = Device::new("192.0.2.90");
+    instance.sign_in_device(&mac, "matt@example.com", "Matt's Mac").await;
+    let identity = IdentityKey::generate().expect("a key");
+    let leaves = [&phone, &mac]
+        .iter()
+        .enumerate()
+        .map(|(n, device)| Listed { kind: LeafKind::Device, leaf_id: device.account_key(), signature_key: [n as u8 + 1; 32] })
+        .collect();
+    let signed = DeviceList { account_id: account.clone(), version: 1, created_ms: 1, leaves }.sign(&identity).expect("signed");
+    let put = json!({"identity_key": b64(identity.public().0), "device_list": b64(signed.to_bytes().expect("bytes")),
+                     "version": 1, "previous_version": 0});
+    assert_eq!(instance.device_signed(&phone, "PUT", "/v1/apps/dms/me/keys", Some(&put), None).await.status, 200);
+    let apps = rusqlite::Connection::open(dir.path().join("apps.db")).expect("the worker's records");
+    let put_up = |device: &Device, n: u8| {
+        apps.execute(
+            "INSERT INTO dm_key_packages VALUES (?1, ?2, ?3, 'device', 0, x'00', 1)",
+            rusqlite::params![vec![n; 32], account, device.account_key()],
+        )
+        .expect("held");
+    };
+    let held = |device: &Device| -> i64 {
+        apps.query_row("SELECT COUNT(*) FROM dm_key_packages WHERE leaf_id = ?1", [device.account_key()], |row| row.get(0)).expect("count")
+    };
+    let signed_out = || async {
+        instance.advance(1);
+        let keys = instance.device_signed(&phone, "GET", &format!("/v1/apps/dms/keys/{account}"), None, None).await.value();
+        keys["signed_out"].clone()
+    };
+    put_up(&phone, 1);
+    put_up(&mac, 2);
+    assert_eq!(signed_out().await, json!([]));
+
+    instance.device_signed(&mac, "POST", "/v1/devices/sign-out", Some(&json!({})), None).await;
+    assert_eq!((held(&mac), held(&phone)), (0, 1), "the Mac's went at its sign-out");
+    assert_eq!(signed_out().await, json!([mac.account_key()]));
+
+    // Back: it's signed in again, and puts some up.
+    instance.advance(1);
+    instance.sign_in_device(&mac, "matt@example.com", "Matt's Mac").await;
+    assert_eq!(signed_out().await, json!([]));
+    put_up(&mac, 3);
+
+    // Removed by the phone: the same.
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&json!({"account_key": mac.account_key()})), None).await;
+    assert_eq!(answer.json::<DeviceRemoved>(), DeviceRemoved { removed: true });
+    assert_eq!(held(&mac), 0);
+    assert_eq!(signed_out().await, json!([mac.account_key()]));
+
+    // At the account page: the same.
+    let tablet = Device::new("192.0.2.91");
+    instance.sign_in_device(&tablet, "matt@example.com", "Matt's iPad").await;
+    put_up(&tablet, 4);
+    let cookie = web_sign_in(&instance, "matt@example.com", "192.0.2.92").await;
+    let csrf = field(&crate::web::get(&instance, "/account", &cookie).await.text(), "csrf");
+    let form = format!("csrf={csrf}&device={}&confirm=yes", tablet.account_key());
+    post_form(&instance, "/account/remove-device", &cookie, &form).await;
+    assert_eq!(held(&tablet), 0);
+}
+
+/// Row 671 (Fugo's follow-up): the Mac signs out while the worker is down.
+/// The sign-out goes ahead and the notice waits; asked again once it's up,
+/// its KeyPackages from before go, and any it put up after signing back in
+/// meanwhile stay. Removed while it's down, the same.
+#[tokio::test]
+async fn a_sign_out_while_the_worker_is_down_reaches_it_once_it_answers() {
+    let dir = tempfile::tempdir().expect("a folder");
+    let socket = worker(dir.path(), uid(dir.path()));
+    let instance = with_apps(Some(socket.clone()), uid(dir.path())).await;
+    let phone = Device::new("192.0.2.93");
+    let account = instance.sign_in_device(&phone, "matt@example.com", "Matt's iPhone").await.account_id;
+    let mac = Device::new("192.0.2.94");
+    instance.sign_in_device(&mac, "matt@example.com", "Matt's Mac").await;
+    let apps = rusqlite::Connection::open(dir.path().join("apps.db")).expect("the worker's records");
+    let put_up = |n: u8, uploaded: i64| {
+        apps.execute(
+            "INSERT INTO dm_key_packages VALUES (?1, ?2, ?3, 'device', 0, x'00', ?4)",
+            rusqlite::params![vec![n; 32], account, mac.account_key(), uploaded],
+        )
+        .expect("held");
+    };
+    let held = || -> Vec<i64> {
+        let mut statement = apps.prepare("SELECT uploaded FROM dm_key_packages WHERE leaf_id = ?1 ORDER BY uploaded").expect("query");
+        statement.query_map([mac.account_key()], |row| row.get(0)).expect("rows").collect::<Result<_, _>>().expect("held")
+    };
+    let queued = || {
+        rusqlite::Connection::open(&instance.db)
+            .expect("the service's database")
+            .query_row("SELECT COUNT(*) FROM apps_sign_outs", [], |row| row.get::<_, i64>(0))
+            .expect("queued")
+    };
+    put_up(1, instance.now() * 1000);
+
+    // Down: the sign-out goes ahead, the notice waits.
+    std::fs::remove_file(&socket).expect("the socket");
+    instance.advance(1);
+    let answer = instance.device_signed(&mac, "POST", "/v1/devices/sign-out", Some(&json!({})), None).await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+    assert_eq!((held().len(), queued()), (1, 1));
+
+    // Signed back in meanwhile, with new ones put up.
+    instance.advance(1);
+    instance.sign_in_device(&mac, "matt@example.com", "Matt's Mac").await;
+    let after = instance.now() * 1000;
+    put_up(2, after);
+
+    // Up: asked again after a minute, not before; only the old ones go.
+    worker(dir.path(), uid(dir.path()));
+    assert_eq!(instance.service.retry_app_sign_outs().await, 0, "not due yet");
+    instance.advance(60);
+    assert_eq!(instance.service.retry_app_sign_outs().await, 1);
+    assert_eq!((held(), queued()), (vec![after], 0));
+    instance.advance(3600);
+    assert_eq!(instance.service.retry_app_sign_outs().await, 0, "nothing left to ask");
+
+    // Removed by the phone while it's down: the same.
+    std::fs::remove_file(&socket).expect("the socket");
+    let answer = instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&json!({"account_key": mac.account_key()})), None).await;
+    assert_eq!(answer.json::<DeviceRemoved>(), DeviceRemoved { removed: true });
+    assert_eq!((held().len(), queued()), (1, 1));
+    worker(dir.path(), uid(dir.path()));
+    instance.advance(60);
+    assert_eq!(instance.service.retry_app_sign_outs().await, 1);
+    assert_eq!((held().len(), queued()), (0, 0));
 }

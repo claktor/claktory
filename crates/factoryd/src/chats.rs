@@ -178,6 +178,11 @@ impl Chats {
     pub(crate) fn model_and_name(&self, id: &str) -> Option<(String, String)> {
         self.meta(id).map(|meta| (meta.model, "The chat".to_owned()))
     }
+
+    /// The model and effort a chat runs on.
+    pub(crate) fn model_and_effort(&self, id: &str) -> Option<(String, String)> {
+        self.meta(id).map(|meta| (meta.model, meta.effort))
+    }
 }
 
 fn refused(why: impl Into<String>) -> RequestError {
@@ -193,7 +198,7 @@ fn known(factory: &Factory, id: &str) -> Result<(), RequestError> {
 }
 
 /// The chats for Workspace.chats, most recent first, and the one shown.
-pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Chat>, String) {
+pub(crate) fn view(factory: &Factory, inner: &Inner, switching: &crate::usage_switch::View) -> (Vec<v1::Chat>, String) {
     let data = factory.chats.data();
     let mut chats: Vec<v1::Chat> = data
         .chats
@@ -205,7 +210,7 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Chat>, String) 
             let transcript = runtime.and_then(|runtime| runtime.transcript.as_ref());
             let wait = runtime.and_then(|runtime| runtime.usage_wait.as_ref());
             v1::Chat {
-                id,
+                id: id.clone(),
                 title: meta.shown().to_owned(),
                 created: meta.created,
                 updated: meta.updated,
@@ -217,6 +222,9 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Chat>, String) 
                 model_available: inner.models.iter().any(|model| model.id == meta.model),
                 usage_wait: wait.map(|wait| wait.text.clone()).unwrap_or_default(),
                 usage_wait_until_ms: wait.map_or(0, |wait| wait.until_ms),
+                usage_wait_alternative: switching.alternative(&id),
+                usage_wait_no_other_provider: switching.no_other_provider(&id),
+                usage_switch: switching.switch(&id),
             }
         })
         .collect();
@@ -454,6 +462,51 @@ pub(crate) fn rename(factory: &Arc<Factory>, id: &str, title: &str) -> Result<()
     Ok(())
 }
 
+/// A chat's settings for its next model call (`runner`'s settings_now): its
+/// effort, and its model with a frame of its own when that changed
+/// (`set_model`).
+pub(crate) fn settings_now(factory: &Arc<Factory>, id: &str, epoch: u64) -> factory_agent::Settings {
+    let mut settings = factory_agent::Settings::default();
+    let Some(meta) = factory.chats.meta(id) else { return settings };
+    let (frame, listed) = {
+        let inner = factory.lock();
+        let Some(runtime) = inner.agents.get(id).filter(|runtime| runtime.epoch == epoch) else { return settings };
+        let frame = runtime.transcript.as_ref().and_then(Transcript::frame).cloned();
+        (frame, inner.models.iter().any(|model| model.id == meta.model))
+    };
+    settings.thinking_level = ThinkingLevel::parse(&meta.effort);
+    let Some(frame) = frame else { return settings };
+    if crate::runner::frame_model(&frame) == meta.model {
+        return settings;
+    }
+    // A model that can't run leaves it on the one it has until the run ends.
+    let Some(model) = listed.then(|| factory.models.resolve(&meta.model)).flatten() else { return settings };
+    let given = tools(factory, id);
+    let specs = given.iter().map(|tool| tool.spec.clone()).collect();
+    let Some(frame) = new_frame(factory, id, epoch, &meta.model, specs) else { return settings };
+    settings.system_prompt = Some(frame.system_prompt);
+    settings.model = Some(model);
+    settings.tools = Some(given);
+    settings
+}
+
+/// A chat runs on `model` at `effort` from its next model call: it
+/// continued on another provider, or went back (`crate::usage_switch`).
+pub(crate) fn set_model(factory: &Arc<Factory>, id: &str, model: &str, effort: &str) -> Result<(), RequestError> {
+    known(factory, id)?;
+    let inner = factory.lock();
+    let number = {
+        let mut data = factory.chats.data();
+        let Some(meta) = number(id).and_then(|number| data.chats.get_mut(&number)) else { return Err(unknown(id)) };
+        meta.model = model.to_owned();
+        meta.effort = effort.to_owned();
+        meta.number
+    };
+    factory.store.db().execute("UPDATE chats SET model = ?2, effort = ?3 WHERE id = ?1", params![number, model, effort])?;
+    factory.broadcast_workspace(&inner);
+    Ok(())
+}
+
 /// DeleteChat: for good.
 pub(crate) fn delete(factory: &Arc<Factory>, id: &str) -> Result<(), RequestError> {
     known(factory, id)?;
@@ -464,6 +517,7 @@ pub(crate) fn delete(factory: &Arc<Factory>, id: &str) -> Result<(), RequestErro
         save_selected(factory, None);
     }
     forget(factory, &mut inner, id);
+    factory.usage_switches.forget(&factory.store, id);
     Ok(())
 }
 
@@ -669,6 +723,8 @@ async fn execute(factory: &Arc<Factory>, id: &str, job: Job) {
             let (weak, id, model) = (weak.clone(), id.clone(), model.clone());
             Box::pin(async move {
                 let factory = weak.upgrade()?;
+                // On the model it runs on now (`set_model`).
+                let model = factory.chats.model_and_effort(&id).map_or(model, |(model, _)| model);
                 let tools = tools(&factory, &id);
                 let specs = tools.iter().map(|tool| tool.spec.clone()).collect();
                 let frame = new_frame(&factory, &id, epoch, &model, specs)?;

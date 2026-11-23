@@ -541,7 +541,7 @@ mod tests {
     fn reading_and_drafts_are_no_routes_of_the_worker_s() {
         let mut world = World::new();
         let (conversation, _) = friends(&mut world, "ana", "bo");
-        let caller = crate::ipc::Caller::Device { account_id: "ana".into(), device_key: "k".into(), registrations: Vec::new() };
+        let caller = crate::ipc::Caller::Device { account_id: "ana".into(), device_key: "k".into(), registrations: Vec::new(), removed_devices: Vec::new(), signed_in_at: None, bound_devices: None };
         for what in ["read", "draft"] {
             let route = format!("conversations/{conversation}/{what}");
             let body = json!({"seq": 1, "text": "x", "revision": 0}).to_string();

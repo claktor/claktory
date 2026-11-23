@@ -20,7 +20,10 @@ Agent _agent(String id, String name, {String pipe = ''}) => Agent(
   status: AgentStatus.AGENT_STATUS_IDLE,
 );
 
-Pipe _pipe({PipeState state = PipeState.PIPE_STATE_OPEN}) => Pipe(
+Pipe _pipe({
+  PipeState state = PipeState.PIPE_STATE_OPEN,
+  bool reviewOutgoing = false,
+}) => Pipe(
   id: 'pipe1',
   name: 'Acme launch',
   projectId: 'p1',
@@ -38,19 +41,22 @@ Pipe _pipe({PipeState state = PipeState.PIPE_STATE_OPEN}) => Pipe(
   canRunCommandsIds: const ['june'],
   limits: PipeLimits(messagesPerHour: 30, burst: 10),
   online: true,
+  reviewOutgoing: reviewOutgoing,
 );
 
-Workspace _workspace({PipeState state = PipeState.PIPE_STATE_OPEN}) =>
-    Workspace(
-      projects: [Project(id: 'p1', name: 'Factory', path: '/Users/me/f')],
-      agents: [
-        _agent('june', 'June'),
-        _agent('kai', 'Kai', pipe: 'pipe1'),
-      ],
-      pipes: [_pipe(state: state)],
-      selectedPipeId: 'pipe1',
-      selectedAgentId: 'kai',
-    );
+Workspace _workspace({
+  PipeState state = PipeState.PIPE_STATE_OPEN,
+  bool reviewOutgoing = false,
+}) => Workspace(
+  projects: [Project(id: 'p1', name: 'Factory', path: '/Users/me/f')],
+  agents: [
+    _agent('june', 'June'),
+    _agent('kai', 'Kai', pipe: 'pipe1'),
+  ],
+  pipes: [_pipe(state: state, reviewOutgoing: reviewOutgoing)],
+  selectedPipeId: 'pipe1',
+  selectedAgentId: 'kai',
+);
 
 PipeMessage _message(
   int seq,
@@ -105,8 +111,11 @@ void main() {
     List<Entry> entries = const [],
     List<PipeMessage> messages = const [],
     bool chatHasEarlier = false,
+    bool reviewOutgoing = false,
   }) async {
-    final harness = Harness(_workspace(state: state));
+    final harness = Harness(
+      _workspace(state: state, reviewOutgoing: reviewOutgoing),
+    );
     await harness.show(tester);
     harness.backend.transcript.load(
       Transcript(agentId: 'kai', entries: entries),
@@ -241,7 +250,10 @@ void main() {
       'draft over, sends it through the pipe, then goes back to the '
       'liaison', (tester) async {
     final harness = await show(tester);
-    expect(find.text('Only Kai sees this.'), findsOneWidget);
+    expect(
+      find.text("Goes to Kai, who can pass it on to Ana's Claktory."),
+      findsOneWidget,
+    );
 
     await tester.enterText(field(), 'Ask them for dates');
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
@@ -261,7 +273,22 @@ void main() {
     expect(harness.last.sendPipeMessage.pipeId, 'pipe1');
     expect(harness.last.sendPipeMessage.text, 'Hello Ana');
     // The next message goes to the liaison again.
-    expect(find.text('Only Kai sees this.'), findsOneWidget);
+    expect(
+      find.text("Goes to Kai, who can pass it on to Ana's Claktory."),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('with Review outgoing on, the box says what the liaison passes '
+      'on waits for you (friend bug #1)', (tester) async {
+    await show(tester, reviewOutgoing: true);
+    expect(
+      find.text(
+        "Goes to Kai. If Kai passes it on to Ana's Claktory, you approve it "
+        'first.',
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets("a message the pipe refuses comes back to the box, saying why", (
@@ -288,7 +315,10 @@ void main() {
       findsOneWidget,
     );
     expect(find.text("To Ana's Claktory"), findsNothing);
-    expect(find.text('Only Kai sees this.'), findsOneWidget);
+    expect(
+      find.text("Goes to Kai, who can pass it on to Ana's Claktory."),
+      findsOneWidget,
+    );
 
     await tester.tap(find.text('Delete…'));
     await settle(tester);

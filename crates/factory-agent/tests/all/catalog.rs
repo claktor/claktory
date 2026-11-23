@@ -6,7 +6,7 @@ use serde_json::json;
 fn the_four_providers_load_from_pi_data() {
     assert_eq!(models("openai").len(), 38);
     assert_eq!(models("openai-codex").len(), 8);
-    assert_eq!(models("openrouter").len(), 353);
+    assert_eq!(models("openrouter").len(), 356);
     assert_eq!(models("anthropic").len(), 15);
     assert!(models("google").is_empty());
 }

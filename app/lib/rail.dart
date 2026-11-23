@@ -801,15 +801,25 @@ class _Tile extends StatelessWidget {
                     size: Size.square(16 * size / 28),
                     painter: _LaptopPainter(color),
                   )
-                : Text(
-                    claktoryInitials(name),
-                    style: TextStyles.caption.copyWith(
-                      color: color,
-                      fontWeight: FontWeight.w600,
-                      height: 1,
-                      fontSize: size == 28
-                          ? null
-                          : (TextStyles.caption.fontSize ?? 11) * size / 28,
+                // They grow with the text size until they fill the tile,
+                // and no further: the tile keeps its size in the rail, and
+                // its name is read out whole (Sorbet's row 102).
+                : Padding(
+                    padding: EdgeInsets.all(3 * size / 28),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        claktoryInitials(name),
+                        maxLines: 1,
+                        style: TextStyles.caption.copyWith(
+                          color: color,
+                          fontWeight: FontWeight.w600,
+                          height: 1,
+                          fontSize: size == 28
+                              ? null
+                              : (TextStyles.caption.fontSize ?? 11) * size / 28,
+                        ),
+                      ),
                     ),
                   ),
           ),

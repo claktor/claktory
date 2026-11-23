@@ -924,6 +924,11 @@ void main() {
       secretRequestSummary(passed, workspace, shownIn: 'june'),
       'Mike is finding it: Resend',
     );
+    // Handed back to the person (its admin /cleared or deleted): approved
+    // with no admin, it asks them again, as its card does (#327).
+    final handedBack = resend()
+      ..state = SecretRequestState.SECRET_REQUEST_STATE_APPROVED;
+    expect(secretRequestSummary(handedBack, workspace), 'Asks for Resend');
   });
 
   group('with an admin agent to pass it to', () {
@@ -1318,7 +1323,7 @@ void main() {
     );
     expect(find.text('Strength: very strong'), findsOneWidget);
     expect(find.text("Also the key's comment"), findsNothing);
-    expect(find.text('No one ever sees it, June included.'), findsOneWidget);
+    expect(find.text('No agent ever sees it, June included.'), findsOneWidget);
 
     await tester.tap(find.bySemanticsLabel('Longer'));
     await tester.pump();
@@ -1373,6 +1378,62 @@ void main() {
       (m) => m.hasDecideSecretRequest(),
     ).single.decideSecretRequest;
     expect(decided.passwordLength, 0);
+  });
+
+  testWidgets('a length chosen in the conversation stays when the card '
+      'scrolls out of view and back (row 189)', (tester) async {
+    final harness = Harness(_workspace());
+    Entry said(int seq) =>
+        Entry(seq: Int64(seq), user: UserText(text: 'message $seq'));
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'june',
+        entries: [
+          for (var i = 0; i < 40; i++) said(i),
+          Entry(seq: Int64(40), secretRequest: password()),
+          for (var i = 41; i < 80; i++) said(i),
+        ],
+      ),
+    );
+    await harness.show(tester);
+    await pumpFrames(tester);
+    final conversation = find.byType(CustomScrollView).first;
+    final shorter = find.bySemanticsLabel('Shorter');
+    await tester.dragUntilVisible(shorter, conversation, const Offset(0, 300));
+    await tester.pump();
+    await tester.tap(shorter);
+    await tester.pump();
+    await tester.tap(shorter);
+    await tester.pump();
+    expect(find.textContaining('30-character'), findsOneWidget);
+
+    // Up past it, then back down to the newest.
+    for (var i = 0; i < 3; i++) {
+      await tester.drag(conversation, const Offset(0, 3000));
+      await tester.pump();
+    }
+    expect(find.textContaining('-character password'), findsNothing);
+    for (var i = 0; i < 6; i++) {
+      await tester.drag(conversation, const Offset(0, -3000));
+      await tester.pump();
+    }
+    expect(find.text('message 79'), findsOneWidget);
+    expect(find.textContaining('-character password'), findsNothing);
+
+    await tester.dragUntilVisible(
+      find.text('Generate'),
+      conversation,
+      const Offset(0, 300),
+    );
+    await tester.pump();
+    expect(find.textContaining('30-character'), findsOneWidget);
+    await tester.tap(find.text('Generate'));
+    await pumpFrames(tester);
+    final decided = _sent(
+      harness,
+      (m) => m.hasDecideSecretRequest(),
+    ).single.decideSecretRequest;
+    expect(decided.passwordLength, 30);
   });
 
   testWidgets('a generated key shows to whom it went and its public key, '
@@ -1580,7 +1641,7 @@ void main() {
       expect(find.text('/Users/me/.ssh/id_\\u{202E}yek.pub'), findsOneWidget);
       expect(find.text('This is in your SSH keys folder.'), findsOneWidget);
       expect(
-        find.textContaining('June had read messages from another Claktory'),
+        find.textContaining('June had read a web page when it asked'),
         findsOneWidget,
       );
     });

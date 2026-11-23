@@ -9,7 +9,7 @@
 //! the move says an agent started it (`Move.started_by_agent_id`) so every
 //! device shows that confirm. Only Rivet (`proposals::rivet`, the settings'
 //! admin agent, never a tool argument) can use them, never while it has
-//! read a pipe, and nothing here deletes the copy a move leaves behind:
+//! read a web page, and nothing here deletes the copy a move leaves behind:
 //! that stays the person's.
 
 use std::fmt::Write as _;
@@ -19,10 +19,9 @@ use std::time::{Duration, Instant};
 use factory_agent::{Tool, ToolResult};
 use factory_protocol::v1::{self, MovePhase as Phase};
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::json;
 
-use super::{Extension, Manifest, PromptKind, PromptSection};
+use super::{Extension, Manifest, PromptKind, PromptSection, async_tool};
 use crate::config::AgentConfig;
 use crate::factory::{Factory, Inner};
 
@@ -103,33 +102,6 @@ impl Extension for Move {
     }
 }
 
-/// Binds an asynchronous tool to an agent without keeping Factory alive.
-fn async_tool<A, F>(
-    factory: &Arc<Factory>,
-    agent: &str,
-    name: &'static str,
-    label: &'static str,
-    description: &'static str,
-    parameters: Value,
-    run: fn(Arc<Factory>, String, A) -> F,
-) -> Tool
-where
-    A: DeserializeOwned + Send + 'static,
-    F: std::future::Future<Output = Result<ToolResult, String>> + Send + 'static,
-{
-    super::tool(
-        name,
-        label,
-        description,
-        parameters,
-        super::agent_handler(factory, agent, move |factory, agent, args| async move {
-            let args: A = serde_json::from_value(args)?;
-            let Some(factory) = factory else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
-            run(factory, agent, args).await.map_err(factory_agent::Error::Other)
-        }),
-    )
-}
-
 /// Only Rivet moves this Claktory: the settings' admin agent, whoever calls.
 fn only_rivet(factory: &Factory, agent: &str) -> Result<(), String> {
     let inner = factory.lock();
@@ -141,7 +113,7 @@ fn only_rivet(factory: &Factory, agent: &str) -> Result<(), String> {
     }
 }
 
-/// An agent that has read a pipe doesn't start a move: what it read may be
+/// An agent that has read a web page doesn't start a move: what it read may be
 /// someone else's instructions, and a move hands over everything.
 fn untainted(factory: &Factory, agent: &str) -> Result<(), String> {
     if factory.pipes.tainted(agent).is_empty() {

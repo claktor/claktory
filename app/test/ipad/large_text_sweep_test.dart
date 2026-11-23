@@ -2,11 +2,13 @@
 // buttons don't fit a dialog's row, so its less common action (Delete…)
 // goes on a line of its own under Cancel and Save, as on a phone; and the
 // sidebar's foot shows the count of agents at work whole, never cut to
-// half its height.
+// half its height; and in Slide Over, an agent's extensions put their names
+// under the switch, whole, never "Messa|ging".
 import 'dart:async' show unawaited;
 
 import 'package:factory_app/controls.dart' show showModal;
 import 'package:factory_app/forms.dart';
+import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/sidebar.dart';
 import 'package:factory_app/team_activity.dart';
 import 'package:flutter/rendering.dart' show RenderParagraph;
@@ -15,6 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../harness.dart';
 import '../messaging_test.dart' as messaging show workspace;
+import '../phone_sizes_test.dart' show loadGeist;
 import 'as_ipad.dart';
 import 'window_fixtures.dart' show TextFactor;
 
@@ -113,4 +116,80 @@ void main() {
     expect(delete.right, lessThan(save.left));
     expect(tester.getSize(find.byType(TeamActivity)).height, 24);
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+  testWidgets("Agent settings' extensions in Slide Over (320) at AX5: each "
+      'name whole, never broken mid-word', (tester) async {
+    // As wide as on the iPad: the test font's square letters break any word.
+    await tester.runAsync(loadGeist);
+    asIPad();
+    tester.platformDispatcher.textScaleFactorTestValue = TextFactor.ax5;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    const names = {
+      'agents': 'Messaging',
+      'checklist': 'Checklist',
+      'comments': 'Comments',
+      'database': 'Database',
+      'devices': 'Devices',
+      'reports': 'Reports',
+      'highlights': 'Highlights',
+      'memory': 'Memory',
+      'monitors': 'Monitors',
+      'resources': 'Resources',
+      'secrets': 'Secrets',
+      'tree': 'Own checkout',
+    };
+    final snapshot = messaging.workspace();
+    snapshot.extensions
+      ..clear()
+      ..addAll([
+        for (final MapEntry(:key, :value) in names.entries)
+          Extension(id: key, name: value, icon: 'users'),
+      ]);
+    final agent = snapshot.agents.firstWhere((agent) => agent.id == 'a1');
+    agent.extensions
+      ..clear()
+      ..addAll([
+        for (final id in names.keys) AgentExtension(id: id, enabled: true),
+      ]);
+    final harness = Harness(snapshot);
+    await harness.show(tester, size: const Size(320, 834));
+    await pumpFrames(tester);
+    final workspace = harness.backend.workspace;
+    unawaited(
+      showModal(
+        tester.element(
+          find
+              .descendant(of: find.byType(Overlay), matching: find.byType(Text))
+              .first,
+        ),
+        (context, close) =>
+            AgentSettingsForm(agent: workspace.agent('a1')!, close: close),
+      ),
+    );
+    await pumpFrames(tester);
+    expect(tester.takeException(), isNull);
+    for (final name in names.values) {
+      final label = find
+          .byWidgetPredicate(
+            (widget) => widget is RichText && widget.text.toPlainText() == name,
+            skipOffstage: false,
+          )
+          .last;
+      await tester.ensureVisible(label);
+      await pumpFrames(tester);
+      final paragraph = tester.renderObject<RenderParagraph>(label);
+      // Every line after the first starts after a space.
+      double top(int at) => paragraph
+          .getBoxesForSelection(
+            TextSelection(baseOffset: at, extentOffset: at + 1),
+          )
+          .first
+          .top;
+      for (var at = 1; at < name.length; at++) {
+        if (name[at] != ' ' && top(at) > top(at - 1) + 1) {
+          expect(name[at - 1], ' ', reason: '"$name" breaks at $at');
+        }
+      }
+    }
+  });
 }

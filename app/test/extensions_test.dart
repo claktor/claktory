@@ -553,6 +553,38 @@ void main() {
     expect(change.value.on, isFalse);
   });
 
+  testWidgets("items added in one call keep their order past 32, though "
+      "they share a millisecond (Abbacchio's row 661)", (tester) async {
+    final harness = await showWith(tester, workspace(openPanel: 'checklist'));
+    final added = at(now);
+    harness.backend.extensionView.apply(
+      ExtensionView(
+        extensionId: 'checklist',
+        agentId: 'a1',
+        checklist: Checklist(
+          items: [
+            for (var i = 1; i <= 40; i++)
+              ChecklistItem(id: i, text: 'Step $i', created: added),
+          ],
+        ),
+      ),
+    );
+    await settle(tester);
+    final shown = [
+      for (var i = 1; i <= 40; i++)
+        if (find.text('Step $i').evaluate().isNotEmpty)
+          (i, tester.getTopLeft(find.text('Step $i')).dy),
+    ];
+    expect(shown.length, greaterThan(5));
+    for (var k = 1; k < shown.length; k++) {
+      expect(
+        shown[k].$2,
+        greaterThan(shown[k - 1].$2),
+        reason: '#${shown[k].$1} after #${shown[k - 1].$1}',
+      );
+    }
+  });
+
   testWidgets('a long checklist follows its bottom like a chat', (
     tester,
   ) async {

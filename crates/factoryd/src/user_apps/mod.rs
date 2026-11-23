@@ -280,7 +280,7 @@ pub(crate) struct Card {
     pub expires_ms: i64,
     pub reason: String,
     pub created_ms: i64,
-    /// The grantee has read a pipe.
+    /// The grantee has read a web page (a pipe, before #346).
     #[serde(default)]
     pub read_pipes: bool,
 }
@@ -474,7 +474,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppGrant)
     };
     let name = agent_name(factory, &row.grantee);
     if !same {
-        let error = format!("{name} was deleted since this was proposed, so nothing was given.");
+        let error = format!("{name} was deleted since Rivet suggested this, so nothing was given.");
         if let Some(row) = end(factory, &row.id, State::Failed, comment, &error, "") {
             tell(factory, &row);
         }
@@ -489,13 +489,14 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppGrant)
         }
         return Ok(());
     }
-    // It read a pipe after the card was shown: the card says so now, and
+    // It read a web page after the card was shown: the card says so now, and
     // the person decides again, knowing (Fugo's review).
     if !row.read_pipes && !factory.pipes.tainted(&row.grantee).is_empty() {
         factory.store.db().execute("UPDATE app_grant_proposals SET read_pipes = 1 WHERE id = ?1", [&row.id])?;
         reshow(factory, &row.id);
         return Err(RequestError::Proposal(format!(
-            "{name} has read messages from another Claktory since this was proposed. Look at it again."
+            "{name} has read {} since Rivet suggested this. Look at it again.",
+            crate::pipes::agents::what_was_read(factory, &row.grantee)
         )));
     }
     if row.expires != 0 && row.expires <= now_ms() {
@@ -707,7 +708,7 @@ pub(crate) async fn reconcile(factory: &Arc<Factory>) {
     if let Err(error) = replaced {
         tracing::error!(%error, "could not mirror the app grants");
     }
-    dms::watch::wake();
+    dms::watch::wake(factory);
 }
 
 /// An agent is deleted: its proposals go, and its grants are revoked by a

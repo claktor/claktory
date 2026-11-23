@@ -55,9 +55,25 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
 
   /// What's shown changed (read again, or formatted or plain): found again
   /// once it's built.
-  void _shownChanged() {
+  /// Shows the file as it's written ([raw]) or formatted. What was
+  /// selected goes: the other view's text is laid out differently, so the
+  /// same place in it would be other words (Zucchero's row 105).
+  void _showRaw(bool raw) {
+    if (raw == _raw) return;
+    comments?.selection.value = null;
+    setState(() => _raw = raw);
+    // The occurrence the find is on, in sight in the view now shown.
+    _shownChanged(reveal: true);
+  }
+
+  void _shownChanged({bool reveal = false}) {
+    // After the frame's other callbacks: a view built anew records what
+    // it shows in its own, so found before it would find nothing
+    // (Abbacchio's row 655, Plain to Formatted).
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _find.refresh();
+      scheduleMicrotask(() {
+        if (mounted) _find.refresh(reveal: reveal);
+      });
     });
   }
 
@@ -116,10 +132,7 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
         _Toggle(
           options: const ['Formatted', 'Plain'],
           selected: _raw ? 1 : 0,
-          onChanged: (index) {
-            setState(() => _raw = index == 1);
-            _shownChanged();
-          },
+          onChanged: (index) => _showRaw(index == 1),
         ),
       reloadButton(),
     ];
@@ -140,6 +153,9 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
       // Selected with the mouse and copied with ⌘C or a right click's
       // Copy, like the conversation; the line numbers stay out of it.
       final text = SelectableArea(
+        // A region of its own for each view, so a selection never carries
+        // over to the other's text.
+        key: ValueKey(formatted),
         // On an iPhone, Comment and Suggest join the text's own menu, after
         // Copy: the comment's written in a sheet above the keyboard.
         extra: commenting == null
@@ -183,10 +199,7 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
       comments: commentable ? CommentsButton(controller: comments) : null,
       actions: [
         if (_markdown && !_binary && problem == null)
-          PaneAction('Plain text', () {
-            setState(() => _raw = !_raw);
-            _shownChanged();
-          }, active: _raw),
+          PaneAction('Plain text', () => _showRaw(!_raw), active: _raw),
         PaneAction('Reload', reload),
       ],
       body: FindScope(
@@ -603,10 +616,37 @@ class _FormattedTextState extends State<_FormattedText>
     if (box == null || view is! RenderBox || !view.attached) return;
     final top = view.localToGlobal(Offset.zero).dy;
     final height = view.size.height;
-    if (box.top >= top + Space.xxl && box.bottom <= top + height - Space.l) {
+    if (box.top < top + Space.xxl || box.bottom > top + height - Space.l) {
+      _scrollBy(box.top - (top + height * 0.25));
+    }
+    // In a block that scrolls sideways (a wide table, a code block), across
+    // too, where it's past the edge (Abbacchio's row 652).
+    final context = block.key.currentContext;
+    final across = context == null ? null : Scrollable.maybeOf(context);
+    final band = across?.context.findRenderObject();
+    if (across == null ||
+        across.position.axis != Axis.horizontal ||
+        band is! RenderBox ||
+        !band.attached) {
       return;
     }
-    _scrollBy(box.top - (top + height * 0.25));
+    final end = boxAt(
+      block.base + at + widget.find.marks.value.query.length - 1,
+    );
+    final left = band.localToGlobal(Offset.zero).dx;
+    final right = left + band.size.width;
+    final from = box.left;
+    final to = end != null && end.right > from ? end.right : box.right;
+    if (from >= left + Space.m && to <= right - Space.m) return;
+    final position = across.position;
+    // In the middle, so what's around it reads too.
+    final middle = (from + to) / 2 - (left + right) / 2;
+    position.jumpTo(
+      (position.pixels + middle).clamp(
+        position.minScrollExtent,
+        position.maxScrollExtent,
+      ),
+    );
   }
 
   void _attach() {

@@ -170,6 +170,54 @@ pub(crate) fn build(config: &Config, home: &Home, vault: &v1::VaultState, apps: 
             edges.push(edge(&id, &agent_node(&lead.id), v1::MapEdgeKind::Lead));
         }
     }
+    // What apps were given to read: agents' databases, Claktory's records,
+    // and Activity or Conversations, a node of their own.
+    let mut read = Vec::new();
+    for app in apps {
+        for source in app.sources.iter().filter(|source| source.granted) {
+            let to = match source.id.as_str() {
+                crate::apps::data::FACTORY_SOURCE => {
+                    records = true;
+                    RECORDS.to_owned()
+                }
+                id => match id.strip_prefix(crate::apps::data::AGENT_PREFIX) {
+                    Some(agent) => {
+                        let Some(found) = config.agent(agent).filter(|agent| !config.archived(agent)) else { continue };
+                        let database = database_node(agent);
+                        if !nodes.iter().any(|node| node.id == database) {
+                            nodes.push(v1::MapNode {
+                                id: database.clone(),
+                                kind: v1::MapNodeKind::Data.into(),
+                                label: format!("{}'s database", found.name),
+                                detail: path(&home.agent_dir(agent).join("database.sqlite")),
+                                parent_id: agent_node(agent),
+                                ref_id: agent.to_owned(),
+                                project_id: found.project.clone().unwrap_or_default(),
+                                ..Default::default()
+                            });
+                        }
+                        database
+                    }
+                    None => {
+                        let node = format!("data:{id}");
+                        if !read.iter().any(|(_, to): &(String, String)| *to == node) {
+                            nodes.push(v1::MapNode {
+                                id: node.clone(),
+                                kind: v1::MapNodeKind::Data.into(),
+                                label: source.label.clone(),
+                                detail: source.holds.clone(),
+                                ref_id: id.to_owned(),
+                                ..Default::default()
+                            });
+                        }
+                        node
+                    }
+                },
+            };
+            read.push((app_node(&app.id), to));
+        }
+    }
+    edges.extend(read.iter().map(|(from, to)| edge(from, to, v1::MapEdgeKind::Reads)));
     if records {
         nodes.push(v1::MapNode {
             id: RECORDS.to_owned(),

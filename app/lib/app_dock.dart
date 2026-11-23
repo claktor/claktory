@@ -56,32 +56,39 @@ Color? appDot(AppInfo app, Palette palette) => switch (app.state) {
   _ => null,
 };
 
-/// Opens [app]'s [view] (empty: its first) beside the selected agent's
-/// conversation, as Files open, or makes its pane glow when it's open
-/// already. An app with no views opens its place in Settings → Apps.
+/// Opens the Marketplace on its Apps tab, where apps are installed, run,
+/// given to agents and uninstalled.
+void openAppsTab(BuildContext context) {
+  AppScope.openPage(context, AppPage.marketplace);
+  AppScope.of(context).marketplaceTab.value = 'apps';
+}
+
+/// Opens [app]'s [view] (empty: its first). On a Mac or an iPad it fills
+/// the window, as an expanded pane does, over everything as it was: the
+/// agent's layout doesn't change, and Back, Collapse or Esc returns to it.
+/// On a phone it opens as a page over the agent's conversation. An app
+/// with no views opens its place in the Marketplace's Apps tab.
 void openApp(BuildContext context, AppInfo app, [String view = '']) {
   final scope = AppScope.scope(context);
   final backend = scope.backend;
   if (app.views.isEmpty) {
-    AppScope.openPage(context, AppPage.settings);
-    backend.settingsSection.value = 'apps';
+    openAppsTab(context);
     return;
   }
   final workspace = backend.workspace;
   final agent =
       workspace.selectedAgent ?? workspace.workspace.agents.firstOrNull;
   if (agent == null) return;
-  // On a phone, the view opens as a page over the agent's conversation
-  // (which chooses the agent), rather than beside it.
   final phone = PhoneRoutes.of(context);
-  if (phone == null && workspace.selectedAgent == null) {
-    fireAndLog(backend.selectAgent(agent.id));
+  if (phone == null) {
+    _expandApp(context, agent, app, view);
+    return;
   }
   if (scope.page.value != AppPage.agent) AppScope.closePage(context);
   final root = layoutOf(agent);
   final shown = appPane(root, app.id, view, app.views.first.id);
   if (shown != null) {
-    if (phone != null && phone.showPane(agent.id, shown.id)) return;
+    if (phone.showPane(agent.id, shown.id)) return;
     backend.highlights.glow('pane:${agent.id}:${shown.id}', [
       agentColor(agent.color),
     ]);
@@ -90,7 +97,64 @@ void openApp(BuildContext context, AppInfo app, [String view = '']) {
   final opened = withApp(root, app, view);
   fireAndLog(backend.setLayout(agent.id, opened));
   final pane = appPane(opened, app.id, view, app.views.first.id);
-  if (phone != null && pane != null) phone.showPane(agent.id, pane.id);
+  if (pane != null) phone.showPane(agent.id, pane.id);
+}
+
+/// The app view filling each window now ([_expandApp]), by the window's
+/// overlay: its entry, and the app and view it shows.
+final _expanded = Expando<({OverlayEntry entry, String app, String view})>();
+
+/// Shows [app]'s [view] (empty: its first) filling the window, in the
+/// window's overlay, so dialogs and menus still float above it: the same
+/// band and Esc as an expanded pane, "Back to [agent]". Nothing changes
+/// under it. Another view opened meanwhile takes its place.
+void _expandApp(BuildContext context, Agent agent, AppInfo app, String view) {
+  final spec = view.isEmpty
+      ? app.views.first
+      : app.views.where((v) => v.id == view).firstOrNull;
+  final viewId = spec?.id ?? view;
+  final overlay = Overlay.of(context);
+  final shown = _expanded[overlay];
+  if (shown != null && shown.app == app.id && shown.view == viewId) return;
+  _closeExpandedApp(overlay);
+  final leaf = ViewLeaf(
+    kind: appKind,
+    appId: app.id,
+    view: viewId,
+    title: spec?.title ?? '',
+  );
+  late final OverlayEntry entry;
+  void back() {
+    if (_expanded[overlay]?.entry == entry) _closeExpandedApp(overlay);
+  }
+
+  entry = OverlayEntry(
+    builder: (context) => ExpandedPane(
+      key: const ValueKey('expanded-app'),
+      agent: agent,
+      opened: const [],
+      onBack: back,
+      child: Pane(
+        agent: agent,
+        node: ViewNode(id: 'expanded-app', leaf: leaf),
+        onDrop: (_, _) {},
+        onClose: back,
+        expanded: true,
+        onExpand: back,
+        child: AppPane(leaf: leaf),
+      ),
+    ),
+  );
+  _expanded[overlay] = (entry: entry, app: app.id, view: viewId);
+  overlay.insert(entry);
+}
+
+void _closeExpandedApp(OverlayState overlay) {
+  final shown = _expanded[overlay];
+  _expanded[overlay] = null;
+  if (shown == null) return;
+  shown.entry.remove();
+  shown.entry.dispose();
 }
 
 /// The apps with a view open beside the selected agent's conversation.
@@ -127,13 +191,8 @@ Future<void> _tileActions(BuildContext context, AppInfo app) async {
     case 'unpin':
       fireAndLog(AppScope.of(context).pinApp(app.id, pinned: false));
     case 'settings':
-      _openAppSettings(context);
+      openAppsTab(context);
   }
-}
-
-void _openAppSettings(BuildContext context) {
-  AppScope.openPage(context, AppPage.settings);
-  AppScope.of(context).settingsSection.value = 'apps';
 }
 
 Widget _lucide(String icon, Color color, [double size = 16]) =>
@@ -518,8 +577,8 @@ class _Floating extends StatelessWidget {
 
 /// Every installed app, by name: a 44px row each with its icon, name and
 /// state, opening it; Pin or Unpin on an app with views; then Manage
-/// apps…, opening Settings → Apps. The launcher's list on a Mac, and the
-/// sheet the phone's strip opens.
+/// apps…, opening the Marketplace's Apps tab. The launcher's list on a
+/// Mac, and the sheet the phone's strip opens.
 class AppLauncherList extends StatelessWidget {
   const AppLauncherList({super.key, required this.onDone});
 
@@ -562,7 +621,7 @@ class AppLauncherList extends StatelessWidget {
             _ManageRow(
               onTap: () {
                 onDone();
-                _openAppSettings(context);
+                openAppsTab(context);
               },
             ),
           ],

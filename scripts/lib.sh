@@ -211,6 +211,20 @@ PLIST
 # the running version's release folder) in Settings -> Apps. Each must be
 # signed by a key pinned as Claktory's (CLAKTORY_KEYS in bundle.rs), with a
 # signature that holds, and carry no trace of this Mac (check_no_traces).
+# A backend built with QA's provider override (cargo feature qa-provider,
+# de042953) could send the person's Claude token to another address: it must
+# never ship (Fugo). Refuses any of the FILES that carries its marks.
+check_no_qa_provider() { # FILE...
+  local f
+  for f in "$@"; do
+    [[ -f "$f" ]] || { echo "expected $f to check for QA's provider override, and it isn't there; this release stops here" >&2; return 1; }
+    if grep -aq -e FACTORY_QA_ANTHROPIC_URL -e "QA provider override" "$f"; then
+      echo "$f was built with QA's provider override, which could send the person's Claude sign-in elsewhere; it must never ship, so this release stops here. Build it without the qa-provider feature." >&2
+      return 1
+    fi
+  done
+}
+
 bundled_apps() { # SRC DEST
   local src="$1" dest="$2" clapp work public pinned
   rm -rf "$dest/apps"

@@ -585,7 +585,7 @@ mod tests {
         refused(&mut db, &backend(3, Some(Actor { id: "june".into(), incarnation: "inc-2".into() })), "dm.read", Some(&c1));
         refused(&mut db, &backend(3, Some(Actor { id: "kai".into(), incarnation: "inc-1".into() })), "dm.read", Some(&c1));
         refused(&mut db, &backend(3, None), "dm.read", Some(&c1));
-        let device = Caller::Device { account_id: "acct".into(), device_key: "k".into(), registrations: Vec::new() };
+        let device = Caller::Device { account_id: "acct".into(), device_key: "k".into(), registrations: Vec::new(), removed_devices: Vec::new(), signed_in_at: None, bound_devices: None };
         refused(&mut db, &device, "dm.read", Some(&c1));
         let other_account = Caller::Backend { account_id: "other".into(), claktory_id: "mac".into(), epoch: 3, agent: Some(june()) };
         refused(&mut db, &other_account, "dm.read", Some(&c1));
@@ -644,9 +644,9 @@ mod tests {
         assert!(matches!(allowed(&mut db, &as_june, "dm.read", Some(&c1), minute + 1000), Err(Refused::Quota(59))));
         assert!(allowed(&mut db, &as_june, "dm.read", Some(&c1), minute + 60_000).is_ok(), "a new minute");
         // Revoked by a device of the account; another account's can't.
-        let stranger = Caller::Device { account_id: "other".into(), device_key: "k".into(), registrations: Vec::new() };
+        let stranger = Caller::Device { account_id: "other".into(), device_key: "k".into(), registrations: Vec::new(), removed_devices: Vec::new(), signed_in_at: None, bound_devices: None };
         assert_eq!(revoke(&mut db, &stranger, &again.id, 0), Err(Refused::NotFound));
-        let device = Caller::Device { account_id: "acct".into(), device_key: "k".into(), registrations: Vec::new() };
+        let device = Caller::Device { account_id: "acct".into(), device_key: "k".into(), registrations: Vec::new(), removed_devices: Vec::new(), signed_in_at: None, bound_devices: None };
         revoke(&mut db, &device, &again.id, 0).expect("revoked");
         assert_eq!(allowed(&mut db, &as_june, "dm.read", Some(&c1), NOW), Err(Refused::NotGranted));
         let uses: i64 = db.query_row("SELECT COUNT(*) FROM grant_uses", [], |row| row.get(0)).expect("count");
@@ -678,7 +678,7 @@ mod tests {
         let mut bad_agent = ask(&["dm.read"], vec![conversation("c1")], 0);
         bad_agent.agent.id = "june bob".into();
         invalid(&mut db, &backend(3, None), bad_agent);
-        let device = |registrations: Vec<Registration>| Caller::Device { account_id: "acct".into(), device_key: "k".into(), registrations };
+        let device = |registrations: Vec<Registration>| Caller::Device { account_id: "acct".into(), device_key: "k".into(), registrations, removed_devices: Vec::new(), signed_in_at: None, bound_devices: None };
         invalid(&mut db, &device(Vec::new()), ask(&["dm.read"], vec![conversation("c1")], 0));
 
         let grant = give(&mut db, &["dm.read"], 0);
