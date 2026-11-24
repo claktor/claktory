@@ -12,7 +12,7 @@ import 'agent_name.dart';
 import 'app_access_card.dart' show AppAccessCard;
 import 'app_grant_card.dart';
 import 'attachments.dart';
-import 'backend.dart' show RequestFailure;
+import 'backend.dart' show Backend, RequestFailure;
 import 'characters/character.dart';
 import 'checklist_reply.dart' show ChecklistRef;
 import 'avatar.dart';
@@ -26,7 +26,6 @@ import 'conversation_scrollbar.dart';
 import 'conversation_versions.dart' show canGoBackTo, goBackTo;
 import 'explorer.dart' show openFile;
 import 'find.dart';
-import 'extensions.dart' show logTime;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
 import 'mobile/haptics.dart';
@@ -46,6 +45,7 @@ import 'refusal_card.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'quiet_copies.dart' show MessageProvenance, quietQueuedLabel;
 import 'scope.dart';
+import 'share_files.dart';
 import 'secrets.dart';
 import 'state.dart';
 import 'tell_rivet.dart';
@@ -1482,9 +1482,41 @@ class _TranscriptViewState extends State<TranscriptView>
         waiting.outgoing == null &&
         message.transcription.state ==
             TranscriptionState.TRANSCRIPTION_STATE_FAILED;
+    // Typed with a voice message (#425): over its recording while it
+    // waits; once heard, the rest of the text is what was said.
+    final typed = message.typed.isNotEmpty
+        ? message.typed
+        : voice != null
+        ? message.text
+        : '';
     final (Widget bubble, CrossAxisAlignment side) = switch (message.source) {
       'person' when voice != null => (
-        _UserText('', waitingVoice: voice),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            _UserText('', typed: typed, waitingVoice: voice),
+            // The files going with it, each as it uploads.
+            if (files.isEmpty && message.attachments.length > 1) ...[
+              const SizedBox(height: Space.xs),
+              SentFiles(message.attachments.skip(1).toList()),
+            ] else if (files.length > 1) ...[
+              const SizedBox(height: Space.xs),
+              Wrap(
+                alignment: WrapAlignment.end,
+                spacing: Space.xs,
+                runSpacing: Space.xs,
+                children: [
+                  for (final file in files.skip(1))
+                    AttachmentChip(
+                      name: file.file.name,
+                      size: file.file.size,
+                      progress: file.done == null ? file.progress : null,
+                    ),
+                ],
+              ),
+            ],
+          ],
+        ),
         CrossAxisAlignment.end,
       ),
       'person' when files.isNotEmpty => (
@@ -1520,7 +1552,10 @@ class _TranscriptViewState extends State<TranscriptView>
       ),
       'person' => (
         _UserText(
-          message.text,
+          heard && typed.isNotEmpty
+              ? heardOf(message.text, typed)
+              : message.text,
+          typed: heard ? typed : '',
           files: message.attachments,
           voice: heard ? message.transcription : null,
           checklist: message.hasChecklistItem() ? message.checklistItem : null,
@@ -1760,6 +1795,17 @@ class _TranscriptViewState extends State<TranscriptView>
                     MenuItem(
                       'Go back to here…',
                       () => goBackTo(context, widget.transcript, entry),
+                    ),
+                  // The files sent with it, to send on (#418).
+                  if (_pointed.value?.entry case final entry?
+                      when entry.hasUser() &&
+                          entry.user.attachments.isNotEmpty &&
+                          canShareFiles)
+                    MenuItem(
+                      shareLabel(entry.user.attachments.length),
+                      () => shareFiles(context, [
+                        for (final file in entry.user.attachments) file.path,
+                      ]),
                     ),
                   if (_pointed.value?.report case final seq?)
                     MenuItem(
@@ -2497,7 +2543,11 @@ class _EntryViewState extends State<EntryView> {
     final (Widget child, double gap) = switch (entry.whichKind()) {
       Entry_Kind.user => (
         _UserText(
-          entry.user.text,
+          // Typed and said in one message (#425): each in its place.
+          entry.user.typed.isNotEmpty && entry.user.hasVoice()
+              ? entry.user.heard
+              : entry.user.text,
+          typed: entry.user.hasVoice() ? entry.user.typed : '',
           sentFrom: entry.user.hasSentFrom() ? entry.user.sentFrom : null,
           files: entry.user.attachments,
           voice: entry.user.hasVoice() ? entry.user.voice : null,
@@ -2738,9 +2788,15 @@ class _UserText extends StatelessWidget {
     this.waitingVoice,
     this.sentMs = 0,
     this.checklist,
+    this.typed = '',
   });
 
+  /// What was written: for a voice message, what was heard
+  /// ([UserText.heard]) when [typed] goes with it.
   final String text;
+
+  /// What was typed with a voice message (#425), over its recording.
+  final String typed;
 
   /// The checklist item it replies on, over the bubble; null for none.
   final ChecklistItemRef? checklist;
@@ -2775,18 +2831,40 @@ class _UserText extends StatelessWidget {
     );
     final voice = this.voice;
     final waiting = waitingVoice;
+    // Typed with a voice message (#425): first, the recording under it.
+    final typed = this.typed.isEmpty
+        ? null
+        : Text.rich(
+            FindHighlight.markText(
+              context,
+              this.typed,
+              TypeScale.of(context).body
+                  .copyWith(color: const Color(0xFFFFFFFF)),
+            ),
+          );
     final bubble = Bubble(
       color: color,
       outgoing: true,
       sentMs: sentMs,
       timeColor: const Color(0xB3FFFFFF),
       child: waiting != null
-          ? VoiceWaiting(duration: waiting)
+          ? typed == null
+                ? VoiceWaiting(duration: waiting)
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      typed,
+                      const SizedBox(height: Space.s),
+                      VoiceWaiting(duration: waiting),
+                    ],
+                  )
           : voice != null && this.files.isNotEmpty
           ? Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (typed != null) ...[typed, const SizedBox(height: Space.s)],
                 words,
                 const SizedBox(height: Space.xs),
                 VoicePlay(
@@ -2797,9 +2875,10 @@ class _UserText extends StatelessWidget {
             )
           : words,
     );
-    // A voice message's recording plays from its bubble.
+    // A voice message's recording plays from its bubble; files sent with
+    // it (#425) are under it, as any message's.
     final files = voice != null || waiting != null
-        ? const <Attachment>[]
+        ? this.files.skip(1).toList()
         : this.files;
     final from = sentFrom;
     // The person's avatar beside it, at its foot, as an agent's character
@@ -2813,10 +2892,10 @@ class _UserText extends StatelessWidget {
               : Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    if (text.isNotEmpty) bubble,
+                    if (text.isNotEmpty || voice != null) bubble,
                     Padding(
                       padding: EdgeInsets.only(
-                        top: text.isEmpty ? 0 : Space.xs,
+                        top: text.isEmpty && voice == null ? 0 : Space.xs,
                       ),
                       child: SentFiles(files),
                     ),
@@ -2892,13 +2971,18 @@ class SentFiles extends StatelessWidget {
     runSpacing: Space.xs,
     children: [
       for (final file in files)
-        isImageName(file.name)
-            ? _Thumbnail(file)
-            : AttachmentChip(
-                name: file.name,
-                size: file.size.toInt(),
-                onOpen: () => openFile(context, file.path),
-              ),
+        // Touched and held: Share…, or all of them (#418).
+        ShareHold(
+          path: file.path,
+          all: [for (final file in files) file.path],
+          child: isImageName(file.name)
+              ? _Thumbnail(file)
+              : AttachmentChip(
+                  name: file.name,
+                  size: file.size.toInt(),
+                  onOpen: () => openFile(context, file.path),
+                ),
+        ),
     ],
   );
 }
@@ -2975,7 +3059,7 @@ class _ThumbnailState extends State<_Thumbnail> {
     final ratio = MediaQuery.devicePixelRatioOf(context);
     return Semantics(
       image: true,
-      label: file.name,
+      label: shownName(file.name),
       child: Pressable(
         onTap: open,
         builder: (context, hovered) => Container(
@@ -3074,6 +3158,14 @@ String deviceGlyph(DeviceKind kind) => switch (kind) {
 
 /// What the mark under a message says on hover: the device's name, or
 /// its kind when it has none.
+/// What was heard of a voice message sent with [typed] text (#425), from
+/// its whole [text]: what was typed, a blank line, and "Voice note: " with
+/// what was heard (as the agent reads it). The whole text if it isn't so.
+String heardOf(String text, String typed) {
+  final head = '$typed\n\nVoice note: ';
+  return text.startsWith(head) ? text.substring(head.length) : text;
+}
+
 String sentFromText(SentFrom from) {
   final name = from.deviceName.trim();
   if (name.isNotEmpty) return 'Sent from $name';
@@ -3143,21 +3235,63 @@ class _ProposalCardState extends State<ProposalCard> {
   /// Why the last decision was refused.
   String? _error;
 
+  /// The decision cut off by the connection, to make again (as it was
+  /// pressed, its revision too) once it's back; null when none waits.
+  VoidCallback? _whenBack;
+
+  Backend? _backend;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final backend = AppScope.of(context);
+    if (identical(backend, _backend)) return;
+    _backend?.connected.removeListener(_connectedChanged);
+    _backend = backend..connected.addListener(_connectedChanged);
+  }
+
+  /// The connection is back: the decision that waited for it goes, and
+  /// what comes of it shows (Abbacchio's row 1052: the proposal changed
+  /// meanwhile, and it said "Not sent yet" for good).
+  void _connectedChanged() {
+    final whenBack = _whenBack;
+    if (whenBack == null || _deciding || _backend?.connected.value != true) {
+      return;
+    }
+    _whenBack = null;
+    whenBack();
+  }
+
   @override
   void dispose() {
+    _backend?.connected.removeListener(_connectedChanged);
     _comment.dispose();
     super.dispose();
   }
 
   /// [approve] or dismiss; with [reply] (#370), what's typed is the
-  /// person's answer for Rivet to act on, neither.
-  Future<void> _decide({required bool approve, bool reply = false}) async {
+  /// person's answer for Rivet to act on, neither. Cut off by the
+  /// connection, it goes again by itself once it's back ([again]), for the
+  /// [revision] pressed: a decision the Claktory already has counts as
+  /// made; one on a proposal changed meanwhile is refused, and says so.
+  Future<void> _decide({
+    required bool approve,
+    bool reply = false,
+    bool again = false,
+    int? revision,
+  }) async {
     if (_deciding || (reply && !commentTyped(_comment))) return;
     final scope = AppScope.of(context);
+    final seen = revision ?? widget.proposal.revision;
+    void retry() => unawaited(
+      _decide(approve: approve, reply: reply, again: true, revision: seen),
+    );
     setState(() {
       _deciding = true;
       _error = null;
     });
+    _whenBack = null;
+    var now = false;
     try {
       final chatId = widget.chatId ?? ChatScope.chatIdOf(context) ?? '';
       await scope.decideProposal(
@@ -3169,11 +3303,28 @@ class _ProposalCardState extends State<ProposalCard> {
         comment: _comment.text.trim(),
         chatId: chatId,
         reply: reply,
+        // The proposal as the person read it (#428).
+        revision: seen,
       );
     } on RequestFailure catch (failure) {
-      if (mounted) setState(() => _error = failure.message);
+      if (!mounted) return;
+      if (again && failure.message.startsWith('This proposal was already')) {
+        return;
+      }
+      if (connectionLost(failure)) {
+        // Back already (it dropped and came back meanwhile): once more now.
+        if (scope.connected.value && !again) {
+          now = true;
+        } else {
+          _whenBack = retry;
+          setState(() => _error = decisionWaiting);
+        }
+        return;
+      }
+      setState(() => _error = failure.message);
     } finally {
       if (mounted) setState(() => _deciding = false);
+      if (now && mounted) retry();
     }
   }
 
@@ -3198,6 +3349,14 @@ class _ProposalCardState extends State<ProposalCard> {
         proposal.state != ProposalState.PROPOSAL_STATE_DISMISSED;
     final dismissed = proposal.state == ProposalState.PROPOSAL_STATE_DISMISSED;
     final decided = proposal.decidedAtMs.toInt();
+    // The agent that made it, which can take it back; a chat's can't.
+    final chatId = widget.chatId ?? ChatScope.chatIdOf(context) ?? '';
+    final proposer = chatId.isNotEmpty
+        ? null
+        : AppScope.of(context).workspace.agent(
+            widget.agentId ??
+                AppScope.of(context).workspace.workspace.selectedAgentId,
+          );
     return Container(
       padding: const EdgeInsets.all(Space.l),
       decoration: BoxDecoration(
@@ -3232,8 +3391,24 @@ class _ProposalCardState extends State<ProposalCard> {
             proseCodes(proposal.text),
             color: dismissed ? palette.textMuted : null,
           ),
+          // Changed by the agent that made it while it waited (#428).
+          if (proposal.updatedMs > 0) ...[
+            const SizedBox(height: Space.s),
+            UpdatedLine(
+              updatedMs: proposal.updatedMs.toInt(),
+              reason: proposal.updateReason,
+            ),
+          ],
           const SizedBox(height: Space.m),
-          if (pending) ...[
+          if (proposal.withdrawn)
+            // Taken back by the agent that made it (#407), not dismissed.
+            WithdrawnLine(
+              agent: proposer,
+              name: proposer?.name ?? 'the agent',
+              reason: proposal.withdrawReason,
+              decidedMs: decided,
+            )
+          else if (pending) ...[
             // Once a comment is typed, one Submit in place of both: the
             // proposal goes to Rivet with the person's words as what to do
             // (#370).
@@ -3311,7 +3486,7 @@ class _ProposalCardState extends State<ProposalCard> {
                         if (decided > 0)
                           TextSpan(
                             text:
-                                '  ${logTime(DateTime.fromMillisecondsSinceEpoch(decided))}',
+                                '  ${cardTime(context, decided)}',
                             style: TextStyle(color: palette.textFaint),
                           ),
                       ],

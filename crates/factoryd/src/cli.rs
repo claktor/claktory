@@ -827,8 +827,15 @@ mod review_box {
         eprintln!("factoryd: {line}");
         #[cfg(target_os = "linux")]
         if let Ok(line) = std::ffi::CString::new(line) {
-            // SAFETY: a constant format with one C string argument.
-            unsafe { libc::syslog(libc::LOG_AUTH | libc::LOG_NOTICE, c"%s".as_ptr(), line.as_ptr()) };
+            // Named, so the journal says "factoryd[pid]:" as for the
+            // backend's own lines: musl's syslog has no name of its own.
+            // SAFETY: a static identifier, then a constant format with one C
+            // string argument.
+            unsafe {
+                libc::openlog(c"factoryd".as_ptr(), libc::LOG_PID, libc::LOG_AUTH);
+                libc::syslog(libc::LOG_AUTH | libc::LOG_NOTICE, c"%s".as_ptr(), line.as_ptr());
+                libc::closelog();
+            }
         }
     }
 

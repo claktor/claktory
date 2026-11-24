@@ -83,6 +83,18 @@
                 <data android:scheme="factory"/>
             </intent-filter>
         </activity>
+        <!-- Files the person shares from Claktory to another app (#418):
+             not exported, so only an address granted with a share can be
+             read, read-only, and only in cache/claktory-share. -->
+        <provider
+            android:name=".ShareFiles"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/share_paths" />
+        </provider>
         <!-- What other apps share to Claktory (factory/shared): text, links,
              images and any file. It shows nothing and hands the app's one
              screen only the text, the subject and the files, with a read

@@ -222,11 +222,14 @@ fn put_in(setup: &Setup, found: &Found) -> Result<Report, Report> {
     let damaged = |detail: String| Report::new(Outcome::Damaged, "This copy of Claktory is damaged. Download Claktory again.", detail);
     let backend = setup.helpers.join("factoryd");
     let helpers: Vec<std::path::PathBuf> = crate::update::HELPERS.iter().map(|name| setup.helpers.join(name)).collect();
+    // The tools every agent gets (ripgrep), in Helpers/tools.
+    let tools: Vec<std::path::PathBuf> = crate::update::TOOLS.iter().map(|name| setup.helpers.join("tools").join(name)).collect();
     let app = setup.helpers.join(SUPERVISOR_APP);
     if !backend.is_file() || !app.join(SUPERVISOR_PROGRAM).is_file() {
         return Err(damaged(format!("{} has no factoryd or {SUPERVISOR_APP}", setup.helpers.display())));
     }
-    for (piece, deep) in std::iter::once((&backend, false)).chain(helpers.iter().map(|helper| (helper, false))).chain([(&app, true)]) {
+    let pieces = helpers.iter().chain(&tools).map(|helper| (helper, false));
+    for (piece, deep) in std::iter::once((&backend, false)).chain(pieces).chain([(&app, true)]) {
         if piece.exists() {
             verify(&setup.codesign, piece, deep).map_err(damaged)?;
         }
@@ -252,6 +255,22 @@ fn put_in(setup: &Setup, found: &Found) -> Result<Report, Report> {
             let bytes = std::fs::read(bundled).map_err(copying)?;
             crate::update::write_executable(&installed, &bytes).map_err(copying)?;
         }
+    }
+    let installed_tools = crate::update::tools_dir(&setup.home);
+    for (name, bundled) in crate::update::TOOLS.iter().zip(&tools) {
+        let installed = installed_tools.join(name);
+        if bundled.is_file() && !installed.exists() {
+            std::fs::create_dir_all(&installed_tools).map_err(copying)?;
+            let bytes = std::fs::read(bundled).map_err(copying)?;
+            crate::update::write_executable(&installed, &bytes).map_err(copying)?;
+        }
+    }
+    // Their licenses, in Resources: codesign refuses data in Helpers.
+    if let Some(contents) = setup.helpers.parent()
+        && installed_tools.is_dir()
+        && !installed_tools.join("LICENSES").exists()
+    {
+        crate::update::put_tool_licenses(&contents.join("Resources/tools/LICENSES"), &setup.home).map_err(copying)?;
     }
     // Claktory's own apps (`apps/*.clapp`), for the Marketplace's Apps tab to offer
     // (`apps::bundled`): data, so in the bundle's Resources (codesign
@@ -559,8 +578,11 @@ mod tests {
         let helpers = dir.join("Claktory.app/Contents/Helpers");
         executable(&helpers.join("factoryd"), "the bundle's backend");
         executable(&helpers.join("claktory-apps"), "the bundle's host");
+        executable(&helpers.join("tools/rg"), "the bundle's rg");
         executable(&helpers.join(SUPERVISOR_APP).join(SUPERVISOR_PROGRAM), "the bundle's supervisor");
         let resources = dir.join("Claktory.app/Contents/Resources");
+        std::fs::create_dir_all(resources.join("tools/LICENSES/ripgrep")).expect("licenses");
+        std::fs::write(resources.join("tools/LICENSES/ripgrep/UNLICENSE"), "ripgrep's license").expect("license");
         std::fs::create_dir_all(resources.join("apps")).expect("apps");
         std::fs::write(resources.join("apps/charts.clapp"), "the bundle's Charts").expect("Charts");
         helpers
@@ -622,6 +644,9 @@ mod tests {
         assert_eq!(read(&bin.join("factoryd")), "the bundle's backend");
         assert_eq!(read(&bin.join("claktory-apps")), "the bundle's host");
         assert_eq!(read(&bin.join("apps/charts.clapp")), "the bundle's Charts");
+        let tools = setup.home.root().join("tools");
+        assert_eq!(read(&tools.join("rg")), "the bundle's rg", "every agent's ripgrep, off bin");
+        assert_eq!(read(&tools.join("LICENSES/ripgrep/UNLICENSE")), "ripgrep's license");
         let supervisor = launch_agent::supervisors(&setup.home)[0].clone();
         assert_eq!(read(&supervisor), "the bundle's supervisor");
         assert!(!flag(&supervisor), "no quarantine on the installed supervisor");

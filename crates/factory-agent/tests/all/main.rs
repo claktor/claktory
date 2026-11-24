@@ -28,6 +28,7 @@ mod estimate;
 mod extra_dirs;
 mod glm_reasoning;
 mod guard;
+mod image_making;
 mod images;
 mod json_parse;
 mod limits;

@@ -298,7 +298,10 @@ class _ReviewBarState extends State<ReviewBar> {
   final _text = TextEditingController();
   final _focus = FocusNode(debugLabel: 'Review answer');
   var _busy = false;
-  var _failed = false;
+
+  /// Why the last answer didn't go: it couldn't be sent, or its agent
+  /// changed the card meanwhile (#428).
+  String? _failed;
 
   @override
   void dispose() {
@@ -320,20 +323,28 @@ class _ReviewBarState extends State<ReviewBar> {
     }
     setState(() {
       _busy = true;
-      _failed = false;
+      _failed = null;
     });
     try {
       await AppScope.of(context).answerAsk(
         widget.agentId,
         widget.review.seq,
+        // The card as the person read it (#428).
+        revision: widget.review.ask.revision,
         text: text,
         dismiss: dismiss,
         reply: reply,
       );
       if (!mounted) return;
       await finishReview(context, widget.agentId, widget.path);
-    } on RequestFailure {
-      if (mounted) setState(() => _failed = true);
+    } on RequestFailure catch (failure) {
+      if (mounted) {
+        setState(
+          () => _failed = cardChanged(failure)
+              ? failure.message
+              : "Couldn't send your answer. Try again.",
+        );
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -423,6 +434,7 @@ class _ReviewBarState extends State<ReviewBar> {
               ask.title.isEmpty
                   ? 'Your answer to $name'
                   : 'Your answer to $name: ${ask.title}',
+              select: (backend) => backend.selectAgent(widget.agentId),
             ),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
@@ -491,14 +503,12 @@ class _ReviewBarState extends State<ReviewBar> {
               ),
             ),
           ),
-          if (_failed || reviewHasLineComments(widget.path)) ...[
+          if (_failed != null || reviewHasLineComments(widget.path)) ...[
             const SizedBox(height: Space.xs),
             Text(
-              _failed
-                  ? "Couldn't send your answer. Try again."
-                  : 'Your comments on lines go to $name with your answer.',
+              _failed ?? 'Your comments on lines go to $name with your answer.',
               style: type.caption.copyWith(
-                color: _failed ? palette.danger : palette.textFaint,
+                color: _failed != null ? palette.danger : palette.textFaint,
               ),
             ),
           ],

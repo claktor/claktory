@@ -130,9 +130,26 @@ async fn rivet_compacts_an_agent_when_asked_and_clears_one_only_with_the_persons
     assert_eq!(cards(&view).len(), 1, "one card per agent at a time");
 
     // Dismissed, it stays as it is.
+    // Without a comment, Rivet is told quietly (friend bug #19), with
+    // whatever next wakes it.
     apply_request(&mut client, &mut view, answer(*seq, true)).await;
+    view.follow(&mut client, |view| view.agent("rivet").quiet_waiting == 1 && idle(view, "rivet")).await;
+    apply_request(&mut client, &mut view, select("tiziano")).await;
+    assert!(describe(&view.entries).starts_with(&["user: hello".to_owned()]), "{:?}", describe(&view.entries));
+
+    // Withdrawn by Rivet (#407), it closes and nothing is cleared.
+    let said = call(&mut client, &mut view, "rivet", "agents_clear", r#"{"agent":"Tiziano"}"#).await;
     let text = told(&mut client, &mut view, 1).await;
     assert!(text.contains("dismissed your request to clear Tiziano's conversation, so it stays as it is."), "{text}");
+    let id = said.split_once("Its id is ").and_then(|(_, rest)| rest.split(':').next()).expect("its id").to_owned();
+    let withdrawn = call(&mut client, &mut view, "rivet", "ask_withdraw", &serde_json::json!({"id": id, "reason": "Tiziano was compacted instead."}).to_string()).await;
+    assert!(withdrawn.starts_with(&format!("Withdrew question {id}, \"Clear Tiziano's conversation\"")), "{withdrawn}");
+    let (seq, card) = cards(&view).pop().expect("the card");
+    assert_eq!((card.state(), card.withdrawn), (v1::AskPersonState::Dismissed, true));
+    match apply_request(&mut client, &mut view, answer(seq, false)).await {
+        Body::Error(error) => assert_eq!(error.message, "This question was withdrawn."),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
     apply_request(&mut client, &mut view, select("tiziano")).await;
     assert!(describe(&view.entries).starts_with(&["user: hello".to_owned()]), "{:?}", describe(&view.entries));
 

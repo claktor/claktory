@@ -16,6 +16,12 @@ import 'app_access_card.dart' show AppAccessCard, appAccessSummary;
 import 'app_grant_card.dart' show AppGrantCard, appGrantSummary;
 import 'ask_card.dart';
 import 'backend.dart';
+import 'backend_service.dart'
+    show
+        BackendServiceRestore,
+        backendByHand,
+        backendServiceSummary,
+        backendServiceTitle;
 import 'browser/browser_view.dart'
     show BrowserScope, BrowserSessionCard, browserAssists;
 import 'browser/session.dart' show browserHost;
@@ -116,6 +122,11 @@ enum NeedsYouKind {
   /// Whether to keep this Mac awake while agents work, asked once on a
   /// laptop (Workspace.keep_awake.ask, #352 P1): yes or no, in the card.
   keepAwake,
+
+  /// The backend runs without its background service, started by hand
+  /// (Workspace.backend_service BY_HAND, friend bug #24): Restore, in the
+  /// card.
+  backendService,
 }
 
 /// One thing that waits for the person's answer.
@@ -218,6 +229,17 @@ class NeedsYouItem {
       sessionId = '',
       conversationId = '';
 
+  const NeedsYouItem.backendService()
+    : kind = NeedsYouKind.backendService,
+      agentId = '',
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      seq = 0,
+      sessionId = '',
+      conversationId = '';
+
   const NeedsYouItem.dmSend(this.agentId, this.conversationId)
     : kind = NeedsYouKind.dmSend,
       chatId = '',
@@ -277,6 +299,7 @@ class NeedsYouItem {
     NeedsYouKind.providerWait => 'usage:$providerId',
     NeedsYouKind.device => 'device:$sessionId',
     NeedsYouKind.keepAwake => 'keepAwake',
+    NeedsYouKind.backendService => 'backendService',
   };
 
   /// Done in a click, with no card to open: signing in again, unlocking
@@ -334,6 +357,8 @@ List<NeedsYouItem> needsYouItems(Workspace workspace) {
       const NeedsYouItem.recoveryKey(),
     // Asked once, on a laptop agents have worked on.
     if (workspace.keepAwake.ask) const NeedsYouItem.keepAwake(),
+    // Started by hand: Restore hands it back to its service.
+    if (backendByHand(workspace)) const NeedsYouItem.backendService(),
     // Also floating over the window on every device (MoveGate).
     if (workspace.hasMove() && moveStatusOf(workspace.move).awaitsPerson)
       const NeedsYouItem.move(),
@@ -1014,6 +1039,8 @@ class _NeedsYouListState extends State<NeedsYouList> {
         NeedsYouKind.device => true,
         // Answered here: it stays, saying what the Mac does now.
         NeedsYouKind.keepAwake => workspace.keepAwake.available,
+        // Restored: the backend that comes back runs as installed.
+        NeedsYouKind.backendService => false,
         _ => workspace.pipes.any((pipe) => pipe.id == item.pipeId),
       };
 }
@@ -1105,6 +1132,8 @@ class _Bubble extends StatelessWidget {
         ? 'Allow a new device?'
         : item.kind == NeedsYouKind.keepAwake
         ? keepAwakeTitle
+        : item.kind == NeedsYouKind.backendService
+        ? backendServiceTitle
         : liaisonOf != null
         ? '${agent!.name} · ${liaisonOf.name}'
         : agent?.name ??
@@ -1180,7 +1209,8 @@ class _Bubble extends StatelessWidget {
                             color: palette.textFaint,
                           ),
                         }
-                      : item.kind == NeedsYouKind.keepAwake
+                      : item.kind == NeedsYouKind.keepAwake ||
+                            item.kind == NeedsYouKind.backendService
                       ? ExtensionGlyph(
                           icon: 'laptop-minimal',
                           name: '',
@@ -1287,6 +1317,8 @@ class _Bubble extends StatelessWidget {
                         entry!.proposal.id,
                         approve: false,
                         chatId: item.chatId,
+                        // As shown (#428).
+                        revision: entry?.proposal.revision,
                       ),
                     ),
                   ),
@@ -1345,6 +1377,7 @@ class _Bubble extends StatelessWidget {
                     if (item.kind != NeedsYouKind.move &&
                         item.kind != NeedsYouKind.device &&
                         item.kind != NeedsYouKind.keepAwake &&
+                        item.kind != NeedsYouKind.backendService &&
                         item.kind != NeedsYouKind.dmSend) ...[
                       const SizedBox(height: Space.s),
                       Wrap(
@@ -1473,6 +1506,11 @@ class _Bubble extends StatelessWidget {
           return line(keepAwakeAnswered(AppScope.of(context), keep));
         }
         return const KeepAwakeCard();
+      case NeedsYouKind.backendService:
+        if (!backendByHand(workspace)) {
+          return line('Claktory runs in the background again.');
+        }
+        return const BackendServiceRestore();
       case NeedsYouKind.move:
         final move = _move;
         if (!MoveConfirmCard.shows(move)) {
@@ -1623,6 +1661,10 @@ class _Bubble extends StatelessWidget {
         return keep.ask
             ? keepAwakeSummary(backend)
             : keepAwakeAnswered(backend, keep);
+      case NeedsYouKind.backendService:
+        return backendByHand(workspace)
+            ? backendServiceSummary(workspace.backendService)
+            : 'Claktory runs in the background again.';
       case NeedsYouKind.browser:
         final session = browserSessionOf(workspace, item);
         if (session == null) return 'No longer needs you';

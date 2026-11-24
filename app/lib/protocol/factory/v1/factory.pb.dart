@@ -228,6 +228,7 @@ enum ClientMessage_Body {
   setLidClosed,
   refreshModels,
   addModel,
+  restoreBackendService,
   notSet
 }
 
@@ -440,6 +441,7 @@ class ClientMessage extends $pb.GeneratedMessage {
     SetLidClosed? setLidClosed,
     RefreshModels? refreshModels,
     AddModel? addModel,
+    RestoreBackendService? restoreBackendService,
   }) {
     final result = ClientMessage._();
     if (id != null) result.id = id;
@@ -669,6 +671,8 @@ class ClientMessage extends $pb.GeneratedMessage {
     if (setLidClosed != null) result.setLidClosed = setLidClosed;
     if (refreshModels != null) result.refreshModels = refreshModels;
     if (addModel != null) result.addModel = addModel;
+    if (restoreBackendService != null)
+      result.restoreBackendService = restoreBackendService;
     return result;
   }
 
@@ -889,6 +893,7 @@ class ClientMessage extends $pb.GeneratedMessage {
     212: ClientMessage_Body.setLidClosed,
     213: ClientMessage_Body.refreshModels,
     214: ClientMessage_Body.addModel,
+    215: ClientMessage_Body.restoreBackendService,
     0: ClientMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -1101,7 +1106,8 @@ class ClientMessage extends $pb.GeneratedMessage {
       211,
       212,
       213,
-      214
+      214,
+      215
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -1528,6 +1534,9 @@ class ClientMessage extends $pb.GeneratedMessage {
         subBuilder: RefreshModels.$_createMessage)
     ..aOM<AddModel>(214, _omitFieldNames ? '' : 'addModel',
         subBuilder: AddModel.$_createMessage)
+    ..aOM<RestoreBackendService>(
+        215, _omitFieldNames ? '' : 'restoreBackendService',
+        subBuilder: RestoreBackendService.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1758,6 +1767,7 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(212)
   @$pb.TagNumber(213)
   @$pb.TagNumber(214)
+  @$pb.TagNumber(215)
   ClientMessage_Body whichBody() => _ClientMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -1965,6 +1975,7 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(212)
   @$pb.TagNumber(213)
   @$pb.TagNumber(214)
+  @$pb.TagNumber(215)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -4395,6 +4406,19 @@ class ClientMessage extends $pb.GeneratedMessage {
   void clearAddModel() => $_clearField(214);
   @$pb.TagNumber(214)
   AddModel ensureAddModel() => $_ensure(206);
+
+  /// Claktory's background service back in charge (friend bug #24).
+  @$pb.TagNumber(215)
+  RestoreBackendService get restoreBackendService => $_getN(207);
+  @$pb.TagNumber(215)
+  set restoreBackendService(RestoreBackendService value) =>
+      $_setField(215, value);
+  @$pb.TagNumber(215)
+  $core.bool hasRestoreBackendService() => $_has(207);
+  @$pb.TagNumber(215)
+  void clearRestoreBackendService() => $_clearField(215);
+  @$pb.TagNumber(215)
+  RestoreBackendService ensureRestoreBackendService() => $_ensure(207);
 }
 
 /// A new group at the end of the project's (Workspace.pipe_groups).
@@ -5021,6 +5045,7 @@ class ServerMessage extends $pb.GeneratedMessage {
     Branches? branches,
     $core.String? workspaceRevision,
     $core.String? workspaceBaseRevision,
+    $core.String? transcriptRevision,
   }) {
     final result = ServerMessage._();
     if (replyTo != null) result.replyTo = replyTo;
@@ -5098,6 +5123,8 @@ class ServerMessage extends $pb.GeneratedMessage {
     if (workspaceRevision != null) result.workspaceRevision = workspaceRevision;
     if (workspaceBaseRevision != null)
       result.workspaceBaseRevision = workspaceBaseRevision;
+    if (transcriptRevision != null)
+      result.transcriptRevision = transcriptRevision;
     return result;
   }
 
@@ -5399,6 +5426,7 @@ class ServerMessage extends $pb.GeneratedMessage {
         subBuilder: Branches.$_createMessage)
     ..aOS(75, _omitFieldNames ? '' : 'workspaceRevision')
     ..aOS(76, _omitFieldNames ? '' : 'workspaceBaseRevision')
+    ..aOS(77, _omitFieldNames ? '' : 'transcriptRevision')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -6424,6 +6452,21 @@ class ServerMessage extends $pb.GeneratedMessage {
   $core.bool hasWorkspaceBaseRevision() => $_has(71);
   @$pb.TagNumber(76)
   void clearWorkspaceBaseRevision() => $_clearField(76);
+
+  /// Resuming the conversation shown on reconnect (#413, #378's second step).
+  /// On a Transcript, and on each EntryUpdate and EntryDelta of the agent it's
+  /// for: the revision of that agent's conversation the message brings the
+  /// app to, opaque ("<process random>-<counter>"). Keep the latest applied,
+  /// with its agent, and send both back in Hello.transcript_agent_id and
+  /// transcript_revision. Empty on others (a chat's, a pipe's).
+  @$pb.TagNumber(77)
+  $core.String get transcriptRevision => $_getSZ(72);
+  @$pb.TagNumber(77)
+  set transcriptRevision($core.String value) => $_setString(72, value);
+  @$pb.TagNumber(77)
+  $core.bool hasTranscriptRevision() => $_has(72);
+  @$pb.TagNumber(77)
+  void clearTranscriptRevision() => $_clearField(77);
 }
 
 class Hello extends $pb.GeneratedMessage {
@@ -6438,6 +6481,8 @@ class Hello extends $pb.GeneratedMessage {
     $core.bool? canConfirm,
     $core.String? platform,
     $core.String? workspaceRevision,
+    $core.String? transcriptAgentId,
+    $core.String? transcriptRevision,
   }) {
     final result = Hello._();
     if (protocolVersion != null) result.protocolVersion = protocolVersion;
@@ -6450,6 +6495,9 @@ class Hello extends $pb.GeneratedMessage {
     if (canConfirm != null) result.canConfirm = canConfirm;
     if (platform != null) result.platform = platform;
     if (workspaceRevision != null) result.workspaceRevision = workspaceRevision;
+    if (transcriptAgentId != null) result.transcriptAgentId = transcriptAgentId;
+    if (transcriptRevision != null)
+      result.transcriptRevision = transcriptRevision;
     return result;
   }
 
@@ -6478,6 +6526,8 @@ class Hello extends $pb.GeneratedMessage {
     ..aOB(8, _omitFieldNames ? '' : 'canConfirm')
     ..aOS(9, _omitFieldNames ? '' : 'platform')
     ..aOS(10, _omitFieldNames ? '' : 'workspaceRevision')
+    ..aOS(11, _omitFieldNames ? '' : 'transcriptAgentId')
+    ..aOS(12, _omitFieldNames ? '' : 'transcriptRevision')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -6623,6 +6673,30 @@ class Hello extends $pb.GeneratedMessage {
   $core.bool hasWorkspaceRevision() => $_has(9);
   @$pb.TagNumber(10)
   void clearWorkspaceRevision() => $_clearField(10);
+
+  /// The agent whose conversation the app holds, and the revision of it it
+  /// last applied (ServerMessage.transcript_revision), to resume it (#413).
+  /// When that agent is still the one shown and the backend can tell what
+  /// changed since, the Transcript after Welcome has `resumed` and only the
+  /// entries added or changed since; otherwise it's the latest page, as when
+  /// they're empty (older apps).
+  @$pb.TagNumber(11)
+  $core.String get transcriptAgentId => $_getSZ(10);
+  @$pb.TagNumber(11)
+  set transcriptAgentId($core.String value) => $_setString(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasTranscriptAgentId() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearTranscriptAgentId() => $_clearField(11);
+
+  @$pb.TagNumber(12)
+  $core.String get transcriptRevision => $_getSZ(11);
+  @$pb.TagNumber(12)
+  set transcriptRevision($core.String value) => $_setString(11, value);
+  @$pb.TagNumber(12)
+  $core.bool hasTranscriptRevision() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearTranscriptRevision() => $_clearField(12);
 }
 
 /// Where the person sent a message from: the device their app ran on.
@@ -8956,11 +9030,15 @@ class SendMessage extends $pb.GeneratedMessage {
 
   /// A voice message: attachments[0] is a recording (AAC in .m4a, 16 kHz
   /// mono from the apps; WAV, MP3, FLAC, Ogg Vorbis also read), up to 30
-  /// minutes, and `text` is empty. It waits in the queue
-  /// (QueuedMessage.transcription) while this Claktory transcribes it, then
-  /// the agent gets its words as the person's message. Refused while the
-  /// speech model is ABSENT or UNSUPPORTED (Workspace.speech_model): the app
-  /// asks the person and sends InstallSpeechModel first.
+  /// minutes. `text` is empty, or what the person typed or pasted to go with
+  /// it (#425), and the attachments after the first are files sent with it,
+  /// as in any message. It waits in the queue (QueuedMessage.transcription)
+  /// while this Claktory transcribes it, then the agent gets one message:
+  /// the typed text first, then the words heard after "Voice note: " (see
+  /// UserText.typed). Failed, it keeps the typed text; RetryVoiceMessage and
+  /// DiscardVoiceMessage work as for any. Refused while the speech model is
+  /// ABSENT or UNSUPPORTED (Workspace.speech_model): the app asks the person
+  /// and sends InstallSpeechModel first.
   @$pb.TagNumber(5)
   $core.bool get voice => $_getBF(4);
   @$pb.TagNumber(5)
@@ -11823,6 +11901,7 @@ class DecideProposal extends $pb.GeneratedMessage {
     $core.String? comment,
     $core.String? chatId,
     $core.bool? reply,
+    $core.int? revision,
   }) {
     final result = DecideProposal._();
     if (agentId != null) result.agentId = agentId;
@@ -11831,6 +11910,7 @@ class DecideProposal extends $pb.GeneratedMessage {
     if (comment != null) result.comment = comment;
     if (chatId != null) result.chatId = chatId;
     if (reply != null) result.reply = reply;
+    if (revision != null) result.revision = revision;
     return result;
   }
 
@@ -11853,6 +11933,7 @@ class DecideProposal extends $pb.GeneratedMessage {
     ..aOS(4, _omitFieldNames ? '' : 'comment')
     ..aOS(5, _omitFieldNames ? '' : 'chatId')
     ..aOB(6, _omitFieldNames ? '' : 'reply')
+    ..aI(7, _omitFieldNames ? '' : 'revision', fieldType: $pb.PbFieldType.OU3)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -11937,6 +12018,19 @@ class DecideProposal extends $pb.GeneratedMessage {
   $core.bool hasReply() => $_has(5);
   @$pb.TagNumber(6)
   void clearReply() => $_clearField(6);
+
+  /// The proposal's version the person decided (Proposal.revision, #428),
+  /// checked as AnswerAsk.revision is: another is refused with "This card
+  /// changed. Look at it again."; left out, refused only within 30 seconds
+  /// of a change.
+  @$pb.TagNumber(7)
+  $core.int get revision => $_getIZ(6);
+  @$pb.TagNumber(7)
+  set revision($core.int value) => $_setUnsignedInt32(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasRevision() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearRevision() => $_clearField(7);
 }
 
 /// Folds a project folder's agents away in the sidebar, or shows them.
@@ -16808,6 +16902,7 @@ class Workspace extends $pb.GeneratedMessage {
     KeepAwake? keepAwake,
     $core.Iterable<PipeGroup>? pipeGroups,
     $core.bool? usageAutoContinue,
+    BackendService? backendService,
   }) {
     final result = Workspace._();
     if (projects != null) result.projects.addAll(projects);
@@ -16856,6 +16951,7 @@ class Workspace extends $pb.GeneratedMessage {
     if (keepAwake != null) result.keepAwake = keepAwake;
     if (pipeGroups != null) result.pipeGroups.addAll(pipeGroups);
     if (usageAutoContinue != null) result.usageAutoContinue = usageAutoContinue;
+    if (backendService != null) result.backendService = backendService;
     return result;
   }
 
@@ -16946,6 +17042,8 @@ class Workspace extends $pb.GeneratedMessage {
     ..pPM<PipeGroup>(45, _omitFieldNames ? '' : 'pipeGroups',
         subBuilder: PipeGroup.$_createMessage)
     ..aOB(46, _omitFieldNames ? '' : 'usageAutoContinue')
+    ..aOM<BackendService>(47, _omitFieldNames ? '' : 'backendService',
+        subBuilder: BackendService.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -17405,6 +17503,169 @@ class Workspace extends $pb.GeneratedMessage {
   $core.bool hasUsageAutoContinue() => $_has(45);
   @$pb.TagNumber(46)
   void clearUsageAutoContinue() => $_clearField(46);
+
+  /// How this Claktory's backend runs on its Mac (friend bug #24): unset,
+  /// or state UNSPECIFIED, shows nothing.
+  @$pb.TagNumber(47)
+  BackendService get backendService => $_getN(46);
+  @$pb.TagNumber(47)
+  set backendService(BackendService value) => $_setField(47, value);
+  @$pb.TagNumber(47)
+  $core.bool hasBackendService() => $_has(46);
+  @$pb.TagNumber(47)
+  void clearBackendService() => $_clearField(47);
+  @$pb.TagNumber(47)
+  BackendService ensureBackendService() => $_ensure(46);
+}
+
+/// Claktory's background service on a Mac (friend bug #24): the LaunchAgent
+/// whose supervisor starts the backend at login, starts it again if it
+/// stops, undoes an update that fails and stops and starts it for a move.
+class BackendService extends $pb.GeneratedMessage {
+  factory BackendService({
+    BackendServiceState? state,
+    $core.String? reason,
+    $core.bool? canRestore,
+    $core.bool? restoring,
+  }) {
+    final result = BackendService._();
+    if (state != null) result.state = state;
+    if (reason != null) result.reason = reason;
+    if (canRestore != null) result.canRestore = canRestore;
+    if (restoring != null) result.restoring = restoring;
+    return result;
+  }
+
+  BackendService._();
+
+  factory BackendService.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      BackendService()..mergeFromBuffer(data, registry);
+  factory BackendService.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      BackendService()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'BackendService',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: BackendService.$_createMessage)
+    ..aE<BackendServiceState>(1, _omitFieldNames ? '' : 'state',
+        enumValues: BackendServiceState.values)
+    ..aOS(2, _omitFieldNames ? '' : 'reason')
+    ..aOB(3, _omitFieldNames ? '' : 'canRestore')
+    ..aOB(4, _omitFieldNames ? '' : 'restoring')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  BackendService clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  BackendService copyWith(void Function(BackendService) updates) =>
+      super.copyWith((message) => updates(message as BackendService))
+          as BackendService;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use BackendService() / BackendService.new instead')
+  static BackendService create() => BackendService._();
+  static $pb.GeneratedMessage $_createMessage() => BackendService._();
+  @$core.override
+  BackendService createEmptyInstance() => BackendService._();
+  @$core.pragma('dart2js:noInline')
+  static BackendService getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<BackendService>(
+          BackendService.$_createMessage);
+  static BackendService? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  BackendServiceState get state => $_getN(0);
+  @$pb.TagNumber(1)
+  set state(BackendServiceState value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasState() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearState() => $_clearField(1);
+
+  /// BY_HAND: a sentence for the person, as it is: what that means, and
+  /// what Restore does or how to repair the service.
+  @$pb.TagNumber(2)
+  $core.String get reason => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set reason($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasReason() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearReason() => $_clearField(2);
+
+  /// BY_HAND: RestoreBackendService can put the service back in charge.
+  /// Show it as a Needs you item with Restore (it asks nothing more; the
+  /// backend restarts once), and in Settings → General beside Move.
+  @$pb.TagNumber(3)
+  $core.bool get canRestore => $_getBF(2);
+  @$pb.TagNumber(3)
+  set canRestore($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasCanRestore() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearCanRestore() => $_clearField(3);
+
+  /// Restore was asked for: this backend stops in a moment, and the service
+  /// starts it again. Show "Restarting…" until the app reconnects.
+  @$pb.TagNumber(4)
+  $core.bool get restoring => $_getBF(3);
+  @$pb.TagNumber(4)
+  set restoring($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasRestoring() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearRestoring() => $_clearField(4);
+}
+
+/// Puts Claktory's background service back in charge (BackendService
+/// can_restore): the backend stops, and the service starts it again. Ack,
+/// then the connection closes; refused, saying why, when it can't.
+class RestoreBackendService extends $pb.GeneratedMessage {
+  factory RestoreBackendService() => RestoreBackendService._();
+
+  RestoreBackendService._();
+
+  factory RestoreBackendService.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      RestoreBackendService()..mergeFromBuffer(data, registry);
+  factory RestoreBackendService.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      RestoreBackendService()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'RestoreBackendService',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: RestoreBackendService.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RestoreBackendService clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RestoreBackendService copyWith(
+          void Function(RestoreBackendService) updates) =>
+      super.copyWith((message) => updates(message as RestoreBackendService))
+          as RestoreBackendService;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use RestoreBackendService() / RestoreBackendService.new instead')
+  static RestoreBackendService create() => RestoreBackendService._();
+  static $pb.GeneratedMessage $_createMessage() => RestoreBackendService._();
+  @$core.override
+  RestoreBackendService createEmptyInstance() => RestoreBackendService._();
+  @$core.pragma('dart2js:noInline')
+  static RestoreBackendService getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<RestoreBackendService>(
+          RestoreBackendService.$_createMessage);
+  static RestoreBackendService? _defaultInstance;
 }
 
 /// Agents and chats waiting on one provider's usage limit or credit
@@ -27852,6 +28113,7 @@ class Model extends $pb.GeneratedMessage {
     $core.Iterable<$core.String>? efforts,
     $core.bool? imageInput,
     $core.bool? added,
+    $core.bool? imageOutput,
   }) {
     final result = Model._();
     if (id != null) result.id = id;
@@ -27860,6 +28122,7 @@ class Model extends $pb.GeneratedMessage {
     if (efforts != null) result.efforts.addAll(efforts);
     if (imageInput != null) result.imageInput = imageInput;
     if (added != null) result.added = added;
+    if (imageOutput != null) result.imageOutput = imageOutput;
     return result;
   }
 
@@ -27884,6 +28147,7 @@ class Model extends $pb.GeneratedMessage {
     ..pPS(4, _omitFieldNames ? '' : 'efforts')
     ..aOB(5, _omitFieldNames ? '' : 'imageInput')
     ..aOB(6, _omitFieldNames ? '' : 'added')
+    ..aOB(7, _omitFieldNames ? '' : 'imageOutput')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -27960,6 +28224,19 @@ class Model extends $pb.GeneratedMessage {
   $core.bool hasAdded() => $_has(5);
   @$pb.TagNumber(6)
   void clearAdded() => $_clearField(6);
+
+  /// An agent on it can make images (#403: image_generate): on its sign-in
+  /// now, as Claktory reads it. Phase 1: a GPT model with image input,
+  /// signed in with ChatGPT on a plan that isn't Free. Read again whenever
+  /// the models or the plan are.
+  @$pb.TagNumber(7)
+  $core.bool get imageOutput => $_getBF(6);
+  @$pb.TagNumber(7)
+  set imageOutput($core.bool value) => $_setBool(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasImageOutput() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearImageOutput() => $_clearField(7);
 }
 
 /// The selected agent's whole transcript, oldest entry first.
@@ -27968,11 +28245,13 @@ class Transcript extends $pb.GeneratedMessage {
     $core.String? agentId,
     $core.Iterable<Entry>? entries,
     $core.bool? hasEarlier,
+    $core.bool? resumed,
   }) {
     final result = Transcript._();
     if (agentId != null) result.agentId = agentId;
     if (entries != null) result.entries.addAll(entries);
     if (hasEarlier != null) result.hasEarlier = hasEarlier;
+    if (resumed != null) result.resumed = resumed;
     return result;
   }
 
@@ -27993,6 +28272,7 @@ class Transcript extends $pb.GeneratedMessage {
     ..pPM<Entry>(2, _omitFieldNames ? '' : 'entries',
         subBuilder: Entry.$_createMessage)
     ..aOB(3, _omitFieldNames ? '' : 'hasEarlier')
+    ..aOB(4, _omitFieldNames ? '' : 'resumed')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -28039,6 +28319,20 @@ class Transcript extends $pb.GeneratedMessage {
   $core.bool hasHasEarlier() => $_has(2);
   @$pb.TagNumber(3)
   void clearHasEarlier() => $_clearField(3);
+
+  /// Resumed (#413; only after a Hello with transcript_revision): `entries`
+  /// are only those added or changed since the revision the app held, oldest
+  /// first, possibly none. Put each in place of the one with its seq, or add
+  /// it; keep the others, and `has_earlier` as it was. Otherwise the app
+  /// replaces what it held with `entries`.
+  @$pb.TagNumber(4)
+  $core.bool get resumed => $_getBF(3);
+  @$pb.TagNumber(4)
+  set resumed($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasResumed() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearResumed() => $_clearField(4);
 }
 
 /// Try now: an agent (or a chat, by its id) waiting out its accounts' usage
@@ -28781,6 +29075,7 @@ class QueuedMessage extends $pb.GeneratedMessage {
     Transcription? transcription,
     $core.bool? quiet,
     ChecklistItemRef? checklistItem,
+    $core.String? typed,
   }) {
     final result = QueuedMessage._();
     if (id != null) result.id = id;
@@ -28796,6 +29091,7 @@ class QueuedMessage extends $pb.GeneratedMessage {
     if (transcription != null) result.transcription = transcription;
     if (quiet != null) result.quiet = quiet;
     if (checklistItem != null) result.checklistItem = checklistItem;
+    if (typed != null) result.typed = typed;
     return result;
   }
 
@@ -28829,6 +29125,7 @@ class QueuedMessage extends $pb.GeneratedMessage {
     ..aOB(12, _omitFieldNames ? '' : 'quiet')
     ..aOM<ChecklistItemRef>(13, _omitFieldNames ? '' : 'checklistItem',
         subBuilder: ChecklistItemRef.$_createMessage)
+    ..aOS(14, _omitFieldNames ? '' : 'typed')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -28952,8 +29249,8 @@ class QueuedMessage extends $pb.GeneratedMessage {
   $pb.PbList<Attachment> get attachments => $_getList(9);
 
   /// A voice message (SendMessage.voice), while it's transcribed or after it
-  /// failed; unset for any other. `text` is empty until it's DONE, and
-  /// attachments[0] is the recording.
+  /// failed; unset for any other. `text` is empty until it's DONE (or the
+  /// typed text sent with it, `typed`), and attachments[0] is the recording.
   @$pb.TagNumber(11)
   Transcription get transcription => $_getN(10);
   @$pb.TagNumber(11)
@@ -28987,6 +29284,18 @@ class QueuedMessage extends $pb.GeneratedMessage {
   void clearChecklistItem() => $_clearField(13);
   @$pb.TagNumber(13)
   ChecklistItemRef ensureChecklistItem() => $_ensure(12);
+
+  /// A voice message sent with typed text (#425): what was typed. `text` is
+  /// the same while it's PENDING or FAILED, then the whole message as in
+  /// UserText.typed once it's DONE. Empty for any other message.
+  @$pb.TagNumber(14)
+  $core.String get typed => $_getSZ(13);
+  @$pb.TagNumber(14)
+  set typed($core.String value) => $_setString(13, value);
+  @$pb.TagNumber(14)
+  $core.bool hasTyped() => $_has(13);
+  @$pb.TagNumber(14)
+  void clearTyped() => $_clearField(14);
 }
 
 /// Adds an entry or replaces the one with the same `seq`.
@@ -30084,6 +30393,11 @@ class Proposal extends $pb.GeneratedMessage {
     $fixnum.Int64? decidedAtMs,
     $core.Iterable<PipeTaint>? taint,
     $core.bool? replied,
+    $core.bool? withdrawn,
+    $core.String? withdrawReason,
+    $core.int? revision,
+    $fixnum.Int64? updatedMs,
+    $core.String? updateReason,
   }) {
     final result = Proposal._();
     if (id != null) result.id = id;
@@ -30093,6 +30407,11 @@ class Proposal extends $pb.GeneratedMessage {
     if (decidedAtMs != null) result.decidedAtMs = decidedAtMs;
     if (taint != null) result.taint.addAll(taint);
     if (replied != null) result.replied = replied;
+    if (withdrawn != null) result.withdrawn = withdrawn;
+    if (withdrawReason != null) result.withdrawReason = withdrawReason;
+    if (revision != null) result.revision = revision;
+    if (updatedMs != null) result.updatedMs = updatedMs;
+    if (updateReason != null) result.updateReason = updateReason;
     return result;
   }
 
@@ -30118,6 +30437,11 @@ class Proposal extends $pb.GeneratedMessage {
     ..pPM<PipeTaint>(6, _omitFieldNames ? '' : 'taint',
         subBuilder: PipeTaint.$_createMessage)
     ..aOB(7, _omitFieldNames ? '' : 'replied')
+    ..aOB(8, _omitFieldNames ? '' : 'withdrawn')
+    ..aOS(9, _omitFieldNames ? '' : 'withdrawReason')
+    ..aI(10, _omitFieldNames ? '' : 'revision', fieldType: $pb.PbFieldType.OU3)
+    ..aInt64(11, _omitFieldNames ? '' : 'updatedMs')
+    ..aOS(12, _omitFieldNames ? '' : 'updateReason')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -30208,6 +30532,66 @@ class Proposal extends $pb.GeneratedMessage {
   $core.bool hasReplied() => $_has(6);
   @$pb.TagNumber(7)
   void clearReplied() => $_clearField(7);
+
+  /// The agent took it back (proposal_withdraw, #407) before the person
+  /// decided: it no longer applied. state is DISMISSED, decided_at_ms when it
+  /// was withdrawn, and `comment` empty. Shown as withdrawn by the agent,
+  /// with its reason, never as the person's dismissal; DecideProposal on it
+  /// is refused.
+  @$pb.TagNumber(8)
+  $core.bool get withdrawn => $_getBF(7);
+  @$pb.TagNumber(8)
+  set withdrawn($core.bool value) => $_setBool(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasWithdrawn() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearWithdrawn() => $_clearField(8);
+
+  /// withdrawn: why, in the agent's words (at most 300 characters); show it
+  /// as the agent's, never as Claktory's.
+  @$pb.TagNumber(9)
+  $core.String get withdrawReason => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set withdrawReason($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasWithdrawReason() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearWithdrawReason() => $_clearField(9);
+
+  /// Which version of the proposal this is (#428): 1 as proposed, one more
+  /// each time its agent changes the text while it waits (proposal_update;
+  /// at most 10 times). As AskPerson.revision: redrawn in place, not counted
+  /// again, not notified again; DecideProposal.revision names the version
+  /// decided. 0 from a backend before #428: treat it as 1.
+  @$pb.TagNumber(10)
+  $core.int get revision => $_getIZ(9);
+  @$pb.TagNumber(10)
+  set revision($core.int value) => $_setUnsignedInt32(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasRevision() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearRevision() => $_clearField(10);
+
+  /// When its agent last changed it, in ms since 1970; 0 if it never did.
+  @$pb.TagNumber(11)
+  $fixnum.Int64 get updatedMs => $_getI64(10);
+  @$pb.TagNumber(11)
+  set updatedMs($fixnum.Int64 value) => $_setInt64(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasUpdatedMs() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearUpdatedMs() => $_clearField(11);
+
+  /// Why it changed it last, in the agent's words (at most 300 characters);
+  /// empty if it gave no reason.
+  @$pb.TagNumber(12)
+  $core.String get updateReason => $_getSZ(11);
+  @$pb.TagNumber(12)
+  set updateReason($core.String value) => $_setString(11, value);
+  @$pb.TagNumber(12)
+  $core.bool hasUpdateReason() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearUpdateReason() => $_clearField(12);
 }
 
 /// A device an agent adds for the person (an admin agent's devices_add tool,
@@ -31597,6 +31981,8 @@ class UserText extends $pb.GeneratedMessage {
     $core.Iterable<Attachment>? attachments,
     Transcription? voice,
     ChecklistItemRef? checklistItem,
+    $core.String? typed,
+    $core.String? heard,
   }) {
     final result = UserText._();
     if (text != null) result.text = text;
@@ -31605,6 +31991,8 @@ class UserText extends $pb.GeneratedMessage {
     if (attachments != null) result.attachments.addAll(attachments);
     if (voice != null) result.voice = voice;
     if (checklistItem != null) result.checklistItem = checklistItem;
+    if (typed != null) result.typed = typed;
+    if (heard != null) result.heard = heard;
     return result;
   }
 
@@ -31631,6 +32019,8 @@ class UserText extends $pb.GeneratedMessage {
         subBuilder: Transcription.$_createMessage)
     ..aOM<ChecklistItemRef>(6, _omitFieldNames ? '' : 'checklistItem',
         subBuilder: ChecklistItemRef.$_createMessage)
+    ..aOS(7, _omitFieldNames ? '' : 'typed')
+    ..aOS(8, _omitFieldNames ? '' : 'heard')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -31716,6 +32106,31 @@ class UserText extends $pb.GeneratedMessage {
   void clearChecklistItem() => $_clearField(6);
   @$pb.TagNumber(6)
   ChecklistItemRef ensureChecklistItem() => $_ensure(5);
+
+  /// A voice message sent with typed text (#425): what the person typed or
+  /// pasted. `text` is then the whole message as the agent read it: this
+  /// text, a blank line, "Voice note: " and the words heard (`heard`), so an
+  /// app that doesn't know these fields still shows all of it. Show this
+  /// text, then the recording (attachments[0]) with `heard` as its words.
+  /// Empty for any other message, a voice message alone included.
+  @$pb.TagNumber(7)
+  $core.String get typed => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set typed($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasTyped() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearTyped() => $_clearField(7);
+
+  /// With `typed`: the words heard in the recording, alone.
+  @$pb.TagNumber(8)
+  $core.String get heard => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set heard($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasHeard() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearHeard() => $_clearField(8);
 }
 
 /// A voice message's transcription.
@@ -44233,6 +44648,7 @@ class Pipe extends $pb.GeneratedMessage {
     $fixnum.Int64? peerWaitingUntilMs,
     $core.String? groupId,
     $core.String? replyAgentId,
+    $core.Iterable<$core.String>? sendOnlyIds,
   }) {
     final result = Pipe._();
     if (id != null) result.id = id;
@@ -44272,6 +44688,7 @@ class Pipe extends $pb.GeneratedMessage {
       result.peerWaitingUntilMs = peerWaitingUntilMs;
     if (groupId != null) result.groupId = groupId;
     if (replyAgentId != null) result.replyAgentId = replyAgentId;
+    if (sendOnlyIds != null) result.sendOnlyIds.addAll(sendOnlyIds);
     return result;
   }
 
@@ -44330,6 +44747,7 @@ class Pipe extends $pb.GeneratedMessage {
     ..aInt64(32, _omitFieldNames ? '' : 'peerWaitingUntilMs')
     ..aOS(33, _omitFieldNames ? '' : 'groupId')
     ..aOS(34, _omitFieldNames ? '' : 'replyAgentId')
+    ..pPS(35, _omitFieldNames ? '' : 'sendOnlyIds')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -44704,6 +45122,14 @@ class Pipe extends $pb.GeneratedMessage {
   $core.bool hasReplyAgentId() => $_has(33);
   @$pb.TagNumber(34)
   void clearReplyAgentId() => $_clearField(34);
+
+  /// Members that only send to it (#414), among member_ids: pipe_send and
+  /// pipe_status, never reading it, never woken by what arrives or told
+  /// what the other side says, never its lead. Any agent of this Claktory,
+  /// its project's or not (Rivet, say). Never quarantined as well, and not
+  /// in can_run_commands_ids.
+  @$pb.TagNumber(35)
+  $pb.PbList<$core.String> get sendOnlyIds => $_getList(34);
 }
 
 /// The other side of a pipe, as it describes itself.
@@ -45817,6 +46243,7 @@ class ApprovePipe extends $pb.GeneratedMessage {
     $core.bool? reviewOutgoing,
     $core.String? comment,
     $core.bool? reply,
+    PipeMembers? sendOnly,
   }) {
     final result = ApprovePipe._();
     if (pipeId != null) result.pipeId = pipeId;
@@ -45829,6 +46256,7 @@ class ApprovePipe extends $pb.GeneratedMessage {
     if (reviewOutgoing != null) result.reviewOutgoing = reviewOutgoing;
     if (comment != null) result.comment = comment;
     if (reply != null) result.reply = reply;
+    if (sendOnly != null) result.sendOnly = sendOnly;
     return result;
   }
 
@@ -45856,6 +46284,8 @@ class ApprovePipe extends $pb.GeneratedMessage {
     ..aOB(8, _omitFieldNames ? '' : 'reviewOutgoing')
     ..aOS(9, _omitFieldNames ? '' : 'comment')
     ..aOB(10, _omitFieldNames ? '' : 'reply')
+    ..aOM<PipeMembers>(11, _omitFieldNames ? '' : 'sendOnly',
+        subBuilder: PipeMembers.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -45979,6 +46409,20 @@ class ApprovePipe extends $pb.GeneratedMessage {
   $core.bool hasReply() => $_has(9);
   @$pb.TagNumber(10)
   void clearReply() => $_clearField(10);
+
+  /// Members that only send to it (Pipe.send_only_ids), among member_ids;
+  /// unset makes none. They may be agents outside the pipe's project; none
+  /// is the lead or quarantined.
+  @$pb.TagNumber(11)
+  PipeMembers get sendOnly => $_getN(10);
+  @$pb.TagNumber(11)
+  set sendOnly(PipeMembers value) => $_setField(11, value);
+  @$pb.TagNumber(11)
+  $core.bool hasSendOnly() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearSendOnly() => $_clearField(11);
+  @$pb.TagNumber(11)
+  PipeMembers ensureSendOnly() => $_ensure(10);
 }
 
 /// Changes a pipe's settings; unset fields stay as they are.
@@ -45994,6 +46438,7 @@ class UpdatePipe extends $pb.GeneratedMessage {
     $core.bool? reviewOutgoing,
     PipeMembers? quarantined,
     $core.bool? reviewIncoming,
+    PipeMembers? sendOnly,
   }) {
     final result = UpdatePipe._();
     if (pipeId != null) result.pipeId = pipeId;
@@ -46006,6 +46451,7 @@ class UpdatePipe extends $pb.GeneratedMessage {
     if (reviewOutgoing != null) result.reviewOutgoing = reviewOutgoing;
     if (quarantined != null) result.quarantined = quarantined;
     if (reviewIncoming != null) result.reviewIncoming = reviewIncoming;
+    if (sendOnly != null) result.sendOnly = sendOnly;
     return result;
   }
 
@@ -46035,6 +46481,8 @@ class UpdatePipe extends $pb.GeneratedMessage {
     ..aOM<PipeMembers>(9, _omitFieldNames ? '' : 'quarantined',
         subBuilder: PipeMembers.$_createMessage)
     ..aOB(10, _omitFieldNames ? '' : 'reviewIncoming')
+    ..aOM<PipeMembers>(11, _omitFieldNames ? '' : 'sendOnly',
+        subBuilder: PipeMembers.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -46158,6 +46606,21 @@ class UpdatePipe extends $pb.GeneratedMessage {
   $core.bool hasReviewIncoming() => $_has(9);
   @$pb.TagNumber(10)
   void clearReviewIncoming() => $_clearField(10);
+
+  /// The members that only send to it (Pipe.send_only_ids), all of them;
+  /// ids that aren't members are refused, and so is one that's quarantined
+  /// or the lead. A member left out reads the pipe as before. Agents
+  /// outside the pipe's project may be members only this way.
+  @$pb.TagNumber(11)
+  PipeMembers get sendOnly => $_getN(10);
+  @$pb.TagNumber(11)
+  set sendOnly(PipeMembers value) => $_setField(11, value);
+  @$pb.TagNumber(11)
+  $core.bool hasSendOnly() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearSendOnly() => $_clearField(11);
+  @$pb.TagNumber(11)
+  PipeMembers ensureSendOnly() => $_ensure(10);
 }
 
 class PipeMembers extends $pb.GeneratedMessage {
@@ -47351,6 +47814,13 @@ class AskPerson extends $pb.GeneratedMessage {
     $core.Iterable<Attachment>? answerAttachments,
     $core.Iterable<AskStep>? steps,
     $core.bool? replied,
+    $core.bool? withdrawn,
+    $core.String? withdrawReason,
+    $core.int? revision,
+    $fixnum.Int64? updatedMs,
+    $core.String? updateReason,
+    $core.String? actionDescription,
+    $core.String? actionReason,
   }) {
     final result = AskPerson._();
     if (id != null) result.id = id;
@@ -47366,6 +47836,13 @@ class AskPerson extends $pb.GeneratedMessage {
       result.answerAttachments.addAll(answerAttachments);
     if (steps != null) result.steps.addAll(steps);
     if (replied != null) result.replied = replied;
+    if (withdrawn != null) result.withdrawn = withdrawn;
+    if (withdrawReason != null) result.withdrawReason = withdrawReason;
+    if (revision != null) result.revision = revision;
+    if (updatedMs != null) result.updatedMs = updatedMs;
+    if (updateReason != null) result.updateReason = updateReason;
+    if (actionDescription != null) result.actionDescription = actionDescription;
+    if (actionReason != null) result.actionReason = actionReason;
     return result;
   }
 
@@ -47398,6 +47875,13 @@ class AskPerson extends $pb.GeneratedMessage {
     ..pPM<AskStep>(11, _omitFieldNames ? '' : 'steps',
         subBuilder: AskStep.$_createMessage)
     ..aOB(12, _omitFieldNames ? '' : 'replied')
+    ..aOB(13, _omitFieldNames ? '' : 'withdrawn')
+    ..aOS(14, _omitFieldNames ? '' : 'withdrawReason')
+    ..aI(15, _omitFieldNames ? '' : 'revision', fieldType: $pb.PbFieldType.OU3)
+    ..aInt64(16, _omitFieldNames ? '' : 'updatedMs')
+    ..aOS(17, _omitFieldNames ? '' : 'updateReason')
+    ..aOS(18, _omitFieldNames ? '' : 'actionDescription')
+    ..aOS(19, _omitFieldNames ? '' : 'actionReason')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -47543,6 +48027,94 @@ class AskPerson extends $pb.GeneratedMessage {
   $core.bool hasReplied() => $_has(11);
   @$pb.TagNumber(12)
   void clearReplied() => $_clearField(12);
+
+  /// The agent took it back (ask_withdraw, #407) before the person answered:
+  /// it no longer applied. state is DISMISSED, so it no longer waits, and
+  /// decided_ms is when it was withdrawn; `answer` is empty. Shown as
+  /// withdrawn by the agent, with its reason, never as the person's
+  /// dismissal; a card the person is answering just closes. AnswerAsk on it
+  /// is refused ("This question was withdrawn.").
+  @$pb.TagNumber(13)
+  $core.bool get withdrawn => $_getBF(12);
+  @$pb.TagNumber(13)
+  set withdrawn($core.bool value) => $_setBool(12, value);
+  @$pb.TagNumber(13)
+  $core.bool hasWithdrawn() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearWithdrawn() => $_clearField(13);
+
+  /// withdrawn: why, in the agent's words (a short line, at most 300
+  /// characters); show it as the agent's, never as Claktory's.
+  @$pb.TagNumber(14)
+  $core.String get withdrawReason => $_getSZ(13);
+  @$pb.TagNumber(14)
+  set withdrawReason($core.String value) => $_setString(13, value);
+  @$pb.TagNumber(14)
+  $core.bool hasWithdrawReason() => $_has(13);
+  @$pb.TagNumber(14)
+  void clearWithdrawReason() => $_clearField(14);
+
+  /// Which version of the card this is (#428): 1 as asked, one more each
+  /// time its agent changes it while it waits (ask_update: its title, body,
+  /// wants_text, review_path or steps; at most 10 times). The card redraws
+  /// in place; it doesn't count again in Needs you, and nothing notifies the
+  /// person again. AnswerAsk.revision names the version answered. 0 from a
+  /// backend before #428: treat it as 1.
+  @$pb.TagNumber(15)
+  $core.int get revision => $_getIZ(14);
+  @$pb.TagNumber(15)
+  set revision($core.int value) => $_setUnsignedInt32(14, value);
+  @$pb.TagNumber(15)
+  $core.bool hasRevision() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearRevision() => $_clearField(15);
+
+  /// When its agent last changed it, in ms since 1970; 0 if it never did
+  /// (revision 1). Show "Updated · <time>" on the card.
+  @$pb.TagNumber(16)
+  $fixnum.Int64 get updatedMs => $_getI64(15);
+  @$pb.TagNumber(16)
+  set updatedMs($fixnum.Int64 value) => $_setInt64(15, value);
+  @$pb.TagNumber(16)
+  $core.bool hasUpdatedMs() => $_has(15);
+  @$pb.TagNumber(16)
+  void clearUpdatedMs() => $_clearField(16);
+
+  /// Why it changed it last, in the agent's words (at most 300 characters);
+  /// empty if it gave no reason. Show it muted, as the agent's.
+  @$pb.TagNumber(17)
+  $core.String get updateReason => $_getSZ(16);
+  @$pb.TagNumber(17)
+  set updateReason($core.String value) => $_setString(16, value);
+  @$pb.TagNumber(17)
+  $core.bool hasUpdateReason() => $_has(16);
+  @$pb.TagNumber(17)
+  void clearUpdateReason() => $_clearField(17);
+
+  /// A card whose Approve makes a change an admin agent asked for (#423:
+  /// pipes_settings, apps_uninstall, models_auto_continue): what Approve
+  /// does, in Claktory's own words, never the agent's ("Rivet asks to add
+  /// Cy … on the pipe "Website"."); and the agent's reason, in its own
+  /// words. Show the description as the card's text and the reason apart,
+  /// muted, as the agent's ("Rivet's reason: …"), instead of body, which
+  /// holds both for older apps. Both empty on every other card.
+  @$pb.TagNumber(18)
+  $core.String get actionDescription => $_getSZ(17);
+  @$pb.TagNumber(18)
+  set actionDescription($core.String value) => $_setString(17, value);
+  @$pb.TagNumber(18)
+  $core.bool hasActionDescription() => $_has(17);
+  @$pb.TagNumber(18)
+  void clearActionDescription() => $_clearField(18);
+
+  @$pb.TagNumber(19)
+  $core.String get actionReason => $_getSZ(18);
+  @$pb.TagNumber(19)
+  set actionReason($core.String value) => $_setString(18, value);
+  @$pb.TagNumber(19)
+  $core.bool hasActionReason() => $_has(18);
+  @$pb.TagNumber(19)
+  void clearActionReason() => $_clearField(19);
 }
 
 /// One step of a procedure (AskPerson.steps).
@@ -47654,6 +48226,7 @@ class AnswerAsk extends $pb.GeneratedMessage {
     $core.Iterable<Attachment>? attachments,
     $core.int? step,
     $core.bool? reply,
+    $core.int? revision,
   }) {
     final result = AnswerAsk._();
     if (agentId != null) result.agentId = agentId;
@@ -47663,6 +48236,7 @@ class AnswerAsk extends $pb.GeneratedMessage {
     if (attachments != null) result.attachments.addAll(attachments);
     if (step != null) result.step = step;
     if (reply != null) result.reply = reply;
+    if (revision != null) result.revision = revision;
     return result;
   }
 
@@ -47688,6 +48262,7 @@ class AnswerAsk extends $pb.GeneratedMessage {
         subBuilder: Attachment.$_createMessage)
     ..aI(6, _omitFieldNames ? '' : 'step', fieldType: $pb.PbFieldType.OU3)
     ..aOB(7, _omitFieldNames ? '' : 'reply')
+    ..aI(8, _omitFieldNames ? '' : 'revision', fieldType: $pb.PbFieldType.OU3)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -47789,6 +48364,20 @@ class AnswerAsk extends $pb.GeneratedMessage {
   $core.bool hasReply() => $_has(6);
   @$pb.TagNumber(7)
   void clearReply() => $_clearField(7);
+
+  /// The card's version the person answered (AskPerson.revision, #428).
+  /// Another version is refused, "This card changed. Look at it again.",
+  /// and nothing is answered: the card already shows the new one. Left
+  /// out (an app before #428), it's taken for the card as it is, unless its
+  /// agent changed it in the last 30 seconds, when it's refused the same way.
+  @$pb.TagNumber(8)
+  $core.int get revision => $_getIZ(7);
+  @$pb.TagNumber(8)
+  set revision($core.int value) => $_setUnsignedInt32(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasRevision() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearRevision() => $_clearField(8);
 }
 
 /// A chat: a one-off conversation of the person's, beside their agents but
@@ -48264,7 +48853,8 @@ class SendChatMessage extends $pb.GeneratedMessage {
   /// A voice message, as SendMessage.attachments and SendMessage.voice:
   /// attachments[0] is the recording, uploaded for the chat (StartUpload
   /// with agent_id the chat's id; a chat takes only recordings, an audio type
-  /// up to 100 MB), and `text` is empty. It waits in the chat's queue
+  /// up to 100 MB), and `text` is empty or typed with it, as in
+  /// SendMessage.voice (#425). It waits in the chat's queue
   /// (QueuedMessage.transcription) while it's transcribed, then the chat
   /// reads its words; a short one with nothing said is dropped. Refused while
   /// the speech model is ABSENT or UNSUPPORTED. RetryVoiceMessage and
@@ -50564,8 +51154,10 @@ class SendTestNotification extends $pb.GeneratedMessage {
 }
 
 /// The cards the person decided in the last 30 days (answered, dismissed,
-/// approved or denied), newest first, a page at a time. Answered with
-/// NeedsYouHistory. Expired, withdrawn and waiting cards aren't listed.
+/// approved or denied), newest first, a page at a time, and the questions
+/// and proposals their agents withdrew (WITHDRAWN). Answered with
+/// NeedsYouHistory. Expired and waiting cards, and withdrawn requests for
+/// secrets, aren't listed.
 class ListNeedsYouHistory extends $pb.GeneratedMessage {
   factory ListNeedsYouHistory({
     $core.String? query,
@@ -50747,6 +51339,7 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     $core.String? modelChangeId,
     $core.String? subjectAgentId,
     $core.bool? superseded,
+    $core.int? updates,
   }) {
     final result = NeedsYouRecord._();
     if (kind != null) result.kind = kind;
@@ -50773,6 +51366,7 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     if (modelChangeId != null) result.modelChangeId = modelChangeId;
     if (subjectAgentId != null) result.subjectAgentId = subjectAgentId;
     if (superseded != null) result.superseded = superseded;
+    if (updates != null) result.updates = updates;
     return result;
   }
 
@@ -50820,6 +51414,7 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     ..aOS(22, _omitFieldNames ? '' : 'modelChangeId')
     ..aOS(23, _omitFieldNames ? '' : 'subjectAgentId')
     ..aOB(24, _omitFieldNames ? '' : 'superseded')
+    ..aI(25, _omitFieldNames ? '' : 'updates', fieldType: $pb.PbFieldType.OU3)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -51051,7 +51646,8 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
   /// APP_ACCESS: why, in Rivet's words (apps_set_access's reason): show it
   /// as Rivet's, under the title, never as Claktory's; empty for the
   /// person's own changes. MODEL: models_set's reason, the same way;
-  /// CONVERSATION: conversation_fork's or conversation_switch's.
+  /// CONVERSATION: conversation_fork's or conversation_switch's;
+  /// WITHDRAWN: why the agent took its question or proposal back.
   @$pb.TagNumber(21)
   $core.String get agentReason => $_getSZ(20);
   @$pb.TagNumber(21)
@@ -51072,7 +51668,8 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
   void clearModelChangeId() => $_clearField(22);
 
   /// MODEL: the agent whose model or effort changed. CONVERSATION: the
-  /// agent whose conversation changed.
+  /// agent whose conversation changed. PIPE_MEMBER: the agent let send to
+  /// the pipe, or stopped.
   @$pb.TagNumber(23)
   $core.String get subjectAgentId => $_getSZ(22);
   @$pb.TagNumber(23)
@@ -51094,6 +51691,19 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
   $core.bool hasSuperseded() => $_has(23);
   @$pb.TagNumber(24)
   void clearSuperseded() => $_clearField(24);
+
+  /// QUESTION, REVIEW and PROPOSAL: how many times its agent changed the
+  /// card before it was decided (#428; ask_update, proposal_update); 0 for
+  /// none. title is the card as it was last. Show it quietly ("Updated
+  /// twice"), never as a record of its own.
+  @$pb.TagNumber(25)
+  $core.int get updates => $_getIZ(24);
+  @$pb.TagNumber(25)
+  set updates($core.int value) => $_setUnsignedInt32(24, value);
+  @$pb.TagNumber(25)
+  $core.bool hasUpdates() => $_has(24);
+  @$pb.TagNumber(25)
+  void clearUpdates() => $_clearField(25);
 }
 
 /// A Mac app can broker for its Chrome. Sent on every connection, and again

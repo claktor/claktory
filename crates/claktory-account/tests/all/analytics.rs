@@ -387,3 +387,267 @@ async fn a_check_in_counts_devices_setup_and_update_health() {
     instance.signed(&claktory, "POST", "/v1/check-in", &none, None).await;
     assert_eq!(devices(), 0, "an empty list: none now");
 }
+
+/// The export for Charts (#411): global counts per completed UTC day,
+/// in schema 1's eleven columns, never anything of one Claktory.
+fn export(instance: &Instance) -> serde_json::Value {
+    let conn = rusqlite::Connection::open_with_flags(&instance.db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    serde_json::from_str(&stats::export(&conn, instance.now()).expect("exports")).expect("JSON")
+}
+
+/// The rows of `metric` in `window`, by their day's start (seconds).
+fn series(export: &serde_json::Value, window: &str, metric: &str) -> Vec<(i64, i64)> {
+    export["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["window"] == window && row["metric"] == metric)
+        .map(|row| (row["bucket_start_ms"].as_i64().unwrap() / 1000, row["value"].as_i64().unwrap()))
+        .collect()
+}
+
+#[tokio::test]
+async fn the_charts_export_has_global_counts_for_completed_days_only() {
+    let instance = start_located().await;
+    let mut claktories = Vec::new();
+    for (number, ip) in ["203.0.113.90", "198.51.100.91"].into_iter().enumerate() {
+        let mut claktory = Claktory::new(ip);
+        instance.sign_in(&mut claktory, &format!("p{number}@example.com"), "Mac").await;
+        let mut body = check_in(vec![period(&format!("period-00000000000009{number}0"), instance.now(), vec![usage("gpt-5.6-sol", 1000, 5)])]);
+        body.periods[0].health = vec![Health { version: "v0.1.19".into(), rolled_back: 1, crashes: 2 }];
+        body.setup = Some(Setup { model_connected: true, first_run: number == 0 });
+        instance.signed(&claktory, "POST", "/v1/check-in", &body, None).await;
+        claktories.push(claktory);
+    }
+    let first_day = instance.now() - instance.now().rem_euclid(86_400);
+
+    // The day isn't over: no completed day of it, only today's running
+    // totals, partial (slice 3, Fugo 27512).
+    let today = export(&instance);
+    assert_eq!(series(&today, "day", "runs").last().map(|(day, _)| *day), Some(first_day - 86_400));
+    assert!(series(&today, "day", "runs").iter().all(|(_, runs)| *runs == 0));
+    assert_eq!(series(&today, "today", "runs"), [(first_day, 8)]);
+    assert_eq!(series(&today, "today", "contact_claktories"), [(first_day, 2)]);
+    assert_eq!(series(&today, "today", "input_tokens"), [(first_day, 2000)]);
+    assert_eq!(series(&today, "today", "registered_claktories"), [(first_day, 2)]);
+    assert_eq!(series(&today, "rolling30", "contact_claktories").len(), 90, "rolling30 for completed days only");
+    let partial = today["rows"].as_array().unwrap().iter().filter(|row| row["window"] == "today").collect::<Vec<_>>();
+    assert_eq!(partial.len(), 11, "each global metric of a day, rolling30 aside");
+    assert!(partial.iter().all(|row| row["status"] == "partial" && row["bucket_start_ms"].as_i64() == Some(first_day * 1000)));
+    // Again later, the same rows rewritten: nothing keeps the earlier ones.
+    instance.advance(60);
+    assert_eq!(export(&instance)["rows"].as_array().unwrap().iter().filter(|row| row["window"] == "today").count(), 11);
+
+    // The next day, one of them is in touch again, with more work.
+    instance.advance(86_400);
+    let body = check_in(vec![period("period-0000000000000999", instance.now(), vec![usage("gpt-5.6-sol", 7, 0)])]);
+    instance.signed(&claktories[0], "POST", "/v1/check-in", &body, None).await;
+    let out = export(&instance);
+    let text = out.to_string();
+
+    // Schema 1: these eleven columns, global only, for the last 90
+    // completed days, ending yesterday.
+    assert_eq!((out["schema_version"].as_i64(), out["generated_at_ms"].as_i64()), (Some(1), Some(instance.now() * 1000)));
+    for row in out["rows"].as_array().unwrap() {
+        let mut columns: Vec<&str> = row.as_object().unwrap().keys().map(String::as_str).collect();
+        columns.sort_unstable();
+        assert_eq!(
+            columns,
+            [
+                "bucket_end_ms",
+                "bucket_start_ms",
+                "dimension",
+                "generated_at_ms",
+                "label",
+                "metric",
+                "published_at_ms",
+                "schema_version",
+                "status",
+                "value",
+                "window"
+            ]
+        );
+        let partial = row["window"] == "today";
+        let status = if partial { "partial" } else { "ok" };
+        assert_eq!((row["dimension"].as_str(), row["label"].as_str(), row["status"].as_str()), (Some("none"), Some("All"), Some(status)));
+        assert_eq!(row["bucket_end_ms"].as_i64().unwrap() - row["bucket_start_ms"].as_i64().unwrap(), 86_400_000);
+        assert!(row["value"].as_i64().unwrap() >= 0);
+        // Today only as `today`, partial.
+        assert_eq!(row["bucket_end_ms"].as_i64().unwrap() > (first_day + 86_400) * 1000, partial, "{row}");
+    }
+    let runs = series(&out, "day", "runs");
+    assert_eq!(runs.len(), 90);
+    assert_eq!(runs.last().unwrap().0, first_day);
+    assert_eq!(runs.first().unwrap().0, first_day - 89 * 86_400);
+
+    // The completed day's totals, over both Claktories.
+    let on = |window: &str, metric: &str| series(&out, window, metric).into_iter().find(|(day, _)| *day == first_day).unwrap().1;
+    assert_eq!(on("day", "contact_claktories"), 2);
+    assert_eq!(on("rolling30", "contact_claktories"), 2);
+    assert_eq!(on("day", "registered_claktories"), 2);
+    assert_eq!(on("day", "requests"), 20);
+    assert_eq!(on("day", "input_tokens"), 2000);
+    assert_eq!(on("day", "output_tokens"), 10);
+    assert_eq!(on("day", "cache_read_tokens"), 2000);
+    assert_eq!(on("day", "cache_write_tokens"), 200);
+    assert_eq!(on("day", "agent_minutes"), 180);
+    assert_eq!(on("day", "runs"), 8);
+    assert_eq!(on("day", "rolled_back"), 2);
+    assert_eq!(on("day", "crashes"), 4);
+    assert_eq!(on("day", "registered_claktories"), 2);
+    let before = |metric: &str| series(&out, "day", metric).into_iter().find(|(day, _)| *day == first_day - 86_400).unwrap().1;
+    assert_eq!((before("registered_claktories"), before("contact_claktories")), (0, 0));
+    // Setup reached: as now, of those registered by yesterday's end.
+    let snapshot = |metric: &str| series(&out, "snapshot", metric);
+    assert_eq!(snapshot("model_connected_claktories"), [(first_day, 2)]);
+    assert_eq!(snapshot("first_run_claktories"), [(first_day, 1)]);
+
+    // Nothing of any one of them: no id, email, address, place, model or version.
+    for private in [&claktories[0].id, &claktories[1].id, "p0@example.com", "203.0.113", "Netherlands", "Amsterdam", "gpt-5.6", "v0.1.19", "anthropic"] {
+        assert!(!text.contains(private), "{private} in the export");
+    }
+
+    // Another day on: the Claktory in touch both days counts once in the
+    // 30 days, never as a sum of the days.
+    instance.advance(86_400);
+    let out = export(&instance);
+    let day = |window: &str, at: i64| series(&out, window, "contact_claktories").into_iter().find(|(day, _)| *day == at).unwrap().1;
+    assert_eq!((day("day", first_day), day("day", first_day + 86_400)), (2, 1));
+    assert_eq!(day("rolling30", first_day + 86_400), 2);
+}
+
+#[test]
+fn the_charts_export_leaves_the_connection_as_it_was() {
+    let dir = std::env::temp_dir().join(format!("claktory-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("account.db");
+    drop(db::open(&path).unwrap());
+    // A connection that could write still doesn't, and is as it was after.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    stats::export(&conn, 1_795_000_000).expect("exports");
+    let query_only: bool = conn.query_row("PRAGMA query_only", [], |row| row.get(0)).unwrap();
+    assert!(!query_only);
+    assert!(conn.is_autocommit(), "no transaction left open");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Slice 2 (#411): a month's breakdowns are published once it's over,
+/// write once, each category with five Claktories behind it or folded
+/// into Other, and nothing of any one Claktory.
+#[tokio::test]
+async fn a_month_is_published_once_with_small_groups_folded_and_nothing_of_any_one() {
+    let instance = start_located().await;
+    let mut ids = Vec::new();
+    for number in 0..6 {
+        // Five in the Netherlands, one in France.
+        let ip = if number < 5 { format!("203.0.113.{}", 110 + number) } else { "198.51.100.115".to_owned() };
+        let mut claktory = Claktory::new(&ip);
+        instance.sign_in(&mut claktory, &format!("m{number}@example.com"), "Mac").await;
+        // Six use Opus; five Haiku; one a model with no label of its own.
+        let second = if number < 5 { usage("claude-haiku-4-5", 10, 1) } else { usage("someones-own-model", 10, 1) };
+        let body = check_in(vec![period(&format!("period-00000000000077{number}0"), instance.now(), vec![usage("claude-opus-4-8", 100, 1), second])]);
+        instance.signed(&claktory, "POST", "/v1/check-in", &body, None).await;
+        ids.push(claktory.id.clone());
+    }
+    let month = stats::month_of(instance.now());
+    let mut conn = db::open(&instance.db).unwrap();
+
+    // Not before it's over.
+    let early = stats::publish(&mut conn, &month, instance.now()).unwrap_err();
+    assert!(early.contains("isn't over yet"), "{early}");
+
+    // The next month, it's due once.
+    let (start, end) = stats::month_bounds(&month).unwrap();
+    instance.advance(end - instance.now() + 3600);
+    assert!(stats::publish_due(&mut conn, instance.now()).unwrap());
+    assert!(!stats::publish_due(&mut conn, instance.now()).unwrap());
+    let kept = || -> (i64, String) {
+        conn.query_row("SELECT published_at, rows FROM analytics_months WHERE month = ?1", [&month], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+    };
+    let first = kept();
+    assert_eq!(first.0, instance.now());
+
+    // Never again, never changed, never deleted.
+    instance.advance(86_400);
+    let mut again = db::open(&instance.db).unwrap();
+    let refused = stats::publish(&mut again, &month, instance.now()).unwrap_err();
+    assert!(refused.contains("published already"), "{refused}");
+    assert!(again.execute("UPDATE analytics_months SET rows = '[]'", []).is_err());
+    assert!(again.execute("DELETE FROM analytics_months", []).is_err());
+    assert_eq!(kept(), first);
+
+    // In the export, bucketed by the month, timed by its publication.
+    let out = export(&instance);
+    let text = out.to_string();
+    let rows: Vec<&serde_json::Value> = out["rows"].as_array().unwrap().iter().filter(|row| row["window"] == "month").collect();
+    for row in &rows {
+        assert_eq!(
+            (row["bucket_start_ms"].as_i64(), row["bucket_end_ms"].as_i64(), row["published_at_ms"].as_i64()),
+            (Some(start * 1000), Some(end * 1000), Some(first.0 * 1000))
+        );
+    }
+    let value = |metric: &str, dimension: &str, label: &str| {
+        rows.iter()
+            .find(|row| row["metric"] == metric && row["dimension"] == dimension && row["label"] == label)
+            .map(|row| row["value"].as_i64().unwrap())
+    };
+    assert_eq!(value("requests", "none", "All"), Some(120));
+    assert_eq!(value("requests", "provider", "anthropic"), Some(120));
+    // Opus has six behind it; Haiku's five go into Other, which the one
+    // unlisted model alone couldn't make safe.
+    assert_eq!(value("requests", "model", "claude-opus-4-8"), Some(60));
+    assert_eq!(value("requests", "model", "Other"), Some(60));
+    assert_eq!(value("requests", "model", "claude-haiku-4-5"), None);
+    // France alone is too few, and Other then takes in the Netherlands.
+    assert_eq!(value("backend_claktories", "country", "Other"), Some(6));
+    assert_eq!(value("backend_claktories", "backend_version", "v0.1.9"), Some(6));
+    assert_eq!(value("backend_claktories", "backend_platform", "macos-arm64"), Some(6));
+    assert_eq!(value("contact_claktories", "none", "All"), Some(6));
+    for private in [ids[0].as_str(), ids[5].as_str(), "someones-own-model", "France", "Netherlands", "Amsterdam", "m0@example.com", "203.0.113"] {
+        assert!(!text.contains(private), "{private} in the export");
+    }
+}
+
+#[test]
+fn too_few_claktories_leave_a_breakdown_suppressed_and_only_its_total() {
+    let dir = std::env::temp_dir().join(format!("claktory-publish-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("account.db");
+    let mut conn = db::open(&path).unwrap();
+    let (start, end) = stats::month_bounds("2026-10").unwrap();
+    for (id, model) in [("c1", "claude-opus-4-8"), ("c2", "claude-opus-4-8"), ("", "claude-opus-4-8")] {
+        conn.execute(
+            "INSERT INTO usage (claktory_id, day, provider, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
+             VALUES (?1, ?2, 'anthropic', ?3, 5, 1, 1, 1, 1)",
+            rusqlite::params![id, db::day(start + 86_400), model],
+        )
+        .unwrap();
+    }
+    stats::publish(&mut conn, "2026-10", end + 10).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&stats::export(&conn, end + 20).unwrap()).unwrap();
+    let rows: Vec<(String, String, String, Option<i64>, String)> = out["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["window"] == "month" && row["metric"] == "requests")
+        .map(|row| {
+            (
+                row["dimension"].as_str().unwrap().to_owned(),
+                row["label"].as_str().unwrap().to_owned(),
+                row["status"].as_str().unwrap().to_owned(),
+                row["value"].as_i64(),
+                String::new(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("none".into(), "All".into(), "ok".into(), Some(15), String::new()),
+            ("provider".into(), "Other".into(), "suppressed".into(), None, String::new()),
+            ("model".into(), "Other".into(), "suppressed".into(), None, String::new()),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

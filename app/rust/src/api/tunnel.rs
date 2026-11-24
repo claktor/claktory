@@ -146,6 +146,9 @@ impl TunnelHandle {
                 RelayTrouble::Network => TunnelRelayTrouble::Network,
                 RelayTrouble::Other => TunnelRelayTrouble::Other,
             },
+            received: status.received,
+            link_received: status.link_received,
+            dial_timeout_ms: status.dial_timeout_ms,
         }
     }
 
@@ -255,6 +258,17 @@ pub struct TunnelStatus {
     pub relay_up_ms: u32,
     /// Why its relay can't be reached, roughly, while it can't.
     pub relay_trouble: TunnelRelayTrouble,
+    /// Bytes received from the backend so far, as they arrive, wrapping:
+    /// while it moves, the link is delivering, even before a whole message
+    /// is in (#413).
+    pub received: u32,
+    /// Bytes the open connection has received at all, QUIC's own traffic
+    /// included, wrapping: it moves while the link is alive even when a
+    /// backed-off connection holds the data back (#413).
+    pub link_received: u32,
+    /// How long the next dial has, in ms: it grows after dials that timed
+    /// out, and the app's connect window with it (#413).
+    pub dial_timeout_ms: u32,
 }
 
 /// Why this device's relay can't be reached, in a word.

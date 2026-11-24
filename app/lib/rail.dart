@@ -31,6 +31,7 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart';
 import 'usage_wait.dart' show atWork;
+import 'voice_keep.dart' show keptClaktoryKey, keptVoiceCount;
 import 'inbox.dart' show needsYouCount;
 import 'waiting.dart' show waitingLabel;
 import 'your_claktories.dart' show DeviceSignInDialog;
@@ -979,6 +980,16 @@ class _ClaktoryFormState extends State<ClaktoryForm> {
     }
   }
 
+  /// Recordings kept on this device for it, not sent yet: removing it
+  /// deletes them too, so the question says so (Sale's row 76).
+  var _unsent = 0;
+
+  Future<void> _confirmRemove(RemoteFactory target) async {
+    setState(() => _confirmingRemove = true);
+    final unsent = await keptVoiceCount(keptClaktoryKey(target));
+    if (mounted && unsent != _unsent) setState(() => _unsent = unsent);
+  }
+
   void _remove(RemoteFactory target) {
     // It forgets this device's key, so its pairing is of no more use:
     // leave its devices too, when it can be reached.
@@ -1000,7 +1011,8 @@ class _ClaktoryFormState extends State<ClaktoryForm> {
         body:
             'This $thisDeviceKind disconnects from it. Its agents and work '
             'stay on $name. To connect again, add this '
-            '$thisDeviceKind on $name in Settings → Devices.',
+            '$thisDeviceKind on $name in Settings → Devices.'
+            '${unsentGoesToo(_unsent)}',
         fields: const [],
         error: null,
         submitLabel: 'Remove',
@@ -1010,10 +1022,7 @@ class _ClaktoryFormState extends State<ClaktoryForm> {
     }
     final remove = target == null
         ? null
-        : Button(
-            label: 'Remove…',
-            onPressed: () => setState(() => _confirmingRemove = true),
-          );
+        : Button(label: 'Remove…', onPressed: () => _confirmRemove(target));
     // Its name and color are its own: they change only while connected.
     if (!_backend.connected.value) {
       return FormFrame(
@@ -1846,3 +1855,12 @@ class _ListRow extends StatelessWidget {
     );
   }
 }
+
+/// What removing a Claktory says of the [count] recordings kept for it on
+/// this device, not sent yet, which go with it; nothing when there are
+/// none. Trish's words: the sheet already names the device.
+String unsentGoesToo(int count) => switch (count) {
+  0 => '',
+  1 => " A voice recording you haven't sent yet is deleted too.",
+  _ => " $count voice recordings you haven't sent yet are deleted too.",
+};

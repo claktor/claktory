@@ -68,6 +68,7 @@ async fn a_curator_keeps_its_database_files_and_asks_and_nothing_else() {
         "db_exec",
         "db_schema",
         "ask_person",
+        "ask_withdraw",
         "extension_call",
     ];
     let have = tools(&models);

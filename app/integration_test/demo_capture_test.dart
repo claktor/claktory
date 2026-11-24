@@ -23,6 +23,20 @@
 //   send         sends the box's text, as Return in it does
 //   file PATH    opens PATH (on the dev machine) beside the conversation
 //   shot NAME    saves one frame as SHOTS_DIR/NAME.png
+//   region X Y W H  from then on, frames (and shots) hold only that
+//                rectangle of the view, in points from its top left: far
+//                quicker to take, so a high fps holds. `region` alone goes
+//                back to the whole view
+//   size W H     lays the app out as a W×H point window from then on (its
+//                frames W×H points at the screen's pixel ratio, times
+//                SCALE); on a Mac, under 600 points wide is the phone's
+//                layout, as a window that narrow would be. `size` alone
+//                goes back to the real window
+//   scroll TEXT  scrolls the conversation shown to the first (oldest)
+//                message with TEXT in it, loading back to it, and puts it
+//                near the top: as Needs you goes to a card. Prints
+//                "scrolled" with the message's words around TEXT, or
+//                "not found: TEXT"
 //   voice FILE   records FILE (.m4a) as a voice message from the mic and
 //                sends it once it has played; FILE.levels (or backup.levels
 //                for backup.m4a) beside it holds
@@ -44,7 +58,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
-import 'package:factory_app/backend.dart' show localPort;
+import 'package:factory_app/backend.dart' show RequestFailure, localPort;
 import 'package:factory_app/explorer.dart' show openFile;
 import 'package:factory_app/main.dart' as app;
 import 'package:factory_app/controls.dart' show Button;
@@ -160,33 +174,56 @@ void main() {
     final mic = _FileMic();
     deviceRecorder = mic;
     var read = control.lengthSync();
-    var clock = Duration.zero;
+    // The app's clock is the wall clock, so what moves moves in real time
+    // however long a frame takes to save.
+    final clock = Stopwatch()..start();
     var fps = 0.0;
+    // What each frame holds, in logical points: null for the whole view.
+    Rect? region;
+    // Frames still being encoded and written, oldest first.
+    final writing = <Future<void>>[];
     var frame = Directory('$_shots/frames').listSync().length;
     var lastFrame = DateTime.fromMillisecondsSinceEpoch(0);
 
     Future<void> step() async {
-      const wait = Duration(milliseconds: 50);
+      // Twice as often as frames are due, so none waits long for its turn.
+      final wait = Duration(
+        microseconds: fps > 0
+            ? (500000 / fps).clamp(5000, 50000).round()
+            : 50000,
+      );
       await Future<void>.delayed(wait);
-      clock += wait;
       // The camera films a window that may be covered, where the app stops
       // everything that moves (sight.dart): here it's always being seen.
       Sight.shown.value = true;
-      await tester.pumpBenchmark(clock);
+      await tester.pumpBenchmark(clock.elapsed);
     }
 
-    Future<void> save(String path) async {
+    /// The view as drawn now ([region] of it, if set), to save as [path]
+    /// once it's encoded: the returned future.
+    Future<Future<void>> take(String path) async {
       final view = binding.renderViews.first;
+      final ratio = view.flutterView.devicePixelRatio;
+      final shown = region ?? Offset.zero & view.size;
       // The view's layer is already in physical pixels; SCALE draws it
       // larger still.
       final image = await (view.debugLayer! as OffsetLayer).toImage(
-        Offset.zero & view.size * view.flutterView.devicePixelRatio,
+        Rect.fromLTWH(
+          shown.left * ratio,
+          shown.top * ratio,
+          shown.width * ratio,
+          shown.height * ratio,
+        ),
         pixelRatio: _scale,
       );
-      final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
-      image.dispose();
-      await File(path).writeAsBytes(bytes!.buffer.asUint8List());
+      return () async {
+        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+        image.dispose();
+        await File(path).writeAsBytes(bytes!.buffer.asUint8List());
+      }();
     }
+
+    Future<void> save(String path) async => await take(path);
 
     late AppScope scope;
     EditableText messageBox() => tester.widget<EditableText>(
@@ -200,10 +237,16 @@ void main() {
     Future<void> grab() async {
       frame += 1;
       final name = frame.toString().padLeft(6, '0');
-      await save('$_shots/frames/$name.png');
+      // Logged at the moment it shows, not when it's written.
       lastFrame = DateTime.now();
       final shown = scope.backend.workspace.workspace.selectedAgentId;
       log.writeln('$name ${lastFrame.toIso8601String()} $shown');
+      // Encoded and written while the next frames are taken; a few at most
+      // at once.
+      writing.add(await take('$_shots/frames/$name.png'));
+      while (writing.length > 6) {
+        await writing.removeAt(0);
+      }
     }
 
     /// A step, and a frame when one is due at [fps].
@@ -277,6 +320,7 @@ void main() {
           log.writeln('# ${DateTime.now().toIso8601String()} $command');
           switch (verb) {
             case 'quit':
+              await Future.wait(writing);
               await log.close();
               return;
             case 'fps':
@@ -292,6 +336,70 @@ void main() {
                   break;
                 }
               }
+            case 'region':
+              final xywh = [
+                for (final part in arg.split(' '))
+                  if (part.isNotEmpty) double.parse(part),
+              ];
+              region = xywh.length == 4
+                  ? Rect.fromLTWH(xywh[0], xywh[1], xywh[2], xywh[3])
+                  : null;
+            case 'size':
+              // The view as the app sees it (MediaQuery and layout alike);
+              // the real window keeps its size, and the frames are the
+              // view's own drawing, so they come out at the new size.
+              final wh = arg.split(' ').where((p) => p.isNotEmpty).toList();
+              if (wh.isEmpty) {
+                tester.view.resetPhysicalSize();
+              } else {
+                tester.view.physicalSize =
+                    Size(double.parse(wh[0]), double.parse(wh[1])) *
+                    tester.view.devicePixelRatio;
+              }
+              for (var i = 0; i < 5; i++) {
+                await step();
+              }
+            case 'scroll':
+              // Claktory's own search of the whole conversation, newest
+              // first, a page at a time: the last match is the oldest.
+              final backend = scope.backend;
+              final agentId = backend.workspace.workspace.selectedAgentId;
+              ({int seq, String snippet})? first;
+              int? before;
+              try {
+                while (true) {
+                  final found = await backend.searchConversation(
+                    agentId: agentId,
+                    query: arg,
+                    beforeSeq: before,
+                  );
+                  if (found.matches.isEmpty) break;
+                  final last = found.matches.last;
+                  first = (seq: last.seq.toInt(), snippet: last.snippet);
+                  if (!found.more) break;
+                  before = first.seq;
+                }
+              } on RequestFailure catch (error) {
+                // ignore: avoid_print
+                print('not found: $arg (${error.message})');
+                continue;
+              }
+              if (first == null) {
+                // ignore: avoid_print
+                print('not found: $arg');
+                continue;
+              }
+              backend.reveal.reachSeq(agentId, first.seq);
+              // Until the conversation has gone there (loading back to it
+              // first), and laid out there.
+              for (var i = 0; i < 200 && backend.reveal.value != null; i++) {
+                await step();
+              }
+              for (var i = 0; i < 5; i++) {
+                await step();
+              }
+              // ignore: avoid_print
+              print('scrolled: ${first.snippet}');
             case 'page':
               scope.page.value = AppPage.values.byName(arg);
             case 'file':

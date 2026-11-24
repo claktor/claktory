@@ -53,6 +53,7 @@ impl Models for Listing {
                 efforts: vec!["off".into()],
                 image_input: false,
                 added,
+                image_output: false,
             };
             if self.read.load(Ordering::Relaxed) {
                 models.push(model("scripted/listed", false));

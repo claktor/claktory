@@ -122,13 +122,18 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
         text: text,
         dismiss: dismiss,
         reply: reply,
+        // The card as the person read it (#428).
+        revision: ask.ask.revision,
       );
-    } on RequestFailure {
+    } on RequestFailure catch (failure) {
       unawaited(Haptics.warning());
       if (mounted) {
         setState(() {
           _busy = false;
-          _error = "Couldn't send your answer. Try again.";
+          // Its agent changed it meanwhile: the bar shows the new one.
+          _error = cardChanged(failure)
+              ? failure.message
+              : "Couldn't send your answer. Try again.";
         });
       }
       return;

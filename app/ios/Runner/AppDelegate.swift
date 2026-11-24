@@ -43,6 +43,9 @@ import UniformTypeIdentifiers
     // The network path, to reconnect the moment it changes, as on the Mac
     // (app/macos/Runner/NetworkPath.swift).
     NetworkPath.register(with: messenger)
+    // A short grace after leaving the app, so a quick trip to another app
+    // keeps the connections (BackgroundGrace.swift).
+    BackgroundGrace.register(with: messenger)
     // Copying a secret, such as a device's add code, marked sensitive and
     // expiring (app/macos/Runner/SecretClipboard.swift).
     SecretClipboard.register(with: messenger)
@@ -119,6 +122,10 @@ import UniformTypeIdentifiers
       case "share":
         // The system's share sheet for text (lib/mobile/share.dart).
         Self.share(call.arguments as? [String: Any] ?? [:], result)
+      case "shareFiles":
+        // The share sheet for files the app fetched (lib/share_files.dart,
+        // #418): AirDrop, Messages, Save to Files…
+        Self.shareFiles(call.arguments as? [String: Any] ?? [:], result)
       case "capabilities":
         // What this device is (Capabilities.swift): the iPad's workbench
         // follows its idiom, never its window's size.
@@ -162,17 +169,37 @@ import UniformTypeIdentifiers
   /// or sits in the middle without an arrow. True once the person sent it
   /// somewhere; false if they closed it, or nothing could show it.
   private static func share(_ args: [String: Any], _ result: @escaping FlutterResult) {
+    guard let text = args["text"] as? String, !text.isEmpty else {
+      result(false)
+      return
+    }
+    present([text], args, result)
+  }
+
+  /// The share sheet for `paths`, files on this device (the app deletes
+  /// them once it answers). On an iPad it points at `rect`, as for text.
+  /// True once the person sent them somewhere.
+  private static func shareFiles(_ args: [String: Any], _ result: @escaping FlutterResult) {
+    let urls = (args["paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
+      .filter { FileManager.default.fileExists(atPath: $0.path) }
+    guard !urls.isEmpty else {
+      result(false)
+      return
+    }
+    present(urls, args, result)
+  }
+
+  private static func present(_ items: [Any], _ args: [String: Any], _ result: @escaping FlutterResult) {
     let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
     let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
-    guard let text = args["text"] as? String, !text.isEmpty,
-      let window = scene?.keyWindow ?? scene?.windows.first,
+    guard let window = scene?.keyWindow ?? scene?.windows.first,
       var top = window.rootViewController
     else {
       result(false)
       return
     }
     while let shown = top.presentedViewController { top = shown }
-    let sheet = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+    let sheet = UIActivityViewController(activityItems: items, applicationActivities: nil)
     if let popover = sheet.popoverPresentationController {
       popover.sourceView = top.view
       if let r = args["rect"] as? [Double], r.count == 4 {
@@ -182,7 +209,14 @@ import UniformTypeIdentifiers
         popover.permittedArrowDirections = []
       }
     }
-    sheet.completionWithItemsHandler = { _, completed, _, _ in result(completed) }
+    // Answered once: the sheet can report again (an activity's own screen
+    // closing back to it), and a second answer would end the app.
+    var answered = false
+    sheet.completionWithItemsHandler = { _, completed, _, _ in
+      guard !answered else { return }
+      answered = true
+      result(completed)
+    }
     top.present(sheet, animated: true)
   }
 

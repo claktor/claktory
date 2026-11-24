@@ -196,7 +196,26 @@ class TranscriptStore extends ChangeNotifier {
   int get earlier => _earlier;
   var _earlier = 0;
 
-  void load(Transcript transcript) {
+  /// The revision of this conversation last applied
+  /// (ServerMessage.transcript_revision), sent back in Hello so a
+  /// reconnect brings only what changed since (#413); empty when none is
+  /// held (an older Claktory, or nothing loaded).
+  String get heldRevision => _heldRevision;
+  var _heldRevision = '';
+
+  /// Takes [transcript], whole or, [Transcript.resumed], only what changed
+  /// since [heldRevision]; [revision] is where it brings the conversation.
+  void load(Transcript transcript, {String revision = ''}) {
+    if (transcript.resumed && transcript.agentId == _agentId) {
+      // Only what was added or changed: in place, the rest kept as it is,
+      // has-earlier too.
+      _heldRevision = revision;
+      _merge(transcript);
+      return;
+    }
+    // Resumed for another conversation than the one held can't be put
+    // anywhere: what it brings shows, and the next reconnect asks whole.
+    _heldRevision = transcript.resumed ? '' : revision;
     if (_sameConversation(transcript)) {
       _merge(transcript);
       return;
@@ -276,8 +295,9 @@ class TranscriptStore extends ChangeNotifier {
     _changed(listChanged: true);
   }
 
-  void update(EntryUpdate update) {
+  void update(EntryUpdate update, {String revision = ''}) {
     if (update.agentId != _agentId) return;
+    _heldRevision = revision;
     final seq = update.entry.seq.toInt();
     final existing = _bySeq[seq];
     if (existing != null) {
@@ -291,8 +311,9 @@ class TranscriptStore extends ChangeNotifier {
     _changed(listChanged: true);
   }
 
-  void delta(EntryDelta delta) {
+  void delta(EntryDelta delta, {String revision = ''}) {
     if (delta.agentId != _agentId) return;
+    _heldRevision = revision;
     final entry = _bySeq[delta.seq.toInt()];
     if (entry != null && entry.append(delta.text)) {
       _changed(listChanged: false);

@@ -53,16 +53,29 @@ KEY below is the file of an SSH key the vault generated for it (secrets_request 
 
 1. First contact records the server's host key; tell {person} its fingerprint. After that never turn host checking off: if the key changes, ssh refuses, and you tell {person} and stop.
    ssh -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new root@SERVER true && ssh-keygen -l -F SERVER
-2. The receive side, as one background task (run_in_background, timeout up to 7200). Its log is receive's JSON lines. Keep `|| s=$?`, or a refusal hangs.
-   M="$HOME/.claktory-move"; mkdir -p "$M"; : > "$M/answers"; rm -f "$M/done"
-   { tail -n +1 -f "$M/answers" & t=$!
-     while [ ! -e "$M/done" ]; do sleep 1; done
-     kill "$t" 2>/dev/null || true; } |
-   { s=0; ssh -i "$KEY" -o IdentitiesOnly=yes -o ServerAliveInterval=30 root@SERVER 'bash -c "$(curl -fsSL https://claktory.com/install.sh)" -- --receive --json' || s=$?
-     touch "$M/done"; exit "$s"; }
-3. The log's first {"event":"code",…} line's code goes to move_claktory. Compare the digits it returns with the log's {"event":"confirm","digits":…} line: if they differ, call move_cancel at once, since something is between the two computers. If they match, tell {person} that Claktory is asking them to confirm the move, on any of their devices. Then wait, following move_status: once it says {person} confirmed the move here, write their yes, `echo yes >> "$HOME/.claktory-move/answers"`; if they called it off (move_status says no move is under way), write `echo no`. Never before a confirm line, and never your own judgement. A new code line after a no is a fresh code.
-4. The task's last line is {"ok":true,…} (Claktory runs on the server) or {"ok":false,…}: not moved (exit 3 refused, or "error":"called_off" when the move was called off after the confirm; 1 failed; 130 stopped). Then nothing runs on the server: tell {person} why, in its message. Running step 2 again resumes a move that stopped. To stop it on purpose, stop receive on the server, not the local task: ssh -i "$KEY" -o IdentitiesOnly=yes root@SERVER 'pkill -TERM -f "factoryd receive"'
-5. At the freeze your run stops like every agent's, and you carry on on the server. There, call move_report before you tell {person} the move is done, and pass on what it says: the copy left behind can still be gone back to while something is wrong. If it says the secrets are locked, call it again once they're unlocked, to check the sign-ins.
+2. Start receive on the server, detached there, so that nothing here can stop it: not the freeze, when your own tasks stop, and not a dropped connection. It writes receive's JSON lines to ~/.claktory-move/receive.log there and reads {person}'s answer from ~/.claktory-move/answers there. Run it as it is, with its lines unindented. If receive already runs there, it says so and starts nothing.
+ssh -i "$KEY" -o IdentitiesOnly=yes root@SERVER sh -s <<'EOF'
+M="$HOME/.claktory-move"; mkdir -p "$M"
+if pgrep -f claktory-move/receive.sh >/dev/null; then echo "receive already runs"; exit 0; fi
+: > "$M/answers"; rm -f "$M/done" "$M/exit"
+cat > "$M/receive.sh" <<'END'
+M="$HOME/.claktory-move"
+{ tail -n +1 -f "$M/answers" & t=$!
+  while [ ! -e "$M/done" ]; do sleep 1; done
+  kill "$t" 2>/dev/null; } |
+{ s=0; bash -c "$(curl -fsSL https://claktory.com/install.sh)" -- --receive --json || s=$?
+  echo "$s" > "$M/exit"; touch "$M/done"; }
+END
+command -v loginctl >/dev/null && loginctl enable-linger "$(id -un)" 2>/dev/null
+if command -v setsid >/dev/null; then d=setsid; else d=; fi
+nohup $d sh "$M/receive.sh" > "$M/receive.log" 2>&1 < /dev/null &
+echo started
+EOF
+3. Follow it as one background task (run_in_background, timeout up to 7200). Its log is receive's JSON lines, and it ends when receive does, with receive's exit status. If this task stops (at the freeze, or when the connection drops), receive carries on there; run it again to follow it, from the first line.
+   ssh -i "$KEY" -o IdentitiesOnly=yes -o ServerAliveInterval=30 root@SERVER 'M="$HOME/.claktory-move"; tail -n +1 -f "$M/receive.log" & t=$!; while [ ! -e "$M/exit" ] && pgrep -f claktory-move/receive.sh >/dev/null; do sleep 2; done; sleep 1; kill "$t"; exit "$(cat "$M/exit" 2>/dev/null || echo 1)"'
+4. The log's first {"event":"code",…} line's code goes to move_claktory. Compare the digits it returns with the log's {"event":"confirm","digits":…} line: if they differ, call move_cancel at once, since something is between the two computers. If they match, tell {person} that Claktory is asking them to confirm the move, on any of their devices. Then wait, following move_status: once it says {person} confirmed the move here, write their yes on the server, ssh -i "$KEY" -o IdentitiesOnly=yes root@SERVER 'echo yes >> "$HOME/.claktory-move/answers"'; if they called it off (move_status says no move is under way), write no the same way. Never before a confirm line, and never your own judgement. A new code line after a no is a fresh code.
+5. The log's last line is {"ok":true,…} (Claktory runs on the server) or {"ok":false,…}: not moved (exit 3 refused, or "error":"called_off" when the move was called off after the confirm; 1 failed; 130 stopped). Then nothing runs on the server: tell {person} why, in its message. Running step 2 again resumes a move that stopped, and step 3 follows it. To stop it on purpose, stop receive on the server: ssh -i "$KEY" -o IdentitiesOnly=yes root@SERVER 'pkill -TERM -f "factoryd receive"'. If receive stops while the server sets the moved Claktory up, this Claktory gives up after two minutes without an answer, carries on here as it was, and move_status says why.
+6. At the freeze your run stops like every agent's, and so may your task from step 3; receive carries on on the server by itself. You carry on on the server: there, call move_report before you tell {person} the move is done, and pass on what it says: the copy left behind can still be gone back to while something is wrong. If it says the secrets are locked, call it again once they're unlocked, to check the sign-ins.
 "#;
 
 pub(crate) struct Move;

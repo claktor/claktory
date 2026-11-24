@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
+import 'backend_service.dart' show BackendServiceRestore;
 import 'claktory_identity.dart' show claktoryName;
 import 'controls.dart';
 import 'forms.dart' show FormFrame;
@@ -1447,6 +1448,9 @@ class MoveSettingRow extends StatelessWidget {
                     : palette.textFaint,
               ),
             ),
+            // Started by hand (friend bug #24), a move is refused: Restore
+            // sits here too.
+            const BackendServiceRestore(top: Space.m),
           ],
         );
       },

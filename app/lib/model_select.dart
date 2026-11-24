@@ -397,6 +397,8 @@ class _ModelChooserState extends State<ModelChooser> {
           for (final model in models)
             _ModelRow(
               label: _name(model),
+              // What it can do beyond writing, as the provider says it.
+              note: model.imageOutput ? modelMakesImages : '',
               chosen: model.id == widget.value,
               onTap: () => widget.onChoose(model.id),
             ),
@@ -435,15 +437,21 @@ class _ModelChooserState extends State<ModelChooser> {
   }
 }
 
-/// One choice: its name, the chosen one tinted.
+/// What the model list says after a model that can make images (#403,
+/// Model.image_output).
+const modelMakesImages = 'Makes images';
+
+/// One choice: its name, then [note] faint, the chosen one tinted.
 class _ModelRow extends StatelessWidget {
   const _ModelRow({
     required this.label,
     required this.chosen,
     required this.onTap,
+    this.note = '',
   });
 
   final String label;
+  final String note;
   final bool chosen;
   final VoidCallback onTap;
 
@@ -470,8 +478,17 @@ class _ModelRow extends StatelessWidget {
                   : null,
               borderRadius: BorderRadius.circular(Radii.control),
             ),
-            child: Text(
-              label,
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(text: label),
+                  if (note.isNotEmpty)
+                    TextSpan(
+                      text: '  $note',
+                      style: TextStyle(color: palette.textFaint),
+                    ),
+                ],
+              ),
               style: TypeScale.of(context).body.copyWith(color: palette.text),
             ),
           ),

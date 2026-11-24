@@ -1,3 +1,4 @@
+pub mod images;
 pub mod oauth;
 pub mod websocket;
 
@@ -62,6 +63,7 @@ pub fn provider() -> Provider {
     provider.plan = Some(crate::limits::codex_plan);
     provider.identity = Some(crate::limits::codex_identity);
     provider.reset = Some(crate::limits::codex_reset);
+    provider.images = Some(images::generate);
     provider
 }
 

@@ -535,3 +535,214 @@ async fn the_overview_lists_every_agents_monitors_and_their_history() {
         other => panic!("expected an error, got {other:?}"),
     }
 }
+
+/// Makes the secret "Export" (TOKEN, and KEYFILE as a file) for `agent`,
+/// and "Other", granted to no one; returns Export's id.
+async fn export_secret(client: &mut Client, view: &mut View, agent: &str) -> String {
+    let entry = |variable: &str, value: &str, file: bool| v1::SecretEntry { variable: variable.into(), value: value.into(), file };
+    let secret = v1::CreateSecret {
+        name: "Export".into(),
+        description: "Reads the usage export.".into(),
+        entries: vec![entry("TOKEN", "tok-0123456789abcdef", false), entry("KEYFILE", "key-material-0123456789", true)],
+        ask_each_time: false,
+    };
+    apply_request(client, view, client_message::Body::CreateSecret(secret)).await;
+    let other = v1::CreateSecret { name: "Other".into(), entries: vec![entry("OTHER", "other-0123456789", false)], ..Default::default() };
+    apply_request(client, view, client_message::Body::CreateSecret(other)).await;
+    let id = view.workspace.vault.clone().expect("vault").secrets.iter().find(|secret| secret.name == "Export").expect("Export").id.clone();
+    let grant = v1::GrantSecret { id: id.clone(), agent_id: agent.into(), proof: None };
+    apply_request(client, view, client_message::Body::GrantSecret(grant)).await;
+    id
+}
+
+fn add(name: &str, when: serde_json::Value) -> String {
+    serde_json::json!({"monitors": [{"name": name, "prompt": "Look.", "when": when}]}).to_string()
+}
+
+/// (a), Fugo's conditions: a check's command gets the secrets its agent
+/// named, as bash's would; what it prints has their values hidden, a file
+/// secret's file is gone after it, and the vault logs the use.
+#[tokio::test]
+async fn a_check_gets_the_secrets_it_names_with_their_values_hidden_and_files_removed() {
+    let (_dir, _factory, mut client, mut view) = setup().await;
+    export_secret(&mut client, &mut view, "lead").await;
+    let command = r#"echo "token $TOKEN"; echo "file $(cat "$KEYFILE")"; echo "path $KEYFILE""#;
+    let added = call(&mut client, &mut view, "lead", "monitors_add", &add("export", serde_json::json!({"check": command, "every": "30s", "secrets": ["Export"]}))).await;
+    assert!(added.ends_with(", fires on success, with the secret Export; first check now."), "{added}");
+    view.follow(&mut client, |view| fires(view).len() == 1 && idle(view, "lead")).await;
+    let fire = fires(&view)[0].text.clone();
+    assert!(fire.contains("token [secret Export/TOKEN]\nfile [secret Export/KEYFILE]\npath "), "{fire}");
+    assert!(!fire.contains("0123456789"), "{fire}");
+    let path = fire.split("path ").nth(1).and_then(|rest| rest.lines().next()).expect("the file's path");
+    assert!(path.ends_with("/monitors/m1.secrets/KEYFILE"), "{path}");
+    assert!(!std::path::Path::new(path).exists(), "removed after the run");
+    view.follow(&mut client, |view| {
+        view.workspace.vault.as_ref().is_some_and(|vault| vault.secrets.iter().any(|secret| secret.name == "Export" && secret.last_used_by == "lead"))
+    })
+    .await;
+
+    // A check that names none gets none.
+    call(&mut client, &mut view, "lead", "monitors_add", &add("plain", serde_json::json!({"check": "echo \"plain [$TOKEN]\"", "every": "30s"}))).await;
+    view.follow(&mut client, |view| fires(view).len() == 2 && idle(view, "lead")).await;
+    assert!(fires(&view)[1].text.contains("Output (end):\nplain []\n"), "{:?}", fires(&view)[1].text);
+
+    // Output read up to its 64 KB ending partway into a value: that end goes.
+    let long = serde_json::json!({"check": "head -c 65530 /dev/zero | tr '\\0' x; echo \"$TOKEN\"", "every": "30s", "secrets": ["Export"]});
+    call(&mut client, &mut view, "lead", "monitors_add", &add("long", long)).await;
+    view.follow(&mut client, |view| fires(view).len() == 3 && idle(view, "lead")).await;
+    let fire = fires(&view)[2].text.clone();
+    assert!(fire.contains("xxx\n[the rest cut]") && !fire.contains("tok-"), "{}", &fire[fire.len().saturating_sub(200)..]);
+}
+
+#[tokio::test]
+async fn a_check_can_name_only_its_own_agents_secrets_never_ones_that_ask_each_time() {
+    let (_dir, factory, mut client, mut view) = setup().await;
+    export_secret(&mut client, &mut view, "lead").await;
+    let check = |secrets: serde_json::Value| serde_json::json!({"check": "true", "secrets": secrets});
+    // Not granted to it, or not in the vault: as bash says.
+    for name in ["Other", "Nowhere"] {
+        let refused = call(&mut client, &mut view, "lead", "monitors_add", &add("x", check(serde_json::json!([name])))).await;
+        assert!(refused.starts_with(&format!("\"{name}\" isn't one of your secrets.")) && refused.ends_with("Nothing was added."), "{refused}");
+    }
+    // Another agent's monitor, even with a secret that agent has.
+    let id = view.workspace.vault.clone().expect("vault").secrets.iter().find(|secret| secret.name == "Export").expect("Export").id.clone();
+    let grant = v1::GrantSecret { id, agent_id: "worker".into(), proof: None };
+    apply_request(&mut client, &mut view, client_message::Body::GrantSecret(grant)).await;
+    let for_worker = serde_json::json!({"monitors": [{"name": "x", "prompt": "y", "when": check(serde_json::json!(["Export"])), "agent": "worker"}]});
+    let refused = call(&mut client, &mut view, "lead", "monitors_add", &for_worker.to_string()).await;
+    assert!(refused.contains("A check with secrets can only be its agent's own"), "{refused}");
+    // One that asks the person each time: nobody is there when it runs.
+    let asks = v1::CreateSecret {
+        name: "Deploy".into(),
+        entries: vec![v1::SecretEntry { variable: "DEPLOY".into(), value: "deploy-0123456789".into(), file: false }],
+        ask_each_time: true,
+        ..Default::default()
+    };
+    apply_request(&mut client, &mut view, client_message::Body::CreateSecret(asks)).await;
+    let id = view.workspace.vault.clone().expect("vault").secrets.iter().find(|secret| secret.name == "Deploy").expect("Deploy").id.clone();
+    let grant = v1::GrantSecret { id, agent_id: "lead".into(), proof: None };
+    apply_request(&mut client, &mut view, client_message::Body::GrantSecret(grant)).await;
+    let refused = call(&mut client, &mut view, "lead", "monitors_add", &add("x", check(serde_json::json!(["Export", "Deploy"])))).await;
+    assert!(refused.starts_with("Deploy asks the person each time it's used, and nobody is there to ask when a check runs"), "{refused}");
+    // Only a check takes secrets.
+    let refused = call(&mut client, &mut view, "lead", "monitors_add", &add("x", serde_json::json!({"watch": "tail -F log", "secrets": ["Export"]}))).await;
+    assert!(refused.starts_with("secrets works only with check"), "{refused}");
+    // An agent that has read a web page: its secrets need the person for each command.
+    factoryd::pipes::taint_for_test(&factory, "lead", "browser:https://example.com");
+    let refused = call(&mut client, &mut view, "lead", "monitors_add", &add("x", check(serde_json::json!(["Export"])))).await;
+    assert!(refused.starts_with("You've read a page on https://example.com, so each command with a secret needs the person's approval"), "{refused}");
+    assert_eq!(call(&mut client, &mut view, "lead", "monitors_list", "{}").await.lines().filter(|line| line.starts_with('m')).count(), 0);
+}
+
+/// Nothing a check with secrets prints reaches its agent but a fire; once
+/// its secret is taken back, its runs fail and it stops, saying why.
+#[tokio::test]
+async fn a_check_whose_secret_is_taken_back_stops_and_shows_nothing_until_then() {
+    let (_dir, factory, mut client, mut view) = setup().await;
+    let id = export_secret(&mut client, &mut view, "lead").await;
+    let never = serde_json::json!({"check": "echo \"$TOKEN\"; false", "every": "30s", "secrets": ["Export"]});
+    call(&mut client, &mut view, "lead", "monitors_add", &add("quiet", never)).await;
+    let entries = view.entries.len();
+    for _ in 0..3 {
+        factory.advance_monitor_clock(Duration::from_secs(30));
+        settle(&mut client, &mut view, 300).await;
+    }
+    assert_eq!(view.entries.len(), entries, "nothing reached the conversation");
+
+    let revoke = v1::RevokeSecret { id, agent_id: "lead".into(), stop_running_tasks: false };
+    apply_request(&mut client, &mut view, client_message::Body::RevokeSecret(revoke)).await;
+    for _ in 0..20 {
+        if !fires(&view).is_empty() {
+            break;
+        }
+        factory.advance_monitor_clock(Duration::from_secs(30));
+        settle(&mut client, &mut view, 300).await;
+    }
+    let stopped = fires(&view).pop().expect("a notice").text;
+    assert!(
+        stopped.starts_with(
+            "Monitor m1 \"quiet\" stopped: its check couldn't run 5 times in a row (last: its secrets couldn't be had: \"Export\" isn't one of your secrets."
+        ),
+        "{stopped}"
+    );
+    assert!(!stopped.contains("0123456789"), "{stopped}");
+}
+
+/// Fugo 28177: the files a check runs can change after it's set, so while
+/// its agent has read a web page, or is contained, its check is held: not
+/// run, nothing logged, one notice, no failure counted; it carries on once
+/// that ends.
+#[tokio::test]
+async fn a_check_with_secrets_is_held_while_its_agent_has_read_a_page_or_is_contained() {
+    let (dir, factory, mut client, mut view) = setup().await;
+    export_secret(&mut client, &mut view, "lead").await;
+    let marker = dir.join("site").join("ran");
+    let check = serde_json::json!({"check": "echo \"$TOKEN\" > ran; false", "every": "30s", "secrets": ["Export"]});
+    call(&mut client, &mut view, "lead", "monitors_add", &add("collect", check)).await;
+    let used = |view: &View| {
+        view.workspace.vault.as_ref().and_then(|vault| vault.secrets.iter().find(|secret| secret.name == "Export")).map(|secret| secret.last_used_ms)
+    };
+    view.follow(&mut client, |view| used(view).is_some_and(|used| used > 0)).await;
+    for _ in 0..50 {
+        if marker.exists() {
+            break;
+        }
+        settle(&mut client, &mut view, 100).await;
+    }
+    std::fs::remove_file(&marker).expect("it ran");
+    let logged = used(&view);
+
+    // Tainted: held, with one notice, past the hour its use would be logged again.
+    factoryd::pipes::taint_for_test(&factory, "lead", "browser:https://example.com");
+    factory.advance_monitor_clock(Duration::from_secs(2 * 3600));
+    view.follow(&mut client, |view| !fires(view).is_empty() && idle(view, "lead")).await;
+    let notice = fires(&view)[0].text.clone();
+    assert_eq!(
+        notice,
+        "Monitor m1 \"collect\" is held: you've read a page on https://example.com, so it doesn't run with its secrets until your conversation is cleared. Then it carries on by itself."
+    );
+    for _ in 0..6 {
+        factory.advance_monitor_clock(Duration::from_secs(30));
+        settle(&mut client, &mut view, 200).await;
+    }
+    assert!(!marker.exists(), "not run while held");
+    assert_eq!(fires(&view).len(), 1, "told once, and never stopped");
+    assert_eq!(used(&view), logged, "nothing logged");
+
+    // Cleared: it runs again by itself.
+    let clear = v1::RunCommand { agent_id: "lead".into(), name: "clear".into(), args: String::new() };
+    apply_request(&mut client, &mut view, client_message::Body::RunCommand(clear)).await;
+    for _ in 0..50 {
+        if marker.exists() {
+            break;
+        }
+        factory.advance_monitor_clock(Duration::from_secs(30));
+        settle(&mut client, &mut view, 100).await;
+    }
+    assert!(marker.exists(), "it carried on");
+    std::fs::remove_file(&marker).expect("ran");
+
+    // Made a curator (contained): held too, until that's lifted.
+    factoryd::pipes::make_curator_for_test(&factory, "lead", false).await.expect("a curator");
+    view.follow(&mut client, |view| fires(view).iter().any(|fire| fire.text.contains("limited to a pipe's work"))).await;
+    let held = fires(&view).into_iter().find(|fire| fire.text.contains("limited to a pipe's work")).expect("a notice").text;
+    assert_eq!(
+        held,
+        "Monitor m1 \"collect\" is held: you're limited to a pipe's work, so it doesn't run with its secrets until the person lifts that. Then it carries on by itself."
+    );
+    std::fs::remove_file(&marker).ok();
+    for _ in 0..3 {
+        factory.advance_monitor_clock(Duration::from_secs(30));
+        settle(&mut client, &mut view, 200).await;
+    }
+    assert!(!marker.exists(), "not run while contained");
+    factoryd::pipes::release_curator_for_test(&factory, "lead").await.expect("released");
+    for _ in 0..50 {
+        if marker.exists() {
+            break;
+        }
+        factory.advance_monitor_clock(Duration::from_secs(30));
+        settle(&mut client, &mut view, 100).await;
+    }
+    assert!(marker.exists(), "it carried on");
+}

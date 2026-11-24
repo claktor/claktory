@@ -11,6 +11,10 @@
 //! or ports (7420, 7421). factoryd refuses to start otherwise, saying why.
 //! It covers everything the subscription reaches: the messages, the usage,
 //! plan and account reads, the resets and the sign-in's token.
+//!
+//! OpenRouter's model list (#185 U4) can come from qa-model the same way
+//! (`MODELS_URL_VAR`, within the same guard), so a sandbox shows a list
+//! arriving, refreshing and changing without reaching openrouter.ai.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,6 +25,9 @@ use crate::providers::Provider;
 /// The variable factoryd reads the override from.
 pub const URL_VAR: &str = "FACTORY_QA_ANTHROPIC_URL";
 
+/// The variable factoryd reads OpenRouter's model list's address from.
+pub const MODELS_URL_VAR: &str = "FACTORY_QA_OPENROUTER_MODELS_URL";
+
 /// The real Claktories' ports, never a sandbox's.
 const REAL_PORTS: [u16; 2] = [7420, 7421];
 
@@ -29,15 +36,23 @@ const REAL_PORTS: [u16; 2] = [7420, 7421];
 /// provider at that address when it passes the guard, or why not.
 pub fn provider_for(url: Option<&str>, home: &Path, port: u16) -> Result<Option<(String, Provider)>, String> {
     let Some(url) = url else { return Ok(None) };
-    let base = check(url, home, &real_homes(), port)?;
+    let base = check(URL_VAR, url, home, &real_homes(), port)?;
     Ok(Some((base.clone(), provider_at(&base))))
+}
+
+/// Where OpenRouter's model list comes from, for a backend in `home` on
+/// `port`, when `url` (MODELS_URL_VAR's value) asks: None without it, the
+/// address when it passes the guard, or why not.
+pub fn models_url_for(url: Option<&str>, home: &Path, port: u16) -> Result<Option<String>, String> {
+    let Some(url) = url else { return Ok(None) };
+    check(MODELS_URL_VAR, url, home, &real_homes(), port).map(Some)
 }
 
 /// The address, as a base URL without a trailing slash, when the guard
 /// lets it through.
-fn check(url: &str, home: &Path, real_homes: &[PathBuf], port: u16) -> Result<String, String> {
+fn check(var: &str, url: &str, home: &Path, real_homes: &[PathBuf], port: u16) -> Result<String, String> {
     let parsed =
-        reqwest::Url::parse(url.trim()).map_err(|error| format!("{URL_VAR} isn't an address ({error}): the QA override is refused."))?;
+        reqwest::Url::parse(url.trim()).map_err(|error| format!("{var} isn't an address ({error}): the QA override is refused."))?;
     // An IP address only, never a name such as localhost that could resolve elsewhere.
     let loopback = parsed
         .host_str()
@@ -46,18 +61,18 @@ fn check(url: &str, home: &Path, real_homes: &[PathBuf], port: u16) -> Result<St
         .is_some_and(|ip| ip.is_loopback());
     if !matches!(parsed.scheme(), "http" | "https") || !loopback || parsed.username() != "" || parsed.password().is_some() {
         return Err(format!(
-            "{URL_VAR} is {url}: the QA override takes only an http(s) address on this computer (127.0.0.1 or [::1]), so it's refused."
+            "{var} is {url}: the QA override takes only an http(s) address on this computer (127.0.0.1 or [::1]), so it's refused."
         ));
     }
     if REAL_PORTS.contains(&port) {
-        return Err(format!("{URL_VAR} is set on port {port}, a real Claktory's: the QA override is refused."));
+        return Err(format!("{var} is set on port {port}, a real Claktory's: the QA override is refused."));
     }
     let same = |a: &Path, b: &Path| {
         let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
         canonical(a) == canonical(b)
     };
     if let Some(real) = real_homes.iter().find(|real| same(home, real)) {
-        return Err(format!("{URL_VAR} is set for {}, a real Claktory's home: the QA override is refused.", real.display()));
+        return Err(format!("{var} is set for {}, a real Claktory's home: the QA override is refused.", real.display()));
     }
     Ok(parsed.as_str().trim_end_matches('/').to_owned())
 }
@@ -107,8 +122,8 @@ mod tests {
     fn only_an_address_on_this_computer_is_taken() {
         let homes = [PathBuf::from("/Users/someone/.factory"), PathBuf::from("/Users/someone/.factory-dev")];
         let sandbox = Path::new("/tmp/claktory-qa/sandboxes/qa1/home");
-        assert_eq!(check("http://127.0.0.1:7503/", sandbox, &homes, 7500), Ok("http://127.0.0.1:7503".to_owned()));
-        assert_eq!(check("http://[::1]:7503", sandbox, &homes, 7500), Ok("http://[::1]:7503".to_owned()));
+        assert_eq!(check(URL_VAR, "http://127.0.0.1:7503/", sandbox, &homes, 7500), Ok("http://127.0.0.1:7503".to_owned()));
+        assert_eq!(check(URL_VAR, "http://[::1]:7503", sandbox, &homes, 7500), Ok("http://[::1]:7503".to_owned()));
         for url in [
             "https://api.anthropic.com",
             "http://localhost:7503",
@@ -119,7 +134,7 @@ mod tests {
             "127.0.0.1:7503",
             "",
         ] {
-            let refused = check(url, sandbox, &homes, 7500).expect_err(url);
+            let refused = check(URL_VAR, url, sandbox, &homes, 7500).expect_err(url);
             assert!(refused.contains("refused"), "{url}: {refused}");
         }
     }
@@ -132,15 +147,15 @@ mod tests {
         let homes = [real.clone(), dir.path().join(".factory-dev")];
         let url = "http://127.0.0.1:7503";
         for port in [7420, 7421] {
-            assert!(check(url, Path::new("/tmp/qa/home"), &homes, port).expect_err("port").contains(&port.to_string()));
+            assert!(check(URL_VAR, url, Path::new("/tmp/qa/home"), &homes, port).expect_err("port").contains(&port.to_string()));
         }
         // Named another way (a trailing slash, a symlink), it's the same home.
-        let refused = check(url, &dir.path().join(".factory/"), &homes, 7500).expect_err("home");
+        let refused = check(URL_VAR, url, &dir.path().join(".factory/"), &homes, 7500).expect_err("home");
         assert!(refused.contains("a real Claktory's home"), "{refused}");
         std::os::unix::fs::symlink(&real, dir.path().join("link")).expect("link");
-        assert!(check(url, &dir.path().join("link"), &homes, 7500).is_err());
-        assert!(check(url, &dir.path().join(".factory-dev"), &homes, 7500).is_err());
-        assert!(check(url, &dir.path().join("sandbox"), &homes, 7500).is_ok());
+        assert!(check(URL_VAR, url, &dir.path().join("link"), &homes, 7500).is_err());
+        assert!(check(URL_VAR, url, &dir.path().join(".factory-dev"), &homes, 7500).is_err());
+        assert!(check(URL_VAR, url, &dir.path().join("sandbox"), &homes, 7500).is_ok());
         // The user database's home counts, whatever HOME says.
         assert!(real_homes().len() >= 2);
     }

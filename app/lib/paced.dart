@@ -71,13 +71,22 @@ class Pace {
   int get next => _next;
 
   /// About how long [bytes] would take to come over this link, in pieces:
-  /// null until both the round trip and the link's speed are known (a
-  /// tiny read and a piece, or two pieces of different sizes).
+  /// once both the round trip and the link's speed are known (a tiny read
+  /// and a piece, or two pieces of different sizes), or once a piece took
+  /// half the [target] or more. On a slow link the pieces stay about one
+  /// size and nothing tiny may come on a new connection, so the round
+  /// trip may never be known (Zucchero's row 341); but a piece that long
+  /// is mostly the link's speed, the round trip a small part of it, so its
+  /// own speed says enough. Null before either: a short piece on a quick
+  /// link far away is mostly round trip, and would make it look slow.
   Duration? estimate(int bytes) {
     final bandwidth = _bandwidth;
-    if (bandwidth == null || _roundTrip == null) return null;
-    return Duration(microseconds: (bytes / bandwidth * 1e6).round()) +
-        (_roundTrip ?? Duration.zero);
+    if (bandwidth == null) return null;
+    final took = Duration(microseconds: (bytes / bandwidth * 1e6).round());
+    if (_roundTrip case final trip?) return took + trip;
+    final last = _last;
+    if (last != null && last.elapsed * 2 >= target) return took;
+    return null;
   }
 
   /// [bytes] took [elapsed], there and back.
@@ -129,8 +138,14 @@ class Pace {
         : (rate + measured) / 2;
     final ideal = _rate! * target.inMicroseconds / 1e6;
     // A small piece is mostly the round trip, so it grows at most four
-    // times a step and settles from there.
-    final grown = math.min(ideal, _next * 4.0);
+    // times a step and settles from there; twice, till the link's speed
+    // can be told ([estimate]): enough for the round trip to show, and on
+    // a slow link that let a first piece through quickly (a burst), the
+    // next isn't one that holds up saying so (Sale's row 87).
+    final grown = math.min(
+      ideal,
+      _next * (estimate(_next) == null ? 2.0 : 4.0),
+    );
     _next = grown.round().clamp(least, most);
   }
 
@@ -278,20 +293,35 @@ Future<FileContent?> _readOnce({
   final data = BytesBuilder(copy: false)..add(first.data);
   var version = expectedSha256;
   var whole = first.sha256;
+  // How long it waits for the connection, from the first piece lost.
+  DateTime? lostSince;
   while (data.length < total) {
     final at = offset + data.length;
     final asked = math.min(pace.next, total - data.length);
     final FileContent piece;
     try {
       piece = await timed(at, asked, version);
-    } on RequestFailure {
-      // Gone with the connection: from here once it's back.
-      if (connected.value) rethrow;
-      if (!await _connects(connected, reconnectWithin)) {
+    } on RequestFailure catch (failure) {
+      // Gone with the connection: from here once it's back. Lost while
+      // the connection still says it's up (its socket closed a moment
+      // before the app hears so, Sale's row 87): it will say otherwise in
+      // a moment, so it waits for that too rather than failing.
+      final lost = _lost.contains(failure.message);
+      if (connected.value && !lost) rethrow;
+      final since = lostSince ??= DateTime.now();
+      final left = reconnectWithin - DateTime.now().difference(since);
+      if (left <= Duration.zero) {
+        throw const RequestFailure(lostWhileReading);
+      }
+      if (connected.value) {
+        await _changes(connected, _sayingSo < left ? _sayingSo : left);
+      }
+      if (!await _connects(connected, left)) {
         throw const RequestFailure(lostWhileReading);
       }
       continue;
     }
+    lostSince = null;
     if (piece.error == 'changed' && expectedSha256.isEmpty) return null;
     if (piece.error.isNotEmpty) return piece;
     if (piece.offset.toInt() != at) {
@@ -328,6 +358,27 @@ Future<FileContent?> _readOnce({
 }
 
 /// Whether [connected] is true, or becomes so within [within].
+/// What a request lost with its connection fails with (Backend's).
+const _lost = {'Connection lost.', 'Not connected to the backend.'};
+
+/// How long a connection that lost a request may take to say it's down.
+const _sayingSo = Duration(seconds: 2);
+
+/// Once [listenable] changes, or after [within] if it doesn't.
+Future<void> _changes(Listenable listenable, Duration within) {
+  final done = Completer<void>();
+  void changed() {
+    if (!done.isCompleted) done.complete();
+  }
+
+  final timer = Timer(within, changed);
+  listenable.addListener(changed);
+  return done.future.whenComplete(() {
+    timer.cancel();
+    listenable.removeListener(changed);
+  });
+}
+
 Future<bool> _connects(ValueListenable<bool> connected, Duration within) {
   if (connected.value) return Future.value(true);
   final done = Completer<bool>();

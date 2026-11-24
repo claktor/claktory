@@ -7,7 +7,8 @@
 //!
 //! Proposals live in factory.db. The conversation shows each as an entry
 //! after the propose_to_rivet call that made it (its result names it), so it
-//! reloads where it was; its state comes from here.
+//! reloads where it was; its state comes from here. One that no longer
+//! applies, its agent takes back with proposal_withdraw (#407).
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -49,8 +50,31 @@ pub(crate) const REPLIED: &str = "
 ALTER TABLE proposals ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// The migration that let an agent take back its own proposal once it no
+/// longer applies (proposal_withdraw, #407): state 'withdrawn', decided
+/// when it was, and this, the agent's reason; '' for every other state.
+pub(crate) const WITHDRAWN: &str = "
+ALTER TABLE proposals ADD COLUMN reason TEXT NOT NULL DEFAULT '';
+";
+
+/// The migration that let an agent change its own proposal's text while it
+/// waits (proposal_update, #428), as ask::UPDATED does for questions.
+pub(crate) const UPDATED: &str = "
+ALTER TABLE proposals ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE proposals ADD COLUMN updated INTEGER;
+ALTER TABLE proposals ADD COLUMN update_reason TEXT NOT NULL DEFAULT '';
+";
+
 /// The tool, one of the Messaging extension's, for agents that aren't admins.
 pub(crate) const TOOL: &str = "propose_to_rivet";
+/// Takes back one of the agent's own proposals still waiting (#407).
+pub(crate) const WITHDRAW_TOOL: &str = "proposal_withdraw";
+/// Changes one of the agent's own proposals still waiting (#428).
+pub(crate) const UPDATE_TOOL: &str = "proposal_update";
+
+const UPDATE_ABOUT: &str = "Change one of your proposals to Rivet still waiting for the person, in place, when what you propose changes but still needs Rivet: a detail was wrong, or the need moved. id: the proposal's id, which propose_to_rivet's result gave; message: the whole new message, standing alone; reason: optional, why it changed, in a short line they read on the card (at most 300 characters). Their card redraws where it is, marked updated, without counting again or notifying them again; approving the version before is refused, so they look again. At most 10 changes per proposal; take back one that no longer applies with proposal_withdraw instead. You can change only your own proposals.";
+
+const WITHDRAW_ABOUT: &str = "Take back one of your proposals to Rivet still waiting for the person, as soon as it no longer applies: the need went away, or it was settled elsewhere. id: the proposal's id, which propose_to_rivet's result gave; reason: why, in a short line they read in Needs you's History (at most 300 characters). Without id, lists your proposals waiting, with their ids. It leaves their Needs you at once; a checklist item it was for stays as it is, so update the item yourself. You can take back only your own proposals.";
 
 const ABOUT: &str = "Propose a message for Rivet, the admin agent, which only the person can message: for a conclusion Rivet should act on, such as adding an agent. The person approves it, with a comment, or dismisses it, and you're told which; approved, Rivet gets it from the person. Write it to stand alone, with all the context Rivet needs: Rivet can't see your conversation. item: the checklist item it's for (12 for #12, or Ana#12), whenever one waits on it: the proposal shows as that item in the person's Needs you, so don't also ask them about it.";
 
@@ -88,6 +112,31 @@ pub(crate) fn tool(factory: &Arc<Factory>, agent: &str) -> Tool {
         crate::extensions::typed_handler(factory, agent, |factory, agent, args: ProposeArgs| {
             propose(factory, agent, args.message, args.item.as_deref())
         }),
+    )
+}
+
+pub(crate) fn update_tool(factory: &Arc<Factory>, agent: &str) -> Tool {
+    let parameters = json!({
+        "type": "object",
+        "required": ["id", "message"],
+        "properties": {"id": {"type": "string"}, "message": {"type": "string", "minLength": 1}, "reason": {"type": "string"}},
+        "additionalProperties": false,
+    });
+    crate::extensions::tool(UPDATE_TOOL, "Change a proposal", UPDATE_ABOUT, parameters, crate::extensions::typed_handler(factory, agent, update))
+}
+
+pub(crate) fn withdraw_tool(factory: &Arc<Factory>, agent: &str) -> Tool {
+    let parameters = json!({
+        "type": "object",
+        "properties": {"id": {"type": "string"}, "reason": {"type": "string"}},
+        "additionalProperties": false,
+    });
+    crate::extensions::tool(
+        WITHDRAW_TOOL,
+        "Withdraw a proposal",
+        WITHDRAW_ABOUT,
+        parameters,
+        crate::extensions::typed_handler(factory, agent, withdraw),
     )
 }
 
@@ -141,7 +190,14 @@ fn propose(factory: &Factory, agent: &str, text: String, item: Option<&str>) -> 
         factory.broadcast_workspace(&factory.lock());
     }
     let id = id.to_string();
-    let said = format!("Proposed; {person} will approve or dismiss it.{}", crate::extensions::checklist::taken_for(linked, &person));
+    // A chat has no proposal_withdraw.
+    let take_back = if crate::chats::kept(factory, agent) {
+        String::new()
+    } else {
+        format!(" Its id is {id}: if it stops applying before they decide on the card (they settle it in your chat, say), take it back with proposal_withdraw, or change it with proposal_update if what you propose changes.")
+    };
+    let said =
+        format!("Proposed; {person} will approve or dismiss it.{take_back}{}", crate::extensions::checklist::taken_for(linked, &person));
     let mut details = json!({"proposal": id, "text": text});
     if let Some(taint) = taint {
         details["taint"] = taint;
@@ -159,7 +215,7 @@ pub(crate) fn proposed(tool: &str, is_error: bool, details: &serde_json::Value) 
     let id = details.get("proposal")?.as_str()?.to_owned();
     let text = details.get("text").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
     let taint = details.get("taint").map(crate::pipes::agents::routes_from_json).unwrap_or_default();
-    Some(v1::Proposal { id, text, state: ProposalState::Pending.into(), taint, ..Default::default() })
+    Some(v1::Proposal { id, text, state: ProposalState::Pending.into(), taint, revision: 1, ..Default::default() })
 }
 
 /// A proposal as recorded.
@@ -173,9 +229,18 @@ struct Row {
     taint: Option<String>,
     /// Answered with a comment (#370), not approved.
     replied: bool,
+    /// Withdrawn: the agent's reason.
+    reason: String,
+    created: i64,
+    /// Which version it is (#428): 1 as proposed, one more each change.
+    revision: i64,
+    /// When its agent last changed it; None if it never did.
+    updated: Option<i64>,
+    /// Why, in the agent's words; '' for no reason given.
+    update_reason: String,
 }
 
-const COLUMNS: &str = "id, text, state, comment, decided, taint, replied";
+const COLUMNS: &str = "id, text, state, comment, decided, taint, replied, reason, created, revision, updated, update_reason";
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
     Ok(Row {
@@ -186,6 +251,11 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         decided: row.get(4)?,
         taint: row.get(5)?,
         replied: row.get(6)?,
+        reason: row.get(7)?,
+        created: row.get(8)?,
+        revision: row.get(9)?,
+        updated: row.get(10)?,
+        update_reason: row.get(11)?,
     })
 }
 
@@ -193,7 +263,7 @@ impl Row {
     fn to_proto(&self) -> v1::Proposal {
         let state = match self.state.as_str() {
             "approved" => ProposalState::Approved,
-            "dismissed" => ProposalState::Dismissed,
+            "dismissed" | "withdrawn" => ProposalState::Dismissed,
             _ => ProposalState::Pending,
         };
         v1::Proposal {
@@ -209,14 +279,20 @@ impl Row {
                 .map(|taint| crate::pipes::agents::routes_from_json(&taint))
                 .unwrap_or_default(),
             replied: self.replied,
+            withdrawn: self.state == "withdrawn",
+            withdraw_reason: self.reason.clone(),
+            revision: u32::try_from(self.revision).unwrap_or(1),
+            updated_ms: self.updated.unwrap_or_default(),
+            update_reason: self.update_reason.clone(),
         }
     }
 }
 
-/// Shows the agent's decided proposals as decided in its just-loaded conversation.
+/// Shows the agent's decided proposals as decided in its just-loaded
+/// conversation, and those it changed as they are now.
 pub(crate) fn restore(store: &Store, agent: &str, transcript: &mut Transcript) -> rusqlite::Result<()> {
     let db = store.db();
-    let mut statement = db.prepare(&format!("SELECT {COLUMNS} FROM proposals WHERE agent = ?1 AND state != 'pending' ORDER BY id"))?;
+    let mut statement = db.prepare(&format!("SELECT {COLUMNS} FROM proposals WHERE agent = ?1 AND (state != 'pending' OR revision > 1) ORDER BY id"))?;
     let rows = statement.query_map([agent], row)?;
     for row in rows {
         transcript.set_proposal(row?.to_proto());
@@ -243,7 +319,15 @@ pub(crate) fn forget(store: &Store, agent: &str) -> rusqlite::Result<()> {
 /// as what to do. Approved or answered, Rivet gets it as the person's
 /// message; it stays pending when there's no Rivet, or Rivet has no model.
 /// Either way the agent is told.
-pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: bool, reply: bool, comment: &str) -> Result<(), RequestError> {
+pub(crate) fn decide(
+    factory: &Arc<Factory>,
+    agent: &str,
+    id: &str,
+    approve: bool,
+    reply: bool,
+    comment: &str,
+    revision: Option<u32>,
+) -> Result<(), RequestError> {
     let comment = crate::decisions::comment(comment)?;
     if reply && comment.is_empty() {
         return Err(RequestError::Proposal("Write an answer, or approve or dismiss the proposal.".to_owned()));
@@ -258,9 +342,13 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
         .query_row(&format!("SELECT {COLUMNS} FROM proposals WHERE id = ?1 AND agent = ?2"), params![number, agent], row)
         .optional()?;
     let Some(mut row) = found else { return Err(unknown()) };
+    if row.state == "withdrawn" {
+        return Err(RequestError::Proposal("This proposal was withdrawn.".to_owned()));
+    }
     if row.state != "pending" {
         return Err(RequestError::Proposal(format!("This proposal was already {}.", row.state)));
     }
+    crate::extensions::ask::seen(revision, row.revision, row.updated).map_err(RequestError::Proposal)?;
     // Who it's for, and what Rivet reads.
     let (rivet_name, person, delivery) = {
         let inner = factory.lock();
@@ -308,12 +396,18 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
     };
     let state = if approve { "approved" } else { "dismissed" };
     let decided = now_ms();
+    // Kept only if nothing decided or changed it meanwhile.
     let claimed = factory.store.db().execute(
-        "UPDATE proposals SET state = ?2, comment = ?3, decided = ?4, replied = ?5 WHERE id = ?1 AND state = 'pending'",
-        params![number, state, comment, decided, reply],
+        "UPDATE proposals SET state = ?2, comment = ?3, decided = ?4, replied = ?5 WHERE id = ?1 AND state = 'pending' AND revision = ?6",
+        params![number, state, comment, decided, reply, row.revision],
     )?;
     if claimed == 0 {
-        return Err(RequestError::Proposal("This proposal was already decided.".to_owned()));
+        let now = factory.store.db().query_row("SELECT state FROM proposals WHERE id = ?1", [number], |row| row.get::<_, String>(0));
+        return Err(RequestError::Proposal(match now.as_deref() {
+            Ok("pending") => crate::extensions::ask::CHANGED.to_owned(),
+            Ok("withdrawn") => "This proposal was withdrawn.".to_owned(),
+            _ => "This proposal was already decided.".to_owned(),
+        }));
     }
     if let Some((rivet, message)) = &delivery
         && let Err(error) = factory.send_message(rivet, message, None, "", &[])
@@ -353,7 +447,212 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
         let text = format!("{summary}{}\n\nYour proposal:\n{}{about}", crate::decisions::note(&person, comment), row.text);
         (summary, text)
     };
-    let event = host_event(summary);
+    // Dismissed without a comment, it's told quietly (friend bug #19).
+    let event = if approve || !comment.is_empty() { host_event(summary) } else { crate::needs_you::dismissed_event(summary) };
     factory.deliver_event(agent, text, event);
     Ok(())
+}
+
+/// proposal_withdraw (#407): takes back one of the agent's own proposals
+/// still waiting, with its reason, or lists them. It leaves Needs you at
+/// once and shows as withdrawn; the item it was for stays as it was, for
+/// the agent to update.
+fn withdraw(factory: &Arc<Factory>, agent: &str, args: crate::extensions::ask::WithdrawArgs) -> Result<ToolResult, String> {
+    use crate::extensions::ask::{card_number, item_named, withdraw_reason};
+    let person = {
+        let inner = factory.lock();
+        crate::extensions::caller(&inner.config, agent)?;
+        inner.config.person().to_owned()
+    };
+    let couldnt = |error: rusqlite::Error| format!("Couldn't read your proposals: {error}");
+    // The checklist item a proposal is for ("agent#12"), if any.
+    let item_of = |id: i64| -> Option<String> {
+        factory
+            .store
+            .db()
+            .query_row("SELECT item FROM card_items WHERE kind = 'proposal' AND card = ?1", [id.to_string()], |row| row.get(0))
+            .optional()
+            .unwrap_or_default()
+    };
+    let Some(given) = args.id.as_deref().map(str::trim).filter(|id| !id.is_empty()) else {
+        let waiting = crate::store::query(
+            &factory.store.db(),
+            &format!("SELECT {COLUMNS} FROM proposals WHERE agent = ?1 AND state = 'pending' ORDER BY id"),
+            [agent],
+            row,
+        )
+        .map_err(couldnt)?;
+        if waiting.is_empty() {
+            return Ok(ToolResult::text(format!("You have no proposals waiting for {person}."), json!({})));
+        }
+        let mut said = format!("Your proposals waiting for {person}; take one back with its id and a reason:");
+        for proposal in &waiting {
+            let when = factory_agent::accounts::local_time(u64::try_from(proposal.created).unwrap_or_default()).unwrap_or_default();
+            let first = proposal.text.lines().find(|line| !line.trim().is_empty()).unwrap_or_default().trim();
+            let first: String = first.chars().take(120).collect();
+            let _ = write!(said, "\n- {}: \"{first}\", proposed {when}", proposal.id);
+            if let Some(item) = item_of(proposal.id) {
+                let _ = write!(said, ", for {}", item_named(factory, agent, &item));
+            }
+        }
+        return Ok(ToolResult::text(said, json!({})));
+    };
+    let unknown = || format!("You have no proposal {given}: proposal_withdraw without id lists yours. Nothing was withdrawn.");
+    let number = card_number(given).ok_or_else(unknown)?;
+    let reason = withdraw_reason(args.reason.as_deref(), &person)?;
+    // Only the agent's own: another's is as unknown as one never made.
+    let found = factory
+        .store
+        .db()
+        .query_row(&format!("SELECT {COLUMNS} FROM proposals WHERE id = ?1 AND agent = ?2"), params![number, agent], row)
+        .optional()
+        .map_err(couldnt)?;
+    let Some(mut proposal) = found else { return Err(unknown()) };
+    if proposal.state != "pending" {
+        let was = match proposal.state.as_str() {
+            "approved" if proposal.replied => format!("{person} already answered it"),
+            "approved" => format!("{person} already approved it"),
+            "dismissed" => format!("{person} already dismissed it"),
+            "withdrawn" => "You already withdrew it".to_owned(),
+            _ => "It's already closed".to_owned(),
+        };
+        return Err(format!("Proposal {number} isn't waiting: {was}. Nothing was withdrawn."));
+    }
+    let decided = now_ms();
+    // Kept only if the person didn't decide it meanwhile.
+    let claimed = factory
+        .store
+        .db()
+        .execute(
+            "UPDATE proposals SET state = 'withdrawn', decided = ?3, reason = ?4 WHERE id = ?1 AND agent = ?2 AND state = 'pending'",
+            params![number, agent, decided, reason],
+        )
+        .map_err(|error| format!("Couldn't withdraw it: {error}"))?;
+    if claimed == 0 {
+        return Err(format!("{person} just decided proposal {number}, so it wasn't withdrawn; you'll be told what they decided."));
+    }
+    (proposal.state, proposal.decided, proposal.reason) = ("withdrawn".to_owned(), Some(decided), reason);
+    // Its card shows it withdrawn, and it no longer waits for the person.
+    {
+        let mut inner = factory.lock();
+        let entry = inner
+            .agents
+            .get_mut(agent)
+            .and_then(|runtime| runtime.transcript.as_mut())
+            .and_then(|transcript| transcript.set_proposal(proposal.to_proto()));
+        if let Some(entry) = entry {
+            factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
+        }
+        factory.broadcast_workspace(&inner);
+    }
+    let mut said = format!(
+        "Withdrew proposal {number}: it's gone from {person}'s Needs you, and their History shows it withdrawn by you, with your reason."
+    );
+    if let Some(item) = item_of(number) {
+        if let Some((whose, _)) = item.rsplit_once('#') {
+            factory.refresh_view(whose);
+        }
+        let _ = write!(
+            said,
+            " It was for {}, which stays as it was: update it if it no longer waits on {person}.",
+            item_named(factory, agent, &item)
+        );
+    }
+    Ok(ToolResult::text(said, json!({})))
+}
+
+#[derive(Deserialize)]
+struct UpdateArgs {
+    id: String,
+    message: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// proposal_update (#428): changes the text of one of the agent's own
+/// proposals still waiting, in place, as ask_update changes a question:
+/// a new version, redrawn where it is, not counted or notified again.
+fn update(factory: &Arc<Factory>, agent: &str, args: UpdateArgs) -> Result<ToolResult, String> {
+    use crate::extensions::ask::{MAX_UPDATES, card_number, too_many_updates, update_reason};
+    let person = {
+        let inner = factory.lock();
+        crate::extensions::caller(&inner.config, agent)?;
+        inner.config.person().to_owned()
+    };
+    let given = args.id.trim();
+    let unknown = || format!("You have no proposal {given}: proposal_withdraw without id lists yours. Nothing was changed.");
+    let number = card_number(given).ok_or_else(unknown)?;
+    let reason = update_reason(args.reason.as_deref())?;
+    let text = args.message.trim().to_owned();
+    if text.is_empty() {
+        return Err("The message is empty: give the whole new message. Nothing was changed.".to_owned());
+    }
+    // Only the agent's own: another's is as unknown as one never made.
+    let found = factory
+        .store
+        .db()
+        .query_row(&format!("SELECT {COLUMNS} FROM proposals WHERE id = ?1 AND agent = ?2"), params![number, agent], row)
+        .optional()
+        .map_err(|error| format!("Couldn't read your proposals: {error}"))?;
+    let Some(mut proposal) = found else { return Err(unknown()) };
+    if proposal.state != "pending" {
+        let was = match proposal.state.as_str() {
+            "approved" if proposal.replied => format!("{person} already answered it"),
+            "approved" => format!("{person} already approved it"),
+            "dismissed" => format!("{person} already dismissed it"),
+            "withdrawn" => "You withdrew it".to_owned(),
+            _ => "It's already closed".to_owned(),
+        };
+        return Err(format!("Proposal {number} isn't waiting: {was}. Nothing was changed."));
+    }
+    if proposal.revision > MAX_UPDATES {
+        return Err(too_many_updates("proposal", number));
+    }
+    if text == proposal.text {
+        return Err(format!("That's what proposal {number} already says. Nothing was changed."));
+    }
+    // Read a pipe or a web page since it proposed: the card says so now.
+    let routes = crate::pipes::agents::routes(factory, agent);
+    if !routes.is_empty() {
+        proposal.taint = Some(crate::pipes::agents::routes_json(&routes).to_string());
+    }
+    let now = now_ms();
+    // Kept only if the person didn't decide it, nor the agent change it, meanwhile.
+    let claimed = factory
+        .store
+        .db()
+        .execute(
+            "UPDATE proposals SET text = ?3, taint = ?4, revision = revision + 1, updated = ?5, update_reason = ?6
+             WHERE id = ?1 AND agent = ?2 AND state = 'pending' AND revision = ?7",
+            params![number, agent, text, proposal.taint, now, reason, proposal.revision],
+        )
+        .map_err(|error| format!("Couldn't change it: {error}"))?;
+    if claimed == 0 {
+        return Err(format!("{person} just decided proposal {number}, so it wasn't changed; you'll be told what they decided."));
+    }
+    (proposal.text, proposal.revision, proposal.updated, proposal.update_reason) = (text, proposal.revision + 1, Some(now), reason);
+    // Its card redraws in place; it still waits, at the same seq.
+    {
+        let mut inner = factory.lock();
+        let entry = inner
+            .agents
+            .get_mut(agent)
+            .and_then(|runtime| runtime.transcript.as_mut())
+            .and_then(|transcript| transcript.set_proposal(proposal.to_proto()));
+        if let Some(entry) = entry {
+            factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
+        }
+        factory.broadcast_workspace(&inner);
+    }
+    let left = MAX_UPDATES - (proposal.revision - 1);
+    let mut said = format!(
+        "Changed proposal {number}: {person}'s card shows it as it is now, marked updated{}, without notifying them again. Approving the version before is refused, so they look again.",
+        if proposal.update_reason.is_empty() { "" } else { " with your reason" }
+    );
+    said.push_str(&match left {
+        0 => " That was the last change this proposal can take.".to_owned(),
+        1 => " It can be changed once more.".to_owned(),
+        _ => format!(" It can be changed {left} more times."),
+    });
+    Ok(ToolResult::text(said, json!({})))
 }

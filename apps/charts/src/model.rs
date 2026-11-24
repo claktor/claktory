@@ -658,6 +658,85 @@ fn write<T: Serialize>(host: &mut impl Host, key: &str, value: &T) -> Result<(),
     host.kv_set(key, &bytes)
 }
 
+/// Where the person's home and starred dashboards are kept.
+pub const PREFS_KEY: &str = "prefs";
+
+/// How the person arranges the dashboards, the same on every device: the
+/// one Charts opens on, and those starred, first in the dashboards' menu.
+/// Their order is the index's.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Prefs {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub starred: Vec<String>,
+}
+
+/// The person's arrangement, without dashboards that are gone.
+pub fn prefs(host: &mut impl Host) -> Prefs {
+    let ids = ids(host);
+    let mut prefs: Prefs = read(host, PREFS_KEY).unwrap_or_default();
+    prefs.home = prefs.home.filter(|home| ids.contains(home));
+    prefs.starred.retain(|id| ids.contains(id));
+    prefs
+}
+
+pub fn save_prefs(host: &mut impl Host, prefs: &Prefs) -> Result<(), String> {
+    write(host, PREFS_KEY, prefs)
+}
+
+/// The dashboard a view opens on: the home one, else the first.
+pub fn opening(host: &mut impl Host) -> String {
+    let home = prefs(host).home;
+    home.or_else(|| ids(host).into_iter().next()).unwrap_or_default()
+}
+
+/// The dashboards as their menu lists them: the starred ones, then the
+/// others, each in the person's order.
+pub fn menu_order(ids: &[String], prefs: &Prefs) -> Vec<String> {
+    let starred = |id: &&String| prefs.starred.contains(id);
+    ids.iter().filter(starred).chain(ids.iter().filter(|id| !starred(id))).cloned().collect()
+}
+
+/// Where `id` can move in the menu: (up, down), within its group (starred
+/// or not).
+pub fn can_move(ids: &[String], prefs: &Prefs, id: &str) -> (bool, bool) {
+    let group: Vec<&String> = ids.iter().filter(|other| prefs.starred.contains(other) == prefs.starred.iter().any(|s| s == id)).collect();
+    match group.iter().position(|other| *other == id) {
+        Some(at) => (at > 0, at + 1 < group.len()),
+        None => (false, false),
+    }
+}
+
+/// Moves `id` one place up or down in the menu, past the next dashboard
+/// of its group.
+pub fn move_board(host: &mut impl Host, id: &str, up: bool) -> Result<(), String> {
+    let mut ids = ids(host);
+    let prefs = prefs(host);
+    let starred = prefs.starred.iter().any(|s| s == id);
+    let at = ids.iter().position(|other| other == id).ok_or_else(|| format!("there's no dashboard \"{id}\""))?;
+    let same = |other: &String| prefs.starred.contains(other) == starred;
+    let next = if up { ids[..at].iter().rposition(same) } else { ids[at + 1..].iter().position(same).map(|n| at + 1 + n) };
+    let Some(next) = next else { return Ok(()) };
+    ids.swap(at, next);
+    write(host, INDEX_KEY, &ids)
+}
+
+/// Puts the dashboards in `order` first, in that order, the others after
+/// as they were.
+pub fn set_order(host: &mut impl Host, order: &[String]) -> Result<(), String> {
+    let ids = ids(host);
+    let mut next: Vec<String> = Vec::new();
+    for id in order.iter().filter(|id| ids.contains(id)) {
+        if !next.contains(id) {
+            next.push(id.clone());
+        }
+    }
+    next.extend(ids.into_iter().filter(|id| !order.contains(id)));
+    write(host, INDEX_KEY, &next)
+}
+
 /// The dashboards' ids, in order; None before the first start.
 pub fn index(host: &mut impl Host) -> Option<Vec<String>> {
     read(host, INDEX_KEY)

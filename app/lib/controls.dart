@@ -1072,6 +1072,10 @@ class _SelectState<T> extends State<Select<T>> {
 
   /// A phone's sheet of choices.
   Future<void> _choose() async {
+    // Nothing keeps focus while the sheet is up, so closing it gives none
+    // back: a text field focused before (its keyboard hidden) would raise
+    // the keyboard again and scroll itself into view.
+    FocusManager.instance.primaryFocus?.unfocus();
     final chosen = await showChoice<T>(
       context,
       title: widget.title,
@@ -2626,6 +2630,7 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'film': _drawFilm,
   'chart-column': _drawChartColumn,
   'upload': _drawUpload,
+  'share': _drawShare,
   'inbox': _drawInbox,
   'bell': _drawBell,
   'message-circle-question': _drawMessageCircleQuestion,
@@ -2636,7 +2641,35 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'pin': _drawPin,
   'pin-off': _drawPinOff,
   'copy': _drawCopy,
+  'star': _drawStar,
+  'house': _drawHouse,
+  'home': _drawHouse,
+  'clock': _drawClock,
 };
+
+/// Whether the app draws the Lucide icon [name] (an app's menu leaves out
+/// an icon it doesn't).
+bool hasLucideIcon(String name) => _lucide.containsKey(name);
+
+final _drawStar = _paths(const [
+  'M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16'
+      'l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 '
+      '1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0'
+      '-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0'
+      '-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 '
+      '0 0 1.597-1.16z',
+]);
+
+final _drawHouse = _paths(const [
+  'M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8',
+  'M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9'
+      'a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+]);
+
+final _drawClock = _paths(const [
+  'M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0',
+  'M12 6v6l4 2',
+]);
 
 final _drawCopy = _paths(const [
   'M10 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2z',
@@ -2920,6 +2953,12 @@ final _drawUpload = _paths(const [
   'M12 3v12',
   'm17 8-5-5-5 5',
   'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4',
+]);
+
+final _drawShare = _paths(const [
+  'M12 2v13',
+  'm16 6-4-4-4 4',
+  'M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8',
 ]);
 
 /// An extension's 16px icon: the Lucide icon it names, or for one this app

@@ -319,6 +319,9 @@ pub struct Snapshot {
     pub events: broadcast::Receiver<Event>,
     pub workspace: v1::Workspace,
     pub transcript: Option<v1::Transcript>,
+    /// The revision `transcript` brings the app to (#413); empty when it
+    /// isn't the conversation (one that can't be read).
+    pub transcript_revision: String,
     /// The explorers of the projects whose files are open, the focused
     /// project's last.
     pub explorers: Vec<v1::Explorer>,
@@ -436,8 +439,13 @@ pub struct Factory {
     pub(crate) usage_switches: crate::usage_switch::Switches,
     /// What each device's app was last sent, to resume from (#378).
     pub(crate) resumes: Arc<crate::patch::Resumes>,
+    /// The revisions of the conversation shown, to resume it on reconnect
+    /// (#413).
+    pub(crate) transcript_log: crate::transcript::resume::Log,
     /// Keeping the Mac awake while agents work (P1).
     pub(crate) keep_awake: crate::keep_awake::KeepAwake,
+    /// Whether its background service runs it, on a Mac (friend bug #24).
+    pub(crate) service: crate::service::Service,
     /// How each provider's model list was last read (friend bug #14).
     pub(crate) catalog: crate::catalog::Catalog,
     /// Notifications: who's using Claktory where, and what was seen
@@ -863,7 +871,9 @@ impl Factory {
             chats,
             usage_switches,
             resumes: Arc::default(),
+            transcript_log: crate::transcript::resume::Log::default(),
             keep_awake,
+            service: crate::service::Service::default(),
             catalog,
             notify: crate::notify::State::default(),
             browser: crate::browser::Browser::default(),
@@ -901,6 +911,7 @@ impl Factory {
         tokio::spawn(crate::catalog::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::credit::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::keep_awake::monitor(Arc::downgrade(&factory)));
+        crate::service::check(&factory);
         tokio::spawn(crate::extensions::nudge::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::swarm::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::tasks::monitor(Arc::downgrade(&factory)));
@@ -993,6 +1004,13 @@ impl Factory {
 
     /// Subscribes to events and returns the state they apply on top of.
     pub async fn connect(&self) -> Snapshot {
+        self.connect_resuming(None).await
+    }
+
+    /// `connect`, for an app that holds `held`'s conversation (its agent and
+    /// revision, Hello's): the entries added or changed since, when that
+    /// agent is still the one shown and that can be told (#413).
+    pub(crate) async fn connect_resuming(&self, held: Option<(&str, &str)>) -> Snapshot {
         loop {
             let selected = self.lock().state.selected_agent.clone();
             let mut problem = None;
@@ -1014,14 +1032,22 @@ impl Factory {
                 continue;
             }
             let receiver = self.events.subscribe();
-            let transcript = selected.as_deref().map(|id| {
-                // An unreadable transcript mustn't keep clients out; show why it's missing.
-                transcript_of(&inner, id).unwrap_or_else(|| unreadable(id, problem.as_ref()))
-            });
+            let (transcript, transcript_revision) = match selected.as_deref() {
+                None => (None, String::new()),
+                Some(id) => match self.resumed(&inner, id, held) {
+                    Some((resumed, revision)) => (Some(resumed), revision),
+                    None => match transcript_of(&inner, id) {
+                        Some(page) => (Some(page), self.transcript_log.now(id)),
+                        // An unreadable transcript mustn't keep clients out; show why it's missing.
+                        None => (Some(unreadable(id, problem.as_ref())), String::new()),
+                    },
+                },
+            };
             return Snapshot {
                 events: receiver,
                 workspace: self.workspace(&inner),
                 transcript,
+                transcript_revision,
                 explorers: self.explorers(&inner),
                 view: inner.view.clone(),
                 // A client starts out with nothing queued.
@@ -1029,6 +1055,20 @@ impl Factory {
                 chat: crate::chats::shown(self, &inner),
             };
         }
+    }
+
+    /// The conversation of `id` an app holding `held` catches up with, and
+    /// the revision it brings it to; None when it gets the latest page.
+    fn resumed(&self, inner: &Inner, id: &str, held: Option<(&str, &str)>) -> Option<(v1::Transcript, String)> {
+        let (agent, revision) = held?;
+        if agent != id {
+            return None;
+        }
+        let resumed = self.transcript_log.since(id, revision)?;
+        let transcript = inner.agents.get(id)?.transcript.as_ref()?;
+        let entries = resumed.seqs.iter().map(|seq| transcript.entry(*seq).cloned()).collect::<Option<Vec<_>>>()?;
+        let shown = v1::Transcript { agent_id: id.to_owned(), entries, has_earlier: false, resumed: true };
+        Some((shown, resumed.revision))
     }
 
     /// Creates a project. Without a `path`, its folder is named after it inside
@@ -1642,7 +1682,7 @@ impl Factory {
         // Workspace first: clients learn the selection, then receive its transcript.
         self.broadcast_workspace(&inner);
         if let Some(transcript) = transcript_of(&inner, id) {
-            self.send(Body::Transcript(transcript));
+            self.send_transcript(&inner, transcript);
         }
         self.store.save_state(&inner.state)?;
         Ok(())
@@ -1828,11 +1868,7 @@ impl Factory {
         if let Some(runtime) = inner.agents.get_mut(id) {
             // What's queued stays: it reaches the agent after the stop, as a
             // new run (/clear drops it).
-            runtime.stopped = true;
-            if let Some(abort) = runtime.abort.take() {
-                abort.abort();
-            }
-            self.end_run(runtime, "stopped");
+            self.stop_run(runtime);
         }
         self.broadcast_workspace(&inner);
         Ok(())
@@ -2135,11 +2171,7 @@ impl Factory {
                 && !was
                 && let Some(runtime) = inner.agents.get_mut(&agent.id)
             {
-                runtime.stopped = true;
-                if let Some(abort) = runtime.abort.take() {
-                    abort.abort();
-                }
-                self.end_run(runtime, "stopped");
+                self.stop_run(runtime);
             }
             unarchived |= was && !is;
         }
@@ -2444,6 +2476,13 @@ impl Factory {
         if crate::chats::is_chat(agent_id) {
             return crate::chats::send_change(self, agent_id, change);
         }
+        // Followed even while another agent is shown, so a resume of it is
+        // right whatever was shown meanwhile.
+        let seq = match &change {
+            Change::Entry(entry) => entry.seq,
+            Change::Delta { seq, .. } => *seq,
+        };
+        let revision = self.transcript_log.changed(agent_id, seq).unwrap_or_default();
         if inner.state.selected_agent.as_deref() != Some(agent_id) {
             return;
         }
@@ -2452,7 +2491,24 @@ impl Factory {
             Change::Entry(entry) => Body::Entry(v1::EntryUpdate { agent_id, entry: Some(entry) }),
             Change::Delta { seq, text } => Body::Delta(v1::EntryDelta { agent_id, seq, text }),
         };
-        self.send(body);
+        self.send_revised(body, revision);
+    }
+
+    /// Sends the conversation shown, whole: apps replace what they held, and
+    /// resume from its revision (#413). With the lock held, as every change
+    /// to it is.
+    pub(crate) fn send_transcript(&self, _inner: &Inner, transcript: v1::Transcript) {
+        let revision = self.transcript_log.whole(&transcript.agent_id);
+        self.send_revised(Body::Transcript(transcript), revision);
+    }
+
+    /// `send`, with the conversation's revision (ServerMessage.transcript_revision).
+    fn send_revised(&self, body: Body, transcript_revision: String) {
+        if self.events.receiver_count() == 0 {
+            return;
+        }
+        let message = v1::ServerMessage { reply_to: 0, body: Some(body), transcript_revision, ..Default::default() };
+        let _ = self.events.send(Bytes::from(message.encode_to_vec()));
     }
 
     /// How many apps are connected now.
@@ -2628,7 +2684,7 @@ impl Factory {
             person: Some(crate::person::person(config, &self.key_seed, self.account.signed_in_as(&config.account))),
             projects,
             agents,
-            models: inner.models.clone(),
+            models: crate::extensions::images::listed(inner),
             version: crate::update::VERSION.to_owned(),
             focused_project_id: inner.state.focused_project.clone().filter(|id| inner.config.project(id).is_some()).unwrap_or_default(),
             latest_release: inner.latest_release.version.clone(),
@@ -2640,6 +2696,7 @@ impl Factory {
             update_error: inner.update_error.clone(),
             update_check: Some(inner.update_check.clone()),
             keep_awake: Some(self.keep_awake.view()),
+            backend_service: Some(self.service.view()),
             diagnostics: Some(crate::diagnostics::view(self)),
             report_schemas: crate::pipes::handoff::schemas(self),
             report_type_rules: Some(crate::pipes::handoff::type_rules()),
@@ -2782,7 +2839,7 @@ fn unreadable(id: &str, problem: Option<&TranscriptError>) -> v1::Transcript {
         reply: 0,
         replied_to: None,
     };
-    v1::Transcript { agent_id: id.to_owned(), entries: vec![entry], has_earlier: false }
+    v1::Transcript { agent_id: id.to_owned(), entries: vec![entry], has_earlier: false, ..Default::default() }
 }
 
 /// A queued message as clients see it.
@@ -2802,6 +2859,7 @@ pub(crate) fn queued_message(queued: &Queued) -> v1::QueuedMessage {
         transcription: queued.voice.as_ref().map(crate::speech::voice::Voice::view),
         checklist_item: queued.checklist_item.as_ref().map(crate::transcript::checklist_item),
         quiet: queued.quiet(),
+        typed: queued.voice.as_ref().map(|voice| voice.typed.clone()).unwrap_or_default(),
     }
 }
 
@@ -2809,7 +2867,7 @@ pub(crate) fn queued_message(queued: &Queued) -> v1::QueuedMessage {
 pub(crate) fn transcript_of(inner: &Inner, id: &str) -> Option<v1::Transcript> {
     let transcript = inner.agents.get(id)?.transcript.as_ref()?;
     let (entries, has_earlier) = transcript.recent();
-    Some(v1::Transcript { agent_id: id.to_owned(), entries, has_earlier })
+    Some(v1::Transcript { agent_id: id.to_owned(), entries, has_earlier, ..Default::default() })
 }
 
 /// Reads the conversations of agents with something waiting for the

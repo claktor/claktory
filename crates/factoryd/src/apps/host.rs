@@ -28,13 +28,12 @@ pub struct AppsLink {
 pub type Launcher = Arc<dyn Fn() -> std::io::Result<AppsLink> + Send + Sync>;
 
 /// Where the host's program is: `FACTORY_APPS_HOST`, or `claktory-apps`
-/// beside factoryd's own.
+/// beside factoryd's own (links resolved).
 pub(crate) fn program() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("FACTORY_APPS_HOST").filter(|path| !path.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    let beside = std::env::current_exe().ok()?.parent()?.join("claktory-apps");
-    beside.is_file().then_some(beside)
+    crate::update::beside_backend(crate::update::APPS_HOST)
 }
 
 /// Starts the host's program as a child; its log goes to factoryd's.

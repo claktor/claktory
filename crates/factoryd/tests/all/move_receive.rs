@@ -113,10 +113,15 @@ impl Wire {
     }
 
     async fn hello(&mut self, code: &ReceiveCode, secret: &str) -> Frame {
+        self.hello_as(code, secret, "Old Mac").await
+    }
+
+    /// Hello from a computer called `machine`.
+    async fn hello_as(&mut self, code: &ReceiveCode, secret: &str, machine: &str) -> Frame {
         let hello = Frame::Hello {
             secret: secret.to_owned(),
             version: factoryd::update::VERSION.to_owned(),
-            machine: "Old Mac".to_owned(),
+            machine: machine.to_owned(),
             os: "macos".to_owned(),
             arch: "aarch64".to_owned(),
         };
@@ -128,9 +133,13 @@ impl Wire {
     /// Dials again after a session ended, until the target is free to
     /// answer (it lets the last one finish first).
     async fn again(endpoint: &Endpoint, code: &ReceiveCode) -> (Wire, Frame) {
+        Wire::again_as(endpoint, code, "Old Mac").await
+    }
+
+    async fn again_as(endpoint: &Endpoint, code: &ReceiveCode, machine: &str) -> (Wire, Frame) {
         for _ in 0..100 {
             let mut wire = Wire::dial(endpoint, code).await;
-            match wire.hello(code, &code.secret).await {
+            match wire.hello_as(code, &code.secret, machine).await {
                 Frame::Failed { why } if why.contains("right now") => tokio::time::sleep(Duration::from_millis(100)).await,
                 answer => return (wire, answer),
             }
@@ -451,8 +460,8 @@ async fn receive_lets_in_one_source_by_its_digits_and_never_writes_outside_what_
     second.connection.close(0u32.into(), b"gone");
     wire.hang_up(&person).await;
 
-    // Once claimed, no other key gets in, even with the code.
-    let (second, answer) = Wire::again(&other, &code).await;
+    // Once claimed, no other computer's key gets in, even with the code.
+    let (second, answer) = Wire::again_as(&other, &code, "Pest").await;
     let Frame::Failed { why } = answer else { panic!("refused") };
     assert!(why.contains("already moving here"), "{why}");
     second.connection.close(0u32.into(), b"gone");
@@ -649,4 +658,86 @@ async fn receive_json_says_each_step_in_a_line_and_takes_the_persons_answer_on_s
     let (failed, exit) = receive_json::end(&Err(ImportError::Failed("Broke.".to_owned())));
     assert_eq!((failed, exit), (serde_json::json!({"ok": false, "error": "failed", "message": "Broke."}), 1));
     assert_eq!(keys(&receive_json::stopped()), ["error", "message", "ok"]);
+}
+
+/// Friend bugs #21 and #23: a file the source has read-only is written
+/// again by a later round (and keeps its mode in the end), and the same
+/// computer starting its move again with a new key, as a source does after
+/// a failed try, is let in once its new digits are confirmed, carrying on
+/// with what's staged; another computer still isn't.
+#[tokio::test]
+async fn a_read_only_file_is_copied_again_and_the_same_computer_can_start_its_move_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let target = temp_dir();
+    let here = Home::new(target.join("home"));
+    let tree = target.join("tree");
+    std::fs::create_dir_all(tree.join("home/agents/writer")).expect("tree");
+    let notes = tree.join("home/agents/writer/notes.txt");
+    let set = |text: &str| {
+        let _ = std::fs::set_permissions(&notes, std::fs::Permissions::from_mode(0o644));
+        std::fs::write(&notes, text).expect("notes");
+        std::fs::set_permissions(&notes, std::fs::Permissions::from_mode(0o444)).expect("read-only");
+    };
+    set("first\n");
+    // A setuid file comes without the bit (Fugo's review).
+    let tool = tree.join("home/agents/writer/run.sh");
+    std::fs::write(&tool, "#!/bin/sh\n").expect("tool");
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o4755)).expect("setuid");
+    let (task, mut person) = receive(&here);
+    let code = person.code().await;
+    let key = endpoint().await;
+    let mut wire = Wire::dial(&key, &code).await;
+    wire.pair(&key, &code, &person).await;
+
+    // The first pass leaves it read-only, as the source has it.
+    let staged = here.root().join("import/bundle/home/agents/writer/notes.txt");
+    let (done, _, _) = wire.round(1, false, &tree, &listing(&tree), None).await;
+    assert!(matches!(done, Frame::RoundDone { .. }), "{done:?}");
+    assert_eq!(std::fs::metadata(&staged).expect("staged").permissions().mode() & 0o777, 0o444);
+    let run = here.root().join("import/bundle/home/agents/writer/run.sh");
+    assert_eq!(std::fs::metadata(&run).expect("run.sh").permissions().mode() & 0o7777, 0o755, "no setuid");
+
+    // It changed since: the second pass writes it again (#21).
+    set("second, longer\n");
+    let (done, asked, _) = wire.round(2, false, &tree, &listing(&tree), None).await;
+    let Frame::RoundDone { bytes_have, bytes_total, .. } = done else { panic!("the second pass: {done:?}") };
+    assert_eq!((asked, bytes_have, bytes_total), (1, bytes_total, 25));
+    assert_eq!(std::fs::read_to_string(&staged).expect("staged"), "second, longer\n");
+    assert_eq!(std::fs::metadata(&staged).expect("staged").permissions().mode() & 0o777, 0o444, "the source's mode in the end");
+
+    // The source's try fails, and it starts again with a new key (#23).
+    wire.hang_up(&person).await;
+    let retry = endpoint().await;
+    let (mut wire, welcome) = Wire::again(&retry, &code).await;
+    assert!(matches!(welcome, Frame::Welcome { resumed: false, .. }), "a new try, not a resume: {welcome:?}");
+    // Another computer meanwhile is refused, even with the code.
+    let pest = endpoint().await;
+    let mut other = Wire::dial(&pest, &code).await;
+    let Frame::Failed { why } = other.hello_as(&code, &code.secret, "Pest").await else { panic!("turned away") };
+    assert!(why.contains("right now"), "{why}");
+    other.connection.close(0u32.into(), b"gone");
+    // The new digits, confirmed on both sides.
+    person.answers.send(true).expect("answer");
+    wire.send(Frame::Confirmed {}).await;
+    assert_eq!(wire.next().await, Frame::Confirmed {});
+    let asked = person.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 2, "the digits again");
+    assert_eq!(asked[1].digits, move_wire::digits(&code.endpoint, &retry.id().to_string(), &code.secret));
+    assert!(person.said().contains("Old Mac is starting its move again."), "{}", person.said());
+    // It carries on with what's staged: nothing needs sending again.
+    let (done, asked, _) = wire.round(1, false, &tree, &listing(&tree), None).await;
+    assert!(matches!(done, Frame::RoundDone { .. }), "{done:?}");
+    assert_eq!(asked, 0, "what came before stays");
+    wire.hang_up(&person).await;
+
+    // Now the new key has it; another computer still doesn't.
+    let (old, answer) = Wire::again_as(&pest, &code, "Pest").await;
+    let Frame::Failed { why } = answer else { panic!("refused") };
+    assert!(why.contains("already moving here"), "{why}");
+    old.connection.close(0u32.into(), b"gone");
+    let (mut wire, welcome) = Wire::again(&retry, &code).await;
+    assert!(matches!(welcome, Frame::Welcome { resumed: true, .. }), "{welcome:?}");
+    wire.send(Frame::Cancel { why: String::new() }).await;
+    let ended = tokio::time::timeout(WAIT, task).await.expect("in time").expect("joined").expect_err("called off");
+    assert!(matches!(ended, factoryd::move_import::ImportError::CalledOff(_)), "{ended:?}");
 }

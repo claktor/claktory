@@ -731,6 +731,39 @@ Proofs:
 
 Still owed: sharing from real apps (Photos, Files, Chrome) on a phone.
 
+### Sharing files from Claktory (#418)
+
+`factory/device` `shareFiles {paths, mimes, rect?}` answers as `share`
+does for text: true once the person picked an app, false if they closed
+the chooser or nothing could show it. The app writes the files first,
+under the cache's `claktory-share/<random>/<name>`.
+
+- **What goes:** only regular files inside `cache/claktory-share`,
+  checked after resolving `..` and links (`FileShare`). Anything else, or
+  more than 20 files, refuses the whole share, and nothing shows.
+- **How:** `ShareFiles`, the app's own `FileProvider`, serves only that
+  folder (`res/xml/share_paths.xml`). It isn't exported, so another app
+  reads a file only through the address it was granted, and the grant
+  is read-only. One file goes as `ACTION_SEND` with its type, several
+  as `ACTION_SEND_MULTIPLE` with the type they share (`image/*`, or
+  `*/*`). The addresses also go in `ClipData`, so the grant reaches the
+  app picked through the chooser. An empty type is guessed from the
+  name. Claktory itself isn't offered in the chooser.
+- **When the files can go:** Android says which app was picked before
+  that app reads anything, and an app may read later (a mail draft, a
+  chat attaching as it sends). So the app doesn't delete a share's
+  folder when the call answers. Folders older than a day go: the app
+  sweeps them at launch, and the host at each share (Fugo), so a phone
+  that never relaunches the app doesn't keep them for days.
+
+Proof: `FileShareTest` and `ShareCoreTest` (JVM), and `ShareFilesTest`
+(instrumentation). In `ShareFilesTest` the test APK's `ShareReceiver`,
+another package and user, gets the send the chooser hands on. It reads
+both files by their names, can't write them, and can't read a third file
+in the same folder. The shell can't read through the provider either.
+
+Still owed: sending to real apps (Gmail, Messages, Drive) on a phone.
+
 While the release app is installed beside Claktory Dev on the same
 emulator, `factory://` has two handlers. Android then shows a chooser,
 so `WebLinksTest`'s pairing-code case can't pass. The chooser left open

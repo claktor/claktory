@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:fixnum/fixnum.dart';
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/claktory_identity.dart';
@@ -16,6 +19,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/rail.dart';
 import 'package:factory_app/sidebar.dart';
 import 'package:factory_app/tunnel_client.dart';
+import 'package:factory_app/voice_keep.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/rendering.dart' show RenderParagraph;
@@ -370,6 +374,63 @@ void main() {
     );
   });
 
+  testWidgets('removing one with recordings not sent yet says they go '
+      "too (Sale's row 76)", (tester) async {
+    final kept = Directory.systemTemp.createTempSync('kept');
+    final was = keptVoiceFolder;
+    keptVoiceFolder = () async => kept.path;
+    addTearDown(() {
+      keptVoiceFolder = was;
+      kept.deleteSync(recursive: true);
+    });
+    for (final (id, claktory) in [
+      ('1', keptClaktoryKey(parsePairingCode(_nixos))),
+      ('2', keptClaktoryKey(parsePairingCode(_nixos))),
+      ('3', keptClaktoryKey(null)),
+    ]) {
+      final folder = Directory('${kept.path}/$id')..createSync();
+      final voice = KeptVoice(
+        path: '${folder.path}/Voice.m4a',
+        duration: const Duration(seconds: 5),
+        claktory: claktory,
+        kind: KeptKind.agent,
+        target: 'rivet',
+        label: '',
+        made: DateTime(2026, 11, 24),
+        clientId: 'c$id',
+        uploadId: 'u$id',
+        requestId: 'r$id',
+      );
+      File(voice.path).writeAsBytesSync([1, 2, 3]);
+      File('${folder.path}/${KeptVoice.recordName}')
+          .writeAsStringSync(jsonEncode(voice.toJson()));
+    }
+    final app = _App();
+    app.connections.use(parsePairingCode(_nixos));
+    await app.show(tester);
+    await tester.tap(_labeled('nixos'), buttons: kSecondaryButton);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Remove…'));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await pumpFrames(tester);
+    expect(
+      find.textContaining(
+        " 2 voice recordings you haven't sent yet are deleted too.",
+      ),
+      findsOneWidget,
+    );
+  });
+
+  test('with none kept, the question says nothing of recordings', () {
+    expect(unsentGoesToo(0), '');
+    expect(
+      unsentGoesToo(1),
+      " A voice recording you haven't sent yet is deleted too.",
+    );
+  });
+
   testWidgets("this Mac's Claktory shows its own name", (tester) async {
     final app = _App(
       snapshots: {'': _workspace('Rivet')..settings.name = 'Studio'},
@@ -639,6 +700,9 @@ void main() {
           relayConnected: false,
           relayUpMs: 0,
           relayTrouble: TunnelRelayTrouble.none,
+          received: 0,
+          linkReceived: 0,
+          dialTimeoutMs: 0,
         );
         app.backends[long]!.connected.value = false;
         app.backends[long]!.refused.value = 'unknown device';

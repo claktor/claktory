@@ -467,6 +467,16 @@ async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_
     for request in waiting(&view).into_iter().filter(|request| request.id != first.id) {
         apply_request(&mut client, &mut view, Request::DecideSecretRequest(decide("builder", &request.id, false, Vec::new(), ""))).await;
     }
+    // Dismissed with nothing more, they're told quietly (friend bug #19):
+    // they wait for Builder's next wake rather than waking it.
+    view.follow(&mut client, |view| view.agent("builder").quiet_waiting == 2).await;
+    assert!(idle(&view, "builder") && !events(&view).iter().any(|line| line.contains("dismissed")), "{:?}", events(&view));
+    let quietly_dismissed = |view: &View| {
+        view.entries
+            .iter()
+            .filter(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.quiet && event.summary.contains("dismissed your request")))
+            .count()
+    };
 
     // Given one of the vault's: it hears what it got, and only that.
     let nothing =
@@ -481,6 +491,7 @@ async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_
         events(&view)
     );
     assert_eq!(requests(&view)[0], format!("secret request {} (Granted): To deploy the site.", first.id));
+    assert_eq!(quietly_dismissed(&view), 2, "the dismissals came with the next wake");
     let decided = view.entries.iter().find_map(|entry| match &entry.kind {
         Some(Kind::SecretRequest(request)) if request.id == first.id => Some(request.clone()),
         _ => None,

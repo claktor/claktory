@@ -675,6 +675,30 @@ void main() {
       expect(tester.widget<EditableText>(_field).controller.text, 'The second');
       expect(sentOf(harness, (m) => m.hasSetLayout()), isEmpty);
     });
+
+    testWidgets(
+      'an answer to a card changed meanwhile says so (#428), and keeps '
+      'its words and the pane',
+      (tester) async {
+        asIPad();
+        DocumentNative();
+        final harness = await showDocument(tester);
+        harness.backend.refuse = 'This card changed. Look at it again.';
+        await tester.enterText(_field, 'The second');
+        await tester.pump();
+        await tester.tap(find.text('Submit'));
+        await settle(tester);
+        expect(
+          find.text('This card changed. Look at it again.'),
+          findsOneWidget,
+        );
+        expect(
+          tester.widget<EditableText>(_field).controller.text,
+          'The second',
+        );
+        expect(sentOf(harness, (m) => m.hasSetLayout()), isEmpty);
+      },
+    );
   });
 
   group('answering by voice', () {

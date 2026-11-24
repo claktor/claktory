@@ -44,9 +44,26 @@ pub const ALPN: &[u8] = b"claktory/1";
 pub const ALPN_COMPRESSED: &[u8] = b"claktory/2";
 
 /// How long a dial may take before the app says why it can't connect,
-/// rather than waiting on. Under the app's own 10 s connect window, so a
-/// slow dial fails here first and the next try isn't queued behind it.
-pub const DIAL_TIMEOUT: Duration = Duration::from_secs(8);
+/// rather than waiting on, the first time: under the app's own connect
+/// window, so a slow dial fails here first and the next try isn't queued
+/// behind it.
+pub const DIAL_TIMEOUT: Duration = DIAL_TIMEOUTS[0];
+
+/// How long each dial has, in turn, after the ones before it timed out:
+/// on a weak link a dial that's getting there is let finish rather than
+/// cut at the same point every time (#413: Matt's phone, on one or two
+/// bars, gave up 27 dials a day at exactly 8 s, and every cut starts the
+/// handshake from zero). Back to the first once one is made. The app's
+/// connect window follows ([Status::dial_timeout_ms]).
+#[cfg(not(test))]
+pub const DIAL_TIMEOUTS: [Duration; 3] = [Duration::from_secs(8), Duration::from_secs(16), Duration::from_secs(30)];
+#[cfg(test)]
+pub const DIAL_TIMEOUTS: [Duration; 3] = [Duration::from_millis(400), Duration::from_millis(800), Duration::from_millis(1500)];
+
+/// How many dials to each backend (by its endpoint id) have timed out in a
+/// row: kept across tunnels, since the app opens a new one when it starts
+/// over from scratch, and patience is about the link, not the tunnel.
+static DIALS_TIMED_OUT: Mutex<Vec<(EndpointId, usize)>> = Mutex::new(Vec::new());
 
 /// How long an endpoint may go without a home relay chosen before that
 /// counts as trouble ([RelayTrouble::Unchosen]): its first measurement of
@@ -183,8 +200,21 @@ pub const CLAKTORY_RELAY: &str = "https://relay.claktory.com/";
 /// one). The device's home relay isn't what it dials through: a dial goes
 /// at once through the relay the backend's pairing code names (or the one
 /// the lookup finds), n0's or ours, whatever this map holds.
+///
+/// It looks backends up as n0's preset does (pkarr over HTTPS, and DNS),
+/// but never publishes its own address: nothing dials a device, and the
+/// backend reaches it on the connection it made (#413: ~5 KB for every
+/// endpoint made afresh, and again every 5 minutes, on a phone's data).
 pub async fn device_endpoint(key: SecretKey) -> anyhow::Result<Endpoint> {
-    Ok(Endpoint::builder(presets::N0).relay_mode(device_relays()).secret_key(key).transport_config(device_transport()).bind().await?)
+    use iroh::address_lookup::{DnsAddressLookup, PkarrResolver};
+    Ok(Endpoint::builder(presets::Minimal)
+        .address_lookup(PkarrResolver::n0_dns())
+        .address_lookup(DnsAddressLookup::n0_dns())
+        .relay_mode(device_relays())
+        .secret_key(key)
+        .transport_config(device_transport())
+        .bind()
+        .await?)
 }
 
 /// The device's relays: Claktory's only.
@@ -232,6 +262,23 @@ pub struct Status {
     pub relay_up_ms: u32,
     /// Why its home relay can't be reached, roughly, while it can't.
     pub relay_trouble: RelayTrouble,
+    /// Bytes received from the backend so far, on every stream, as they
+    /// arrive (before they're decompressed), wrapping: while it moves, the
+    /// link is delivering, even if no whole message has arrived yet (#413:
+    /// the app's ping, its pong queued behind a slow Workspace, closed the
+    /// connection that was bringing it, every 12 s, for ever).
+    pub received: u32,
+    /// Bytes in the UDP datagrams the open connection has received, QUIC's
+    /// own included (acknowledgements, heartbeats, retransmissions),
+    /// wrapping; it jumps when a new connection is made. On a weak link
+    /// whose queue makes QUIC back off, stream data can pause for longer
+    /// than the app's ping allows while the connection is plainly alive
+    /// (Sale's 63 kbps runs, #413): this still moves then, and stops only
+    /// when nothing arrives at all.
+    pub link_received: u32,
+    /// How long the next dial has ([DIAL_TIMEOUTS]), in ms: the app waits
+    /// at least that long for its connection through the tunnel.
+    pub dial_timeout_ms: u32,
 }
 
 /// Why a home relay can't be reached, in a word (#388): from iroh's last
@@ -362,6 +409,11 @@ struct Shared {
     /// Tells a dial in flight to give up: the network changed under it
     /// (`reconnect`), so it may be stuck on a dead path.
     cancel_dials: tokio::sync::Notify,
+    /// [Status::received].
+    received: AtomicU32,
+    /// [Status::link_received]: the open connection's, as [follow] last
+    /// read it.
+    link_received: AtomicU32,
 }
 
 /// Closes [endpoint], waiting [CLOSE_TIMEOUT] at most. One that takes
@@ -432,6 +484,8 @@ impl Tunnel {
             status: Mutex::new(Status::default()),
             forwards: AsyncMutex::new(None),
             cancel_dials: tokio::sync::Notify::new(),
+            received: AtomicU32::new(0),
+            link_received: AtomicU32::new(0),
         });
         shared.watch_relay(&endpoint);
         let accept = tokio::spawn({
@@ -470,7 +524,11 @@ impl Tunnel {
     }
 
     pub fn status(&self) -> Status {
-        self.shared.status.lock().unwrap().clone()
+        let mut status = self.shared.status.lock().unwrap().clone();
+        status.received = self.shared.received.load(Ordering::Relaxed);
+        status.link_received = self.shared.link_received.load(Ordering::Relaxed);
+        status.dial_timeout_ms = u32::try_from(self.shared.dial_timeout().as_millis()).unwrap_or(u32::MAX);
+        status
     }
 
     /// After the app was suspended, or the network changed under it: a
@@ -583,8 +641,9 @@ impl Dialer {
         }
         let endpoint = self.0.endpoint().await.map_err(|error| ForwardingFailure::Failed(error.to_string()))?;
         let dial = endpoint.connect(self.0.target(), ALPN_FORWARD);
+        let within = self.0.dial_timeout();
         let dialled = tokio::select! {
-            dialled = tokio::time::timeout(DIAL_TIMEOUT, dial) => dialled,
+            dialled = tokio::time::timeout(within, dial) => dialled,
             // reconnect or close: let go of this endpoint.
             _ = self.0.cancel_dials.notified() => {
                 return Err(ForwardingFailure::Failed("The tunnel is reconnecting.".into()));
@@ -595,8 +654,12 @@ impl Dialer {
             Ok(Ok(connection)) => connection,
             Ok(Err(error)) if refused_alpn(&error) => return Err(ForwardingFailure::Unsupported),
             Ok(Err(error)) => return Err(ForwardingFailure::Failed(explain_connect(&error).0)),
-            Err(_) => return Err(ForwardingFailure::Failed(format!("Nothing answered within {} seconds.", DIAL_TIMEOUT.as_secs()))),
+            Err(_) => {
+                self.0.dial_timed_out();
+                return Err(ForwardingFailure::Failed(format!("Nothing answered within {} seconds.", within.as_secs())));
+            }
         };
+        self.0.dial_made();
         self.0.connected();
         *slot = Some(connection.clone());
         Ok(connection)
@@ -632,7 +695,7 @@ async fn forward(mut socket: TcpStream, shared: Arc<Shared>, path: Arc<str>) {
     let Some(connection) = connection(&shared).await else {
         return;
     };
-    let (mut send, mut receive) = match connection.open_bi().await {
+    let (mut send, receive) = match connection.open_bi().await {
         Ok(streams) => streams,
         Err(error) => {
             shared.failed(&error.to_string(), Failure::Other);
@@ -653,7 +716,8 @@ async fn forward(mut socket: TcpStream, shared: Arc<Shared>, path: Arc<str>) {
             let _ = send.shutdown().await;
         };
         let down = async {
-            let _ = copy(&mut ZstdDecoder::new(BufReader::new(receive)), &mut write).await;
+            let mut receive = ZstdDecoder::new(BufReader::new(Counted { inner: receive, shared: shared.clone() }));
+            let _ = copy(&mut receive, &mut write).await;
             let _ = write.shutdown().await;
         };
         tokio::join!(up, down);
@@ -666,10 +730,33 @@ async fn forward(mut socket: TcpStream, shared: Arc<Shared>, path: Arc<str>) {
         let _ = send.finish();
     };
     let down = async {
-        let _ = copy(&mut receive, &mut write).await;
+        let _ = copy(&mut Counted { inner: receive, shared: shared.clone() }, &mut write).await;
         let _ = write.shutdown().await;
     };
     tokio::join!(up, down);
+}
+
+/// [inner], adding what's read from it to [Status::received].
+struct Counted<R> {
+    inner: R,
+    shared: Arc<Shared>,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Counted<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let polled = Pin::new(&mut self.inner).poll_read(cx, buf);
+        let read = buf.filled().len() - before;
+        if read > 0 {
+            // Wrapping: only whether it moved matters.
+            self.shared.received.fetch_add(read as u32, Ordering::Relaxed);
+        }
+        polled
+    }
 }
 
 /// Reads [socket]'s request line and checks it asks for [path]: then what
@@ -728,19 +815,28 @@ async fn dial(shared: &Shared, endpoint: &Endpoint) -> Result<Connection, Connec
 enum Dialled {
     Made(Connection),
     Failed(ConnectError),
-    TimedOut,
+    /// Nothing within the time it had.
+    TimedOut(Duration),
     /// `reconnect` or `close` told it to give up.
     Cancelled,
 }
 
-/// [dial] within [DIAL_TIMEOUT], given up when `reconnect` says so: the
-/// dial may be stuck on a path that's gone.
+/// [dial] within the time it has now ([DIAL_TIMEOUTS]), given up when
+/// `reconnect` says so: the dial may be stuck on a path that's gone. One
+/// that times out gives the next longer; one made, the first again.
 async fn dial_within(shared: &Shared, endpoint: &Endpoint) -> Dialled {
+    let within = shared.dial_timeout();
     tokio::select! {
-        dialled = tokio::time::timeout(DIAL_TIMEOUT, dial(shared, endpoint)) => match dialled {
-            Ok(Ok(connection)) => Dialled::Made(connection),
+        dialled = tokio::time::timeout(within, dial(shared, endpoint)) => match dialled {
+            Ok(Ok(connection)) => {
+                shared.dial_made();
+                Dialled::Made(connection)
+            }
             Ok(Err(error)) => Dialled::Failed(error),
-            Err(_) => Dialled::TimedOut,
+            Err(_) => {
+                shared.dial_timed_out();
+                Dialled::TimedOut(within)
+            }
         },
         _ = shared.cancel_dials.notified() => Dialled::Cancelled,
     }
@@ -839,11 +935,10 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
             *slot = None;
             return None;
         }
-        Dialled::TimedOut => {
+        Dialled::TimedOut(within) => {
             let relay = shared.status.lock().unwrap().relay_connected;
             if relay {
-                let said =
-                    format!("Nothing answered within {} seconds: the machine may be off, asleep or offline.", DIAL_TIMEOUT.as_secs());
+                let said = format!("Nothing answered within {} seconds: the machine may be off, asleep or offline.", within.as_secs());
                 shared.failed(&said, Failure::Unreachable);
             } else {
                 shared.failed("This device can't reach the relay or the machine: check its network.", Failure::Offline);
@@ -875,7 +970,9 @@ async fn follow(connection: Connection, shared: Arc<Shared>) {
             loop {
                 let path = path_of(&connection);
                 shared.status.lock().unwrap().path = path;
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                // Wrapping: only whether it moved matters.
+                shared.link_received.store(connection.stats().udp_rx.bytes as u32, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
     };
@@ -921,6 +1018,25 @@ impl Shared {
         slot.endpoint = Some(endpoint.clone());
         slot.made = Instant::now();
         Ok(endpoint)
+    }
+
+    /// How long the next dial has: [DIAL_TIMEOUTS], by how many to this
+    /// backend have timed out in a row.
+    fn dial_timeout(&self) -> Duration {
+        let timed_out = DIALS_TIMED_OUT.lock().unwrap().iter().find(|(id, _)| *id == self.backend.id).map_or(0, |(_, n)| *n);
+        DIAL_TIMEOUTS[timed_out.min(DIAL_TIMEOUTS.len() - 1)]
+    }
+
+    fn dial_timed_out(&self) {
+        let mut all = DIALS_TIMED_OUT.lock().unwrap();
+        match all.iter_mut().find(|(id, _)| *id == self.backend.id) {
+            Some((_, n)) => *n = (*n + 1).min(DIAL_TIMEOUTS.len() - 1),
+            None => all.push((self.backend.id, 1)),
+        }
+    }
+
+    fn dial_made(&self) {
+        DIALS_TIMED_OUT.lock().unwrap().retain(|(id, _)| *id != self.backend.id);
     }
 
     /// Where dials go: the backend's pairing code, or only its relay once
@@ -1896,5 +2012,106 @@ mod tests {
         assert!(!tunnel.shared.relay_first.load(Ordering::Relaxed));
         assert_eq!(made.lock().unwrap().len(), 1);
         tunnel.close().await;
+    }
+
+    /// #413: what arrives counts as it arrives, before a whole message is
+    /// in or decompressed, so the app can tell a slow link that's
+    /// delivering from a dead one.
+    #[tokio::test]
+    async fn the_status_counts_bytes_as_they_arrive() {
+        for alpn in [ALPN, ALPN_COMPRESSED] {
+            let backend = echo_backend_with(&[alpn]).await;
+            let tunnel = Tunnel::open(local_device().await, backend.addr()).await.unwrap();
+            assert_eq!(tunnel.status().received, 0);
+            let mut socket = ask(&tunnel).await;
+            let after_ask = tunnel.status().received;
+            assert!(after_ask > 0, "{alpn:?}");
+            // Bytes that don't compress, so both ways count them all.
+            let mut state = 0x2545_f491_u32;
+            let bytes: Vec<u8> = (0..100_000)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    state as u8
+                })
+                .collect();
+            echoes(&mut socket, &bytes).await;
+            let received = tunnel.status().received.wrapping_sub(after_ask);
+            assert!(received as usize >= bytes.len() * 9 / 10, "{alpn:?}: {received}");
+            // The link's count, QUIC's own bytes and all, follows within
+            // half a second.
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            let link = tunnel.status().link_received;
+            assert!(link >= tunnel.status().received, "{alpn:?}: link {link}");
+            tunnel.close().await;
+        }
+    }
+
+    /// A UDP path to [backend] that carries everything while [on], and
+    /// nothing otherwise: a link that's there, then isn't.
+    async fn switchable_path(backend: SocketAddr) -> (SocketAddr, Arc<AtomicBool>, JoinHandle<()>) {
+        use tokio::net::UdpSocket;
+        let entry = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let up = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = entry.local_addr().unwrap();
+        let on = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn({
+            let on = on.clone();
+            async move {
+                let mut device = None;
+                let (mut a, mut b) = (vec![0u8; 65536], vec![0u8; 65536]);
+                loop {
+                    tokio::select! {
+                        Ok((read, from)) = entry.recv_from(&mut a) => {
+                            device = Some(from);
+                            if on.load(Ordering::Relaxed) {
+                                let _ = up.send_to(&a[..read], backend).await;
+                            }
+                        }
+                        Ok((read, _)) = up.recv_from(&mut b) => if let Some(device) = device && on.load(Ordering::Relaxed) {
+                            let _ = entry.send_to(&b[..read], device).await;
+                        },
+                    }
+                }
+            }
+        });
+        (address, on, task)
+    }
+
+    /// How long a socket waits before the tunnel gives up dialing for it
+    /// and closes it.
+    async fn given_up_after(tunnel: &Tunnel) -> Duration {
+        let mut socket = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
+        let begun = Instant::now();
+        socket.write_all(format!("GET {} HTTP/1.1\r\n", tunnel.path()).as_bytes()).await.unwrap();
+        let mut rest = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), socket.read_to_end(&mut rest)).await.expect("given up").ok();
+        begun.elapsed()
+    }
+
+    /// #413: on a weak link a dial that times out gives the next one longer
+    /// (DIAL_TIMEOUTS), up to the last; one made, and the first again.
+    #[tokio::test]
+    async fn dials_that_time_out_get_longer_each_time_and_the_first_again_once_one_is_made() {
+        let backend = echo_backend().await;
+        let (path, on, proxy) = switchable_path(direct_addr(&backend)).await;
+        let (make, _made) = maker(Duration::ZERO);
+        let tunnel = Tunnel::open_with(make, REBUILD_AFTER, EndpointAddr::new(backend.id()).with_ip_addr(path)).await.unwrap();
+        let ms = |duration: Duration| u32::try_from(duration.as_millis()).unwrap();
+        assert_eq!(tunnel.status().dial_timeout_ms, ms(DIAL_TIMEOUTS[0]));
+        for expected in [DIAL_TIMEOUTS[0], DIAL_TIMEOUTS[1], DIAL_TIMEOUTS[2], DIAL_TIMEOUTS[2]] {
+            let took = given_up_after(&tunnel).await;
+            assert!(took >= expected && took < expected + Duration::from_millis(400), "{took:?} for {expected:?}");
+            assert_eq!(tunnel.status().phase, Phase::Failed);
+        }
+        assert_eq!(tunnel.status().dial_timeout_ms, ms(DIAL_TIMEOUTS[2]));
+        // The link comes back: made, and patient no more.
+        on.store(true, Ordering::Relaxed);
+        let mut socket = ask(&tunnel).await;
+        echoes(&mut socket, b"back").await;
+        assert_eq!(tunnel.status().dial_timeout_ms, ms(DIAL_TIMEOUTS[0]));
+        tunnel.close().await;
+        proxy.abort();
     }
 }

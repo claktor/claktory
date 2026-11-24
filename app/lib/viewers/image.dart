@@ -793,6 +793,7 @@ class _ImageViewerState extends State<ImageViewer>
             child: body,
           );
     return PaneScaffold(
+      share: sharePath,
       details: details,
       controls: controls,
       comments: comments == null ? null : CommentsButton(controller: comments),

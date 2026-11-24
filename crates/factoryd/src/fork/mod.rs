@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use factory_agent::{AgentEvent, AssistantPart, Message, ToolResultMessage, ToolResultPart, UserContent, UserMessage, UserPart};
-use factory_protocol::v1::{self, server_message::Body};
+use factory_protocol::v1;
 use serde::{Deserialize, Serialize};
 
 use crate::factory::{Factory, Queued, RequestError, transcript_of};
@@ -256,12 +256,8 @@ async fn halt(factory: &Factory, id: &str) -> Result<(), RequestError> {
         let saved = runtime.transcript.as_ref().map_or(0, |transcript| saved(transcript.messages(), &runtime.taken));
         let unsaved: Vec<Queued> = runtime.taken.drain(saved..).map(|(queued, _)| queued).collect();
         runtime.queue.splice(0..0, unsaved);
-        runtime.stopped = true;
-        if let Some(abort) = runtime.abort.take() {
-            abort.abort();
-        }
         // What it was handed and holds reached it.
-        factory.end_run(runtime, "stopped");
+        factory.stop_run(runtime);
         // What the stopped run still reports belongs to the conversation before.
         runtime.epoch += 1;
         runtime.compact = None;
@@ -387,7 +383,7 @@ async fn settle(
     if inner.state.selected_agent.as_deref() == Some(id)
         && let Some(transcript) = transcript_of(&inner, id)
     {
-        factory.send(Body::Transcript(transcript));
+        factory.send_transcript(&inner, transcript);
     }
     // Agent.branches counts the version set aside. What was handed to the
     // stopped run and not saved goes to it once the queue is let go (`held`).

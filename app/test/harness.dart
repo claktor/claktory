@@ -17,6 +17,7 @@ import 'package:factory_app/scope.dart';
 import 'package:factory_app/shell.dart';
 import 'package:factory_app/state.dart';
 import 'package:factory_app/update.dart';
+import 'package:factory_app/voice_session.dart' show VoiceBarHost;
 import 'package:factory_app/zoom.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart' show ValueListenable;
@@ -260,6 +261,7 @@ class RecordingBackend extends Backend {
     String comment = '',
     String chatId = '',
     bool reply = false,
+    int? revision,
   }) => _record(
     ClientMessage(
       decideProposal: DecideProposal(
@@ -269,6 +271,7 @@ class RecordingBackend extends Backend {
         approve: approve && !reply,
         comment: comment,
         reply: reply,
+        revision: revision == null || revision <= 0 ? null : revision,
       ),
     ),
   );
@@ -832,6 +835,11 @@ class RecordingBackend extends Backend {
   @override
   Future<void> addModel(String model) =>
       _record(ClientMessage(addModel: AddModel(model: model)));
+
+  @override
+  Future<void> restoreBackendService() => _record(
+    ClientMessage(restoreBackendService: RestoreBackendService()),
+  );
 
   @override
   Future<void> signOut(String providerId, {String accountId = ''}) => _record(
@@ -1977,6 +1985,7 @@ class RecordingBackend extends Backend {
     bool reply = false,
     List<Attachment> attachments = const [],
     int? step,
+    int? revision,
   }) => _record(
     ClientMessage(
       answerAsk: AnswerAsk(
@@ -1987,6 +1996,7 @@ class RecordingBackend extends Backend {
         reply: reply,
         attachments: attachments,
         step: step,
+        revision: revision == null || revision <= 0 ? null : revision,
       ),
     ),
   );
@@ -2276,10 +2286,16 @@ class Harness {
           connections: connections,
           camera: camera,
           child: AppZoom(
-            child: home == null
-                ? const Shell()
-                // The window's own overlay, as the shell has one.
-                : Overlay(initialEntries: [OverlayEntry(builder: (_) => home)]),
+            // As the app has it (main.dart): a recording away from its box
+            // or field, over everything (#409).
+            child: VoiceBarHost(
+              child: home == null
+                  ? const Shell()
+                  // The window's own overlay, as the shell has one.
+                  : Overlay(
+                      initialEntries: [OverlayEntry(builder: (_) => home)],
+                    ),
+            ),
           ),
         ),
       ),

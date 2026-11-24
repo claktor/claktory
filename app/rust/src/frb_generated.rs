@@ -4599,6 +4599,9 @@ impl SseDecode for crate::api::tunnel::TunnelStatus {
         let mut var_relayConnected = <bool>::sse_decode(deserializer);
         let mut var_relayUpMs = <u32>::sse_decode(deserializer);
         let mut var_relayTrouble = <crate::api::tunnel::TunnelRelayTrouble>::sse_decode(deserializer);
+        let mut var_received = <u32>::sse_decode(deserializer);
+        let mut var_linkReceived = <u32>::sse_decode(deserializer);
+        let mut var_dialTimeoutMs = <u32>::sse_decode(deserializer);
         return crate::api::tunnel::TunnelStatus {
             phase: var_phase,
             path: var_path,
@@ -4607,6 +4610,9 @@ impl SseDecode for crate::api::tunnel::TunnelStatus {
             relay_connected: var_relayConnected,
             relay_up_ms: var_relayUpMs,
             relay_trouble: var_relayTrouble,
+            received: var_received,
+            link_received: var_linkReceived,
+            dial_timeout_ms: var_dialTimeoutMs,
         };
     }
 }
@@ -5465,6 +5471,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::tunnel::TunnelStatus {
             self.relay_connected.into_into_dart().into_dart(),
             self.relay_up_ms.into_into_dart().into_dart(),
             self.relay_trouble.into_into_dart().into_dart(),
+            self.received.into_into_dart().into_dart(),
+            self.link_received.into_into_dart().into_dart(),
+            self.dial_timeout_ms.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -6287,6 +6296,9 @@ impl SseEncode for crate::api::tunnel::TunnelStatus {
         <bool>::sse_encode(self.relay_connected, serializer);
         <u32>::sse_encode(self.relay_up_ms, serializer);
         <crate::api::tunnel::TunnelRelayTrouble>::sse_encode(self.relay_trouble, serializer);
+        <u32>::sse_encode(self.received, serializer);
+        <u32>::sse_encode(self.link_received, serializer);
+        <u32>::sse_encode(self.dial_timeout_ms, serializer);
     }
 }
 

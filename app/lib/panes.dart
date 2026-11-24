@@ -1364,12 +1364,17 @@ class _PaneState extends State<Pane> {
     // a file's viewer fills its header with its details and controls.
     final ownHeader = isChat || pageOfKind(node.leaf.kind) != null;
     final backend = AppScope.of(context);
-    Widget header(String details, List<Widget> controls) => PaneHeader(
+    Widget header(
+      String details,
+      List<Widget> controls, {
+      List<Widget> pinned = const [],
+    }) => PaneHeader(
       drag: PaneDrag(agent.id, node.id),
       glyph: (color) => paneGlyph(agent, node.leaf, color),
       title: paneTitle(node.leaf, backend.workspace.workspace),
       details: details,
       controls: controls,
+      pinned: pinned,
       onClose: widget.onClose,
       focused: widget.focused,
       expanded: widget.expanded,
@@ -1597,6 +1602,7 @@ class PaneHeader extends StatelessWidget {
     required this.title,
     this.details = '',
     this.controls = const [],
+    this.pinned = const [],
     this.onClose,
     this.focused = false,
     this.expanded = false,
@@ -1608,6 +1614,10 @@ class PaneHeader extends StatelessWidget {
   final String title;
   final String details;
   final List<Widget> controls;
+
+  /// After [controls], each as wide as Expand: never clipped as they are
+  /// on a narrow pane; they give way after Expand, before the title.
+  final List<Widget> pinned;
   final VoidCallback? onClose;
 
   /// The pane being read: on touch its header takes `selected`, so moving
@@ -1722,16 +1732,22 @@ class PaneHeader extends StatelessWidget {
             // and × stays whole.
             const least = 14 + Space.s + 24;
             final double close = onClose == null ? 0 : button;
+            final pins = pinned.length * button;
             final withExpand =
                 onExpand != null &&
-                constraints.maxWidth >= least + close + button;
+                constraints.maxWidth >= least + close + button + pins;
+            final expand = withExpand ? button : 0;
+            final withPinned =
+                pinned.isNotEmpty &&
+                constraints.maxWidth >= least + close + expand + pins;
             final withName =
                 constraints.maxWidth >=
-                least + close + (withExpand ? button : 0);
+                least + close + expand + (withPinned ? pins : 0);
             return _headerRow(
               constraints,
               named: withName ? named(withDetails: true) : null,
               withExpand: withExpand,
+              withPinned: withPinned,
               button: button,
               titleRoom: titleRoom,
             );
@@ -1758,6 +1774,7 @@ class PaneHeader extends StatelessWidget {
     BoxConstraints constraints, {
     required Widget? named,
     required bool withExpand,
+    required bool withPinned,
     required double button,
     required double titleRoom,
   }) => Row(
@@ -1774,6 +1791,7 @@ class PaneHeader extends StatelessWidget {
               0,
               constraints.maxWidth -
                   (withExpand ? button : 0) -
+                  (withPinned ? pinned.length * button : 0) -
                   (onClose == null ? 0 : button) -
                   14 -
                   2 * Space.s -
@@ -1796,6 +1814,9 @@ class PaneHeader extends StatelessWidget {
             ),
           ),
         ),
+      if (withPinned)
+        for (final pin in pinned)
+          Padding(padding: const EdgeInsets.only(left: 2), child: pin),
       if (withExpand)
         Padding(
           padding: const EdgeInsets.only(left: 2),

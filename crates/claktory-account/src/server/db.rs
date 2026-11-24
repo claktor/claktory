@@ -228,6 +228,21 @@ CREATE TABLE IF NOT EXISTS apps_sign_outs (
     next_try INTEGER NOT NULL,
     PRIMARY KEY (account_id, account_key)
 ) WITHOUT ROWID;
+-- Each month's usage breakdowns for Charts (#411), published once after
+-- it ends (`stats::publish`): counts only, folded and suppressed as
+-- Fugo's rules say, never an id. Written once: never changed or deleted.
+CREATE TABLE IF NOT EXISTS analytics_months (
+    month TEXT PRIMARY KEY,
+    -- When it was taken, unix seconds: its counts of what Claktories
+    -- last reported are as of then.
+    published_at INTEGER NOT NULL,
+    -- Its rows, as JSON.
+    rows TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS analytics_months_kept BEFORE UPDATE ON analytics_months
+BEGIN SELECT RAISE(ABORT, 'a published month is never changed'); END;
+CREATE TRIGGER IF NOT EXISTS analytics_months_never_deleted BEFORE DELETE ON analytics_months
+BEGIN SELECT RAISE(ABORT, 'a published month is never deleted'); END;
 ";
 
 /// How long a period's id is kept, to know it if it's sent again. A
@@ -973,11 +988,18 @@ pub fn last_release(conn: &Connection, id: &str) -> rusqlite::Result<Option<i64>
     conn.query_row("SELECT max(time) FROM share_releases WHERE claktory_id = ?1", params![id], |row| row.get(0))
 }
 
-pub fn record_release(conn: &Connection, id: &str, now: i64, ip: &str, epoch: u64, mailed: bool) -> rusqlite::Result<()> {
+/// Records a share release; its row, for `release_not_mailed`.
+pub fn record_release(conn: &Connection, id: &str, now: i64, ip: &str, epoch: u64, mailed: bool) -> rusqlite::Result<i64> {
     conn.execute(
         "INSERT INTO share_releases (claktory_id, time, ip, epoch, mailed) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![id, now, ip, epoch as i64, mailed],
     )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// The release `row` was to be emailed, and the email couldn't be sent.
+pub fn release_not_mailed(conn: &Connection, row: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE share_releases SET mailed = 0 WHERE rowid = ?1", params![row])?;
     Ok(())
 }
 

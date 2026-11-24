@@ -12,7 +12,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use factory_protocol::v1;
@@ -39,8 +39,110 @@ const FFMPEG_MEMORY: libc::rlim_t = 2 << 30;
 /// The helper, beside factoryd.
 const HELPER: &str = crate::update::VIDEO_PREVIEW;
 
-/// One video is made at a time, apart from images.
-static MAKING: Mutex<()> = Mutex::new(());
+/// Who a preview is made for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asker {
+    /// A person opening the video, who waits for it.
+    Person,
+    /// `show`, ahead of anyone opening it.
+    Ahead,
+}
+
+/// Previews being made, apart from images'. A person's never waits behind
+/// one made ahead (Bruno 28190): one made ahead runs only while no
+/// person's is waiting or being made, and a person's stops one already
+/// running ahead, which is made again once the person's is done. Running
+/// beside it, even at a lower priority, slowed a person's several times
+/// over, since both share the Mac's video encoder (Sale, 28592). One of each
+/// at a time, and never the same preview twice at once: who asks for one
+/// being made waits for it.
+struct Making {
+    /// Being made: the video's version and the screen.
+    making: Vec<(String, Screen)>,
+    person: bool,
+    ahead: bool,
+    /// People waiting for their turn.
+    waiting: usize,
+    /// The one being made ahead is to stop, for a person's.
+    stop_ahead: bool,
+}
+
+static MAKING: Mutex<Making> = Mutex::new(Making { making: Vec::new(), person: false, ahead: false, waiting: 0, stop_ahead: false });
+/// What `make` says when one made ahead stopped for a person's.
+const STOPPED: &str = "stopped for one someone is waiting for";
+/// How many times one made ahead is started again after it stopped.
+const RESTARTS: usize = 5;
+/// Wakes those waiting for `MAKING` to change.
+static TURNS: Condvar = Condvar::new();
+
+fn making() -> MutexGuard<'static, Making> {
+    MAKING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The turn to make one preview, given back when it's dropped.
+struct Turn {
+    key: (String, Screen),
+    asker: Asker,
+}
+
+impl Turn {
+    /// Waits for the turn to make `key`'s preview for `asker`; None when
+    /// someone else made it meanwhile, kept in `file`.
+    fn take(key: (String, Screen), asker: Asker, file: &Path) -> Option<Turn> {
+        let mut state = making();
+        if asker == Asker::Person {
+            state.waiting += 1;
+        }
+        let turn = loop {
+            let same = state.making.contains(&key);
+            let free = match asker {
+                Asker::Person => !state.person,
+                Asker::Ahead => !state.ahead && !state.person && state.waiting == 0,
+            };
+            if !same && free {
+                break Some(Turn { key: key.clone(), asker });
+            }
+            state = TURNS.wait(state).unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !state.making.contains(&key) && super::header_of(file).is_some() {
+                break None;
+            }
+        };
+        if asker == Asker::Person {
+            state.waiting -= 1;
+        }
+        if let Some(turn) = &turn {
+            state.making.push(turn.key.clone());
+            match asker {
+                Asker::Person => {
+                    state.person = true;
+                    // Never the same preview: that one is waited for.
+                    state.stop_ahead = state.ahead;
+                }
+                Asker::Ahead => state.ahead = true,
+            }
+        }
+        drop(state);
+        // A person who stopped waiting may let one made ahead start.
+        TURNS.notify_all();
+        turn
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let mut state = making();
+        state.making.retain(|key| *key != self.key);
+        match self.asker {
+            Asker::Person => state.person = false,
+            Asker::Ahead => {
+                state.ahead = false;
+                state.stop_ahead = false;
+            }
+        }
+        drop(state);
+        TURNS.notify_all();
+    }
+}
 
 pub(super) fn is_video(mime: &str) -> bool {
     matches!(mime, "video/mp4" | "video/quicktime")
@@ -61,7 +163,7 @@ pub(super) fn helper() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("FACTORY_VIDEO_PREVIEW") {
         return (!path.is_empty()).then(|| PathBuf::from(path));
     }
-    std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join(HELPER))).filter(|beside| beside.is_file())
+    crate::update::beside_backend(HELPER)
 }
 
 fn maker() -> Option<Maker> {
@@ -112,7 +214,7 @@ pub(super) fn read_with(
         Some(header) => header,
         None => {
             let Some(maker) = maker() else { return unavailable() };
-            match make(data, &path, &sha, start.size, screen, &maker) {
+            match make(data, &path, &sha, start.size, screen, &maker, Asker::Person) {
                 Ok(header) => header,
                 Err(why) => {
                     tracing::info!("no preview of {}: {why}", path.display());
@@ -160,15 +262,26 @@ pub(super) fn read_with(
 /// An agent showed a video: its previews for `screens`, made now, when it's
 /// worth one and not too long.
 pub(super) fn ahead(data: &Path, path: &Path, sha: &str, size: u64, screens: &[Screen]) {
+    ahead_with(data, path, sha, size, screens, maker);
+}
+
+/// `ahead`, with `maker` saying what makes previews here.
+fn ahead_with(data: &Path, path: &Path, sha: &str, size: u64, screens: &[Screen], maker: impl FnOnce() -> Option<Maker>) {
     if !worth_it(path, size) || seconds(path).is_none_or(|seconds| seconds > AHEAD_MOST) {
         return;
     }
     let Some(maker) = maker() else { return };
     for screen in screens {
-        if super::header_of(&super::kept_file(data, sha, *screen)).is_none()
-            && let Err(why) = make(data, path, sha, size, *screen, &maker)
-        {
-            tracing::info!("no preview of {}: {why}", path.display());
+        for _ in 0..=RESTARTS {
+            if super::header_of(&super::kept_file(data, sha, *screen)).is_some() {
+                break;
+            }
+            match make(data, path, sha, size, *screen, &maker, Asker::Ahead) {
+                Err(why) if why == STOPPED => continue,
+                Err(why) => tracing::info!("no preview of {}: {why}", path.display()),
+                Ok(_) => {}
+            }
+            break;
         }
     }
 }
@@ -183,11 +296,13 @@ fn worth_it(path: &Path, size: u64) -> bool {
 }
 
 /// Makes and keeps the preview of the video at `path` (version `sha`) for
-/// `screen`; its header. One that isn't smaller than the original is kept
-/// as none needed.
-fn make(data: &Path, path: &Path, sha: &str, size: u64, screen: Screen, maker: &Maker) -> Result<Header, String> {
-    let _making = MAKING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+/// `screen`, for `asker`; its header. One that isn't smaller than the
+/// original is kept as none needed.
+fn make(data: &Path, path: &Path, sha: &str, size: u64, screen: Screen, maker: &Maker, asker: Asker) -> Result<Header, String> {
     let file = super::kept_file(data, sha, screen);
+    let Some(_turn) = Turn::take((sha.to_owned(), screen), asker, &file) else {
+        return super::header_of(&file).ok_or_else(|| "made meanwhile, then gone".to_owned());
+    };
     if let Some(header) = super::header_of(&file) {
         return Ok(header);
     }
@@ -263,7 +378,23 @@ fn make(data: &Path, path: &Path, sha: &str, size: u64, screen: Screen, maker: &
             command
         }
     };
-    let made_it = super::run(&mut command, MAKING_MOST).and_then(|ran| {
+    if asker == Asker::Ahead {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: only setpriority, a system call, between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                // Below a person's, whose preview may be made beside it.
+                libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+                Ok(())
+            });
+        }
+    }
+    let stop = || asker == Asker::Ahead && making().stop_ahead;
+    let ran = super::run_unless(&mut command, MAKING_MOST, &stop);
+    if ran.is_err() && stop() {
+        return Err(STOPPED.to_owned());
+    }
+    let made_it = ran.and_then(|ran| {
         if !ran.status.success() {
             return Err(format!("{}: {}", ran.status, ran.said.trim()));
         }
@@ -489,6 +620,102 @@ mod tests {
         assert_eq!((content.preview(), content.size), (v1::FilePreview::None, start.size));
         let again = read_with(&data, &request, &start, PHONE, || panic!("kept as none needed"));
         assert_eq!(again.preview(), v1::FilePreview::None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Bruno 28190: a person opening a video never waits behind a preview
+    /// made ahead for another video or another screen, nor shares the
+    /// computer with it (Sale, 28592), and one asking for the very preview
+    /// being made ahead gets it once it's done, made once.
+    #[test]
+    fn a_persons_preview_goes_before_those_made_ahead() {
+        let dir = std::env::temp_dir().join(format!("claktory-video-turns-{}", std::process::id()));
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let preview = mp4(10, 900_000, 720, 1280);
+        std::fs::write(dir.join("made.mp4"), &preview).unwrap();
+        // Says when it starts; a video named slow-*, or one for a screen 360
+        // pixels across, waits for a .go file beside the video first.
+        let script = dir.join("slow-helper");
+        let body = format!(
+            "#!/bin/sh\necho \"$(basename \"$1\") $3\" >> '{0}/started'\ncase \"$(basename \"$1\")-$3\" in slow-*|*-360) while [ ! -f \"$1.go\" ]; do sleep 0.02; done;; esac\ncp '{0}/made.mp4' \"$2\"\n",
+            dir.display()
+        );
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let maker = Maker::Helper(script);
+        // Each a video of its own: no two alike.
+        let made = std::sync::atomic::AtomicUsize::new(0);
+        let video = |name: &str| {
+            let path = dir.join(name);
+            let other = made.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::fs::write(&path, mp4(10, 3_000_000 + other, 1080, 1920)).unwrap();
+            path
+        };
+        // Waits for `line` to have started `times` times.
+        let started = |line: &str, times: usize| {
+            for _ in 0..500 {
+                if std::fs::read_to_string(dir.join("started")).is_ok_and(|said| said.lines().filter(|said| *said == line).count() >= times) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("{line} never started {times} times");
+        };
+        let ahead = |path: &Path, screen: Screen| {
+            let (data, path, maker) = (data.clone(), path.to_owned(), maker.clone());
+            std::thread::spawn(move || {
+                let (_, start) = ask(&path, 0, 0);
+                ahead_with(&data, &path, &start.sha256, start.size, &[screen], || Some(maker));
+            })
+        };
+        let open = |path: &Path| {
+            let (request, start) = ask(path, 0, 0);
+            read_with(&data, &request, &start, PHONE, || Some(maker.clone()))
+        };
+        let small = Screen { short: 360, long: 640 };
+
+        // Another video being made ahead: it stops for the person's, which
+        // has the computer to itself, and starts again once it's done.
+        let slow = video("slow-b.mp4");
+        let behind = ahead(&slow, PHONE);
+        started("slow-b.mp4 720", 1);
+        assert_eq!(open(&video("a.mp4")).preview(), v1::FilePreview::Made);
+        started("slow-b.mp4 720", 2);
+        assert!(!behind.is_finished());
+        std::fs::write(slow.with_extension("mp4.go"), "").unwrap();
+        behind.join().unwrap();
+        let slow_kept = crate::previews::kept_file(&data, &ask(&slow, 0, 0).1.sha256, PHONE);
+        assert!(crate::previews::header_of(&slow_kept).is_some(), "made in the end");
+
+        // The same video for another screen: the same.
+        let c = video("c.mp4");
+        let behind = ahead(&c, small);
+        started("c.mp4 360", 1);
+        assert_eq!(open(&c).preview(), v1::FilePreview::Made);
+        started("c.mp4 360", 2);
+        assert!(!behind.is_finished());
+        std::fs::write(c.with_extension("mp4.go"), "").unwrap();
+        behind.join().unwrap();
+
+        // The very preview being made ahead: waited for, and made once.
+        let d = video("slow-d.mp4");
+        let behind = ahead(&d, PHONE);
+        started("slow-d.mp4 720", 1);
+        let opening = {
+            let (data, d, maker) = (data.clone(), d.clone(), maker.clone());
+            std::thread::spawn(move || {
+                let (request, start) = ask(&d, 0, 0);
+                read_with(&data, &request, &start, PHONE, || Some(maker)).preview()
+            })
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!opening.is_finished(), "it waits for the one being made");
+        std::fs::write(d.with_extension("mp4.go"), "").unwrap();
+        behind.join().unwrap();
+        assert_eq!(opening.join().unwrap(), v1::FilePreview::Made);
+        let runs = std::fs::read_to_string(dir.join("started")).unwrap();
+        assert_eq!(runs.lines().filter(|line| line.starts_with("slow-d.mp4")).count(), 1, "{runs}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

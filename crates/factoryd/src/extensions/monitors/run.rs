@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use factory_agent::{Event, EventSource};
+use factory_agent::{Event, EventSource, SecretVariable};
+use zeroize::Zeroizing;
 use serde::{Deserialize, Serialize};
 
 use super::when::{self, FireOn, MINUTE, Repeat, SECOND, When};
@@ -131,6 +132,8 @@ pub(super) struct Live {
     batch: Vec<String>,
     batch_bytes: usize,
     last_line: i64,
+    /// When a check's use of its secrets was last logged in the vault.
+    secrets_logged: Option<i64>,
 }
 
 /// A file's size and modification time, by path.
@@ -396,10 +399,12 @@ enum CheckRun {
     },
     /// It couldn't run, or timed out.
     Failed(String),
+    /// Not run, its secrets held from its agent for now (`hold`).
+    Held(Hold),
 }
 
 fn check(factory: &Arc<Factory>, monitor: &Monitor, agent: &Agent, now: i64) {
-    let When::Check { command, .. } = &monitor.when else { return };
+    let When::Check { command, secrets, .. } = &monitor.when else { return };
     if monitor.next_due.is_some_and(|due| due > now) || (monitor.idle_only && agent.running) {
         return;
     }
@@ -417,8 +422,15 @@ fn check(factory: &Arc<Factory>, monitor: &Monitor, agent: &Agent, now: i64) {
     let factory = factory.clone();
     let (agent_id, id, command, folder) = (monitor.agent.clone(), monitor.id, command.clone(), agent.folder.clone());
     let since = monitor.last_fired.unwrap_or(monitor.created) / 1000;
+    let (secrets, own) = (secrets.clone(), monitor.created_by == monitor.agent);
+    let dir = secrets_dir(&factory, monitor);
+    let path = crate::update::agents_path(&factory.home);
     tokio::spawn(async move {
-        let run = run_check(&folder, &command, since).await;
+        let run = if secrets.is_empty() {
+            run_check(&folder, &command, since, &path, &[]).await
+        } else {
+            run_with_secrets(&factory, &agent_id, id, &command, &secrets, own, (&folder, dir), since).await
+        };
         if let Some(live) = factory.monitors.live().get_mut(&(agent_id.clone(), id)) {
             live.checking = false;
         }
@@ -428,14 +440,206 @@ fn check(factory: &Arc<Factory>, monitor: &Monitor, agent: &Agent, now: i64) {
     });
 }
 
+/// Where a check's file secrets are while its command runs.
+fn secrets_dir(factory: &Factory, monitor: &Monitor) -> PathBuf {
+    factory.home.agent_dir(&monitor.agent).join("monitors").join(format!("m{}.secrets", monitor.id))
+}
+
+/// Why a check with secrets can't run for its agent now, though nothing
+/// is wrong with the check itself: it has read a web page (or what a pipe
+/// brought), so each of its commands with a secret needs the person's
+/// approval, which a check would go around (the files its command runs can
+/// have been changed since); or it's contained (a pipe's liaison, a
+/// curator), which has no secrets. Refused while it's set; held, not
+/// failed, while it runs, until that ends.
+pub(super) enum Hold {
+    Read(String),
+    Contained,
+}
+
+pub(super) fn hold(factory: &Factory, agent: &str) -> Option<Hold> {
+    if factory.pipes.contained(agent) {
+        return Some(Hold::Contained);
+    }
+    (!factory.pipes.tainted(agent).is_empty()).then(|| Hold::Read(crate::pipes::agents::what_was_read(factory, agent)))
+}
+
+/// The vault's secrets a check names, for its agent; or why it can't have
+/// them, in words for the agent: when one isn't granted to it, or asks the
+/// person each time (nobody is there to ask when a check runs), and when
+/// it's set while it's held (`hold`).
+pub(super) fn resolve_secrets(factory: &Factory, agent: &str, names: &[String]) -> Result<Vec<SecretVariable>, String> {
+    let person = factory.lock().config.person().to_owned();
+    match hold(factory, agent) {
+        Some(Hold::Read(what)) => {
+            return Err(format!(
+                "You've read {what}, so each command with a secret needs {person}'s approval, and nobody is there to give it when a check runs. Until your conversation is cleared, use secrets with bash, which asks."
+            ));
+        }
+        Some(Hold::Contained) => {
+            return Err("You're limited to a pipe's work (a liaison or a curator), so you have no secrets, and neither can your checks.".to_owned());
+        }
+        None => {}
+    }
+    let asks = |asking: Vec<String>| {
+        format!(
+            "{} asks {person} each time it's used, and nobody is there to ask when a check runs, so a check can't use it. Use it with bash, which asks, or {person} can turn Ask each time off for it in Settings → Secrets.",
+            asking.join(", ")
+        )
+    };
+    let asking = factory.vault.asking(names);
+    if !asking.is_empty() {
+        return Err(asks(asking));
+    }
+    let variables = factory.vault.resolve(agent, names)?;
+    // Turned on meanwhile.
+    let asking = factory.vault.asking(names);
+    if !asking.is_empty() {
+        return Err(asks(asking));
+    }
+    Ok(variables)
+}
+
+/// Runs a check's command with the secrets it names, as bash runs a
+/// command with them: their variables in its environment alone, a file
+/// secret in a file (0600, in a 0700 folder) removed when it ends, and
+/// every value hidden in its output before anything keeps or shows it.
+/// Only the monitor's agent can have set it (`own`). Each run's use is
+/// logged in the vault at most once an hour.
+#[allow(clippy::too_many_arguments)]
+async fn run_with_secrets(
+    factory: &Arc<Factory>,
+    agent: &str,
+    id: u32,
+    command: &str,
+    names: &[String],
+    own: bool,
+    (folder, dir): (&Path, PathBuf),
+    since: i64,
+) -> CheckRun {
+    if !own {
+        return CheckRun::Failed("only its own agent can set a check that uses secrets".to_owned());
+    }
+    // Before anything is unlocked, resolved or logged.
+    if let Some(hold) = hold(factory, agent) {
+        return CheckRun::Held(hold);
+    }
+    // Locked after a restart: the account service may open it now.
+    crate::account::unlock_now(factory).await;
+    // Secrets made from a connection are renewed first when due.
+    let resolved = match factory.renew_for(agent, names).await {
+        Ok(()) => resolve_secrets(factory, agent, names),
+        Err(error) => Err(error),
+    };
+    let variables = match resolved {
+        Ok(variables) => variables,
+        Err(reason) => return CheckRun::Failed(format!("its secrets couldn't be had: {reason}")),
+    };
+    let files = SecretFiles(dir);
+    let environment = match files.environment(&variables) {
+        Ok(environment) => environment,
+        Err(error) => return CheckRun::Failed(format!("its secrets' files couldn't be written: {error}")),
+    };
+    let now = factory.monitors.now();
+    let log = factory.monitors.live().get_mut(&(agent.to_owned(), id)).is_some_and(|live| {
+        let due = live.secrets_logged.is_none_or(|logged| now - logged >= 60 * MINUTE);
+        if due {
+            live.secrets_logged = Some(now);
+        }
+        due
+    });
+    if log {
+        let used = factory_agent::SecretUse {
+            agent: agent.to_owned(),
+            secrets: names.to_vec(),
+            command: format!("Monitor m{id}: {command}"),
+            task: None,
+            started: u64::try_from(now).unwrap_or_default(),
+        };
+        if let Err(error) = factory.vault.record_use(&used) {
+            tracing::error!(%error, "could not log a secret's use");
+        }
+        factory.broadcast_workspace(&factory.lock());
+    }
+    let run = run_check(folder, command, since, &crate::update::agents_path(&factory.home), &environment).await;
+    drop(environment);
+    drop(files);
+    let CheckRun::Ran { code, output } = run else { return run };
+    let redactor = factory.redaction.current().with(&variables);
+    // Cut at the most it reads, its end may be part of a value: that goes.
+    let output = if output.len() as u64 >= CHECK_OUTPUT {
+        let mut keep = output.len().saturating_sub(redactor.longest());
+        while !output.is_char_boundary(keep) {
+            keep -= 1;
+        }
+        format!("{}\n[the rest cut]", &output[..keep])
+    } else {
+        output
+    };
+    CheckRun::Ran { code, output: redactor.redact(&output).into_owned() }
+}
+
+/// A check's folder of file secrets, removed when the run is over, and
+/// before it's made, in case a run before was cut short.
+struct SecretFiles(PathBuf);
+
+impl SecretFiles {
+    /// The secrets' variables, file ones as their files' paths.
+    fn environment(&self, variables: &[SecretVariable]) -> std::io::Result<Vec<(String, Zeroizing<String>)>> {
+        use std::io::Write as _;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        self.remove();
+        let mut environment = Vec::with_capacity(variables.len());
+        let mut made = false;
+        for (index, variable) in variables.iter().enumerate() {
+            if !variable.file {
+                environment.push((variable.variable.clone(), variable.value.clone()));
+                continue;
+            }
+            if !made {
+                if let Some(parent) = self.0.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::DirBuilder::new().mode(0o700).create(&self.0)?;
+                made = true;
+            }
+            let safe = !variable.variable.is_empty() && variable.variable.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+            let name = if safe { variable.variable.clone() } else { format!("secret-{index}") };
+            let path = self.0.join(name);
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+            file.write_all(&variable.bytes())?;
+            environment.push((variable.variable.clone(), Zeroizing::new(path.display().to_string())));
+        }
+        Ok(environment)
+    }
+
+    fn remove(&self) {
+        match std::fs::remove_dir_all(&self.0) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                tracing::warn!(dir = %self.0.display(), %error, "could not remove a check's secret files");
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Drop for SecretFiles {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
 /// Runs a check's command in the agent's folder, as bash runs commands,
 /// with FACTORY_MONITOR_LAST_FIRED set to when the monitor last fired (or
-/// was set), in seconds since 1970.
-async fn run_check(folder: &Path, command: &str, last_fired: i64) -> CheckRun {
+/// was set), in seconds since 1970, the agents' PATH (`path`) and
+/// `environment` (its secrets', which win).
+async fn run_check(folder: &Path, command: &str, last_fired: i64, path: &str, environment: &[(String, Zeroizing<String>)]) -> CheckRun {
     use tokio::io::AsyncReadExt;
     let spawned = tokio::process::Command::new("bash")
         .args(["--noprofile", "--norc", "-o", "pipefail", "-c", &format!("exec 2>&1\n{command}")])
         .env("FACTORY_MONITOR_LAST_FIRED", last_fired.to_string())
+        .env("PATH", path)
+        .envs(environment.iter().map(|(name, value)| (name, value.as_str())))
         .current_dir(folder)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -475,7 +679,29 @@ fn checked(factory: &Arc<Factory>, agent: &str, id: u32, run: CheckRun) -> rusql
     let When::Check { every, fire_on, pattern, repeat, .. } = monitor.when.clone() else { return Ok(()) };
     let now = factory.monitors.now();
     monitor.next_due = Some(now + every);
+    let held = std::mem::take(&mut monitor.cursor.held);
     let (code, output) = match run {
+        CheckRun::Held(hold) => {
+            // Not a failure: it carries on by itself once that ends. Told once.
+            monitor.cursor.held = true;
+            save(&factory.store, &monitor, now, "", None, true)?;
+            if !held {
+                let until = match hold {
+                    Hold::Read(what) => format!("you've read {what}, so it doesn't run with its secrets until your conversation is cleared"),
+                    Hold::Contained => {
+                        let person = factory.lock().config.person().to_owned();
+                        format!("you're limited to a pipe's work, so it doesn't run with its secrets until {person} lifts that")
+                    }
+                };
+                notice(
+                    factory,
+                    &monitor,
+                    "held",
+                    format!("Monitor m{} \"{}\" is held: {until}. Then it carries on by itself.", monitor.id, monitor.name),
+                );
+            }
+            return Ok(());
+        }
         CheckRun::Failed(reason) => {
             monitor.cursor.failures += 1;
             if monitor.cursor.failures >= CHECK_FAILURES {
@@ -696,7 +922,8 @@ fn watch(
                 let _ = std::fs::create_dir_all(dir);
             }
             let processes = factory.monitors.processes();
-            match factory_agent::tools::bash::spawn_detached(&agent.folder, command, &log) {
+            let environment = [("PATH".to_owned(), crate::update::agents_path(&factory.home))];
+            match factory_agent::tools::bash::spawn_detached(&agent.folder, command, &log, &environment) {
                 Ok((mut child, pid)) => {
                     // Reaped here; whether it runs is read from its group and status file.
                     tokio::spawn(async move {

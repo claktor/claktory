@@ -240,6 +240,21 @@ A rule fits when all of the conditions it has hold:
   check what an agent was told (a pipe's "# Pipes" section, say). The full log
   is the `model_log` file that `up` names.
 
+- **OpenRouter's model list:** qa-model also serves the list factoryd
+  fetches from OpenRouter (Settings → Providers' **Refresh models**, and the
+  monitor that reads it every few hours), so no real OpenRouter is needed.
+  Without a file it's a built-in list of 56 models (`qa/model-01` … `qa/model-55`
+  and the sandbox's own `openai/gpt-4.1-mini`). To change it, write
+  `openrouter-models.json` in the sandbox's folder (`up` names it as
+  `openrouter_models`) as OpenRouter answers, `{"data": [{"id", "name",
+  "context_length", "architecture": {"output_modalities": ["text"]},
+  "supported_parameters": ["tools"]}, …]}`; it's read again at every fetch,
+  so add or remove a model between two refreshes. factoryd keeps a list
+  only when it has 50 models agents can run on (taking tools, answering in
+  text), so keep at least that many, or remove some below 50 to see a broken
+  list kept out. Needs a factoryd built by `scripts/qa.sh` (the QA build),
+  from a commit that has this.
+
 **Careful:** the tools a script calls run for real, as you, on this computer
 (`bash` included), so keep the commands harmless, or run the sandbox in a
 container (next section). qa-model itself reaches nothing.

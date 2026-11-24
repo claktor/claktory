@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:factory_app/loopback_forward.dart';
 import 'package:factory_app/backend.dart';
+import 'package:factory_app/background_grace.dart';
 import 'package:factory_app/connection.dart';
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -31,6 +32,9 @@ TunnelStatus tunnelStatus({
   bool relay = true,
   int relayUpMs = 0,
   TunnelRelayTrouble trouble = TunnelRelayTrouble.none,
+  int received = 0,
+  int linkReceived = 0,
+  int dialTimeoutMs = 0,
 }) => TunnelStatus(
   phase: phase,
   path: path,
@@ -39,6 +43,9 @@ TunnelStatus tunnelStatus({
   relayConnected: relay,
   relayUpMs: relayUpMs,
   relayTrouble: trouble,
+  received: received,
+  linkReceived: linkReceived,
+  dialTimeoutMs: dialTimeoutMs,
 );
 
 /// A tunnel that's a local port: whatever listens there stands for the
@@ -451,6 +458,95 @@ void main() {
     await server.close(force: true);
   });
 
+  test('back within the grace the device kept it running, it only checks '
+      'the connection (#413); after it, or with none, it reconnects', () async {
+    addTearDown(() => BackgroundGrace.debugKind = null);
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var hellos = 0;
+    var checks = 0;
+    var answer = true;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.listen((frame) {
+        final message = ClientMessage.fromBuffer(frame as List<int>);
+        if (message.hasHello()) {
+          hellos++;
+          socket.add(
+            ServerMessage(
+              replyTo: message.id,
+              welcome: Welcome(serverVersion: 'test'),
+            ).writeToBuffer(),
+          );
+        } else if (message == ClientMessage(id: message.id)) {
+          checks++;
+          if (answer) {
+            // As factoryd answers a message it doesn't know.
+            socket.add(
+              ServerMessage(
+                replyTo: message.id,
+                error: Error(
+                  code: ErrorCode.ERROR_CODE_UNKNOWN_MESSAGE,
+                  message: 'unknown message',
+                ),
+              ).writeToBuffer(),
+            );
+          }
+        }
+      });
+    });
+    final tunnels = FakeTunnels(FakeTunnel(server.port));
+    final backend = backendWith(tunnels)..deviceKey = (_) => 'k' * 64;
+    backend.answerWithin = const Duration(milliseconds: 300);
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    Future<void> until(bool Function() done) async {
+      for (var i = 0; i < 150 && !done(); i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(done(), isTrue);
+    }
+
+    await until(() => backend.connected.value);
+    final later = DateTime.now().add(const Duration(seconds: 10));
+
+    // Android keeps the app running: 10 s away is only checked, and the
+    // answer leaves the connection as it was.
+    BackgroundGrace.debugKind = GraceKind.timed;
+    backend.hidden();
+    backend.resumed(now: later);
+    expect(backend.reconnecting.value, isFalse);
+    expect(tunnels.tunnel.reconnects, 0);
+    await until(() => checks == 1);
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    expect(hellos, 1);
+    expect(backend.connected.value, isTrue);
+
+    // A check that goes unanswered reconnects, as before the grace.
+    answer = false;
+    backend.hidden();
+    backend.resumed(now: later);
+    await until(() => checks == 2);
+    await until(() => hellos == 2 && backend.connected.value);
+    expect(tunnels.tunnel.reconnects, 1);
+    answer = true;
+
+    // Past the grace, it reconnects at once.
+    backend.hidden();
+    backend.resumed(now: DateTime.now().add(const Duration(seconds: 30)));
+    expect(tunnels.tunnel.reconnects, 2);
+    await until(() => hellos == 3 && backend.connected.value);
+
+    // On iOS, only when iOS gave the time: here it never said it did.
+    BackgroundGrace.debugKind = GraceKind.native;
+    backend.hidden();
+    backend.resumed(now: later);
+    expect(tunnels.tunnel.reconnects, 3);
+    await until(() => hellos == 4 && backend.connected.value);
+    expect(checks, 2);
+    await backend.close();
+    await server.close(force: true);
+  });
+
   test('back from the background, it reconnects at once and quietly', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     var hellos = 0;
@@ -580,6 +676,136 @@ void main() {
       await fine.close(force: true);
     },
   );
+
+  test('a try that runs out of time gives the next longer, up to three '
+      'times as long; welcomed, the first again (#413)', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var welcoming = false;
+    // How long each connection the app gave up on stayed open.
+    final held = <Duration>[];
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      final opened = DateTime.now();
+      socket.listen(
+        (frame) {
+          final message = ClientMessage.fromBuffer(frame as List<int>);
+          if (message.hasHello() && welcoming) {
+            socket.add(
+              ServerMessage(
+                replyTo: message.id,
+                welcome: Welcome(serverVersion: 'test'),
+              ).writeToBuffer(),
+            );
+          }
+        },
+        onDone: () {
+          if (!welcoming) held.add(DateTime.now().difference(opened));
+        },
+      );
+    });
+    final backend = backendWith(FakeTunnels(FakeTunnel(server.port)))
+      ..deviceKey = ((_) => 'k' * 64)
+      ..connectWithin = const Duration(milliseconds: 300);
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    Future<void> until(bool Function() done) async {
+      for (var i = 0; i < 400 && !done(); i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(done(), isTrue);
+    }
+
+    await until(() => held.length >= 4);
+    final ms = [for (final each in held.take(4)) each.inMilliseconds];
+    expect(ms[0], inInclusiveRange(250, 500), reason: '$ms');
+    expect(ms[1], inInclusiveRange(550, 800), reason: '$ms');
+    expect(ms[2], inInclusiveRange(850, 1100), reason: '$ms');
+    expect(ms[3], inInclusiveRange(850, 1100), reason: '$ms');
+    welcoming = true;
+    await until(() => backend.connected.value);
+    // Welcomed: the next that runs out of time had the first window.
+    welcoming = false;
+    held.clear();
+    backend.networkMoved();
+    await until(() => held.length >= 2);
+    expect(held[1].inMilliseconds, inInclusiveRange(250, 500), reason: '$held');
+    await backend.close();
+    await server.close(force: true);
+  });
+
+  test('a Welcome slower than its window is waited for while the '
+      "tunnel's link still answers, and one try does (#413)", () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var hellos = 0;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.listen((frame) async {
+        final message = ClientMessage.fromBuffer(frame as List<int>);
+        if (!message.hasHello()) return;
+        hellos++;
+        // Behind everything else on a weak link.
+        await Future<void>.delayed(const Duration(milliseconds: 1500));
+        socket.add(
+          ServerMessage(
+            replyTo: message.id,
+            welcome: Welcome(serverVersion: 'test'),
+          ).writeToBuffer(),
+        );
+      });
+    });
+    final backend = backendWith(FakeTunnels(_AnsweringLink(server.port)))
+      ..deviceKey = ((_) => 'k' * 64)
+      ..connectWithin = const Duration(milliseconds: 300);
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    for (var i = 0; i < 150 && !backend.connected.value; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    expect(backend.connected.value, isTrue);
+    expect(hellos, 1);
+    await backend.close();
+    await server.close(force: true);
+  });
+
+  test("through a tunnel, a try waits at least as long as the tunnel's "
+      'dial has, and a little more (#413)', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    // The connection comes slowly: the tunnel still dialing.
+    server.listen((request) async {
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.listen((frame) {
+        final message = ClientMessage.fromBuffer(frame as List<int>);
+        if (message.hasHello()) {
+          socket.add(
+            ServerMessage(
+              replyTo: message.id,
+              welcome: Welcome(serverVersion: 'test'),
+            ).writeToBuffer(),
+          );
+        }
+      });
+    });
+    final tunnel = FakeTunnel(server.port)
+      ..status = tunnelStatus(dialTimeoutMs: 500);
+    final backend = backendWith(FakeTunnels(tunnel))
+      ..deviceKey = ((_) => 'k' * 64)
+      // Shorter than the slow connection: it'd never connect on its own.
+      ..connectWithin = const Duration(milliseconds: 200);
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    final began = DateTime.now();
+    for (var i = 0; i < 100 && !backend.connected.value; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    expect(backend.connected.value, isTrue);
+    expect(
+      DateTime.now().difference(began),
+      lessThan(const Duration(milliseconds: 1500)),
+    );
+    await backend.close();
+    await server.close(force: true);
+  });
 
   test('in the background, a dropped connection waits for the app to be '
       'back: no reconnect, no new tunnel, no tries meanwhile', () async {
@@ -987,4 +1213,15 @@ void main() {
     expect(find.text('Private and encrypted.'), findsOneWidget);
     expect(find.textContaining('relay'), findsNothing);
   });
+}
+
+/// A tunnel whose link keeps answering: its own traffic arrives at every
+/// read, as QUIC's acknowledgements and heartbeats do.
+class _AnsweringLink extends FakeTunnel {
+  _AnsweringLink(super.port);
+
+  var _link = 0;
+
+  @override
+  TunnelStatus get status => tunnelStatus(linkReceived: _link += 100);
 }

@@ -80,6 +80,104 @@ void main() {
     expect(voice.folder.existsSync(), isFalse);
   });
 
+  test("a recording's folder left empty (the app closed while recording, "
+      "Sale's row 86) is swept after a minute, at a launch or when a "
+      'recording starts; one just made stays', () async {
+    Directory empty(String id, {bool old = true}) {
+      final folder = Directory('${kept.path}/$id')..createSync();
+      if (old) {
+        // Two minutes old.
+        final at = DateTime.now().subtract(const Duration(minutes: 2));
+        String two(int n) => n.toString().padLeft(2, '0');
+        Process.runSync('touch', [
+          '-t',
+          '${at.year}${two(at.month)}${two(at.day)}${two(at.hour)}'
+              '${two(at.minute)}.${two(at.second)}',
+          folder.path,
+        ]);
+      }
+      return folder;
+    }
+
+    final left = empty('1');
+    final fresh = empty('2', old: false);
+    final recording = empty('3');
+    File('${recording.path}/Voice.m4a').writeAsBytesSync([1, 2, 3]);
+    await sweepEmptyRecordings();
+    expect(left.existsSync(), isFalse);
+    expect(fresh.existsSync(), isTrue, reason: 'maybe starting now');
+    expect(recording.existsSync(), isTrue, reason: 'maybe recording now');
+
+    final backend = Backend(
+      workspace: WorkspaceStore(),
+      transcript: TranscriptStore(),
+      explorer: ExplorerStore(),
+      extensionView: ExtensionViewStore(),
+      localPairing: () async => null,
+    );
+    addTearDown(backend.close);
+    final atLaunch = empty('4');
+    await KeptVoices.of(backend).load(keptClaktoryKey(null));
+    expect(atLaunch.existsSync(), isFalse);
+    expect(fresh.existsSync(), isTrue);
+    expect(recording.existsSync(), isTrue);
+  });
+
+  test('a voice message keeps its typed text and files, and a voice note '
+      'left in its box goes back to the box after a relaunch (#425)', () async {
+    final backend = Backend(
+      workspace: WorkspaceStore(),
+      transcript: TranscriptStore(),
+      explorer: ExplorerStore(),
+      extensionView: ExtensionViewStore(),
+      localPairing: () async => null,
+    );
+    addTearDown(backend.close);
+    final sent = keep('1', kind: KeptKind.agent, target: 'june', save: false)
+      ..text = 'Look at the login page'
+      ..files = [
+        const KeptFile(
+          path: '/tmp/shot.png',
+          name: 'shot.png',
+          size: 9,
+          uploadId: 'upload-shot',
+        ),
+      ];
+    await sent.save();
+    final read = KeptVoice.read(sent.folder)!;
+    expect(read.text, 'Look at the login page');
+    expect(read.files.single.uploadId, 'upload-shot');
+    expect(read.draft, isFalse);
+    final note = keep('2', kind: KeptKind.agent, target: 'mike', save: false)
+      ..draft = true;
+    await note.save();
+    final chatNote = keep(
+      '3',
+      kind: KeptKind.chat,
+      target: 'chat:c1',
+      save: false,
+    )..draft = true;
+    await chatNote.save();
+
+    await KeptVoices.of(backend).load(keptClaktoryKey(null));
+    final message = backend.outbox.of('june').single;
+    expect(message.text, 'Look at the login page');
+    expect(message.files.map((file) => file.uploadId), [
+      'upload-1',
+      'upload-shot',
+    ]);
+    final notes = VoiceNotes.of(backend);
+    expect(notes.note('mike')?.clientId, 'client-2');
+    expect(notes.note('chat:c1')?.clientId, 'client-3');
+    expect(backend.outbox.of('mike'), isEmpty, reason: 'not sent');
+    expect(backend.chatOutbox.of('chat:c1'), isEmpty);
+    expect(await keptVoiceCount(keptClaktoryKey(null)), 3);
+
+    // Taken out of its box, gone from the device.
+    await notes.discard('mike');
+    expect(note.folder.existsSync(), isFalse);
+  });
+
   test('a record whose recording is gone, or that names a file elsewhere, '
       'is no recording', () {
     final gone = keep('1');

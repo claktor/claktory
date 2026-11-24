@@ -10,6 +10,7 @@ import 'controls.dart';
 import 'identity.dart';
 import 'mobile/metrics.dart';
 import 'resources.dart' show formatBytes;
+import 'visible_codes.dart' show shownName;
 
 /// A file on this device, to send with a message.
 class LocalFile {
@@ -298,7 +299,7 @@ class AttachmentChip extends StatelessWidget {
                 const SizedBox(width: Space.xs + 2),
                 Flexible(
                   child: Text(
-                    name,
+                    shownName(name),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: (phone ? type.secondary : TextStyles.label).copyWith(

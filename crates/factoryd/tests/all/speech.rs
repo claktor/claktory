@@ -435,7 +435,8 @@ async fn voice_messages_need_the_model_and_fail_without_it() {
         attachments: vec![said.clone()],
         ..Default::default()
     });
-    assert_eq!(refusal(&client.request(typed).await.body), "A voice message has no text: its words come from the recording.");
+    // Typed text with it (#425) changes nothing: it needs the model too.
+    assert_eq!(refusal(&client.request(typed).await.body), "Voice messages need the speech model. Download it first.");
 
     // Removed while one waits: it fails, saying so.
     until(&mut client, Request::InstallSpeechModel(v1::InstallSpeechModel {}), |model| model.state() == State::Ready).await;
@@ -1038,4 +1039,124 @@ async fn a_message_sent_again_is_delivered_once() {
         .await;
     seen.follow(&mut client, |seen| seen.settled(&id)).await;
     assert_eq!((delivered("Plan the week."), delivered("And Friday."), delivered("Done.")), (1, 1, 1));
+}
+
+/// #425: what the person typed or pasted and a voice note go as one
+/// message: it waits with the typed text, the agent reads the typed text,
+/// then the words heard after "Voice note: ", and the transcript keeps the
+/// two apart. Failed, nothing typed is lost; a chat takes them alike.
+#[tokio::test]
+async fn typed_text_and_a_voice_note_go_as_one_message() {
+    let dir = temp_dir();
+    let models = Scripted::signed_in();
+    let requests = models.requests.clone();
+    let (_factory, mut client, mut view, _server) = ready(&dir, models).await;
+    let typed = "Notes from the call:\n- budget is fine";
+    let said = "Ship it on Friday.";
+    let whole = format!("{typed}\n\nVoice note: {said}");
+
+    // It waits with what was typed, the recording first and a file after.
+    let recorded = recording(&dir, "ops", "Voice.m4a", &format!("wait {said}"));
+    let notes = v1::Attachment { mime: "text/plain".into(), ..recording(&dir, "ops", "notes.txt", "agenda") };
+    let send = Request::SendMessage(v1::SendMessage {
+        agent_id: "ops".into(),
+        text: format!("  {typed}\n"),
+        voice: true,
+        attachments: vec![recorded.clone(), notes],
+        client_id: "c1".into(),
+        ..Default::default()
+    });
+    apply_request(&mut client, &mut view, send.clone()).await;
+    view.follow(&mut client, |view| view.queued.as_ref().is_some_and(|queued| !queued.messages.is_empty())).await;
+    let waiting = view.queued.as_ref().expect("the queue").messages[0].clone();
+    assert_eq!((waiting.text.as_str(), waiting.typed.as_str()), (typed, typed));
+    assert_eq!(waiting.transcription.as_ref().map(|it| it.state()), Some(v1::TranscriptionState::Pending));
+    assert_eq!(waiting.attachments.len(), 2);
+
+    // Heard: one message, the typed text first; the entry keeps both parts.
+    std::fs::write(format!("{}.go", recorded.path), "").expect("go");
+    view.follow(&mut client, |view| voice_entry(view, &whole).is_some() && idle(view)).await;
+    let user = view
+        .entries
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            Some(Kind::User(user)) if user.text == whole => Some(user.clone()),
+            _ => None,
+        })
+        .expect("the message");
+    assert_eq!((user.typed.as_str(), user.heard.as_str()), (typed, said));
+    assert_eq!(user.voice.as_ref().map(|it| (it.state(), it.duration_ms)), Some((v1::TranscriptionState::Done, 41_200)));
+    assert_eq!(user.attachments.iter().map(|it| it.name.as_str()).collect::<Vec<_>>(), ["Voice.m4a", "notes.txt"]);
+    let prompt = requests.lock().expect("lock").last().map(|request| request.prompt.clone()).expect("a request");
+    assert!(prompt.contains(&format!(" voice=\"42s\">\n{whole}")), "{prompt}");
+    assert!(prompt.contains("notes.txt"), "the file comes as usual: {prompt}");
+    // Sent again (its answer lost): delivered once.
+    assert!(matches!(client.request(send).await.body, Body::Ack(_)));
+    assert_eq!(requests.lock().expect("lock").iter().filter(|request| request.prompt.contains(said)).count(), 1);
+
+    // Nothing heard: it fails, keeping what was typed, even when it's short
+    // (alone, that would vanish); tried again, it goes through.
+    let silent = recording(&dir, "ops", "Voice 2.m4a", "silent 1000");
+    let send = Request::SendMessage(v1::SendMessage {
+        agent_id: "ops".into(),
+        text: "Keep this.".into(),
+        voice: true,
+        attachments: vec![silent.clone()],
+        ..Default::default()
+    });
+    apply_request(&mut client, &mut view, send).await;
+    view.follow(&mut client, |view| queued(view) == [("Keep this.".to_owned(), Some(v1::TranscriptionState::Failed))]).await;
+    let failed = view.queued.as_ref().expect("the queue").messages[0].clone();
+    assert_eq!(failed.typed, "Keep this.");
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("factory.db");
+    let (text, kept): (String, String) =
+        db.query_row("SELECT text, voice FROM messages WHERE id = ?1", [failed.id], |row| Ok((row.get(0)?, row.get(1)?))).expect("kept");
+    assert_eq!(text, "Keep this.");
+    assert!(kept.contains("\"typed\":\"Keep this.\"") && kept.contains("\"failed\""), "{kept}");
+    std::fs::write(&silent.path, "And this.").expect("rerecorded");
+    let retry = Request::RetryVoiceMessage(v1::RetryVoiceMessage { agent_id: "ops".into(), message_id: failed.id });
+    apply_request(&mut client, &mut view, retry).await;
+    view.follow(&mut client, |view| voice_entry(view, "Keep this.\n\nVoice note: And this.").is_some() && idle(view)).await;
+
+    // A voice message alone is as before: its text is what was heard.
+    apply_request(&mut client, &mut view, voice("ops", recording(&dir, "ops", "Voice 3.m4a", "Just this."))).await;
+    view.follow(&mut client, |view| voice_entry(view, "Just this.").is_some() && idle(view)).await;
+    let alone = view.entries.iter().find_map(|entry| match &entry.kind {
+        Some(Kind::User(user)) if user.text == "Just this." => Some(user.clone()),
+        _ => None,
+    });
+    assert_eq!(alone.map(|user| (user.typed, user.heard)), Some((String::new(), String::new())));
+
+    // A chat: the same, and still no files but the recording.
+    let mut seen = ChatSeen { workspace: view.workspace.clone(), ..ChatSeen::default() };
+    let settings =
+        v1::UpdateSettings { default_model: Some(crate::common::MODEL.into()), default_effort: Some("off".into()), ..Default::default() };
+    seen.request(&mut client, Request::UpdateSettings(settings)).await;
+    seen.request(&mut client, Request::CreateChat(v1::CreateChat::default())).await;
+    let id = seen.workspace.chats.first().expect("the chat").id.clone();
+    let recorded = upload_for_chat(&mut client, &id, "Voice.m4a", "Plan it.").await;
+    let extra = upload_for_chat(&mut client, &id, "Voice 2.m4a", "More.").await;
+    let both = v1::SendChatMessage {
+        chat_id: id.clone(),
+        text: "From my notes.".into(),
+        voice: true,
+        attachments: vec![recorded.clone(), extra],
+        ..Default::default()
+    };
+    assert_eq!(refusal(&client.request(Request::SendChatMessage(both)).await.body), "A voice message carries one recording.");
+    let one = v1::SendChatMessage {
+        chat_id: id.clone(),
+        text: "From my notes.".into(),
+        voice: true,
+        attachments: vec![recorded],
+        ..Default::default()
+    };
+    seen.request(&mut client, Request::SendChatMessage(one)).await;
+    seen.follow(&mut client, |seen| seen.settled(&id) && seen.chat(&id).is_some_and(|chat| !chat.title.is_empty())).await;
+    let read = requests
+        .lock()
+        .expect("lock")
+        .iter()
+        .any(|request| request.system_prompt.starts_with("You're a chat") && request.prompt.contains("From my notes.\n\nVoice note: Plan it."));
+    assert!(read, "the chat reads both");
 }

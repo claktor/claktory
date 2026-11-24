@@ -115,6 +115,7 @@ pub(crate) async fn serve_stream<S: Stream>(
     let kind;
     let workspace_patches;
     let workspace_revision;
+    let held_transcript: (String, String);
     let (platform, app_version);
     let hello_id = loop {
         let frame = socket.next().await;
@@ -133,6 +134,7 @@ pub(crate) async fn serve_stream<S: Stream>(
         kind = hello.device_kind();
         workspace_patches = hello.workspace_patches;
         workspace_revision = hello.workspace_revision.chars().take(64).collect::<String>();
+        held_transcript = (hello.transcript_agent_id.chars().take(128).collect(), hello.transcript_revision.chars().take(64).collect());
         (platform, app_version) = (hello.platform.clone(), hello.client_version.clone());
         let knock = crate::remote::Knock {
             token: &hello.token,
@@ -227,8 +229,9 @@ pub(crate) async fn serve_stream<S: Stream>(
         endpoint_id: peer.as_ref().map(|peer| peer.endpoint_id.clone()).unwrap_or_default(),
         workspace_patches,
         workspace_revision,
+        held_transcript,
         files,
-        views: crate::apps::Viewer::new(&factory),
+        views: crate::apps::Viewer::new(&factory, &device.device.id),
         browser: crate::browser::Port::new(&factory, &device.device.id),
         presence: factory.notify.connect(&device.device.id, &platform),
         presentation: crate::presentation::Port::new(&factory, &device.device.id),
@@ -272,6 +275,9 @@ struct Connection {
     workspace_patches: bool,
     /// The Workspace it holds (Hello.workspace_revision), to resume from.
     workspace_revision: String,
+    /// The conversation it holds: its agent and revision (Hello's), to
+    /// resume from (#413).
+    held_transcript: (String, String),
     /// The project whose files it shows on their own (WatchFiles).
     files: crate::explorer::Watch,
     /// The app views it shows (OpenAppView); their messages come through it.
@@ -301,7 +307,9 @@ async fn session<S: Stream>(
     let mut vault_session = crate::vault::requests::Session::new(connection.device.clone(), connection.zoom_device.clone());
     let mut sent =
         Workspaces::resuming(connection.workspace_patches, factory.resumes.clone(), &connection.binding, &connection.workspace_revision);
-    let mut events = sync(socket, &mut sent, factory).await?;
+    let (agent, revision) = &connection.held_transcript;
+    let held = (!agent.is_empty() && !revision.is_empty()).then_some((agent.as_str(), revision.as_str()));
+    let mut events = sync(socket, &mut sent, factory, held).await?;
     // Where this device was reading, for it alone, when it kept anything.
     if let Some(presentation) = crate::presentation::welcome(factory, &connection.binding) {
         send(socket, 0, Body::Presentation(presentation)).await?;
@@ -340,7 +348,7 @@ async fn session<S: Stream>(
                 Ok(event) => forward(socket, &mut sent, event).await?,
                 Err(RecvError::Lagged(missed)) => {
                     tracing::warn!(missed, "client fell behind; resending state");
-                    events = sync(socket, &mut sent, factory).await?;
+                    events = sync(socket, &mut sent, factory, None).await?;
                 }
                 Err(RecvError::Closed) => return Ok(()),
             },
@@ -349,15 +357,27 @@ async fn session<S: Stream>(
 }
 
 /// Sends the full current state, the Workspace whole, and returns the events
-/// that follow it.
-async fn sync<S: Stream>(socket: &mut Socket<S>, sent: &mut Workspaces, factory: &Factory) -> Result<Receiver<Event>, ConnectionError> {
-    let snapshot = factory.connect().await;
+/// that follow it. The conversation shown only from where the app's `held`
+/// one leaves off, when it can (#413).
+async fn sync<S: Stream>(
+    socket: &mut Socket<S>,
+    sent: &mut Workspaces,
+    factory: &Factory,
+    held: Option<(&str, &str)>,
+) -> Result<Receiver<Event>, ConnectionError> {
+    let snapshot = factory.connect_resuming(held).await;
     sent.reset();
     let pipe = snapshot.workspace.selected_pipe_id.clone();
     let workspace = ServerMessage { reply_to: 0, body: Some(Body::Workspace(snapshot.workspace)), ..Default::default() };
     forward(socket, sent, workspace.encode_to_vec().into()).await?;
     if let Some(transcript) = snapshot.transcript {
-        send(socket, 0, Body::Transcript(transcript)).await?;
+        let message = ServerMessage {
+            reply_to: 0,
+            body: Some(Body::Transcript(transcript)),
+            transcript_revision: snapshot.transcript_revision,
+            ..Default::default()
+        };
+        socket.send(Message::Binary(message.encode_to_vec().into())).await?;
     }
     // The pipe shown, its liaison's or alone: its messages, as selecting it
     // sends them. Read after the events were subscribed to, so one that
@@ -395,7 +415,7 @@ async fn flush<S: Stream>(
             Err(TryRecvError::Empty | TryRecvError::Closed) => return Ok(()),
             Err(TryRecvError::Lagged(missed)) => {
                 tracing::warn!(missed, "client fell behind; resending state");
-                *events = sync(socket, sent, factory).await?;
+                *events = sync(socket, sent, factory, None).await?;
                 return Ok(());
             }
         }
@@ -828,6 +848,7 @@ async fn handle(
         Some(Request::RenameChat(request)) => crate::chats::rename(factory, &request.chat_id, &request.title),
         Some(Request::SetChatModel(request)) => crate::chats::choose_model(factory, &request.chat_id, &request.model),
         Some(Request::SetKeepAwake(request)) => crate::keep_awake::set(factory, request.on),
+        Some(Request::RestoreBackendService(_)) => crate::service::restore(factory).await,
         // Only this Mac's own app (its own device, either way in) turns it on.
         Some(Request::SetLidClosed(request)) => {
             crate::lid_closed::set(factory, !connection.remote, &request)
@@ -867,7 +888,7 @@ async fn handle(
         Some(Request::DecideProposal(request)) => {
             // A chat's proposal names the chat instead of an agent.
             let from = if request.chat_id.is_empty() { &request.agent_id } else { &request.chat_id };
-            crate::proposals::decide(factory, from, &request.proposal_id, request.approve, request.reply, &request.comment)
+            crate::proposals::decide(factory, from, &request.proposal_id, request.approve, request.reply, &request.comment, request.revision)
         }
         Some(Request::ClearBuildCache(request)) => {
             crate::extensions::tree::caches::clear_on_request(factory, &request.path).map(|_| ()).map_err(RequestError::BuildCache)

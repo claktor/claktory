@@ -62,7 +62,7 @@ Use monitors for scheduled jobs and reminders, once or on repeat: say, check pro
 A monitor wakes you later with a prompt you write: at a time (at), on an interval since its last fire (every), on a cron schedule (cron), when a command you run periodically succeeds, fails, matches or changes (check), when files change (files), or when a long-running command prints lines (watch). Monitors last until done or cancelled, across restarts and compactions. Each fire arrives as an event from the monitor with your prompt and what happened, so write the prompt so it makes sense on its own. Every fire makes you read your whole context again, so use the slowest schedule that works and prefer check, files or watch to polling on a short interval. Background tasks already wake you when they end; don't add monitors for them. Cancel monitors you no longer need.
 ";
 
-const ADD: &str = "Add monitors, all or none. Each: name (short), prompt (what to do when it fires; self-contained), when, and optionally until (a time), max_fires, idle_only (wait until you're not working; default true for at/every/cron), agent (set it for another agent you can message). when is one of: {\"at\": \"2026-11-19 09:00\"} or {\"in\": \"45m\"}; {\"every\": \"24h\", \"start\"?: time}; {\"cron\": \"0 9 * * 1-5\"} (local time); {\"check\": \"<command>\", \"every\": \"5m\", \"fire_on\": \"success|failure|match|changed\", \"match\"?: regex, \"repeat\"?: true (each time it becomes true again) or \"always\" (at every check it holds)} (the command gets $FACTORY_MONITOR_LAST_FIRED: unix seconds of the last fire, or of when it was added); {\"files\": [paths], \"glob\"?: \"*.rs\"}; {\"watch\": \"<long-running command>\", \"match\"?: regex, \"gap\"?: \"30s\"}. Commands run in your folder.";
+const ADD: &str = "Add monitors, all or none. Each: name (short), prompt (what to do when it fires; self-contained), when, and optionally until (a time), max_fires, idle_only (wait until you're not working; default true for at/every/cron), agent (set it for another agent you can message). when is one of: {\"at\": \"2026-11-19 09:00\"} or {\"in\": \"45m\"}; {\"every\": \"24h\", \"start\"?: time}; {\"cron\": \"0 9 * * 1-5\"} (local time); {\"check\": \"<command>\", \"every\": \"5m\", \"fire_on\": \"success|failure|match|changed\", \"match\"?: regex, \"repeat\"?: true (each time it becomes true again) or \"always\" (at every check it holds), \"secrets\"?: [names] (your own monitors only: secrets of yours the command gets as with bash's secrets, never ones that ask each time; only a fire shows their output, values hidden)} (the command gets $FACTORY_MONITOR_LAST_FIRED: unix seconds of the last fire, or of when it was added); {\"files\": [paths], \"glob\"?: \"*.rs\"}; {\"watch\": \"<long-running command>\", \"match\"?: regex, \"gap\"?: \"30s\"}. Commands run in your folder.";
 const LIST: &str = "Your monitors, one line each, and what else can wake you. all: monitors that ended in the last 7 days too. agent: another agent's, if you can message it.";
 const CHANGE: &str = "Change monitors: changes is a list of {id (\"m3\"), action: pause, resume, cancel or fire (fire now, to try the prompt)}, and agent for another agent's.";
 
@@ -191,6 +191,10 @@ pub(crate) struct Cursor {
     /// When to start the watch's process again after it ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart_at: Option<i64>,
+    /// A check's runs are held from its secrets (`run::hold`), and its
+    /// agent was told.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
     /// What's carried includes a fire that should have been its last.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub last_after_carry: bool,
@@ -657,6 +661,14 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
             }
             let folder = crate::runner::places(&factory.home, &inner.config, config, &[]).folder;
             let (when, next_due) = when::parse(&one.when, &folder, now).map_err(fail)?;
+            if let When::Check { secrets, .. } = &when
+                && !secrets.is_empty()
+                && agent != asker
+            {
+                return Err(fail(
+                    "A check with secrets can only be its agent's own: the agent sets it itself, naming its own secrets.".to_owned(),
+                ));
+            }
             let until = one.until.as_deref().map(|until| when::parse_time(until, now)).transpose().map_err(fail)?;
             if until.is_some_and(|until| until <= now) {
                 return Err(fail("until is in the past.".to_owned()));
@@ -668,6 +680,14 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
             };
             let idle_only = one.idle_only.unwrap_or(when.is_time());
             new.push(New { agent, name, prompt, when, next_due, until, max_fires, idle_only });
+        }
+    }
+    // Secrets only its agent has, and may use without the person each time.
+    for (index, monitor) in new.iter().enumerate() {
+        let When::Check { secrets, .. } = &monitor.when else { continue };
+        if !secrets.is_empty() {
+            let which = if index == 0 { String::new() } else { format!("monitor {}: ", index + 1) };
+            run::resolve_secrets(factory, &monitor.agent, secrets).map_err(|error| format!("{which}{error} Nothing was added."))?;
         }
     }
     // Room for them, agent by agent.

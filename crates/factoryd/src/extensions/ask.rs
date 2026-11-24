@@ -12,7 +12,9 @@
 //! it was; its state comes from here. A pending ask waits until it's
 //! decided, across restarts: the person may not look for hours. An agent has
 //! at most `MAX_PENDING` waiting at once. Clearing its conversation
-//! dismisses them, since the person can no longer see them.
+//! dismisses them, since the person can no longer see them. One that no
+//! longer applies, its agent takes back with `ask_withdraw` (#407), with a
+//! reason the person reads in Needs you's history.
 
 use std::sync::Arc;
 
@@ -33,11 +35,27 @@ pub(crate) const TOOL: &str = "ask_person";
 /// The Messaging extension's tool for admin agents that asks the person to
 /// clear another agent's conversation, with a card of this extension's.
 pub(crate) const CLEAR_TOOL: &str = "agents_clear";
+/// Takes back one of the agent's own questions still waiting (#407).
+pub(crate) const WITHDRAW_TOOL: &str = "ask_withdraw";
+/// Changes one of the agent's own questions still waiting (#428).
+pub(crate) const UPDATE_TOOL: &str = "ask_update";
+/// How many times an agent may change one card (#428), so it can't churn
+/// one the person is reading.
+pub(crate) const MAX_UPDATES: i64 = 10;
+/// An answer that names no version (from an app before #428) is refused
+/// this long after its card changed: the person may have pressed on what
+/// it said before.
+pub(crate) const UNSEEN_MS: i64 = 30_000;
+/// What the person is told when they answer a version of a card that
+/// isn't its latest.
+pub(crate) const CHANGED: &str = "This card changed. Look at it again.";
 
 /// Questions an agent may have waiting at once.
 pub(crate) const MAX_PENDING: i64 = 3;
 /// The longest title, in characters.
 const MAX_TITLE: usize = 120;
+/// The longest reason for withdrawing a question, in characters.
+pub(crate) const MAX_REASON: usize = 300;
 
 static MANIFEST: Manifest = Manifest {
     id: ID,
@@ -109,6 +127,38 @@ pub(crate) const CLEARS_INCARNATION: &str = "
 ALTER TABLE asks ADD COLUMN clears_incarnation TEXT NOT NULL DEFAULT '';
 ";
 
+/// The migration that let an agent take back its own question once it no
+/// longer applies (ask_withdraw, #407): state 'withdrawn', decided when it
+/// was, and this, the agent's reason; '' for every other state.
+pub(crate) const WITHDRAWN: &str = "
+ALTER TABLE asks ADD COLUMN reason TEXT NOT NULL DEFAULT '';
+";
+
+/// The migration that let an agent change its own question while it waits
+/// (ask_update, #428): which version it is (1 as asked, one more each
+/// change), when it last changed (null if never) and the agent's reason
+/// for that ('' for none).
+pub(crate) const UPDATED: &str = "
+ALTER TABLE asks ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE asks ADD COLUMN updated INTEGER;
+ALTER TABLE asks ADD COLUMN update_reason TEXT NOT NULL DEFAULT '';
+";
+
+/// The migration that let an admin agent ask the person to approve a change
+/// it can't make on its own (#423): what their approval does, as JSON
+/// (`crate::card_actions::Action`); '' for an ordinary ask.
+pub(crate) const ACTION: &str = "
+ALTER TABLE asks ADD COLUMN action TEXT NOT NULL DEFAULT '';
+";
+
+/// The migration that kept such a card's two parts apart (Fugo, #423):
+/// what Approve does in Claktory's words, and the agent's reason; '' on
+/// every other card.
+pub(crate) const ACTION_WORDS: &str = "
+ALTER TABLE asks ADD COLUMN action_description TEXT NOT NULL DEFAULT '';
+ALTER TABLE asks ADD COLUMN action_reason TEXT NOT NULL DEFAULT '';
+";
+
 /// A procedure's steps: at least, at most, and the longest one, in characters.
 const MIN_STEPS: usize = 2;
 const MAX_STEPS: usize = 12;
@@ -175,9 +225,13 @@ pub(crate) fn held_today(store: &Store, agent: &str) -> u32 {
 /// The largest text file a review asks about: what comments work on.
 const REVIEW_TEXT_LIMIT: u64 = 2_000_000;
 
-const PROMPT: &str = "# Asking the person\nWhen you're genuinely blocked on something only the person can give you (a decision that's theirs, an approval, access or information you can't get any other way), ask them with ask_person: they see a card they answer or dismiss, and you're told which in an event. Never use it for questions your best judgment can settle: decide, carry on, and say what you chose in your report. Don't ask in your chat text instead: the person may never see it.\nOne question or one action per card, kept short: what to do, where, and how long. Several decisions are several cards, never a list in one, and a checklist item that waits on them is one concern: if it bundles several, split it into items first, each with its own card. Something that takes them several actions goes as steps on one card: they see one step at a time, the next only once the one before is done. When it's about an item on a checklist, give item.";
+const PROMPT: &str = "# Asking the person\nWhen you're genuinely blocked on something only the person can give you (a decision that's theirs, an approval, access or information you can't get any other way), ask them with ask_person: they see a card they answer or dismiss, and you're told which in an event (a dismissal without a comment quietly, with whatever next wakes you). Never use it for questions your best judgment can settle: decide, carry on, and say what you chose in your report. Don't ask in your chat text instead: the person may never see it.\nOne question or one action per card, kept short: what to do, where, and how long. Several decisions are several cards, never a list in one, and a checklist item that waits on them is one concern: if it bundles several, split it into items first, each with its own card. Something that takes them several actions goes as steps on one card: they see one step at a time, the next only once the one before is done. When it's about an item on a checklist, give item.\nWhen a question stops applying before they answer (you found the answer, the plan changed, it was settled elsewhere), take it back at once with ask_withdraw and a short reason, rather than leaving it to waste their time. That includes a question they answer in your chat instead of on its card: take the card back then, so they don't have to dismiss it too. When what you need changes but still needs them, change the card in place with ask_update instead of withdrawing it and asking again.";
 
-const ABOUT: &str = "Ask the person something, as a card they answer or dismiss. Use it only when you're genuinely blocked on something only the person can give you: a decision that's theirs, an approval, access or information you can't get any other way. Never use it for questions your best judgment can settle: decide, carry on, and mention the choice in your report. One question or one action per card, never a list of decisions: several decisions are several cards, and at most 3 can wait at once. title: what you need, in a short line. body: what you need and why, standing alone (the person may read it hours later, away from your conversation); a command they should run goes in a fenced code block, which the card gives a Copy button. wants_text: true if you need a written answer; false (the default) if a yes, an approval, is enough. review: when the person asked to review or comment on a document (text or Markdown up to 2 MB, an image, a video or a PDF up to 64 MB), ask with review: its path (absolute, or relative to your working folder) instead of having someone else show it; their card opens the file beside your conversation, their comments on it come to you, and the answer says how many they left. item: the checklist item it's about (12 for #12, or Ana#12): give it whenever the question is about an item on a checklist, since that's how it shows with the item in their Needs you; if they dismiss it, you're told what to do with the item, and Claktory can have you ask again later. steps: when they have to do several things in order (a procedure), the steps, each one short action (2 to 12 of them): the card shows one step at a time with Done and Can't do this, you're told of each in an event, and the next shows only once the one before is done; a step they can't do stops it. title says what it's all for, body introduces it; not with wants_text or review. You're told their answer, or that they dismissed it, in an event; meanwhile carry on with whatever doesn't depend on it.";
+const ABOUT: &str = "Ask the person something, as a card they answer or dismiss. Use it only when you're genuinely blocked on something only the person can give you: a decision that's theirs, an approval, access or information you can't get any other way. Never use it for questions your best judgment can settle: decide, carry on, and mention the choice in your report. One question or one action per card, never a list of decisions: several decisions are several cards, and at most 3 can wait at once. title: what you need, in a short line. body: what you need and why, standing alone (the person may read it hours later, away from your conversation); a command they should run goes in a fenced code block, which the card gives a Copy button. wants_text: true if you need a written answer; false (the default) if a yes, an approval, is enough. review: when the person asked to review or comment on a document (text or Markdown up to 2 MB, an image, a video or a PDF up to 64 MB), ask with review: its path (absolute, or relative to your working folder) instead of having someone else show it; their card opens the file beside your conversation, their comments on it come to you, and the answer says how many they left. item: the checklist item it's about (12 for #12, or Ana#12): give it whenever the question is about an item on a checklist, since that's how it shows with the item in their Needs you; if they dismiss it, you're told what to do with the item, and Claktory can have you ask again later. steps: when they have to do several things in order (a procedure), the steps, each one short action (2 to 12 of them): the card shows one step at a time with Done and Can't do this, you're told of each in an event, and the next shows only once the one before is done; a step they can't do stops it. title says what it's all for, body introduces it; not with wants_text or review. You're told their answer in an event, and a dismissal without a comment in a quiet one, which comes with whatever next wakes you; meanwhile carry on with whatever doesn't depend on it.";
+
+const UPDATE_ABOUT: &str = "Change one of your questions still waiting for the person, in place, when what you need changes but still needs them: a detail was wrong, the plan moved, a step changed. id: the question's id, which its result gave; then only what changes: title, body, wants_text or review (\"\" for none) on a question, steps on a procedure (one with steps stays one, and one without can't get them); reason: optional, why it changed, in a short line they read on the card (at most 300 characters). Their card redraws where it is, marked updated, without counting again or notifying them again; an answer they gave to the old version is refused, so they look again. On a procedure, the steps already done stay done while their text is unchanged; from the first changed step on, they're asked again. At most 10 changes per card: change it only when it matters, and take back one that no longer applies with ask_withdraw instead. You can change only your own questions.";
+
+const WITHDRAW_ABOUT: &str = "Take back one of your questions still waiting for the person (a card ask_person or another tool of yours opened), as soon as it no longer applies: you found the answer, the plan changed, or it was settled elsewhere. id: the question's id, which its result gave; reason: why, in a short line they read in Needs you's History (at most 300 characters). Without id, lists your questions waiting, with their ids. It leaves their Needs you at once and frees its place; a checklist item it was about stays as it is, so update the item yourself. You can take back only your own questions.";
 
 pub(crate) struct Ask;
 
@@ -204,10 +258,38 @@ impl Extension for Ask {
             },
             "additionalProperties": false,
         });
-        let mut tools = vec![super::tool(TOOL, "Ask the person", ABOUT, parameters, super::typed_handler(factory, agent, ask))];
-        // Alerts that can't wait (`crate::notify`); not for an agent limited
-        // to a pipe, whose asks already reach the person.
+        let update_parameters = json!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string"},
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "wants_text": {"type": "boolean"},
+                "review": {"type": "string"},
+                "steps": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": MIN_STEPS, "maxItems": MAX_STEPS},
+                "reason": {"type": "string"},
+            },
+            "additionalProperties": false,
+        });
+        let withdraw_parameters = json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "additionalProperties": false,
+        });
+        let mut tools = vec![
+            super::tool(TOOL, "Ask the person", ABOUT, parameters, super::typed_handler(factory, agent, ask)),
+            super::tool(WITHDRAW_TOOL, "Withdraw a question", WITHDRAW_ABOUT, withdraw_parameters, super::typed_handler(factory, agent, withdraw)),
+        ];
+        // Alerts that can't wait (`crate::notify`), and changing a card in
+        // place: not for an agent limited to a pipe, whose asks already
+        // reach the person, at most CONTAINED_PER_HOUR an hour, in words
+        // from outside.
         if !factory.pipes.contained(agent) {
+            tools.insert(1, super::tool(UPDATE_TOOL, "Change a question", UPDATE_ABOUT, update_parameters, super::typed_handler(factory, agent, update)));
             tools.push(crate::notify::tool::tool(factory, agent));
         }
         tools
@@ -348,7 +430,10 @@ fn ask(factory: &Arc<Factory>, agent: &str, args: AskArgs) -> Result<ToolResult,
             "Asked {person} to review {review}: their card opens it beside your conversation, and their comments on it come to you. You'll be told when they answer or dismiss it; meanwhile carry on with whatever doesn't depend on it."
         )
     };
-    let said = format!("{said}{}", super::checklist::taken_for(linked, &person));
+    let said = format!(
+        "{said} Its id is {id}: if it stops applying before they answer on the card (they answer it in your chat, say), take it back with ask_withdraw, or change it with ask_update if what you need changes.{}",
+        super::checklist::taken_for(linked, &person)
+    );
     let mut details = json!({"ask": id, "title": title, "body": body, "wants_text": args.wants_text});
     if let Some(taint) = taint {
         details["taint"] = taint;
@@ -407,7 +492,7 @@ fn review_file(factory: &Arc<Factory>, agent: &str, asked: &str) -> Result<Strin
 /// extension_call), pending; None for any other result, or one that asked
 /// nothing.
 pub(crate) fn asked(tool: &str, is_error: bool, details: &serde_json::Value) -> Option<v1::AskPerson> {
-    if !matches!(tool, TOOL | CLEAR_TOOL | "extension_call") || is_error {
+    if !(matches!(tool, TOOL | CLEAR_TOOL | "extension_call") || crate::card_actions::TOOLS.contains(&tool)) || is_error {
         return None;
     }
     let text = crate::transcript::text_fields(details);
@@ -435,6 +520,13 @@ pub(crate) fn asked(tool: &str, is_error: bool, details: &serde_json::Value) -> 
             })
             .unwrap_or_default(),
         replied: false,
+        withdrawn: false,
+        withdraw_reason: String::new(),
+        revision: 1,
+        updated_ms: 0,
+        update_reason: String::new(),
+        action_description: text("action_description"),
+        action_reason: text("action_reason"),
     })
 }
 
@@ -466,10 +558,26 @@ struct Row {
     clears: String,
     /// That agent's incarnation when it was asked.
     clears_incarnation: String,
+    /// Withdrawn: the agent's reason.
+    reason: String,
+    /// Which version it is (#428): 1 as asked, one more each change.
+    revision: i64,
+    /// When its agent last changed it; None if it never did.
+    updated: Option<i64>,
+    /// Why, in the agent's words; '' for no reason given.
+    update_reason: String,
+    /// What approving it does (`crate::card_actions::Action`, as JSON); ''
+    /// for an ordinary ask.
+    action: String,
+    /// Its two parts: what approving it does, in Claktory's words, and the
+    /// agent's reason; '' for an ordinary ask.
+    action_description: String,
+    action_reason: String,
 }
 
-const COLUMNS: &str =
-    "id, title, body, wants_text, state, answer, decided, taint, review, created, answer_attachments, item, steps, replied, clears, clears_incarnation";
+const COLUMNS: &str = "id, title, body, wants_text, state, answer, decided, taint, review, created, answer_attachments, item, steps, replied, clears, clears_incarnation, reason, revision, updated, update_reason, action, action_description, action_reason";
+/// The column after COLUMNS, for a query that reads one more.
+const AFTER_COLUMNS: usize = 23;
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
     Ok(Row {
@@ -489,14 +597,40 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         replied: row.get(13)?,
         clears: row.get(14)?,
         clears_incarnation: row.get(15)?,
+        reason: row.get(16)?,
+        revision: row.get(17)?,
+        updated: row.get(18)?,
+        update_reason: row.get(19)?,
+        action: row.get(20)?,
+        action_description: row.get(21)?,
+        action_reason: row.get(22)?,
     })
 }
 
+/// What ask_update may change on a question.
+struct Changed {
+    title: String,
+    body: String,
+    wants_text: bool,
+    review: String,
+    steps: Vec<Step>,
+}
+
 impl Row {
+    fn clone_fields(&self) -> Changed {
+        Changed {
+            title: self.title.clone(),
+            body: self.body.clone(),
+            wants_text: self.wants_text,
+            review: self.review.clone(),
+            steps: self.steps.clone(),
+        }
+    }
+
     fn to_proto(&self) -> v1::AskPerson {
         let state = match self.state.as_str() {
             "answered" => State::Answered,
-            "dismissed" | "cleared" => State::Dismissed,
+            "dismissed" | "cleared" | "withdrawn" => State::Dismissed,
             _ => State::Pending,
         };
         v1::AskPerson {
@@ -517,16 +651,24 @@ impl Row {
             answer_attachments: self.answer_attachments.iter().map(crate::transcript::attachment).collect(),
             steps: self.steps.iter().map(Step::to_proto).collect(),
             replied: self.replied,
+            withdrawn: self.state == "withdrawn",
+            withdraw_reason: self.reason.clone(),
+            revision: u32::try_from(self.revision).unwrap_or(1),
+            updated_ms: self.updated.unwrap_or_default(),
+            update_reason: self.update_reason.clone(),
+            action_description: self.action_description.clone(),
+            action_reason: self.action_reason.clone(),
         }
     }
 }
 
 /// Shows the agent's decided asks as decided in its just-loaded
-/// conversation, and its procedures as far as they've gone.
+/// conversation, its procedures as far as they've gone, and the questions
+/// it changed as they are now.
 pub(crate) fn restore(store: &Store, agent: &str, transcript: &mut Transcript) -> rusqlite::Result<()> {
     let db = store.db();
     let mut statement = db
-        .prepare(&format!("SELECT {COLUMNS} FROM asks WHERE agent = ?1 AND (state != 'pending' OR steps IS NOT NULL) ORDER BY id"))?;
+        .prepare(&format!("SELECT {COLUMNS} FROM asks WHERE agent = ?1 AND (state != 'pending' OR steps IS NOT NULL OR revision > 1) ORDER BY id"))?;
     for decided in statement.query_map([agent], row)? {
         transcript.set_ask(decided?.to_proto());
     }
@@ -607,9 +749,13 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk) -> R
     if ask.state == "cleared" {
         return Err(RequestError::Ask("This question was closed without an answer.".to_owned()));
     }
+    if ask.state == "withdrawn" {
+        return Err(RequestError::Ask("This question was withdrawn.".to_owned()));
+    }
     if ask.state != "pending" {
         return Err(RequestError::Ask(format!("This question was already {}.", ask.state)));
     }
+    seen(request.revision, ask.revision, ask.updated).map_err(RequestError::Ask)?;
     if !ask.steps.is_empty() || request.step.is_some() {
         if request.reply {
             return Err(RequestError::Ask("Answer the step with Done or Can't do this, and a comment if you like.".to_owned()));
@@ -648,6 +794,12 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk) -> R
             )));
         }
     }
+    // A change an admin agent asked the person to approve (#423): approved,
+    // it's made, so it must still be one that can be made.
+    let acting = !ask.action.is_empty() && !dismiss && !request.reply;
+    if acting {
+        crate::card_actions::check(factory, &ask.action).map_err(RequestError::Ask)?;
+    }
     // Drawings on a PDF's pages, answering or dismissing alike: uploads of
     // this agent's, as a message's attachments are.
     let attachments = factory.attachments(agent, &request.attachments)?;
@@ -656,12 +808,13 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk) -> R
     let state = if dismiss { "dismissed" } else { "answered" };
     let answer = text;
     let decided = now_ms();
+    // Kept only if nothing answered or changed it meanwhile.
     let claimed = factory.store.db().execute(
-        "UPDATE asks SET state = ?2, answer = ?3, decided = ?4, answer_attachments = ?5, replied = ?6 WHERE id = ?1 AND state = 'pending'",
-        params![number, state, answer, decided, stored, request.reply],
+        "UPDATE asks SET state = ?2, answer = ?3, decided = ?4, answer_attachments = ?5, replied = ?6 WHERE id = ?1 AND state = 'pending' AND revision = ?7",
+        params![number, state, answer, decided, stored, request.reply, ask.revision],
     )?;
     if claimed == 0 {
-        return Err(RequestError::Ask("This question was already answered.".to_owned()));
+        return Err(RequestError::Ask(lost_claim(factory, number)));
     }
     (ask.state, ask.answer, ask.decided, ask.answer_attachments, ask.replied) =
         (state.to_owned(), answer.to_owned(), Some(decided), attachments, request.reply);
@@ -691,7 +844,13 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk) -> R
             None
         };
         let (summary, text) = told_clear(&person, &ask, &name, cleared);
-        factory.deliver_event(agent, text, host_event(summary));
+        factory.deliver_event(agent, text, told_event(&ask, None, summary));
+        return Ok(());
+    }
+    if !ask.action.is_empty() {
+        let made = if acting { Some(crate::card_actions::apply(factory, &ask.action).await) } else { None };
+        let (summary, text) = crate::card_actions::told(&person, &ask.title, &ask.answer, ask.replied, made);
+        factory.deliver_event(agent, text, told_event(&ask, None, summary));
         return Ok(());
     }
     let comments = (!ask.review.is_empty()).then(|| reviewed(factory, agent, &ask));
@@ -710,9 +869,22 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk) -> R
         }
         factory.broadcast_workspace(&factory.lock());
     }
-    let event = host_event(summary);
-    factory.deliver_event(agent, text, event);
+    factory.deliver_event(agent, text, told_event(&ask, comments, summary));
     Ok(())
+}
+
+/// The event that tells the agent what became of its question: quiet when
+/// the person dismissed it with nothing of theirs (no comment, drawing or
+/// comment on the file it was about), as a card settled elsewhere is
+/// (friend bug #19), so it waits for the agent's next wake; otherwise one
+/// that wakes it.
+fn told_event(ask: &Row, comments: Option<i64>, summary: String) -> factory_agent::Event {
+    let bare = ask.state == "dismissed"
+        && !ask.replied
+        && ask.answer.trim().is_empty()
+        && ask.answer_attachments.is_empty()
+        && comments.unwrap_or(0) == 0;
+    if bare { crate::needs_you::dismissed_event(summary) } else { host_event(summary) }
 }
 
 /// What the agent that asked to clear `name`'s conversation is told: a
@@ -756,7 +928,7 @@ pub(crate) fn target_deleted(factory: &Arc<Factory>, target: &str) {
             &format!("SELECT {COLUMNS}, agent FROM asks WHERE clears = ?1 AND state = 'pending' ORDER BY id"),
             [target],
             // `agent` comes after COLUMNS, which `row` reads from the start.
-            |found| Ok((found.get::<_, String>(16)?, row(found)?)),
+            |found| Ok((found.get::<_, String>(AFTER_COLUMNS)?, row(found)?)),
         )?;
         // Each one closed here, not by another caller at the same time, so
         // its agent is told once.
@@ -861,13 +1033,444 @@ pub(crate) fn ask_to_clear(factory: &Factory, asker: &str, target: &str, name: &
         db.last_insert_rowid().to_string()
     };
     let said = format!(
-        "Asked {person}: they see a card to approve or dismiss clearing {name}'s conversation, and only their approval clears it. You'll be told which in an event."
+        "Asked {person}: they see a card to approve or dismiss clearing {name}'s conversation, and only their approval clears it. You'll be told which in an event. Its id is {id}: if it stops applying before they answer on the card (they answer it in your chat, say), take it back with ask_withdraw."
     );
     let mut details = json!({"ask": id, "title": title, "body": body, "wants_text": false, "clears": target});
     if let Some(taint) = taint {
         details["taint"] = taint;
     }
     Ok(ToolResult::text(said, details))
+}
+
+/// Opens a card asking the person to approve a change `asker` (an admin
+/// agent, checked by its caller) can't make on its own (#423): `action`,
+/// `crate::card_actions::Action` as JSON, is made when they approve it, and
+/// nothing else makes it. It's one of `asker`'s questions waiting, and the
+/// same change is asked once at a time. Its id.
+pub(crate) fn ask_to_approve(
+    factory: &Factory,
+    asker: &str,
+    title: &str,
+    (description, reason): (&str, &str),
+    action: &str,
+) -> Result<String, String> {
+    // Older apps show the body: both parts.
+    let body = format!("{description} {reason}");
+    let person = factory.lock().config.person().to_owned();
+    // Read a pipe or a web page: the card says so, and where from.
+    let routes = crate::pipes::agents::routes(factory, asker);
+    let taint = (!routes.is_empty()).then(|| crate::pipes::agents::routes_json(&routes));
+    let db = factory.store.db();
+    let couldnt = |error: rusqlite::Error| format!("Couldn't ask: {error}");
+    let waiting: i64 =
+        db.query_row("SELECT COUNT(*) FROM asks WHERE agent = ?1 AND state = 'pending'", [asker], |row| row.get(0)).map_err(couldnt)?;
+    if waiting >= MAX_PENDING {
+        return Err(format!(
+            "You already have {waiting} questions waiting for {person}, the most you can: wait for an answer before asking more. Nothing was asked."
+        ));
+    }
+    let asked: bool = db
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM asks WHERE agent = ?1 AND state = 'pending' AND action = ?2)",
+            params![asker, action],
+            |row| row.get(0),
+        )
+        .map_err(couldnt)?;
+    if asked {
+        return Err(format!("You already asked {person} for this; it's waiting for them. Nothing new was asked."));
+    }
+    db.execute(
+        "INSERT INTO asks (agent, title, body, wants_text, created, state, answer, taint, action, action_description, action_reason) VALUES (?1, ?2, ?3, 0, ?4, 'pending', '', ?5, ?6, ?7, ?8)",
+        params![asker, title, body, now_ms(), taint.as_ref().map(serde_json::Value::to_string), action, description, reason],
+    )
+    .map_err(couldnt)?;
+    Ok(db.last_insert_rowid().to_string())
+}
+
+#[derive(Deserialize)]
+pub(crate) struct WithdrawArgs {
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+}
+
+/// A card's id as an agent gives it: "12", or "#12".
+pub(crate) fn card_number(id: &str) -> Option<i64> {
+    id.trim().trim_start_matches('#').trim().parse().ok().filter(|id| *id > 0)
+}
+
+/// The reason an agent gives for taking a card back, checked: one short
+/// line the person reads.
+pub(crate) fn withdraw_reason(reason: Option<&str>, person: &str) -> Result<String, String> {
+    let reason = reason.unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ");
+    if reason.is_empty() {
+        return Err(format!("Give reason: why it no longer applies, in a short line {person} reads. Nothing was withdrawn."));
+    }
+    if reason.chars().count() > MAX_REASON {
+        return Err(format!("The reason is a short line, at most {MAX_REASON} characters. Nothing was withdrawn."));
+    }
+    Ok(reason)
+}
+
+/// Checklist item `key` ("agent#12") as `me` names it: "#12" on its own
+/// checklist, "Ana#12" on another's.
+pub(crate) fn item_named(factory: &Factory, me: &str, key: &str) -> String {
+    let Some((whose, id)) = key.rsplit_once('#') else { return key.to_owned() };
+    if whose == me {
+        return format!("#{id}");
+    }
+    let name = factory.lock().config.agent(whose).map_or_else(|| whose.to_owned(), |agent| agent.name.clone());
+    format!("{name}#{id}")
+}
+
+/// ask_withdraw (#407): takes back one of the agent's own questions still
+/// waiting, with its reason, or lists them. Its card leaves Needs you at
+/// once, stops counting against new ones, and shows as withdrawn; the item
+/// it was about stays as it was, for the agent to update.
+fn withdraw(factory: &Arc<Factory>, agent: &str, args: WithdrawArgs) -> Result<ToolResult, String> {
+    let person = {
+        let inner = factory.lock();
+        super::caller(&inner.config, agent)?;
+        inner.config.person().to_owned()
+    };
+    let couldnt = |error: rusqlite::Error| format!("Couldn't read your questions: {error}");
+    let Some(given) = args.id.as_deref().map(str::trim).filter(|id| !id.is_empty()) else {
+        let waiting = crate::store::query(
+            &factory.store.db(),
+            &format!("SELECT {COLUMNS} FROM asks WHERE agent = ?1 AND state = 'pending' ORDER BY id"),
+            [agent],
+            row,
+        )
+        .map_err(couldnt)?;
+        if waiting.is_empty() {
+            return Ok(ToolResult::text(format!("You have no questions waiting for {person}."), json!({})));
+        }
+        let mut said = format!("Your questions waiting for {person}; take one back with its id and a reason:");
+        for ask in &waiting {
+            let when = factory_agent::accounts::local_time(u64::try_from(ask.created).unwrap_or_default()).unwrap_or_default();
+            said.push_str(&format!("\n- {}: \"{}\", asked {when}", ask.id, ask.title));
+            if !ask.steps.is_empty() {
+                let done = ask.steps.iter().filter(|step| !step.state.is_empty()).count();
+                said.push_str(&format!(", {done} of {} steps done", ask.steps.len()));
+            }
+            if !ask.item.is_empty() {
+                said.push_str(&format!(", about {}", item_named(factory, agent, &ask.item)));
+            }
+        }
+        return Ok(ToolResult::text(said, json!({})));
+    };
+    let unknown = || format!("You have no question {given}: ask_withdraw without id lists yours. Nothing was withdrawn.");
+    let number = card_number(given).ok_or_else(unknown)?;
+    let reason = withdraw_reason(args.reason.as_deref(), &person)?;
+    // Only the agent's own: another's is as unknown as one never asked.
+    let found = factory
+        .store
+        .db()
+        .query_row(&format!("SELECT {COLUMNS} FROM asks WHERE id = ?1 AND agent = ?2"), params![number, agent], row)
+        .optional()
+        .map_err(couldnt)?;
+    let Some(mut ask) = found else { return Err(unknown()) };
+    if ask.state != "pending" {
+        let was = match ask.state.as_str() {
+            "answered" if ask.replied => format!("{person} already replied to it"),
+            "answered" => format!("{person} already answered it"),
+            "dismissed" => format!("{person} already dismissed it"),
+            "withdrawn" => "You already withdrew it".to_owned(),
+            _ => "It's already closed".to_owned(),
+        };
+        return Err(format!("Question {number} isn't waiting: {was}. Nothing was withdrawn."));
+    }
+    let decided = now_ms();
+    // Kept only if the person didn't answer it meanwhile.
+    let claimed = factory
+        .store
+        .db()
+        .execute(
+            "UPDATE asks SET state = 'withdrawn', decided = ?3, reason = ?4 WHERE id = ?1 AND agent = ?2 AND state = 'pending'",
+            params![number, agent, decided, reason],
+        )
+        .map_err(|error| format!("Couldn't withdraw it: {error}"))?;
+    if claimed == 0 {
+        return Err(format!("{person} just answered question {number}, so it wasn't withdrawn; you'll be told their answer."));
+    }
+    (ask.state, ask.decided, ask.reason) = ("withdrawn".to_owned(), Some(decided), reason);
+    // Its card shows it withdrawn, and it no longer waits for the person.
+    {
+        let mut inner = factory.lock();
+        let entry =
+            inner.agents.get_mut(agent).and_then(|runtime| runtime.transcript.as_mut()).and_then(|transcript| transcript.set_ask(ask.to_proto()));
+        if let Some(entry) = entry {
+            factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
+        }
+        factory.broadcast_workspace(&inner);
+    }
+    let mut said = format!(
+        "Withdrew question {number}, \"{}\": it's gone from {person}'s Needs you, and their History shows it withdrawn by you, with your reason.",
+        ask.title
+    );
+    if !ask.item.is_empty() {
+        if let Some((whose, _)) = ask.item.rsplit_once('#') {
+            factory.refresh_view(whose);
+        }
+        said.push_str(&format!(
+            " It was about {}, which stays as it was: update it if it no longer waits on {person}.",
+            item_named(factory, agent, &ask.item)
+        ));
+    }
+    Ok(ToolResult::text(said, json!({})))
+}
+
+/// Whether an answer was given to the card as it is now (#428): the
+/// version it names (AnswerAsk.revision, DecideProposal.revision) must be
+/// the latest. One that names none, from an app before #428, is taken for
+/// the latest unless the card changed in the last `UNSEEN_MS`. Err: what
+/// the person is told.
+pub(crate) fn seen(named: Option<u32>, revision: i64, updated: Option<i64>) -> Result<(), String> {
+    let fresh = match named {
+        // Before #428 a card was always version 1; 0 is how an older backend said so.
+        Some(named) => i64::from(named.max(1)) == revision,
+        None => revision <= 1 || updated.is_none_or(|at| now_ms() - at >= UNSEEN_MS),
+    };
+    if fresh { Ok(()) } else { Err(CHANGED.to_owned()) }
+}
+
+/// Why an answer's claim on question `id` found nothing to claim: it was
+/// changed meanwhile, or decided.
+fn lost_claim(factory: &Factory, id: i64) -> String {
+    let state = factory.store.db().query_row("SELECT state FROM asks WHERE id = ?1", [id], |row| row.get::<_, String>(0));
+    match state.as_deref() {
+        Ok("pending") => CHANGED.to_owned(),
+        Ok("withdrawn") => "This question was withdrawn.".to_owned(),
+        _ => "This question was already answered.".to_owned(),
+    }
+}
+
+/// The reason an agent gives for changing a card, checked: optional, one
+/// short line the person reads on it.
+pub(crate) fn update_reason(reason: Option<&str>) -> Result<String, String> {
+    let reason = reason.unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ");
+    if reason.chars().count() > MAX_REASON {
+        return Err(format!("The reason is a short line, at most {MAX_REASON} characters. Nothing was changed."));
+    }
+    Ok(reason)
+}
+
+/// What the agent is told when its card can't be changed any more.
+pub(crate) fn too_many_updates(what: &str, number: i64) -> String {
+    format!(
+        "You've changed {what} {number} {MAX_UPDATES} times, the most one card can be changed, so it wasn't changed again. If it no longer says what you need, take it back and make a new one. Nothing was changed."
+    )
+}
+
+#[derive(Deserialize)]
+struct UpdateArgs {
+    id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    wants_text: Option<bool>,
+    #[serde(default)]
+    review: Option<String>,
+    #[serde(default)]
+    steps: Option<Vec<String>>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// A procedure's new steps, keeping those already done while they and every
+/// step before them are unchanged: from the first changed one on, they're
+/// asked again. Err: why they can't be used.
+fn restepped(old: &[Step], new: &[String]) -> Result<Vec<Step>, String> {
+    if !(MIN_STEPS..=MAX_STEPS).contains(&new.len()) {
+        return Err(format!("steps: give {MIN_STEPS} to {MAX_STEPS} of them, each one action. Nothing was changed."));
+    }
+    let texts: Vec<String> = new.iter().map(|step| step.trim().to_owned()).collect();
+    if let Some(at) = texts.iter().position(|text| text.is_empty() || text.chars().count() > MAX_STEP) {
+        return Err(format!(
+            "steps: step {} must say what to do in at most {MAX_STEP} characters; split a longer one in two. Nothing was changed.",
+            at + 1
+        ));
+    }
+    let kept = old.iter().zip(&texts).take_while(|(step, text)| step.state == "done" && step.text == **text).count();
+    if kept == texts.len() {
+        return Err("steps: the person already did every one of these, so there'd be nothing left for them to do: add the steps still to do, or take the question back. Nothing was changed.".to_owned());
+    }
+    Ok(texts
+        .into_iter()
+        .enumerate()
+        .map(|(at, text)| if at < kept { old[at].clone() } else { Step { text, ..Step::default() } })
+        .collect())
+}
+
+/// ask_update (#428): changes one of the agent's own questions still
+/// waiting, in place. Its card redraws where it is, as a new version
+/// (`revision`), marked updated with the agent's reason; it doesn't count
+/// again in Needs you and nothing notifies the person again. An answer to
+/// the version before is refused (`seen`).
+fn update(factory: &Arc<Factory>, agent: &str, args: UpdateArgs) -> Result<ToolResult, String> {
+    let person = {
+        let inner = factory.lock();
+        super::caller(&inner.config, agent)?;
+        inner.config.person().to_owned()
+    };
+    // What a liaison or a curator asks comes from outside, at most a few an
+    // hour: it asks anew rather than rewriting a card the person is reading.
+    if factory.pipes.contained(agent) {
+        return Err("You can't change a question: take it back with ask_withdraw and ask again if it still matters. Nothing was changed.".to_owned());
+    }
+    let given = args.id.trim();
+    let unknown = || format!("You have no question {given}: ask_withdraw without id lists yours. Nothing was changed.");
+    let number = card_number(given).ok_or_else(unknown)?;
+    let reason = update_reason(args.reason.as_deref())?;
+    // Only the agent's own: another's is as unknown as one never asked.
+    let found = factory
+        .store
+        .db()
+        .query_row(&format!("SELECT {COLUMNS} FROM asks WHERE id = ?1 AND agent = ?2"), params![number, agent], row)
+        .optional()
+        .map_err(|error| format!("Couldn't read your questions: {error}"))?;
+    let Some(mut ask) = found else { return Err(unknown()) };
+    if ask.state != "pending" {
+        let was = match ask.state.as_str() {
+            "answered" if ask.replied => format!("{person} already replied to it"),
+            "answered" => format!("{person} already answered it"),
+            "dismissed" => format!("{person} already dismissed it"),
+            "withdrawn" => "You withdrew it".to_owned(),
+            _ => "It's already closed".to_owned(),
+        };
+        return Err(format!("Question {number} isn't waiting: {was}. Nothing was changed."));
+    }
+    if !ask.clears.is_empty() {
+        return Err(format!(
+            "Question {number} asks {person} to clear a conversation, which can't be changed: take it back with ask_withdraw if it no longer applies. Nothing was changed."
+        ));
+    }
+    // What the person approves is what happens (Fugo): a card that makes a
+    // change keeps the words it was asked with.
+    if !ask.action.is_empty() {
+        return Err(format!(
+            "Question {number} makes a change when {person} approves it, so it can't be changed: take it back with ask_withdraw and ask again. Nothing was changed."
+        ));
+    }
+    if ask.revision > MAX_UPDATES {
+        return Err(too_many_updates("question", number));
+    }
+    if args.title.is_none() && args.body.is_none() && args.wants_text.is_none() && args.review.is_none() && args.steps.is_none() {
+        return Err("Give what changes: title, body, wants_text, review or steps. Nothing was changed.".to_owned());
+    }
+    let procedure = !ask.steps.is_empty();
+    if procedure && (args.wants_text.is_some() || args.review.is_some()) {
+        return Err(format!(
+            "Question {number} is a procedure: change its title, body or steps; it takes no wants_text or review. Nothing was changed."
+        ));
+    }
+    if !procedure && args.steps.is_some() {
+        return Err(format!(
+            "Question {number} has no steps, so it can't be given any: change its title, body, wants_text or review, or take it back and ask with steps. Nothing was changed."
+        ));
+    }
+    let mut changed = ask.clone_fields();
+    if let Some(title) = &args.title {
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        if title.is_empty() {
+            return Err("The title can't be empty: say what you need in a short line. Nothing was changed.".to_owned());
+        }
+        if title.chars().count() > MAX_TITLE {
+            return Err(format!("The title is a short line (at most {MAX_TITLE} characters); put the rest in the body. Nothing was changed."));
+        }
+        changed.title = title;
+    }
+    if let Some(body) = &args.body {
+        let body = body.trim().to_owned();
+        if body.is_empty() {
+            return Err("The body can't be empty: say what you need, and why. Nothing was changed.".to_owned());
+        }
+        changed.body = body;
+    }
+    if let Some(wants_text) = args.wants_text {
+        changed.wants_text = wants_text;
+    }
+    if let Some(review) = &args.review {
+        changed.review = match review.trim() {
+            "" => String::new(),
+            path => review_file(factory, agent, path).map_err(|error| error.replace("Nothing was asked.", "Nothing was changed."))?,
+        };
+    }
+    if let Some(steps) = &args.steps {
+        changed.steps = restepped(&ask.steps, steps)?;
+    }
+    let same = changed.title == ask.title
+        && changed.body == ask.body
+        && changed.wants_text == ask.wants_text
+        && changed.review == ask.review
+        && serde_json::to_string(&changed.steps).ok() == serde_json::to_string(&ask.steps).ok();
+    if same {
+        return Err(format!("That's what question {number} already says. Nothing was changed."));
+    }
+    // Read a pipe or a web page since it asked: the card says so now.
+    let routes = crate::pipes::agents::routes(factory, agent);
+    if !routes.is_empty() {
+        ask.taint = Some(crate::pipes::agents::routes_json(&routes).to_string());
+    }
+    let now = now_ms();
+    let steps = (!changed.steps.is_empty()).then(|| serde_json::to_string(&changed.steps).unwrap_or_default());
+    // Kept only if the person didn't answer it, nor the agent change it, meanwhile.
+    let claimed = factory
+        .store
+        .db()
+        .execute(
+            "UPDATE asks SET title = ?3, body = ?4, wants_text = ?5, review = ?6, steps = ?7, taint = ?8,
+             revision = revision + 1, updated = ?9, update_reason = ?10
+             WHERE id = ?1 AND agent = ?2 AND state = 'pending' AND revision = ?11",
+            params![number, agent, changed.title, changed.body, changed.wants_text, changed.review, steps, ask.taint, now, reason, ask.revision],
+        )
+        .map_err(|error| format!("Couldn't change it: {error}"))?;
+    if claimed == 0 {
+        return Err(format!("{person} just answered question {number}, so it wasn't changed; you'll be told their answer."));
+    }
+    let kept = changed.steps.iter().take_while(|step| step.state == "done").count();
+    let moved_back = procedure && kept < ask.steps.iter().take_while(|step| step.state == "done").count();
+    (ask.title, ask.body, ask.wants_text, ask.review, ask.steps) = (changed.title, changed.body, changed.wants_text, changed.review, changed.steps);
+    (ask.revision, ask.updated, ask.update_reason) = (ask.revision + 1, Some(now), reason);
+    // Its card redraws in place; it still waits, at the same seq.
+    {
+        let mut inner = factory.lock();
+        let entry =
+            inner.agents.get_mut(agent).and_then(|runtime| runtime.transcript.as_mut()).and_then(|transcript| transcript.set_ask(ask.to_proto()));
+        if let Some(entry) = entry {
+            factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
+        }
+        factory.broadcast_workspace(&inner);
+    }
+    if let Some((whose, _)) = ask.item.rsplit_once('#') {
+        factory.refresh_view(whose);
+    }
+    let left = MAX_UPDATES - (ask.revision - 1);
+    let mut said = format!(
+        "Changed question {number}, \"{}\": {person}'s card shows it as it is now, marked updated{}, without notifying them again. An answer they give to the version before is refused, so they look again.",
+        ask.title,
+        if ask.update_reason.is_empty() { String::new() } else { " with your reason".to_owned() }
+    );
+    if procedure {
+        let count = ask.steps.len();
+        said.push_str(&match kept {
+            0 => format!(" They go through its {count} steps from the first."),
+            1 => format!(" Step 1 stays done; they see step 2 of {count} next."),
+            _ => format!(" Steps 1 to {kept} stay done; they see step {} of {count} next.", kept + 1),
+        });
+        if moved_back {
+            said.push_str(" That's a step they had already done, changed, so they're asked it again.");
+        }
+    }
+    said.push_str(&match left {
+        0 => " That was the last change this card can take.".to_owned(),
+        1 => " It can be changed once more.".to_owned(),
+        _ => format!(" It can be changed {left} more times."),
+    });
+    Ok(ToolResult::text(said, json!({})))
 }
 
 /// The person answers a procedure's current step: Done, or Can't do this
@@ -901,13 +1504,19 @@ fn step(factory: &Arc<Factory>, agent: &str, request: &v1::AnswerAsk, mut ask: R
         (false, true) => ("answered", Some(now)),
         (false, false) => ("pending", None),
     };
-    // Kept only if nothing answered it meanwhile (another device, a second tap).
+    // Kept only if nothing answered it meanwhile (another device, a second
+    // tap), and its agent didn't change it.
     let claimed = factory.store.db().execute(
-        "UPDATE asks SET steps = ?2, state = ?3, answer = ?4, decided = ?5 WHERE id = ?1 AND state = 'pending' AND steps = ?6",
-        params![ask.id, serde_json::to_string(&ask.steps).unwrap_or_default(), state, comment, decided, before],
+        "UPDATE asks SET steps = ?2, state = ?3, answer = ?4, decided = ?5 WHERE id = ?1 AND state = 'pending' AND steps = ?6 AND revision = ?7",
+        params![ask.id, serde_json::to_string(&ask.steps).unwrap_or_default(), state, comment, decided, before, ask.revision],
     )?;
     if claimed == 0 {
-        return Err(RequestError::Ask("That step was already answered.".to_owned()));
+        let changed = factory
+            .store
+            .db()
+            .query_row("SELECT revision FROM asks WHERE id = ?1", [ask.id], |row| row.get::<_, i64>(0))
+            .is_ok_and(|now| now != ask.revision);
+        return Err(RequestError::Ask(if changed { CHANGED.to_owned() } else { "That step was already answered.".to_owned() }));
     }
     (ask.state, ask.answer, ask.decided) = (state.to_owned(), comment, decided);
     // Its entry shows the next step, or that it's over.
@@ -1109,7 +1718,44 @@ mod tests {
             replied: false,
             clears: String::new(),
             clears_incarnation: String::new(),
+            reason: String::new(),
+            revision: 1,
+            updated: None,
+            update_reason: String::new(),
+            action: String::new(),
+            action_description: String::new(),
+            action_reason: String::new(),
         }
+    }
+
+    #[test]
+    fn a_changed_procedure_keeps_the_steps_done_up_to_the_first_change() {
+        let step = |text: &str, state: &str| Step { text: text.to_owned(), state: state.to_owned(), comment: String::new(), decided: 0 };
+        let old = [step("Open Settings", "done"), step("Sign in", "done"), step("Copy the key", ""), step("Paste it", "")];
+        let texts = |list: &[&str]| list.iter().map(|text| (*text).to_owned()).collect::<Vec<_>>();
+        let kept = |steps: &[Step]| steps.iter().map(|step| step.state.clone()).collect::<Vec<_>>();
+        // A later step changed: both done steps stay done.
+        let new = restepped(&old, &texts(&["Open Settings", "Sign in", "Copy the token", "Paste it"])).expect("steps");
+        assert_eq!(kept(&new), ["done", "done", "", ""]);
+        // A done step changed: it and every step after it are asked again.
+        let new = restepped(&old, &texts(&["Open Settings", "Sign in with SSO", "Copy the key"])).expect("steps");
+        assert_eq!(kept(&new), ["done", "", ""]);
+        // Nothing left to do is refused, as are too few steps.
+        assert!(restepped(&old, &texts(&["Open Settings", "Sign in"])).is_err());
+        assert!(restepped(&old, &texts(&["Open Settings"])).is_err());
+    }
+
+    #[test]
+    fn an_answer_counts_only_for_the_version_it_names() {
+        let now = now_ms();
+        assert!(seen(Some(1), 1, None).is_ok());
+        assert!(seen(Some(0), 1, None).is_ok(), "an app reading an older backend's 0 means 1");
+        assert_eq!(seen(Some(1), 2, Some(now - 3_600_000)), Err(CHANGED.to_owned()));
+        assert!(seen(Some(2), 2, Some(now)).is_ok());
+        // An app before #428 names none: refused only just after a change.
+        assert!(seen(None, 1, None).is_ok());
+        assert!(seen(None, 3, Some(now - UNSEEN_MS)).is_ok());
+        assert_eq!(seen(None, 3, Some(now - 1_000)), Err(CHANGED.to_owned()));
     }
 
     #[test]

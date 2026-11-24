@@ -12,6 +12,8 @@
 //!                         model.json     qa-model's script (with --model), read for every request
 //!                         home/models/speech/  the speech model (with --speech), copied in
 //!                         model.jsonl    what qa-model was asked and answered, a line each
+//!                         openrouter-models.json  OpenRouter's model list as qa-model serves it,
+//!                                        if written (else a built-in one), read for every fetch
 //!                         claude.json    until when the fake Claude sign-in is at its limit (with --claude)
 //!                         home/auth.json the fake Claude sign-in (with --claude): fake tokens only
 //!                         factoryd.log, account.log, model.out
@@ -232,6 +234,7 @@ impl Sandbox {
             "model": self.model_port.map(|_| if self.claude { crate::model::claude::MODEL } else { crate::model::MODEL }),
             "model_script": self.model_port.map(|_| self.model_script()),
             "model_log": self.model_port.map(|_| self.model_log()),
+            "openrouter_models": self.model_port.map(|_| self.dir.join(crate::model::MODELS_FILE)),
             "log": self.dir.join("factoryd.log"),
             "commit": self.commit,
             "machine_name": self.machine_name,
@@ -765,6 +768,9 @@ fn environment(sandbox: &Sandbox) -> Vec<(&'static str, String)> {
     if let Some(port) = sandbox.model_port {
         environment.push(("OPENROUTER_API_KEY", "qa-model".to_owned()));
         environment.push(("OPENROUTER_BASE_URL", format!("http://127.0.0.1:{port}/v1")));
+        // OpenRouter's model list from qa-model too: read only by a QA build
+        // of factoryd, and only for an address on this computer (#185 U4).
+        environment.push(("FACTORY_QA_OPENROUTER_MODELS_URL", format!("http://127.0.0.1:{port}/api/v1/models")));
         if sandbox.claude {
             // Read only by a QA build of factoryd, and only for an address on this computer.
             environment.push(("FACTORY_QA_ANTHROPIC_URL", format!("http://127.0.0.1:{port}")));

@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use factory_agent::{Tool, ToolResult};
+use factory_protocol::v1;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -32,6 +33,9 @@ static MANIFEST: Manifest = Manifest {
     default_enabled: false,
     options: &[],
 };
+
+const UNINSTALL: &str = "Ask the person to uninstall an app installed in this Claktory, when they ask: app, its id, as apps_list gives it; keep_data: true to keep what it stored, for a later install; reason: why, in a sentence they read on the card. A card opens in your conversation (and their Needs you), and only their approval uninstalls it; you're told which in an event. To stop an app for a while instead, use apps_set_running.";
+const RUNNING: &str = "Start or stop an app installed in this Claktory, as the person's switch in Marketplace → Apps does, when they ask (or to start again one Claktory paused after it crashed). app: its id, as apps_list gives it. running: true to start it, false to stop it. Stopped, it stays installed and set up, and its agents can't use it until it starts again.";
 
 const PROPOSE: &str = "Propose giving an agent access to an app at the person's account, when they ask for it: agent, its id or name; app, \"dms\" (direct messages); scopes, what it may do there (dm.read, dm.draft, dm.send, dm.subscribe); resources, what it reaches ([{\"kind\": \"conversation\", \"id\": …}], at least one); days, how long it lasts (left out: until the person takes it back); reason, why, for the person. It opens a card in your conversation where the person approves or declines it, and you're told which. Ask only for what the work needs. Approved, it replaces what that agent had in the app.";
 
@@ -103,8 +107,32 @@ impl Extension for AppGrants {
             },
             "additionalProperties": false,
         });
+        let running = json!({
+            "type": "object",
+            "required": ["app", "running"],
+            "properties": {"app": {"type": "string", "minLength": 1}, "running": {"type": "boolean"}},
+            "additionalProperties": false,
+        });
+        let uninstall = json!({
+            "type": "object",
+            "required": ["app", "reason"],
+            "properties": {
+                "app": {"type": "string", "minLength": 1},
+                "keep_data": {"type": "boolean"},
+                "reason": {"type": "string", "minLength": 1, "maxLength": MAX_REASON},
+            },
+            "additionalProperties": false,
+        });
         vec![
             super::tool(user_apps::TOOL, "Propose app access", PROPOSE, parameters, super::typed_handler(factory, agent, propose)),
+            super::async_tool(factory, agent, RUNNING_TOOL, "Start or stop an app", RUNNING, running, set_running),
+            super::tool(
+                crate::card_actions::UNINSTALL_TOOL,
+                "Uninstall an app",
+                UNINSTALL,
+                uninstall,
+                super::typed_handler(factory, agent, uninstall_app),
+            ),
             super::tool(
                 crate::apps::access::LIST_TOOL,
                 "Apps",
@@ -277,6 +305,83 @@ fn list_apps(factory: &Arc<Factory>, agent: &str, args: crate::apps::access::Lis
 async fn set_access(factory: Arc<Factory>, agent: String, args: crate::apps::access::SetArgs) -> Result<ToolResult, String> {
     only_rivet_sets(&factory, &agent)?;
     crate::apps::access::set_access(&factory, &agent, args).await
+}
+
+/// apps_set_running's name.
+pub(crate) const RUNNING_TOOL: &str = "apps_set_running";
+
+#[derive(Deserialize)]
+struct RunningArgs {
+    app: String,
+    running: bool,
+}
+
+/// apps_set_running: only Rivet starts or stops an installed app, as the
+/// person's switch does (`Factory::set_app_running`), crashes before
+/// forgotten when it starts.
+async fn set_running(factory: Arc<Factory>, agent: String, args: RunningArgs) -> Result<ToolResult, String> {
+    only_rivet_sets(&factory, &agent)?;
+    // A page or a pipe it read mustn't turn the person's apps on or off
+    // (Fugo, Abbacchio's row 1047).
+    super::untainted(&factory, &agent, "start or stop apps", "start or stop one with its switch in Marketplace → Apps. Nothing was changed.")?;
+    let wanted = args.app.trim().to_owned();
+    if !factory.apps.available() {
+        return Err("Apps aren't available in this Claktory yet. Nothing was changed.".to_owned());
+    }
+    let (installed, was) = {
+        let inner = factory.lock();
+        let app = inner.config.apps.iter().find(|app| app.id == wanted);
+        (app.is_some(), app.is_some_and(|app| app.running))
+    };
+    if !installed {
+        return Err(format!("There's no app \"{wanted}\" installed: apps_list gives their ids. Nothing was changed."));
+    }
+    let name = factory.apps.manifest(&wanted).map_or_else(|| wanted.clone(), |manifest| manifest.name.clone());
+    if !args.running && !was {
+        return Ok(ToolResult::text(format!("{name} is stopped already."), json!({"app": wanted, "running": false})));
+    }
+    let request = v1::SetAppRunning { id: wanted.clone(), running: args.running };
+    factory.set_app_running(&request).await.map_err(|error| format!("{error} Nothing was changed."))?;
+    let said = if args.running {
+        format!("Started {name}: it's starting now, and apps_list shows how it's doing.")
+    } else {
+        format!("Stopped {name}. It stays installed and set up; its agents can't use it until it starts again.")
+    };
+    Ok(ToolResult::text(said, json!({"app": wanted, "running": args.running})))
+}
+
+#[derive(Deserialize)]
+struct UninstallArgs {
+    app: String,
+    #[serde(default)]
+    keep_data: bool,
+    reason: String,
+}
+
+/// apps_uninstall (#423): asks the person, on a card, to uninstall an app;
+/// only their approval does.
+fn uninstall_app(factory: &Arc<Factory>, agent: &str, args: UninstallArgs) -> Result<ToolResult, String> {
+    only_rivet_sets(factory, agent)?;
+    let wanted = args.app.trim().to_owned();
+    let reason = args.reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (installed, me, person) = {
+        let inner = factory.lock();
+        let me = inner.config.agent(agent).map(|me| me.name.clone()).unwrap_or_default();
+        (inner.config.apps.iter().any(|app| app.id == wanted), me, inner.config.person_capitalized().to_owned())
+    };
+    if !installed {
+        return Err(format!("There's no app \"{wanted}\" installed: apps_list gives their ids. Nothing was asked."));
+    }
+    if reason.is_empty() {
+        return Err(format!("Give reason: why, in a sentence {person} reads on the card. Nothing was asked."));
+    }
+    let name = factory.apps.manifest(&wanted).map_or_else(|| wanted.clone(), |manifest| manifest.name.clone());
+    let data = if args.keep_data { "what it stored is kept for a later install" } else { "what it stored is deleted too" };
+    let description = format!(
+        "{me} asks to uninstall {name}: it stops, and it's removed with its setup (what it reads and which agents use it); {data}. Its secrets stay in your vault."
+    );
+    let action = crate::card_actions::Action::UninstallApp { app: wanted, keep_data: args.keep_data };
+    crate::card_actions::ask(factory, agent, &format!("Uninstall {name}"), &description, &reason, &action)
 }
 
 /// Only Rivet sets apps up: the settings' admin agent, whoever calls.

@@ -26,11 +26,13 @@ CREATE TABLE IF NOT EXISTS conversation_changes (
 CREATE INDEX IF NOT EXISTS conversation_changes_at ON conversation_changes (at);
 ";
 
-/// What happened to a conversation.
+/// What happened to a conversation: its `kind` in the table, which since
+/// #423 can also be "deleted" (a version set aside, deleted).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Back,
     Switched,
+    Deleted,
 }
 
 impl Kind {
@@ -38,6 +40,7 @@ impl Kind {
         match self {
             Kind::Back => "back",
             Kind::Switched => "switched",
+            Kind::Deleted => "deleted",
         }
     }
 }
@@ -93,6 +96,9 @@ impl ConversationChange {
         if self.kind == Kind::Switched.key() {
             return format!("{by} switched {agent} to another version");
         }
+        if self.kind == Kind::Deleted.key() {
+            return format!("{by} deleted one of {} other versions", crate::apps::changes::possessive(&agent));
+        }
         let day = |ms: i64| local_time(ms, "%Y-%m-%d");
         let when = if day(self.point) == day(self.at) { local_time(self.point, "%H:%M") } else { local_time(self.point, "%-d %b %H:%M") };
         format!("{by} took {} conversation back to {when}", crate::apps::changes::possessive(&agent))
@@ -112,7 +118,7 @@ pub(crate) fn between(db: &rusqlite::Connection, since: i64, before: i64, limit:
 /// The change a conversation_fork or conversation_switch call made, from
 /// its entry.
 pub(crate) fn change_of(call: &factory_protocol::v1::ToolCall) -> Option<String> {
-    if !matches!(call.name.as_str(), "conversation_fork" | "conversation_switch" | "extension_call") {
+    if !matches!(call.name.as_str(), "conversation_fork" | "conversation_switch" | "conversation_delete" | "extension_call") {
         return None;
     }
     let details: serde_json::Value = serde_json::from_str(&call.details).ok()?;
@@ -148,6 +154,7 @@ mod tests {
             format!("Rivet took James' conversation back to {}", local_time(days_before, "%-d %b %H:%M"))
         );
         assert_eq!(change("mike", Kind::Switched, 0).title(&names), "Rivet switched Mike to another version");
+        assert_eq!(change("mike", Kind::Deleted, 0).title(&names), "Rivet deleted one of Mike's other versions");
         assert_eq!(change("gone", Kind::Switched, 0).title(&names), "Rivet switched gone to another version");
     }
 }

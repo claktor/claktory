@@ -12,6 +12,11 @@
 //! dropped instead, as if discarded. What's waiting, and how far it got,
 //! is kept in the store, so a restart carries on with it.
 //!
+//! A voice message can carry what the person typed or pasted with it
+//! (#425): it waits with that as its text, and the agent gets one message,
+//! the typed text, then the words heard after "Voice note: " (`compose`);
+//! the transcript keeps the two apart (UserText.typed and heard).
+//!
 //! One worker transcribes, oldest first across agents, with one
 //! `claktory-speech serve` kept running while there's work (it holds the
 //! model in memory) and stopped after a while without any.
@@ -50,6 +55,29 @@ pub(crate) struct Voice {
     pub(crate) error_code: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) language: String,
+    /// What the person typed with it (#425): the message's text until it's
+    /// done, then the start of it (`compose`); empty for a voice message
+    /// alone.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) typed: String,
+}
+
+/// Between what the person typed and the words heard, as the agent reads
+/// a voice message sent with text.
+const VOICE_NOTE: &str = "\n\nVoice note: ";
+
+/// The message the agent reads: the words heard, after what was typed.
+fn compose(typed: &str, heard: &str) -> String {
+    if typed.is_empty() { heard.to_owned() } else { format!("{typed}{VOICE_NOTE}{heard}") }
+}
+
+/// A delivered voice message's words heard, alone, when it was sent with
+/// `typed` text: what `compose` put after it.
+pub(crate) fn heard_part<'a>(text: &'a str, typed: &str) -> Option<&'a str> {
+    if typed.is_empty() {
+        return None;
+    }
+    text.strip_prefix(typed)?.strip_prefix(VOICE_NOTE)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +90,14 @@ pub(crate) enum State {
 
 impl Voice {
     fn pending() -> Voice {
-        Voice { state: State::Pending, duration_ms: 0, error: String::new(), error_code: String::new(), language: String::new() }
+        Voice {
+            state: State::Pending,
+            duration_ms: 0,
+            error: String::new(),
+            error_code: String::new(),
+            language: String::new(),
+            typed: String::new(),
+        }
     }
 
     pub(crate) fn view(&self) -> v1::Transcription {
@@ -82,7 +117,11 @@ impl Voice {
 
     /// As the agent reads it, once it's done.
     pub(crate) fn heard(&self) -> Option<factory_agent::Voice> {
-        (self.state == State::Done).then(|| factory_agent::Voice { duration_ms: self.duration_ms, language: self.language.clone() })
+        (self.state == State::Done).then(|| factory_agent::Voice {
+            duration_ms: self.duration_ms,
+            language: self.language.clone(),
+            typed: self.typed.clone(),
+        })
     }
 }
 
@@ -173,17 +212,21 @@ fn send_once(
     client_id: &str,
     attached: &[v1::Attachment],
 ) -> Result<(), RequestError> {
-    if !text.trim().is_empty() {
-        return Err(refused("A voice message has no text: its words come from the recording."));
-    }
-    if attached.len() != 1 {
+    // A chat takes no files but the recording; an agent takes others with
+    // it, as in any message.
+    if attached.is_empty() || (crate::chats::is_chat(agent) && attached.len() != 1) {
         return Err(refused("A voice message carries one recording."));
     }
     known(factory, agent)?;
     let attachments = factory.attachments(agent, attached)?;
     usable(factory)?;
-    let queued =
-        Queued { client_id: client_id.to_owned(), attachments, voice: Some(Voice::pending()), ..Queued::from_person("", sent_from) };
+    // What was typed with it waits as its text, redacted as any message's
+    // is, so the agent later reads the same words it starts with.
+    let redactor = factory.redaction.current();
+    let typed = text.trim();
+    let typed = if redactor.is_empty() { typed.to_owned() } else { redactor.redact(typed).into_owned() };
+    let voice = Voice { typed: typed.clone(), ..Voice::pending() };
+    let queued = Queued { client_id: client_id.to_owned(), attachments, voice: Some(voice), ..Queued::from_person(typed, sent_from) };
     factory.enqueue(&mut factory.lock(), agent, queued)?;
     factory.voices.kick();
     Ok(())
@@ -202,7 +245,7 @@ pub(crate) fn retry(factory: &Arc<Factory>, agent: &str, id: i64) -> Result<(), 
     let Some(voice) = queued.voice.as_mut().filter(|voice| voice.state == State::Failed) else {
         return Err(refused("Only a voice message that couldn't be transcribed can be tried again."));
     };
-    *voice = Voice { duration_ms: voice.duration_ms, ..Voice::pending() };
+    *voice = Voice { duration_ms: voice.duration_ms, typed: voice.typed.clone(), ..Voice::pending() };
     factory.store.set_voice(id, &queued.text, voice)?;
     factory.broadcast_workspace(&inner);
     drop(inner);
@@ -445,9 +488,11 @@ fn finish(factory: &Arc<Factory>, job: &Job, outcome: Result<Heard, Failure>) {
     let Some(at) = runtime.queue.iter().position(|queued| queued.id == job.id) else { return };
     let queued = &mut runtime.queue[at];
     let Some(voice) = queued.voice.as_mut().filter(|voice| voice.state == State::Pending) else { return };
+    // One sent with typed text fails instead, keeping what was typed.
     if let Err(failure) = &outcome
         && failure.code == "no_speech"
         && voice.duration_ms < SILENT_MS
+        && voice.typed.is_empty()
     {
         tracing::info!(agent = %job.agent, duration_ms = voice.duration_ms, "a short voice message with no speech was dropped");
         let dropped = runtime.queue.remove(at);
@@ -461,8 +506,15 @@ fn finish(factory: &Arc<Factory>, job: &Job, outcome: Result<Heard, Failure>) {
         Ok(heard) => {
             tracing::info!(agent = %job.agent, duration_ms = heard.duration_ms, "a voice message was transcribed");
             // No secret's value reaches an agent, as in any message.
-            queued.text = if redactor.is_empty() { heard.text } else { redactor.redact(&heard.text).into_owned() };
-            *voice = Voice { state: State::Done, duration_ms: heard.duration_ms, language: heard.language, ..Voice::pending() };
+            let words = if redactor.is_empty() { heard.text } else { redactor.redact(&heard.text).into_owned() };
+            queued.text = compose(&voice.typed, &words);
+            *voice = Voice {
+                state: State::Done,
+                duration_ms: heard.duration_ms,
+                language: heard.language,
+                typed: std::mem::take(&mut voice.typed),
+                ..Voice::pending()
+            };
             if crate::chats::is_chat(&job.agent) {
                 crate::chats::heard(factory, &job.agent, &queued.text);
             }

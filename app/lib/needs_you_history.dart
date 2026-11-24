@@ -67,9 +67,10 @@ class _NeedsYouHistoryListState extends State<NeedsYouHistoryList> {
   /// was left as it was, or why it couldn't.
   final _undoNotes = <String, ({String text, bool failed})>{};
 
-  /// Who gave what in every app, and every agent's model and effort, as
-  /// last seen: a change to either (Rivet's, or the person's on another
-  /// device) changes it, and History asks again.
+  /// Who gave what in every app, every agent's model and effort, and what
+  /// waits for the person in each conversation, as last seen: a change to
+  /// any (Rivet's, the person's on another device, a card answered or its
+  /// agent taking it back, #407) changes it, and History asks again.
   late String _given;
 
   @override
@@ -92,7 +93,9 @@ class _NeedsYouHistoryListState extends State<NeedsYouHistoryList> {
       '/',
     ],
     for (final agent in _backend.workspace.workspace.agents)
-      '${agent.id}=${agent.model}/${agent.effort}',
+      '${agent.id}=${agent.model}/${agent.effort}/${agent.waitingSeqs.join('.')}',
+    for (final chat in _backend.workspace.workspace.chats)
+      '${chat.id}?${chat.waitingSeqs.join('.')}',
   ].join(',');
 
   void _workspaceChanged() {
@@ -336,12 +339,28 @@ bool _opensApp(NeedsYouRecord record) =>
 bool _ofPipe(NeedsYouRecord record) =>
     record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_HELD ||
     record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_LOOP ||
-    (record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_FORWARD &&
+    ((record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_FORWARD ||
+            // Rivet letting an agent only send to a pipe, or stopping it
+            // (#414): Claktory's sentence, and the pipe opens.
+            record.kind ==
+                NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_MEMBER) &&
         record.pipeId.isNotEmpty);
 
+/// How often an agent changed a card while it waited (#428): "Updated
+/// once", "Updated twice", "Updated 3 times".
+String updatedTimes(int times) => switch (times) {
+  1 => 'Updated once',
+  2 => 'Updated twice',
+  _ => 'Updated $times times',
+};
+
 /// What a record's outcome is called: as its card's buttons said it; ""
-/// for one this app doesn't know (a newer Claktory's).
-String historyOutcome(NeedsYouRecord record) => switch (record.outcome) {
+/// for one this app doesn't know (a newer Claktory's). [agent] is the name
+/// of the agent the card is from, as it is now.
+String historyOutcome(
+  NeedsYouRecord record, {
+  String? agent,
+}) => switch (record.outcome) {
   // A held message: an agent's was sent, the other side's let in.
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED
       when record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_HELD =>
@@ -364,6 +383,10 @@ String historyOutcome(NeedsYouRecord record) => switch (record.outcome) {
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_DISMISSED => 'Dismissed',
   // Approved, but the grant couldn't be made (Rivet's app access).
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_FAILED => "Approved, but couldn't give it",
+  // Taken back by its agent once it no longer applied (#407), never the
+  // person's dismissal.
+  NeedsYouOutcome.NEEDS_YOU_OUTCOME_WITHDRAWN =>
+    'Withdrawn by ${agent ?? 'the agent'}',
   _ => '',
 };
 
@@ -447,15 +470,22 @@ class HistoryRow extends StatelessWidget {
     final reply = _shortened(record.reply, 120);
     // An app access change undone since says so after how it ended.
     final outcome = [
-      historyOutcome(record),
+      historyOutcome(record, agent: agentName),
       if ((_ofApp(record) || _ofModel(record)) && record.undone) 'Undone',
       // Changed again since, so Undo would be refused (row 684).
       if (_ofModel(record) && record.superseded && !record.undone)
         'Changed since',
+      // Its agent changed the card while it waited (#428).
+      if (record.updates > 0) updatedTimes(record.updates),
     ].where((part) => part.isNotEmpty).join(' · ');
-    // Rivet's reason, as Rivet's own words, never as Claktory's.
+    // Rivet's reason, or why an agent withdrew its card, as the agent's
+    // own words, never as Claktory's.
     final reason =
-        (_ofApp(record) || _ofModel(record) || _ofConversation(record)) &&
+        (_ofApp(record) ||
+                _ofModel(record) ||
+                _ofConversation(record) ||
+                record.outcome ==
+                    NeedsYouOutcome.NEEDS_YOU_OUTCOME_WITHDRAWN) &&
             record.agentReason.isNotEmpty
         ? '${agentName ?? 'An agent'}: “${proseCodes(_shortened(record.agentReason, 300))}”'
         : '';

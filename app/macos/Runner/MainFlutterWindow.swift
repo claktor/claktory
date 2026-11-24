@@ -159,6 +159,11 @@ class MainFlutterWindow: NSWindow {
       case "cancelWebAuth":
         WebAuth.shared.cancel()
         result(nil)
+      case "shareFiles":
+        // The share menu for files the app fetched (lib/share_files.dart,
+        // #418): AirDrop, Messages, Mail…
+        ShareFiles.show(
+          call.arguments as? [String: Any] ?? [:], in: flutterViewController.view, result)
       default: result(FlutterMethodNotImplemented)
       }
     }
@@ -537,6 +542,62 @@ class MainFlutterWindow: NSWindow {
 /// to one the app listens on: the system's sign-in window, which shares the
 /// default browser's sign-ins. It answers the address the service sent back
 /// to, nil when the person closed it, or an error.
+/// The share menu for files on this Mac (`shareFiles` on factory/device):
+/// `paths`, pointing at `rect` (the Share button or row, in the Flutter
+/// view's points from its top left). Answers true once a service shared
+/// them, false if the person closed the menu or the service failed; the
+/// app deletes the files then.
+final class ShareFiles: NSObject, NSSharingServicePickerDelegate, NSSharingServiceDelegate {
+  /// The share showing now, kept until it answers.
+  private static var current: ShareFiles?
+  private var result: FlutterResult?
+
+  static func show(_ args: [String: Any], in view: NSView, _ result: @escaping FlutterResult) {
+    let urls = (args["paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
+      .filter { FileManager.default.fileExists(atPath: $0.path) }
+    guard !urls.isEmpty, view.window != nil else { return result(false) }
+    current?.answer(false)
+    let share = ShareFiles()
+    share.result = result
+    current = share
+    var rect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+    if let r = args["rect"] as? [Double], r.count == 4 {
+      let y = view.isFlipped ? r[1] : view.bounds.height - r[1] - r[3]
+      rect = CGRect(x: r[0], y: y, width: max(r[2], 1), height: max(r[3], 1))
+    }
+    let picker = NSSharingServicePicker(items: urls)
+    picker.delegate = share
+    picker.show(relativeTo: rect, of: view, preferredEdge: .minY)
+  }
+
+  private func answer(_ shared: Bool) {
+    result?(shared)
+    result = nil
+    if Self.current === self { Self.current = nil }
+  }
+
+  func sharingServicePicker(
+    _ picker: NSSharingServicePicker, delegateFor service: NSSharingService
+  ) -> NSSharingServiceDelegate? { self }
+
+  func sharingServicePicker(
+    _ picker: NSSharingServicePicker, didChoose service: NSSharingService?
+  ) {
+    // Closed without choosing: nothing was shared.
+    if service == nil { answer(false) }
+  }
+
+  func sharingService(_ service: NSSharingService, didShareItems items: [Any]) {
+    answer(true)
+  }
+
+  func sharingService(
+    _ service: NSSharingService, didFailToShareItems items: [Any], error: Error
+  ) {
+    answer(false)
+  }
+}
+
 final class WebAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
   static let shared = WebAuth()
 

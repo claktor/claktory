@@ -35,6 +35,7 @@ Future<void> _show(
   List<Map<String, Object?>> components,
   Object? data, {
   double height = 852,
+  double width = _phone,
   Brightness brightness = Brightness.dark,
 }) async {
   tester.platformDispatcher.platformBrightnessTestValue = brightness;
@@ -60,7 +61,7 @@ Future<void> _show(
     );
   await Harness(_workspace).show(
     tester,
-    size: Size(_phone, height),
+    size: Size(width, height),
     // On the window's canvas, as the app shows a view.
     home: Builder(
       builder: (context) => ColoredBox(
@@ -510,6 +511,234 @@ void main() {
       );
       await _golden(tester, 'bars');
     });
+
+    for (final (width, scale) in [(402.0, 1.0), (320.0, 1.0), (320.0, 1.6)]) {
+      testWidgets("${brightness.name}: a dashboard's bar on one line, "
+          "${width.toInt()} wide, text ×$scale", (tester) async {
+        _shade = brightness.name;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        tester.platformDispatcher.textScaleFactorTestValue = scale;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        List<Map<String, Object?>> button(
+          String id,
+          List<Map<String, Object?>> face, {
+          num? weight,
+        }) => [
+          {
+            'id': id,
+            'component': 'Button',
+            'child': '${id}_c',
+            'variant': 'borderless',
+            'weight': ?weight,
+            'action': {
+              'event': {'name': 'menu'},
+            },
+          },
+          {
+            'id': '${id}_c',
+            'component': 'List',
+            'direction': 'horizontal',
+            'align': 'center',
+            'children': [for (final part in face) part['id']],
+          },
+          ...face,
+        ];
+        await _show(
+          tester,
+          [
+            {
+              'id': 'root',
+              'component': 'Column',
+              'children': ['bar', 'p1'],
+            },
+            {
+              'id': 'bar',
+              'component': 'Row',
+              'children': ['name', 'range', 'agent', 'more'],
+            },
+            ...button('name', weight: 1, [
+              {
+                'id': 'name_t',
+                'component': 'Text',
+                'text': 'Agents at work',
+                'variant': 'heading',
+              },
+              {'id': 'name_i', 'component': 'Icon', 'name': 'chevron-down'},
+            ]),
+            ...button('range', [
+              {'id': 'range_t', 'component': 'Text', 'text': '30 days'},
+              {'id': 'range_i', 'component': 'Icon', 'name': 'chevron-down'},
+            ]),
+            ...button('agent', [
+              {'id': 'agent_t', 'component': 'Text', 'text': 'Agent: All'},
+              {'id': 'agent_i', 'component': 'Icon', 'name': 'chevron-down'},
+            ]),
+            ...button('more', [
+              {'id': 'more_l', 'component': 'Icon', 'name': 'ellipsis'},
+            ]),
+            ..._card('p1', {
+              'component': 'Stat',
+              'label': 'Runs',
+              'value': 42,
+              'spark': [1, 3, 2, 5, 4],
+              'height': 100,
+            }),
+          ],
+          null,
+          width: width,
+          height: 260,
+          brightness: brightness,
+        );
+        expect(tester.takeException(), isNull);
+        await _golden(tester, 'bar_${width.toInt()}_${(scale * 10).round()}');
+      });
+    }
+
+    testWidgets("${brightness.name}: the dashboards' menu on a phone: "
+        'Starred, then all, the home one marked', (tester) async {
+      _shade = brightness.name;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const boards = [
+        ('Cards', 'Starred', 'star'),
+        ('Costs', 'Starred', 'star'),
+        ('Agents at work', 'All dashboards', ''),
+        ('Cards', 'All dashboards', 'star'),
+        ('Claktory', 'All dashboards', 'house'),
+        ('Costs', 'All dashboards', 'star'),
+        ('Fidelity', 'All dashboards', ''),
+      ];
+      await _show(
+        tester,
+        [
+          {
+            'id': 'root',
+            'component': 'Column',
+            'children': ['name'],
+          },
+          {
+            'id': 'name',
+            'component': 'Button',
+            'child': 'name_t',
+            'variant': 'borderless',
+            'menu': {
+              'title': 'Dashboards',
+              'options': [
+                for (final (i, (label, section, icon)) in boards.indexed)
+                  {
+                    'label': label,
+                    'section': section,
+                    if (icon.isNotEmpty) 'icon': icon,
+                    if (i == 4) 'selected': true,
+                    'action': {
+                      'event': {'name': 'board'},
+                    },
+                  },
+              ],
+            },
+          },
+          {'id': 'name_t', 'component': 'Text', 'text': 'Claktory'},
+        ],
+        null,
+        height: 700,
+        brightness: brightness,
+      );
+      await tester.tap(find.text('Claktory'));
+      await tester.pumpAndSettle();
+      await expectLater(
+        find.byType(Overlay).first,
+        matchesGoldenFile('goldens/charts_dashboards_menu_$_shade.png'),
+      );
+    });
+
+    for (final (device, platform, width) in [
+      ('phone', TargetPlatform.iOS, _phone),
+      ('mac', TargetPlatform.macOS, 700.0),
+    ]) {
+      testWidgets("${brightness.name}: a Button's menu of 50 agents open on "
+          "a $device", (tester) async {
+        _shade = brightness.name;
+        debugDefaultTargetPlatformOverride = platform;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        await _show(
+          tester,
+          [
+            {
+              'id': 'root',
+              'component': 'Column',
+              'children': ['bar', 'p1'],
+            },
+            {
+              'id': 'bar',
+              'component': 'List',
+              'direction': 'horizontal',
+              'align': 'center',
+              'children': ['range', 'agent'],
+            },
+            for (final (id, words, title, options) in [
+              (
+                'range',
+                'Last 7 days',
+                'Time range',
+                ['Last 1 hour', 'Last 24 hours', 'Last 7 days'],
+              ),
+              (
+                'agent',
+                'Agent: All',
+                'Agent',
+                ['All', for (var i = 1; i < 50; i++) 'agent-$i'],
+              ),
+            ]) ...[
+              {
+                'id': id,
+                'component': 'Button',
+                'child': '${id}_c',
+                'variant': 'borderless',
+                'menu': {
+                  'title': title,
+                  'options': [
+                    for (final (i, label) in options.indexed)
+                      {
+                        'label': label,
+                        if (i == (id == 'range' ? 2 : 0)) 'selected': true,
+                        'action': {
+                          'event': {'name': id},
+                        },
+                      },
+                  ],
+                },
+              },
+              {
+                'id': '${id}_c',
+                'component': 'List',
+                'direction': 'horizontal',
+                'align': 'center',
+                'children': ['${id}_t', '${id}_i'],
+              },
+              {'id': '${id}_t', 'component': 'Text', 'text': words},
+              {'id': '${id}_i', 'component': 'Icon', 'name': 'chevron-down'},
+            ],
+            ..._card('p1', {
+              'component': 'Stat',
+              'label': 'Runs',
+              'value': 42,
+              'spark': [1, 3, 2, 5, 4],
+            }),
+          ],
+          null,
+          width: width,
+          height: 700,
+          brightness: brightness,
+        );
+        await tester.tap(find.text('Agent: All'));
+        await tester.pumpAndSettle();
+        await expectLater(
+          find.byType(Overlay).first,
+          matchesGoldenFile('goldens/charts_button_menu_${device}_$_shade.png'),
+        );
+      });
+    }
 
     testWidgets('${brightness.name}: a menu, its chosen row marked', (
       tester,

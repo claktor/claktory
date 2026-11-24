@@ -27,6 +27,12 @@ bool hiddenRune(int rune) =>
     rune == 0xffa0 ||
     rune == 0x180e;
 
+/// A file's or folder's name as the app shows it (a pane's title, Files'
+/// rows, a message's files): its hidden characters written out as their
+/// codes, so `invoice\u202Efdp.exe` can't read as a PDF (Fugo's row 1026).
+/// Never for opening or sharing it: the name with them is the file's.
+String shownName(String name) => visibleCodes(name);
+
 /// How a hidden character shows: "\u{202E}".
 String runeCode(int rune) =>
     '\\u{${rune.toRadixString(16).toUpperCase().padLeft(4, '0')}}';

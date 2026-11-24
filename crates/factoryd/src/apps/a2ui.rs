@@ -30,6 +30,9 @@ pub(crate) const MAX_RENDERER_MESSAGE: usize = 64 << 10;
 const MAX_DEPTH: usize = 32;
 const MAX_CHILDREN: usize = 500;
 const MAX_OPTIONS: usize = 200;
+/// A Button's menu searches its options past a few, so it holds more than a
+/// ChoicePicker: a dashboard's every agent, say.
+const MAX_MENU_OPTIONS: usize = 500;
 const MAX_TABS: usize = 20;
 const MAX_ID: usize = 64;
 const MAX_PATH: usize = 1024;
@@ -252,11 +255,22 @@ impl Content {
         if !body.get("context").is_some_and(Value::is_object) {
             return Err(invalid(format!("{at}/context"), "context is an object, and required"));
         }
-        let declared = self.components.get(source).and_then(|component| component.pointer("/action/event/name")).and_then(Value::as_str);
-        match declared {
-            Some(declared) if declared == name => Ok(()),
-            Some(_) => Err(invalid(format!("{at}/name"), format!("\"{source}\"'s action isn't \"{name}\""))),
-            None => Err(invalid(format!("{at}/sourceComponentId"), format!("the surface has no component \"{source}\" with an action"))),
+        // Its own action's name, and its menu's options'.
+        let component = self.components.get(source);
+        let event = |action: &Value| action.pointer("/action/event/name").and_then(Value::as_str).map(str::to_owned);
+        let declared: Vec<String> = component
+            .into_iter()
+            .flat_map(|component| {
+                let options = component.pointer("/menu/options").and_then(Value::as_array).into_iter().flatten();
+                event(component).into_iter().chain(options.filter_map(event))
+            })
+            .collect();
+        if declared.is_empty() {
+            Err(invalid(format!("{at}/sourceComponentId"), format!("the surface has no component \"{source}\" with an action")))
+        } else if declared.iter().any(|declared| declared == name) {
+            Ok(())
+        } else {
+            Err(invalid(format!("{at}/name"), format!("\"{source}\"'s action isn't \"{name}\"")))
         }
     }
 }
@@ -338,6 +352,10 @@ enum Kind {
     /// A plain string.
     Text,
     Options,
+    /// A Button's menu: {title?, options: [{label, action, selected?,
+    /// icon?, section?}]}: an icon after the words (a star, home), and the
+    /// heading over a run of options (Starred, All dashboards).
+    Menu,
     Tabs,
     /// The chart family's own kinds (a2ui_charts.rs).
     Chart(charts::Kind),
@@ -366,7 +384,14 @@ fn catalog(component: &str) -> Option<Props> {
         "Card" => &[("child", Id, true)],
         "Divider" => &[("axis", Choice(&["horizontal", "vertical"]), false)],
         "Icon" => &[("name", Icon, true)],
-        "Button" => &[("child", Id, true), ("action", Action, true), ("variant", Choice(&["default", "primary", "borderless"]), false)],
+        // A Button with a menu opens it over the page, and each option
+        // has its own action; one without has an action of its own.
+        "Button" => &[
+            ("child", Id, true),
+            ("action", Action, false),
+            ("variant", Choice(&["default", "primary", "borderless"]), false),
+            ("menu", Menu, false),
+        ],
         "TextField" => &[
             ("label", DynString, true),
             ("value", DynString, true),
@@ -431,6 +456,9 @@ fn component_id(component: &Value, at: &str) -> Result<(String, Vec<String>), In
     }
     if let Some((missing, _, _)) = props.iter().find(|(prop, _, required)| *required && !fields.contains_key(*prop)) {
         return Err(invalid(format!("{at}/{missing}"), format!("{name} needs {missing}")));
+    }
+    if name == "Button" && !fields.contains_key("action") && !fields.contains_key("menu") {
+        return Err(invalid(format!("{at}/action"), "Button needs action or menu"));
     }
     charts::component(name, fields, at)?;
     Ok((id, left_out))
@@ -542,6 +570,33 @@ fn check(kind: Kind, value: &Value, at: &str) -> Result<(), Invalid> {
             }),
             _ => Err(invalid(at, format!("options are a list of at most {MAX_OPTIONS}"))),
         },
+        Kind::Menu => {
+            let Value::Object(menu) = value else { return Err(invalid(at, "a menu is {title, options}")) };
+            only(menu, at, &["title", "options"])?;
+            if let Some(title) = menu.get("title") {
+                check(Kind::DynString, title, &format!("{at}/title"))?;
+            }
+            match menu.get("options") {
+                Some(Value::Array(options)) if !options.is_empty() && options.len() <= MAX_MENU_OPTIONS => {
+                    options.iter().enumerate().try_for_each(|(index, option)| {
+                        let here = format!("{at}/options/{index}");
+                        let Value::Object(option) = option else {
+                            return Err(invalid(&here, "an option is {label, action, selected}"));
+                        };
+                        only(option, &here, &["label", "action", "selected", "icon", "section"])?;
+                        check(Kind::DynString, option.get("label").unwrap_or(&Value::Null), &format!("{here}/label"))?;
+                        check(Kind::Action, option.get("action").unwrap_or(&Value::Null), &format!("{here}/action"))?;
+                        for (key, kind) in [("selected", Kind::DynBool), ("icon", Kind::Icon), ("section", Kind::DynString)] {
+                            if let Some(value) = option.get(key) {
+                                check(kind, value, &format!("{here}/{key}"))?;
+                            }
+                        }
+                        Ok(())
+                    })
+                }
+                _ => Err(invalid(format!("{at}/options"), format!("a menu's options are a list of 1 to {MAX_MENU_OPTIONS}"))),
+            }
+        }
         Kind::Tabs => match value {
             Value::Array(tabs) if !tabs.is_empty() && tabs.len() <= MAX_TABS => tabs.iter().enumerate().try_for_each(|(index, tab)| {
                 let here = format!("{at}/{index}");
@@ -771,6 +826,69 @@ mod tests {
         }
         let refused = apply(&mut content, json!({"version": "1.0", "updateDataModel": {"surfaceId": S, "path": "/b4", "value": chunk}}));
         assert!(refused.unwrap_err().contains("at most 4194304"));
+    }
+
+    #[test]
+    fn a_buttons_menu_is_checked_and_its_options_actions_come_from_it() {
+        let mut content = created();
+        let option = |label: &str, name: &str| json!({"label": label, "action": {"event": {"name": name, "context": {"v": label}}}});
+        let menu = |options: Value| {
+            json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [
+                {"id": "pick", "component": "Button", "child": "go_label", "variant": "borderless", "menu": options},
+            ]}})
+        };
+        // Many options (a dashboard's every agent), a title, one selected;
+        // no action of its own.
+        let many: Vec<Value> = (0..MAX_MENU_OPTIONS).map(|n| option(&format!("agent{n}"), "agent")).collect();
+        let mut first = many.clone();
+        first[0]["selected"] = json!(true);
+        first[1]["selected"] = json!({"@path": "/chosen/1"});
+        first[0]["section"] = json!("Starred");
+        first[0]["icon"] = json!("star");
+        first[1]["section"] = json!({"@path": "/sections/all"});
+        apply(&mut content, menu(json!({"title": "Agent", "options": first}))).unwrap();
+        let action = |name: &str, source: &str| {
+            json!({"version": "1.0", "action": {"name": name, "surfaceId": S, "sourceComponentId": source,
+                "timestamp": "2026-11-22T10:00:00Z", "context": {"v": "agent3"}}})
+            .to_string()
+        };
+        assert_eq!(content.check_renderer(S, &action("agent", "pick")), Ok(()));
+        assert!(content.check_renderer(S, &action("go", "pick")).unwrap_err().to_string().contains("isn't \"go\""));
+        // With an action of its own too (for apps that don't open menus):
+        // both names come from it.
+        let both = json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [
+            {"id": "pick", "component": "Button", "child": "go_label", "action": {"event": {"name": "menu"}},
+             "menu": {"options": [option("Last 7 days", "range")]}},
+        ]}});
+        apply(&mut content, both).unwrap();
+        assert_eq!(content.check_renderer(S, &action("menu", "pick")), Ok(()));
+        assert_eq!(content.check_renderer(S, &action("range", "pick")), Ok(()));
+
+        let mut over = many;
+        over.push(option("one more", "agent"));
+        let refused = [
+            (menu(json!({"options": over})), "a list of 1 to 500"),
+            (menu(json!({"options": []})), "a list of 1 to 500"),
+            (menu(json!({"title": "Agent"})), "a list of 1 to 500"),
+            (menu(json!([option("a", "b")])), "a menu is {title, options}"),
+            (menu(json!({"options": [option("a", "b")], "multiple": true})), "\"multiple\""),
+            (menu(json!({"options": [{"label": "a"}]})), "/options/0/action"),
+            (menu(json!({"options": [{"label": "a", "action": {"event": {"name": "b"}}, "detail": "x"}]})), "\"detail\""),
+            (menu(json!({"options": [{"label": "a", "action": {"event": {"name": "b"}}, "icon": 3}]})), "/options/0/icon"),
+            (menu(json!({"options": [{"label": "a", "action": {"event": {"name": "b"}}, "section": []}]})), "/options/0/section"),
+            (menu(json!({"options": [{"label": 3, "action": {"event": {"name": "b"}}}]})), "/options/0/label"),
+            (menu(json!({"options": [{"label": "a", "action": {"event": {"name": "b"}}, "selected": "yes"}]})), "/options/0/selected"),
+            (
+                json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [
+                    {"id": "pick", "component": "Button", "child": "go_label"},
+                ]}}),
+                "Button needs action or menu",
+            ),
+        ];
+        for (message, says) in refused {
+            let error = apply(&mut content, message.clone()).unwrap_err();
+            assert!(error.contains(says), "{message}: {error}");
+        }
     }
 
     #[test]

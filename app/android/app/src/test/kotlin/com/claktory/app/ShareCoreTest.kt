@@ -24,7 +24,12 @@ class ShareCoreTest {
     private val shown = mutableListOf<String>()
     private var opens = true
     private val pending = mutableListOf<() -> Unit>()
-    private val core = ShareCore(open = { shown += it; opens }, later = { _, run -> pending += run })
+    private val shownFiles = mutableListOf<FileShare.Plan>()
+    private val core = ShareCore(
+        open = { shown += it; opens },
+        later = { _, run -> pending += run },
+        openFiles = { shownFiles += it; opens },
+    )
 
     private fun runLater() {
         val now = pending.toList()
@@ -104,5 +109,31 @@ class ShareCoreTest {
         assertEquals(listOf<Any?>(false), none.values)
         core.chosen()
         assertEquals(listOf<Any?>(false), none.values)
+    }
+
+    @Test
+    fun filesAreAnsweredAsTextIs() {
+        val plan = FileShare.Plan(listOf(FileShare.Item(java.io.File("/c/claktory-share/a/x.png"), "image/png")), "image/png")
+        val picked = Answer()
+        core.shareFiles(plan, picked)
+        assertEquals(listOf(plan), shownFiles)
+        core.paused()
+        core.chosen()
+        assertEquals(listOf<Any?>(true), picked.values)
+
+        val closed = Answer()
+        core.shareFiles(plan, closed)
+        core.paused()
+        core.resumed()
+        runLater()
+        assertEquals(listOf<Any?>(false), closed.values)
+    }
+
+    @Test
+    fun refusedFilesAnswerFalseAndShowNothing() {
+        val answer = Answer()
+        core.shareFiles(null, answer)
+        assertEquals(listOf<Any?>(false), answer.values)
+        assertEquals(emptyList<FileShare.Plan>(), shownFiles)
     }
 }

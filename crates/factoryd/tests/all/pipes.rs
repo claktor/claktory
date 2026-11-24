@@ -109,6 +109,56 @@ async fn a_message_reaches_the_lead_fenced_and_escaped_and_marks_no_one() {
     assert_eq!(pipes::taint_of_for_test(&factory, "bo"), "{}");
 }
 
+/// pipe_withdraw (friend bug #19): a writer takes back its own held
+/// message once it no longer applies (settled in its chat, say): never
+/// sent, it leaves Needs you at once, and shows why.
+#[tokio::test]
+async fn a_writer_takes_back_its_own_held_message_and_no_one_elses() {
+    let (_dir, factory, mut client, mut view, pipe) = setup(true).await;
+    let none = call(&mut client, &mut view, "lea", "pipe_withdraw", "{}").await;
+    assert_eq!(none, "None of your messages is held for the person.");
+    let held = call(&mut client, &mut view, "lea", "pipe_send", r#"{"text": "Launch is Friday."}"#).await;
+    let seq = pipes::messages_for_test(&factory, &pipe).last().expect("it").seq;
+    assert!(held.ends_with(&format!("It's message {seq}: if it stops applying before they decide (they settle it in your chat, say), take it back with pipe_withdraw.")), "{held}");
+    assert_eq!(pipe_of(&view, &pipe).waiting_seqs, [seq]);
+    let listed = call(&mut client, &mut view, "lea", "pipe_withdraw", "{}").await;
+    assert!(listed.starts_with("Your messages held for the person, by number:\n") && listed.contains(&format!("- {seq} on ")), "{listed}");
+    assert!(listed.ends_with(": Launch is Friday."), "{listed}");
+
+    // Only its writer takes it back, and with a reason.
+    let args = |reason: &str| serde_json::json!({"message": seq, "reason": reason}).to_string();
+    let other = call(&mut client, &mut view, "bo", "pipe_withdraw", &args("Not mine.")).await;
+    assert_eq!(other, format!("You have no message {seq} in this pipe. Nothing was taken back."));
+    let bare = call(&mut client, &mut view, "lea", "pipe_withdraw", &serde_json::json!({"message": seq}).to_string()).await;
+    assert!(bare.ends_with("Nothing was taken back."), "{bare}");
+    assert_eq!(pipe_of(&view, &pipe).waiting_seqs, [seq]);
+
+    let took = call(&mut client, &mut view, "lea", "pipe_withdraw", &args("The person settled it in our chat.")).await;
+    assert!(took.starts_with(&format!("Took back message {seq} on ")), "{took}");
+    let shown = pipes::messages_for_test(&factory, &pipe).into_iter().find(|message| message.seq == seq).expect("it");
+    assert_eq!(
+        (shown.state(), shown.replied, shown.note.as_str()),
+        (v1::PipeMessageState::Discarded, false, "Lea took it back: The person settled it in our chat.")
+    );
+    view.follow(&mut client, |view| pipe_of(view, &pipe).waiting_seqs.is_empty()).await;
+    let again = call(&mut client, &mut view, "lea", "pipe_withdraw", &args("Again.")).await;
+    assert_eq!(again, "It isn't waiting any more: it was discarded or sent back to you.");
+    // The person can't send it now.
+    let send = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq, allow: true, ..Default::default() };
+    let refused = apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(send)).await;
+    assert!(matches!(refused, v1::server_message::Body::Error(_)), "{refused:?}");
+
+    // History lists it once, withdrawn by Lea with her reason (Polnareff 28211).
+    let list = client_message::Body::ListNeedsYouHistory(v1::ListNeedsYouHistory { query: String::new(), before_ms: 0, limit: 0 });
+    let v1::server_message::Body::NeedsYouHistory(history) = client.request(list).await.body else { panic!("a history") };
+    let held: Vec<&v1::NeedsYouRecord> = history.records.iter().filter(|record| record.seq == seq && record.pipe_id == pipe).collect();
+    assert_eq!(held.len(), 1, "{:?}", history.records);
+    assert_eq!(
+        (held[0].outcome(), held[0].agent_id.as_str(), held[0].agent_reason.as_str()),
+        (v1::NeedsYouOutcome::Withdrawn, "lea", "The person settled it in our chat.")
+    );
+}
+
 #[tokio::test]
 async fn what_an_agent_sends_waits_for_review_and_a_secret_never_goes() {
     let (dir, factory, mut client, mut view, pipe) = setup(true).await;
@@ -122,6 +172,10 @@ async fn what_an_agent_sends_waits_for_review_and_a_secret_never_goes() {
     apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(discard)).await;
     let discarded = pipes::messages_for_test(&factory, &pipe).into_iter().find(|message| message.seq == sent.seq).expect("it");
     assert_eq!(discarded.state(), v1::PipeMessageState::Discarded);
+    // Discarded without a comment, Lea is told quietly, at its next wake
+    // (friend bug #19).
+    view.follow(&mut client, |view| view.agent("lea").quiet_waiting == 1).await;
+    assert_eq!(view.agent("lea").queued_messages, 0);
 
     // A file from outside the outbox waits for the person, even with review off.
     let off = v1::UpdatePipe { pipe_id: pipe.clone(), review_outgoing: Some(false), ..Default::default() };

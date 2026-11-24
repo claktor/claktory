@@ -13,11 +13,18 @@ pub const KEY_PER_MINUTE: u32 = 240;
 
 /// What a sign-in may make of the limits: per email 5 an hour and 20 a day,
 /// per IP 30 a day (people behind one address, at a meetup or an office,
-/// sign in together).
+/// sign in together). The review account's email, while it's on, has no
+/// per-email limits: they're there for the emails a sign-in sends, and it's
+/// sent none, while a reviewer signs in on every device they try. Its fixed
+/// code is kept by the per-IP limit and its lock after 5 wrong codes an
+/// hour (`start`, `check_code`).
 pub(super) fn sign_in_limits(service: &Service, email: &str, ip: &str) -> Result<(), ApiError> {
     let hour = db::email_key("email-hour", email);
     let day = db::email_key("email-day", email);
     let ip = format!("ip-sign-in:{ip}");
+    if service.review(email).is_some() {
+        return service.limit(&[(&ip, 86_400, SIGN_INS_PER_IP)]);
+    }
     service.limit(&[(&hour, 3600, 5), (&day, 86_400, 20), (&ip, 86_400, SIGN_INS_PER_IP)])
 }
 
@@ -289,24 +296,31 @@ pub(super) async fn share(service: &Service, call: &Call) -> Result<Reply, ApiEr
         let sealed_share =
             seal_share(&share, &eph_pub, &claktory.id, epoch).ok_or_else(|| ApiError::invalid("eph_pub isn't a key to seal to."))?;
         // Mailed only when it doesn't look like this Claktory restarting
-        // where it runs (#412): every restart mailed was noise.
+        // where it runs (#412): every restart mailed was noise. The review
+        // account has no mailbox, so its unlocks are never mailed, and
+        // recorded as not (Fugo 27568).
         let unusual = db::unusual_release(&conn, &claktory, &call.ip, epoch, now)?;
         let email = match unusual {
-            Some(_) => db::account_email(&conn, &claktory.account_id)?,
+            Some(_) => db::account_email(&conn, &claktory.account_id)?.filter(|email| service.review(email).is_none()),
             None => None,
         };
-        db::record_release(&conn, &claktory.id, now, &call.ip, epoch, email.is_some())?;
+        let release = db::record_release(&conn, &claktory.id, now, &call.ip, epoch, email.is_some())?;
         db::touch(&conn, &claktory, service.locate(&call.ip).as_ref(), now)?;
         tracing::info!("share released: Claktory {}, epoch {epoch}, {}", claktory.id, if email.is_some() { "emailed" } else { "usual" });
-        (email.zip(unusual), sealed_share)
+        (email.zip(unusual).map(|email| (email, release)), sealed_share)
     };
     let (email, sealed_share) = account_email;
-    if let Some((email, unusual)) = email {
+    if let Some(((email, unusual), release)) = email {
         let notice =
             mail::unlock_mail(&service.config.mail_domain, &email, &claktory.name, unusual, now, &call.ip, &service.config.account_page);
         // The share goes either way: a mail outage mustn't keep a Claktory
-        // locked. `send` logs a failure.
-        let _ = service.send(&notice, false).await;
+        // locked. `send` logs a failure, and the release says it wasn't
+        // emailed (Fugo's LOW on #412), so the account page doesn't either.
+        if service.send(&notice, false).await.is_err()
+            && let Err(error) = db::release_not_mailed(&service.db(), release)
+        {
+            tracing::error!(%error, "couldn't record that an unlock wasn't emailed");
+        }
     }
     Ok(Reply::json(&Share { epoch, sealed_share }))
 }

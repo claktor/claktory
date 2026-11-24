@@ -47,7 +47,7 @@ impl Quarantine {
 pub(crate) const KEPT_EXTENSIONS: &[&str] = &[crate::extensions::ask::ID, super::curator::HANDOFF];
 
 /// The pipe tools a quarantined agent keeps.
-const KEPT_PIPE_TOOLS: &[&str] = &["pipe_send", "pipe_read", "pipe_status"];
+const KEPT_PIPE_TOOLS: &[&str] = &["pipe_send", "pipe_read", "pipe_status", "pipe_withdraw"];
 
 /// `agent`'s quarantine, if any pipe it's in has it quarantined (any pipe
 /// kept, closed ones too: it has read them). `config` is the one the caller

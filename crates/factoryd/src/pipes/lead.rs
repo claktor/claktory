@@ -14,9 +14,13 @@ use super::{Record, State, agents, change, line};
 use crate::config::Config;
 use crate::factory::Factory;
 
-/// The pipe's agents now: its members that are still agents of its project.
+/// The pipe's agents now that could lead it: its members that are still
+/// agents of its project, but for those that only send (#414), which never
+/// read what arrives.
 fn present<'a>(config: &'a Config, record: &'a Record) -> impl Iterator<Item = &'a String> {
-    record.members.iter().filter(|id| config.agent(id).is_some_and(|agent| agent.project.as_deref() == Some(record.project.as_str())))
+    record.members.iter().filter(|id| {
+        !record.send_only.contains(id) && config.agent(id).is_some_and(|agent| agent.project.as_deref() == Some(record.project.as_str()))
+    })
 }
 
 /// Its lead, if it's one of its agents now.

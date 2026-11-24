@@ -23,11 +23,13 @@ import 'people/secret_clipboard.dart' show startClipboardSweeps;
 import 'rail.dart';
 import 'scope.dart';
 import 'setup.dart';
+import 'share_files.dart' show sweepSharedFiles;
 import 'shell.dart';
 import 'sight.dart';
 import 'state.dart';
 import 'unreadable.dart';
 import 'update.dart';
+import 'voice_session.dart' show VoiceBarHost;
 import 'zoom.dart';
 
 Future<void> main() async {
@@ -44,6 +46,8 @@ Future<void> main() async {
   // Codes copied marked sensitive and now dead come off the clipboard, at
   // launch and on each return (Fugo's row 181).
   startClipboardSweeps();
+  // What a share cut short left in the temporary folder goes (#418).
+  unawaited(sweepSharedFiles());
   // What this device is (an iPad, a phone), before the first frame: so
   // nothing lays out as another device first.
   await loadDeviceCapabilities();
@@ -317,7 +321,13 @@ class _FactoryAppState extends State<FactoryApp> {
                         Stack(
                           children: [
                             Positioned.fill(
-                              child: Overlay(initialEntries: [_window]),
+                              // A voice message or answer being recorded
+                              // away from its box or field (#409): its bar
+                              // over the window, sheets and pages too, on
+                              // every screen.
+                              child: VoiceBarHost(
+                                child: Overlay(initialEntries: [_window]),
+                              ),
                             ),
                             // Files dragged over the window from the Finder.
                             const Positioned.fill(child: WindowDropOverlay()),

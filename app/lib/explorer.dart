@@ -9,7 +9,9 @@ import 'pane_chrome.dart';
 import 'panes.dart' show filesPane, withFiles;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'share_files.dart' show ShareHold;
 import 'tell_rivet.dart';
+import 'visible_codes.dart' show shownName;
 
 /// A project's Files: its folder, its folders and its agents' checkouts,
 /// as its agents see them, in a pane of the selected agent's layout (a
@@ -438,7 +440,7 @@ class _FileRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final backend = AppScope.of(context);
-    return Pressable(
+    final row = Pressable(
       onTap: entry.isDir
           ? () => fireAndLog(
               backend.expandFolder(
@@ -483,7 +485,7 @@ class _FileRow extends StatelessWidget {
                 const SizedBox(width: Space.s - 2),
                 Expanded(
                   child: Text(
-                    entry.name,
+                    shownName(entry.name),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyles.body.copyWith(color: color),
@@ -495,5 +497,9 @@ class _FileRow extends StatelessWidget {
         );
       },
     );
+    // A file's row, touched and held: Share… (#418).
+    return entry.isDir
+        ? row
+        : ShareHold(path: _join(base, entry.path), child: row);
   }
 }

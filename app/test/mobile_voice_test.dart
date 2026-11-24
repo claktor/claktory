@@ -12,6 +12,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/recorder.dart';
 import 'package:factory_app/voice.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -51,13 +52,14 @@ void main() {
   Future<Harness> conversation(
     WidgetTester tester, {
     TargetPlatform platform = TargetPlatform.iOS,
+    Size size = const Size(393, 852),
   }) async {
     debugDefaultTargetPlatformOverride = platform;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final harness = Harness(_workspace());
     harness.backend.transcript.load(Transcript(agentId: 'mike'));
     tester.view.padding = const FakeViewPadding(top: 59, bottom: 34);
-    await harness.show(tester, size: const Size(393, 852));
+    await harness.show(tester, size: size);
     await pumpFrames(tester);
     expect(find.byType(PhoneShell), findsOneWidget);
     if (find.byType(AgentView).evaluate().isEmpty) {
@@ -93,8 +95,14 @@ void main() {
     expect(find.byType(SendButton), findsNothing);
     await tester.enterText(find.byType(EditableText).last, 'Hi');
     await pumpFrames(tester);
-    expect(mic, findsNothing);
+    // With text, Send takes its place and the mic moves beside it, for a
+    // voice note to go with the text (#425).
     expect(find.byType(SendButton), findsOneWidget);
+    expect(mic, findsOneWidget);
+    expect(
+      tester.getCenter(mic).dx,
+      lessThan(tester.getCenter(find.byType(SendButton)).dx),
+    );
     semantics.dispose();
   });
 
@@ -179,6 +187,77 @@ void main() {
     expect(recorder.cancelled, 1);
     expect(sent(harness), hasLength(1));
     expect(find.byType(PhoneRecordingRow), findsNothing);
+  });
+
+  testWidgets('at the largest text sizes the recording bar fits its box', (
+    tester,
+  ) async {
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    for (final (size, scale) in [
+      (const Size(393, 852), 2.0),
+      (const Size(393, 852), 3.0),
+      (const Size(320, 568), 3.12),
+      (const Size(375, 667), 3.12),
+    ]) {
+      tester.platformDispatcher.textScaleFactorTestValue = scale;
+      await conversation(tester, size: size);
+      await tester.tap(mic);
+      await io(tester);
+      recorder.hear(0.5, const Duration(seconds: 3));
+      await tester.pump();
+      expect(tester.takeException(), isNull, reason: '$size at $scale');
+      final row = tester.getRect(find.byType(PhoneRecordingRow));
+      final cancel = find.text('Cancel');
+      expect(tester.getRect(cancel).left, greaterThanOrEqualTo(row.left));
+      // Still larger than at the standard size, short of spilling.
+      expect(
+        tester.getSize(cancel).height,
+        greaterThan(17),
+        reason: '$size at $scale',
+      );
+      // The time is never cut off at the bottom (Zucchero's row 339): it
+      // has the height its text needs, and the row holds it.
+      final time = find.descendant(
+        of: find.byType(PhoneRecordingRow),
+        matching: find.textContaining(':'),
+      );
+      final paragraph = tester.renderObject<RenderParagraph>(time);
+      expect(
+        paragraph.size.height,
+        greaterThanOrEqualTo(
+          paragraph.getMinIntrinsicHeight(paragraph.size.width) - 0.01,
+        ),
+        reason: '$size at $scale',
+      );
+      expect(tester.getRect(time).bottom, lessThanOrEqualTo(row.bottom));
+      // Real fonts stand taller than the tests': the row may grow past a
+      // finger's height, never held to it.
+      final slot = tester
+          .renderObject<RenderBox>(find.byType(PhoneRecordingRow))
+          .constraints;
+      expect(slot.maxHeight, greaterThan(row.height), reason: '$size');
+      expect(tester.getRect(cancel).height, lessThan(row.height + 0.01));
+      await tester.tap(cancel);
+      await io(tester);
+      expect(find.byType(PhoneRecordingRow), findsNothing);
+
+      // Held, the instruction is whole, smaller if it must be.
+      final gesture = await hold(tester);
+      final hint = tester.renderObject<RenderParagraph>(
+        find.text('‹ Slide to cancel'),
+      );
+      expect(hint.didExceedMaxLines, isFalse, reason: '$size at $scale');
+      expect(
+        tester.getRect(find.text('‹ Slide to cancel')).right,
+        lessThanOrEqualTo(tester.getRect(find.byType(PhoneRecordingRow)).right),
+      );
+      expect(tester.takeException(), isNull);
+      await gesture.moveBy(const Offset(-300, 0));
+      await tester.pump();
+      await gesture.up();
+      await io(tester);
+      expect(find.byType(PhoneRecordingRow), findsNothing);
+    }
   });
 
   testWidgets('a call pauses it: it waits for Send or Cancel', (tester) async {

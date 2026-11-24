@@ -10,6 +10,7 @@ import 'annotations.dart' show ThreadStore;
 import 'app_views/transport.dart';
 import 'app_update.dart';
 import 'attachments.dart';
+import 'background_grace.dart';
 import 'connections.dart';
 import 'loopback_forward.dart';
 import 'diagnostics_record.dart';
@@ -114,6 +115,16 @@ class RequestFailure implements Exception {
   String toString() => message;
 }
 
+/// What the backend says to an answer for a card its agent has changed
+/// since the person saw it (#428): the card shows its new version, and
+/// this, for them to look at it again.
+const cardChangedRefusal = 'This card changed. Look at it again.';
+
+/// Whether [failure] is that refusal: shown as it is, never as "Couldn't
+/// send".
+bool cardChanged(RequestFailure failure) =>
+    failure.message == cardChangedRefusal;
+
 /// A try given up on, to try again after the backoff: it said why.
 class _NotNow implements Exception {
   const _NotNow();
@@ -157,7 +168,10 @@ class Backend implements AppViewTransport {
        highlights = HighlightStore(
          workspace: workspace,
          extensionView: extensionView,
-       );
+       ) {
+    // Before the app first leaves the screen, so its grace is heard.
+    BackgroundGrace.watch();
+  }
 
   final WorkspaceStore workspace;
   final TranscriptStore transcript;
@@ -271,8 +285,28 @@ class Backend implements AppViewTransport {
   /// How long a reconnect stays quiet at least.
   Duration quietReconnect = const Duration(seconds: 8);
 
-  /// How long a new connection has to open and be welcomed.
+  /// How long a new connection has to open and be welcomed, the first
+  /// time: after tries that ran out of it, the next gets longer
+  /// ([_connectWindow]).
   Duration connectWithin = const Duration(seconds: 10);
+
+  /// Tries in a row that ran out of time to connect or be welcomed: on a
+  /// weak link, one that's getting there is let finish rather than cut at
+  /// the same point every time (#413). Back to 0 once welcomed.
+  var _slowTries = 0;
+
+  /// How long this try has to open and be welcomed: [connectWithin], twice
+  /// that after a try ran out of it, three times after two or more; and
+  /// through a tunnel, never less than its dial has (which grows the same
+  /// way, tunnel.rs DIAL_TIMEOUTS) and a little more for the handshake.
+  Duration _connectWindow([Tunnel? through]) {
+    var window =
+        connectWithin * (_slowTries == 0 ? 1 : (_slowTries == 1 ? 2 : 3));
+    final dialMs = through?.status.dialTimeoutMs ?? 0;
+    final dial = Duration(milliseconds: dialMs) + const Duration(seconds: 2);
+    if (dialMs > 0 && dial > window) window = dial;
+    return window;
+  }
 
   Timer? _quiet;
 
@@ -584,7 +618,10 @@ class Backend implements AppViewTransport {
 
   /// The app is back. After more than a moment away, the connection is
   /// made afresh at once (the old one is most likely dead), quietly, and
-  /// the backend's snapshot brings the conversation up to date.
+  /// the backend's snapshot brings the conversation up to date. Back
+  /// within the grace the device kept it running ([BackgroundGrace], #413),
+  /// it's only checked: no new endpoint, nor the whole sync, unless the
+  /// check goes unanswered.
   void resumed({DateTime? now}) {
     final hiddenAt = _hiddenAt;
     _hiddenAt = null;
@@ -608,6 +645,11 @@ class Backend implements AppViewTransport {
     if (away < const Duration(seconds: 3)) {
       // Not connected, whatever it last said is stale now: it tries again.
       if (!connected.value) check();
+      return;
+    }
+    if (BackgroundGrace.heldThrough(away)) {
+      _log('back within the grace: checking the connection');
+      check();
       return;
     }
     _restart(ConnectionReason.resume);
@@ -647,7 +689,7 @@ class Backend implements AppViewTransport {
     if (_closed || target == null) return;
     _backWatch?.cancel();
     final wait = _backNext ?? backWithin;
-    _backWatch = Timer(wait, () {
+    void check() {
       _backWatch = null;
       if (_closed ||
           connected.value ||
@@ -656,13 +698,22 @@ class Backend implements AppViewTransport {
           signInRequired.value != null) {
         return;
       }
+      // A dial still under way is let finish (it has its own limit, which
+      // grows on a weak link: #413): starting from scratch would only
+      // throw it away and dial from zero again.
+      if (_tunnel?.status.phase == TunnelPhase.dialing) {
+        _backWatch = Timer(const Duration(seconds: 1), check);
+        return;
+      }
       final doubled = wait * 2;
       _backNext = doubled > _backWithinMost ? _backWithinMost : doubled;
       reconnectFromScratch(
         'not back within ${wait.inSeconds}s',
         reason: ConnectionReason.watch,
       );
-    });
+    }
+
+    _backWatch = Timer(wait, check);
   }
 
   /// Gives up on the try under way, whatever it waits on: it throws
@@ -1012,6 +1063,20 @@ class Backend implements AppViewTransport {
 
   Timer? _tunnelWatch;
 
+  /// The tunnel's [TunnelStatus.received] when it was last read, and
+  /// when it last moved.
+  int _tunnelReceived = 0;
+  DateTime? _tunnelMovedAt;
+
+  /// The tunnel's [TunnelStatus.linkReceived] when it was last read, and
+  /// when it last moved.
+  int _tunnelLinkReceived = 0;
+  DateTime? _tunnelLinkMovedAt;
+
+  /// How long after the tunnel last brought data the link's own traffic
+  /// still counts as the connection alive ([_showTunnel]).
+  static const _transferPause = Duration(seconds: 60);
+
   Future<void> run() async {
     _watchSleep();
     // Recordings kept on this device from before, sent once connected.
@@ -1091,6 +1156,7 @@ class Backend implements AppViewTransport {
                 WebSocket.connect(
                   'ws://127.0.0.1:${tunnel.port}${tunnel.requestPath}',
                 ),
+                through: tunnel,
               ),
               late: _let,
             );
@@ -1129,18 +1195,17 @@ class Backend implements AppViewTransport {
           await _let(socket);
           continue;
         }
-        socket.pingInterval = _pingEvery;
+        // No ping yet: the welcome's window below says whether the link
+        // answers, and the first frame (Welcome, or "waiting to be
+        // allowed") starts the pings ([_receive]). On a weak link a ping
+        // sent before then could only cut the try at the same moment, its
+        // pong queued behind everything else still on its way (Sale's row
+        // 81, #413).
         _socket = socket;
-        // Welcomed within [connectWithin], or it starts again; a device
-        // waiting to be allowed waits as long as its code lasts.
-        final welcome = _welcomeTimer = Timer(connectWithin, () {
-          if (identical(_socket, socket) && !connected.value) {
-            _log('no welcome within ${connectWithin.inSeconds}s');
-            _reconnectTunnel();
-            unawaited(socket.close());
-          }
-        });
         _watchTunnel();
+        // What the tunnel had received when this connection opened, for
+        // the log when it closes.
+        final receivedBefore = _tunnelReceived;
         _helloVia = via;
         _helloKey = via == null || !via.tunnelled || loopback
             ? null
@@ -1162,13 +1227,11 @@ class Backend implements AppViewTransport {
         }
         if (target != null && target.fromAccount && asserted == null) {
           _log('no device assertion in time: trying again');
-          welcome.cancel();
           await _let(socket);
           throw const _NotNow();
         }
         // Found through the account, it's let in only on an assertion.
         if (target != null && target.fromAccount && _helloAssertion.isEmpty) {
-          welcome.cancel();
           await _let(socket);
           signInRequired.value = _signInToConnect;
           continue;
@@ -1194,9 +1257,49 @@ class Backend implements AppViewTransport {
               workspacePatches: askForPatches,
               // Back, it carries on from the Workspace it holds.
               workspaceRevision: askForPatches ? _workspaceRevision : '',
+              // Back, the conversation shown carries on from what it holds
+              // (#413): only what changed since comes.
+              transcriptAgentId: transcript.heldRevision.isEmpty
+                  ? ''
+                  : transcript.agentId,
+              transcriptRevision: transcript.heldRevision,
             ),
           ),
         );
+        // Welcomed within [_connectWindow] of asking, or it starts again,
+        // with longer; a device waiting to be allowed waits as long as its
+        // code lasts. From the Hello, not the socket: the wait for this
+        // device's assertion (up to [assertionWithin]) isn't the
+        // Claktory's to answer for.
+        final welcomeWithin = _connectWindow();
+        final asked = DateTime.now();
+        final throughTunnel = via != null && via.tunnelled && !loopback;
+        Timer? welcome;
+        void welcomeDue() {
+          if (!identical(_socket, socket) || connected.value) return;
+          // The tunnel's link still answering: the Welcome may be on its
+          // way behind everything else on a weak link, so a few seconds
+          // more, up to [_transferPause] from the Hello (Sale's 63 kbps
+          // run: cut 73 ms after the link last moved).
+          final link = _tunnelLinkMovedAt;
+          final now = DateTime.now();
+          if (throughTunnel &&
+              link != null &&
+              now.difference(link) < const Duration(seconds: 2) &&
+              now.difference(asked) < _transferPause) {
+            welcome = _welcomeTimer = Timer(
+              const Duration(seconds: 5),
+              welcomeDue,
+            );
+            return;
+          }
+          _log('no welcome within ${now.difference(asked).inSeconds}s');
+          _slowTries++;
+          _reconnectTunnel();
+          unawaited(socket.close());
+        }
+
+        welcome = _welcomeTimer = Timer(welcomeWithin, welcomeDue);
         // Read until it closes, or the try is given up on (then closed).
         final done = Completer<void>();
         final reading = socket.listen(
@@ -1214,13 +1317,22 @@ class Backend implements AppViewTransport {
         try {
           await _orAbandoned(done.future);
         } finally {
-          welcome.cancel();
+          welcome?.cancel();
           if (!done.isCompleted) {
             unawaited(reading.cancel());
             unawaited(_let(socket));
           }
         }
-        _log('connection closed (code ${socket.closeCode})');
+        // Through a tunnel, what it brought meanwhile and when it last did:
+        // a connection closed by its ping while bytes were still arriving
+        // would say so (#413).
+        String ago(DateTime? at) => at == null
+            ? 'never'
+            : '${DateTime.now().difference(at).inMilliseconds} ms ago';
+        _log(
+          'connection closed (code ${socket.closeCode})'
+          '${via != null && via.tunnelled && !loopback ? '; the tunnel received ${(_tunnelReceived - receivedBefore) & 0xffffffff} bytes meanwhile, the last ${ago(_tunnelMovedAt)}; the link last ${ago(_tunnelLinkMovedAt)}' : ''}',
+        );
         closeCode = socket.closeCode;
         why = ConnectionFailure.closed;
         // A live connection that dropped (unanswered pings, say): the
@@ -1246,9 +1358,12 @@ class Backend implements AppViewTransport {
       } on TunnelOpenFailure catch (failure) {
         _log("couldn't open the tunnel: ${failure.message}");
         why = ConnectionFailure.tunnel;
-      } on TimeoutException {
-        _log('no connection within ${connectWithin.inSeconds}s');
+      } on TimeoutException catch (timeout) {
+        _log(
+          'no connection within ${(timeout.duration ?? connectWithin).inSeconds}s',
+        );
         why = ConnectionFailure.timeout;
+        _slowTries++;
         _reconnectTunnel();
       } on _NotNow {
         // Said why already.
@@ -1335,19 +1450,25 @@ class Backend implements AppViewTransport {
   /// none.
   String _helloAssertion = '';
 
-  /// [connecting], or a [TimeoutException] after [connectWithin]; one that
-  /// connects after all is closed, so no connection given up on lingers
-  /// at the other end beside the next.
-  Future<WebSocket> _connectWithin(Future<WebSocket> connecting) =>
-      connecting.timeout(
-        connectWithin,
-        onTimeout: () {
-          unawaited(
-            connecting.then((late) => late.close(), onError: (Object _) {}),
-          );
-          throw TimeoutException('no connection', connectWithin);
-        },
-      );
+  /// [connecting], or a [TimeoutException] after [_connectWindow] (with
+  /// the tunnel it goes [through]); one that connects after all is closed,
+  /// so no connection given up on lingers at the other end beside the
+  /// next.
+  Future<WebSocket> _connectWithin(
+    Future<WebSocket> connecting, {
+    Tunnel? through,
+  }) {
+    final within = _connectWindow(through);
+    return connecting.timeout(
+      within,
+      onTimeout: () {
+        unawaited(
+          connecting.then((late) => late.close(), onError: (Object _) {}),
+        );
+        throw TimeoutException('no connection', within);
+      },
+    );
+  }
 
   /// How long a Hello waits for this device's assertion, once its
   /// connection is open; the request itself carries on, for the next try.
@@ -1544,6 +1665,9 @@ class Backend implements AppViewTransport {
         relayConnected: false,
         relayUpMs: 0,
         relayTrouble: TunnelRelayTrouble.none,
+        received: 0,
+        linkReceived: 0,
+        dialTimeoutMs: 0,
       );
       throw TunnelOpenFailure('$error');
     }
@@ -1575,6 +1699,32 @@ class Backend implements AppViewTransport {
   }
 
   void _showTunnel(TunnelStatus status) {
+    // Bytes arriving through the tunnel: the link is delivering, if
+    // slowly, so the next ping waits from now, as it does for a whole
+    // frame ([_receive]). A pong stuck behind a Workspace still on its way
+    // no longer closes the connection bringing it (#413: on one or two
+    // bars, every 12 s, for ever); a link where nothing arrives is still
+    // closed within [_pingEvery] twice and a second.
+    final now = DateTime.now();
+    if (status.received != _tunnelReceived) {
+      _tunnelReceived = status.received;
+      _tunnelMovedAt = now;
+      _socket?.pingInterval = _pingEvery;
+    }
+    // On a weak link the connection can hold its data back for longer than
+    // the ping allows (QUIC backing off behind a deep queue), while its
+    // own traffic still arrives: alive too, as long as data came lately.
+    // A link where nothing arrives still closes within the ping's time;
+    // one whose data stopped for good, after [_transferPause] (Sale's 63
+    // kbps runs, #413).
+    if (status.linkReceived != _tunnelLinkReceived) {
+      _tunnelLinkReceived = status.linkReceived;
+      _tunnelLinkMovedAt = now;
+      final data = _tunnelMovedAt;
+      if (data != null && now.difference(data) < _transferPause) {
+        _socket?.pingInterval = _pingEvery;
+      }
+    }
     final shown = tunnel.value;
     if (shown != null &&
         shown.phase == status.phase &&
@@ -2133,6 +2283,7 @@ class Backend implements AppViewTransport {
     bool reply = false,
     List<Attachment> attachments = const [],
     int? step,
+    int? revision,
   }) => _request(
     ClientMessage(
       answerAsk: AnswerAsk(
@@ -2145,6 +2296,7 @@ class Backend implements AppViewTransport {
         // A procedure's step (0-based): Done, or with [dismiss], Can't do
         // this.
         step: step,
+        revision: _revision(revision),
       ),
     ),
   );
@@ -2226,6 +2378,7 @@ class Backend implements AppViewTransport {
     String comment = '',
     String chatId = '',
     bool reply = false,
+    int? revision,
   }) => _request(
     ClientMessage(
       decideProposal: DecideProposal(
@@ -2235,9 +2388,17 @@ class Backend implements AppViewTransport {
         approve: approve && !reply,
         comment: comment,
         reply: reply,
+        revision: _revision(revision),
       ),
     ),
   );
+
+  /// The [revision] of a card (#428) as the person saw it, to answer that
+  /// version only: refused, "This card changed. Look at it again.", when
+  /// its agent has changed it since. None from a Claktory before #428
+  /// (its cards are 0): then the answer is for the card as it is.
+  static int? _revision(int? revision) =>
+      revision == null || revision <= 0 ? null : revision;
 
   /// Stops [agentId]'s background task [taskId]; refused when it isn't
   /// running.
@@ -2334,6 +2495,13 @@ class Backend implements AppViewTransport {
   /// already when it's there. A refusal is a sentence to show.
   Future<void> addModel(String model) =>
       _request(ClientMessage(addModel: AddModel(model: model)));
+
+  /// Puts Claktory's background service back in charge of a backend
+  /// started by hand (friend bug #24, BackendService.can_restore): acked,
+  /// then this backend stops and the service starts it again. A refusal
+  /// is a sentence to show.
+  Future<void> restoreBackendService() =>
+      _request(ClientMessage(restoreBackendService: RestoreBackendService()));
 
   /// Signs out of [accountId] (`Account.id`), or of all the provider's
   /// accounts when it's empty.
@@ -3928,6 +4096,7 @@ class Backend implements AppViewTransport {
     switch (message.whichBody()) {
       case ServerMessage_Body.welcome:
         _welcomed = true;
+        _slowTries = 0;
         // Back: the tunnel's time to bring it back is over.
         _tunnelBack?.cancel();
         _tunnelBack = null;
@@ -4034,11 +4203,14 @@ class Backend implements AppViewTransport {
         _sawMove(next);
         _shareDiagnostics(next.diagnostics.share);
       case ServerMessage_Body.transcript:
-        transcript.load(message.transcript);
+        transcript.load(
+          message.transcript,
+          revision: message.transcriptRevision,
+        );
       case ServerMessage_Body.entry:
-        transcript.update(message.entry);
+        transcript.update(message.entry, revision: message.transcriptRevision);
       case ServerMessage_Body.delta:
-        transcript.delta(message.delta);
+        transcript.delta(message.delta, revision: message.transcriptRevision);
       case ServerMessage_Body.explorer:
         explorer.apply(message.explorer);
       case ServerMessage_Body.extensionView:

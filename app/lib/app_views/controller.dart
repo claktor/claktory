@@ -3,7 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
-import '../backend.dart' show RequestFailure;
+import '../backend.dart' show Backend, RequestFailure;
 import '../protocol/factory/v1/factory.pb.dart' show ErrorCode;
 import 'surface.dart';
 import 'transport.dart';
@@ -18,7 +18,8 @@ class AppViewController extends ChangeNotifier {
     required this.appId,
     this.view = '',
     this.params = '',
-  }) {
+    String? device,
+  }) : device = device ?? _deviceOf(transport) {
     _events = transport.viewEvents.listen(_event);
     transport.viewsConnected.addListener(_connectionChanged);
     _wasConnected = transport.viewsConnected.value;
@@ -33,6 +34,32 @@ class AppViewController extends ChangeNotifier {
 
   /// Its params, a JSON object, or empty.
   final String params;
+
+  /// This device as the backend knows it: the paired device's id, or
+  /// "local" for the Mac Claktory runs on; empty for none (a test's).
+  /// Sent with the params as "device", so each device has its own surface
+  /// of a view: what it picked there (a range, a dashboard) is its own,
+  /// while what the app keeps is the same everywhere.
+  final String device;
+
+  static String _deviceOf(AppViewTransport transport) => switch (transport) {
+    final Backend backend when backend.deviceId.isEmpty => 'local',
+    final Backend backend => backend.deviceId,
+    _ => '',
+  };
+
+  /// [params] with [device] in them.
+  String get _openParams {
+    if (device.isEmpty) return params;
+    final Object? asked;
+    try {
+      asked = params.trim().isEmpty ? <String, Object?>{} : jsonDecode(params);
+    } on FormatException {
+      return params;
+    }
+    if (asked is! Map<String, Object?>) return params;
+    return jsonEncode({...asked, 'device': device});
+  }
 
   /// The surface shown; null before the backend answered.
   AppSurfaceModel? get surface => _surface;
@@ -93,7 +120,7 @@ class AppViewController extends ChangeNotifier {
       answer = await transport.openView(
         appId: appId,
         view: view,
-        params: params,
+        params: _openParams,
         catalogs: appViewCatalogs,
       );
     } on RequestFailure catch (failure) {

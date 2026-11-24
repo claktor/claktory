@@ -180,7 +180,16 @@ trap 'rm -rf "$STAGE"' EXIT
 # checkout, as it was built.
 if [[ ${#DEV[@]} -eq 0 ]]; then
   SRC="$(release_tree "$ROOT" "${SOURCE:-HEAD}")"
-  trap 'rm -rf "$STAGE"; release_unlock' EXIT
+  # The Linux builds keep nothing from earlier ones: volumes of this run's
+  # own, removed after (scripts/build-linux.sh, FACTORY_LINUX_FRESH).
+  export FACTORY_LINUX_FRESH=1 FACTORY_LINUX_RUN="publish-$$-$(date +%s)"
+  linux_run_cleanup() {
+    local engine="${FACTORY_CONTAINER:-podman}" arch
+    command -v "$engine" >/dev/null || engine=docker
+    for arch in x86_64 aarch64; do "$engine" volume rm -f "factory-linux-run-$FACTORY_LINUX_RUN-target-$arch" >/dev/null 2>&1 || true; done
+    "$engine" volume rm -f "factory-linux-run-$FACTORY_LINUX_RUN-cargo" >/dev/null 2>&1 || true
+  }
+  trap 'rm -rf "$STAGE"; linux_run_cleanup; release_unlock' EXIT
   # The real path: the container engine's VM shares /private, not /tmp.
   SRC="$(cd "$SRC" && pwd -P)"
 else
@@ -196,8 +205,11 @@ APPS_DIR=()
 # The video preview helper (#379), in Mac releases that have it.
 VIDEO_PREVIEW=()
 [[ -f "$RELEASE/claktory-video-preview" ]] && VIDEO_PREVIEW=(claktory-video-preview)
+# Agents' tools (tools/rg and its licenses), in releases that have them.
+TOOLS_DIR=()
+[[ -f "$RELEASE/tools/rg" ]] && TOOLS_DIR=(tools)
 COPYFILE_DISABLE=1 tar --no-xattrs --uid 0 --gid 0 --uname "" --gname "" -czf "$STAGE/$NAME" \
-  -C "$RELEASE" "$APP_NAME" factoryd claktory-apps claktory-speech ${VIDEO_PREVIEW[@]+"${VIDEO_PREVIEW[@]}"} backend-version CHANGELOG.md ${SUPERVISOR_DIR[@]+"${SUPERVISOR_DIR[@]}"} ${APPS_DIR[@]+"${APPS_DIR[@]}"} \
+  -C "$RELEASE" "$APP_NAME" factoryd claktory-apps claktory-speech ${VIDEO_PREVIEW[@]+"${VIDEO_PREVIEW[@]}"} backend-version CHANGELOG.md ${SUPERVISOR_DIR[@]+"${SUPERVISOR_DIR[@]}"} ${APPS_DIR[@]+"${APPS_DIR[@]}"} ${TOOLS_DIR[@]+"${TOOLS_DIR[@]}"} \
   -C "$SRC" LICENSE.md \
   -C "$SRC/scripts" install-release.sh
 
@@ -229,9 +241,14 @@ for arch in ${LINUX[@]+"${LINUX[@]}"}; do
   check_no_qa_provider "$build/factoryd" || exit 1
   cp "$RELEASE/backend-version" "$RELEASE/CHANGELOG.md" "$build/"
   [[ ! -d "$RELEASE/apps" ]] || cp -R "$RELEASE/apps" "$build/apps"
+  # ripgrep, from the release's own pin (its source's build-rg.sh), when the Mac release has it.
+  if [[ ${#TOOLS_DIR[@]} -gt 0 ]]; then
+    "$SRC/scripts/build-rg.sh" linux "$arch" "$build/tools/rg"
+    cp -R "$RELEASE/tools/LICENSES" "$build/tools/LICENSES"
+  fi
   linux_name="factory-$VERSION-linux-$arch.tar.gz"
   COPYFILE_DISABLE=1 tar --no-xattrs --uid 0 --gid 0 --uname "" --gname "" -czf "$STAGE/$linux_name" \
-    -C "$build" factoryd claktory-apps claktory-speech backend-version CHANGELOG.md ${APPS_DIR[@]+"${APPS_DIR[@]}"} \
+    -C "$build" factoryd claktory-apps claktory-speech backend-version CHANGELOG.md ${APPS_DIR[@]+"${APPS_DIR[@]}"} ${TOOLS_DIR[@]+"${TOOLS_DIR[@]}"} \
     -C "$SRC" LICENSE.md \
     -C "$SRC/scripts" install-linux.sh
   FILES+=("$STAGE/$linux_name")

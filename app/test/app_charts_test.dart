@@ -8,7 +8,7 @@ import 'dart:math' as math;
 import 'package:factory_app/app_views/app_view.dart';
 import 'package:factory_app/app_views/charts.dart';
 import 'package:factory_app/app_views/transport.dart';
-import 'package:factory_app/controls.dart' show Pressable;
+import 'package:factory_app/controls.dart' show ExtensionGlyph, Pressable;
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart' as pb;
 import 'package:fl_chart/fl_chart.dart';
@@ -1641,10 +1641,7 @@ void main() {
           }
           return fontSize == null;
         });
-        return (
-          fontSize!,
-          tester.getSize(find.byType(AppStat)).height,
-        );
+        return (fontSize!, tester.getSize(find.byType(AppStat)).height);
       }
 
       addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
@@ -2067,6 +2064,185 @@ void main() {
       page + Space.xs,
       reason: 'another variant keeps its padding',
     );
+  });
+
+  group("a bar: a Row of Buttons, one weighted (M1)", () {
+    List<Map<String, Object?>> button(
+      String id,
+      List<Map<String, Object?>> face, {
+      num? weight,
+    }) => [
+      {
+        'id': id,
+        'component': 'Button',
+        'child': '${id}_c',
+        'variant': 'borderless',
+        'weight': ?weight,
+        'action': {
+          'event': {
+            'name': 'menu',
+            'context': {'which': id},
+          },
+        },
+      },
+      {
+        'id': '${id}_c',
+        'component': 'List',
+        'direction': 'horizontal',
+        'align': 'center',
+        'children': [for (final part in face) part['id']],
+      },
+      ...face,
+    ];
+    Map<String, Object?> words(String id, String text, {String? variant}) => {
+      'id': id,
+      'component': 'Text',
+      'text': text,
+      'variant': ?variant,
+    };
+    Map<String, Object?> icon(String id, String name) => {
+      'id': id,
+      'component': 'Icon',
+      'name': name,
+    };
+    List<Map<String, Object?>> bar(String name) => [
+      _root(['bar', 'note']),
+      {
+        'id': 'bar',
+        'component': 'Row',
+        'children': ['name', 'range', 'filters', 'more'],
+      },
+      ...button('name', weight: 1, [
+        words('name_t', name, variant: 'heading'),
+        icon('name_i', 'chevron-down'),
+      ]),
+      ...button('range', [
+        icon('range_l', 'clock'),
+        words('range_t', '30 days'),
+        icon('range_i', 'chevron-down'),
+      ]),
+      ...button('filters', [
+        words('filters_t', 'Filters (2)'),
+        icon('filters_i', 'chevron-down'),
+      ]),
+      ...button('more', [icon('more_l', 'ellipsis')]),
+      {'id': 'note', 'component': 'Text', 'text': 'A line of the page'},
+    ];
+
+    for (final (width, scale) in [(402.0, 1.0), (320.0, 1.0), (320.0, 2.0)]) {
+      testWidgets('one line at $width wide, text ×$scale: the name gives way, '
+          '••• stays at the end', (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        tester.platformDispatcher.textScaleFactorTestValue = scale;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        final transport = await _show(
+          tester,
+          bar('A dashboard with a long name'),
+          null,
+          size: Size(width, 844),
+        );
+        final ex = tester.takeException();
+        if (ex is FlutterError) {
+          for (final d in ex.diagnostics) {
+            // ignore: avoid_print
+            print(
+              'DBG ${d.toStringDeep(minLevel: DiagnosticLevel.info).split('\n').take(40).join('\n')}',
+            );
+          }
+        }
+        final page = tester.getRect(find.text('A line of the page'));
+        final inset = page.left;
+        Rect of(String id) => tester.getRect(
+          find
+              .ancestor(of: find.text(id), matching: find.byType(Pressable))
+              .first,
+        );
+        final name = of('A dashboard with a long name');
+        final range = of('30 days');
+        final filters = of('Filters (2)');
+        final more = tester.getRect(
+          find
+              .ancestor(
+                of: find.byWidgetPredicate(
+                  (w) => w is ExtensionGlyph && w.icon == 'ellipsis',
+                ),
+                matching: find.byType(Pressable),
+              )
+              .first,
+        );
+        // One line: every button's middle on the same height.
+        for (final rect in [range, filters, more]) {
+          expect(rect.center.dy, moreOrLessEquals(name.center.dy, epsilon: 1));
+        }
+        expect(name.left, moreOrLessEquals(inset, epsilon: 0.5));
+        expect(more.right, moreOrLessEquals(width - inset, epsilon: 0.5));
+        expect(name.right, lessThanOrEqualTo(range.left));
+        expect(range.right, lessThanOrEqualTo(filters.left));
+        expect(filters.right, lessThanOrEqualTo(more.left));
+        // The name's words end in "…" on one line.
+        final paragraph = tester.renderObject<RenderParagraph>(
+          find.descendant(
+            of: find.text('A dashboard with a long name'),
+            matching: find.byType(RichText),
+          ),
+        );
+        expect(paragraph.maxLines, 1);
+        expect(paragraph.didExceedMaxLines, isTrue);
+        // Its chevron stays.
+        final chevrons = find.byWidgetPredicate(
+          (w) => w is ExtensionGlyph && w.icon == 'chevron-down',
+        );
+        expect(chevrons, findsNWidgets(3));
+        for (final chevron in chevrons.evaluate()) {
+          final rect = tester.getRect(find.byWidget(chevron.widget));
+          expect(rect.right, lessThanOrEqualTo(width - inset));
+        }
+        // Each still a button.
+        await tester.tap(find.text('30 days'));
+        await tester.pump();
+        expect((transport.actions.single.$2['action']! as Map)['context'], {
+          'which': 'range',
+        });
+      });
+    }
+
+    testWidgets('only the name gives way while the others fit: their words '
+        'stay whole (Scolippi 27597)', (tester) async {
+      // The test's font is wide: 480 is about an SE's 320 in the app's.
+      await _show(
+        tester,
+        bar('A dashboard with a long name'),
+        null,
+        size: const Size(480, 844),
+      );
+      expect(tester.takeException(), isNull);
+      bool cut(String words) => tester
+          .renderObject<RenderParagraph>(
+            find.descendant(
+              of: find.text(words),
+              matching: find.byType(RichText),
+            ),
+          )
+          .didExceedMaxLines;
+      expect(cut('A dashboard with a long name'), isTrue);
+      expect(cut('30 days'), isFalse);
+      expect(cut('Filters (2)'), isFalse);
+    });
+
+    testWidgets('a short name keeps its words, the rest of the line '
+        'empty before the others', (tester) async {
+      // The test's font is wide: 700 is a phone's 402 in the app's.
+      await _show(tester, bar('Costs'), null, size: const Size(700, 844));
+      final paragraph = tester.renderObject<RenderParagraph>(
+        find.descendant(
+          of: find.text('Costs'),
+          matching: find.byType(RichText),
+        ),
+      );
+      expect(paragraph.didExceedMaxLines, isFalse);
+      expect(tester.takeException(), isNull);
+    });
   });
 
   testWidgets("a horizontal List's line wraps rather than run off the screen "

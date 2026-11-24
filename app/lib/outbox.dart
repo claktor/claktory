@@ -172,8 +172,9 @@ class Outbox extends ChangeNotifier {
   ];
 
   /// Sends [text] to [agentId] with [files], showing it at once. With
-  /// [voice], it's a voice message: files[0] is its recording, that long,
-  /// and [text] is empty.
+  /// [voice], it's a voice message: files[0] is its recording, that long;
+  /// [text], typed or pasted, and the files after it go with it as one
+  /// message (#425).
   Outgoing send(
     String agentId,
     String text, {
@@ -207,6 +208,17 @@ class Outbox extends ChangeNotifier {
         clientId: message.clientId,
         uploadId: file.uploadId,
         kept: folder != null && file.file.path.startsWith('$folder/'),
+        // What goes with it, so it goes again whole after a relaunch.
+        text: message.text,
+        files: [
+          for (final other in message.files.skip(1))
+            KeptFile(
+              path: other.file.path,
+              name: other.file.name,
+              size: other.file.size,
+              uploadId: other.uploadId,
+            ),
+        ],
       );
       await kept.save();
       if (!_messages.contains(message)) {
@@ -227,7 +239,7 @@ class Outbox extends ChangeNotifier {
     final file = File(kept.path);
     final message = Outgoing._(
       kept.target,
-      '',
+      kept.text,
       kept.clientId,
       [
         OutgoingFile._(
@@ -238,6 +250,11 @@ class Outbox extends ChangeNotifier {
           ),
           kept.uploadId,
         ),
+        for (final other in kept.files)
+          OutgoingFile._(
+            LocalFile(path: other.path, name: other.name, size: other.size),
+            other.uploadId,
+          ),
       ],
       kept.duration,
       kept: kept,

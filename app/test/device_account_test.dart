@@ -166,6 +166,36 @@ void main() {
     expect(service.requests, hasLength(2));
   });
 
+  test('several asking at once, as when the service is back after a '
+      'restart, are never refused as replays', () async {
+    // Like the service: a signature seen before is a replay.
+    final seen = <String>{};
+    service.answer = (request, body) =>
+        seen.add(request.headers.value('claktory-signature')!)
+        ? (200, {'claktories': []})
+        : (
+            401,
+            {'error': 'replayed', 'message': 'This request was sent already.'},
+          );
+    final listed = await Future.wait([
+      for (var i = 0; i < 5; i++) account.claktories(),
+    ]);
+    expect(listed, everyElement(isEmpty));
+    expect(service.requests, hasLength(5));
+    expect(
+      service.requests.map(
+        (sent) => sent.request.headers.value('claktory-time'),
+      ),
+      unorderedEquals([
+        '1800000000',
+        '1800000001',
+        '1800000002',
+        '1800000003',
+        '1800000004',
+      ]),
+    );
+  });
+
   test('a device removed by another of the person\'s: a new key, signed '
       'out, so signing in again starts over as a new device', () async {
     service.answer = (request, body) => (

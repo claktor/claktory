@@ -170,49 +170,63 @@ void main() {
     }
   }
 
-  test('turned on, the device records its connection, sends it once '
-      'connected, and keeps nothing the Claktory has', () async {
-    final recorder = DiagnosticsRecorder(folder);
-    final app = backend(recorder);
-    app.connectTo(parsePairingCode(_code));
-    unawaited(app.run());
-    await until(() => app.connected.value);
-    // Told it's on with the first snapshot: from now on.
-    await until(() => recorder.on);
-    expect(File('${folder.path}/$_endpoint.on').existsSync(), isTrue);
+  for (final system in ['ios', 'android', 'macos']) {
+    test('$system: turned on, the device records its connection, sends it once '
+        'connected, and keeps nothing the Claktory has', () async {
+      final deviceFolder = diagnosticsFolderFor(
+        operatingSystem: system,
+        temporary: Directory(
+          '${folder.path}/${system == 'ios' ? 'tmp' : 'code_cache'}',
+        ),
+        home: folder.path,
+      );
+      expect(deviceFolder, isNotNull);
+      final recorder = DiagnosticsRecorder(deviceFolder!);
+      final app = backend(recorder);
+      app.connectTo(parsePairingCode(_code));
+      unawaited(app.run());
+      await until(() => app.connected.value);
+      // Told it's on with the first snapshot: from now on.
+      await until(() => recorder.on);
+      expect(File('${deviceFolder.path}/$_endpoint.on').existsSync(), isTrue);
 
-    // Away a while and back: the reconnect is recorded, then sent.
-    app.hidden();
-    app.resumed(now: DateTime.now().add(const Duration(minutes: 2)));
-    await until(
-      () =>
-          far.received.any((event) => event.kind == 'connected') &&
-          recorder.waitingCount == 0,
-    );
-    final kinds = far.received.map((event) => event.kind).toList();
-    expect(kinds, containsAllInOrder(['lifecycle', 'reconnect', 'connect']));
-    expect(
-      far.received.where((e) => e.kind == 'lifecycle').map((e) => e.detail),
-      containsAllInOrder([
-        'app=background',
-        matches(RegExp(r'^app=back away_s=\d+$')),
-      ]),
-    );
-    expect(
-      far.received.firstWhere((e) => e.kind == 'reconnect').detail,
-      'reason=resume',
-    );
-    expect(
-      far.received.lastWhere((e) => e.kind == 'connected').detail,
-      matches(RegExp(r'^attempt=\d+ route=(direct|relayed|tunnel)$')),
-    );
-    expectAllowed(far.received);
-    // Each sent once, in order.
-    final seqs = far.received.map((event) => event.seq.toInt()).toList();
-    expect(seqs, [...seqs]..sort());
-    expect(seqs.toSet().length, seqs.length);
-    await app.close();
-  });
+      // Away a while and back: the reconnect is recorded, then sent.
+      app.hidden();
+      app.resumed(now: DateTime.now().add(const Duration(minutes: 2)));
+      await until(
+        () =>
+            far.received.any((event) => event.kind == 'connected') &&
+            recorder.waitingCount == 0,
+      );
+      final kinds = far.received.map((event) => event.kind).toList();
+      expect(kinds, containsAllInOrder(['lifecycle', 'reconnect', 'connect']));
+      expect(
+        far.received.where((e) => e.kind == 'lifecycle').map((e) => e.detail),
+        containsAllInOrder([
+          'app=background',
+          matches(RegExp(r'^app=back away_s=\d+$')),
+        ]),
+      );
+      expect(
+        far.received.firstWhere((e) => e.kind == 'reconnect').detail,
+        'reason=resume',
+      );
+      expect(
+        far.received.lastWhere((e) => e.kind == 'connected').detail,
+        matches(RegExp(r'^attempt=\d+ route=(direct|relayed|tunnel)$')),
+      );
+      expect(
+        kinds,
+        containsAll(['lifecycle', 'connect', 'connected', 'disconnected']),
+      );
+      expectAllowed(far.received);
+      // Each sent once, in order.
+      final seqs = far.received.map((event) => event.seq.toInt()).toList();
+      expect(seqs, [...seqs]..sort());
+      expect(seqs.toSet().length, seqs.length);
+      await app.close();
+    });
+  }
 
   test("the relay's trouble while it's down, and how long it took to come "
       'up, are recorded in words and numbers only (#388)', () async {
@@ -275,28 +289,43 @@ void main() {
     await app.close();
   });
 
-  test('remembered on the device: what happens before it connects is '
-      'recorded too, and sent once it does', () async {
-    // On from an earlier run.
-    DiagnosticsRecorder(folder)
-      ..select(_endpoint)
-      ..share(true);
-    final recorder = DiagnosticsRecorder(folder);
-    final app = backend(recorder);
-    app.connectTo(parsePairingCode(_code));
-    expect(recorder.on, isTrue);
-    unawaited(app.run());
-    await until(() => far.received.any((event) => event.kind == 'connected'));
-    // The tunnel's relay and path as it opens, between them.
-    expect(
-      far.received.map((event) => event.kind),
-      containsAllInOrder(['lifecycle', 'connect', 'connected']),
+  for (final system in ['ios', 'android', 'macos']) {
+    test(
+      '$system: remembered on the device: what happens before it connects is '
+      'recorded too, and sent once it does',
+      () async {
+        final deviceFolder = diagnosticsFolderFor(
+          operatingSystem: system,
+          temporary: Directory(
+            '${folder.path}/${system == 'ios' ? 'tmp' : 'code_cache'}',
+          ),
+          home: folder.path,
+        );
+        expect(deviceFolder, isNotNull);
+        // On from an earlier run.
+        DiagnosticsRecorder(deviceFolder!)
+          ..select(_endpoint)
+          ..share(true);
+        final recorder = DiagnosticsRecorder(deviceFolder);
+        final app = backend(recorder);
+        app.connectTo(parsePairingCode(_code));
+        expect(recorder.on, isTrue);
+        unawaited(app.run());
+        await until(
+          () => far.received.any((event) => event.kind == 'connected'),
+        );
+        // The tunnel's relay and path as it opens, between them.
+        expect(
+          far.received.map((event) => event.kind),
+          containsAllInOrder(['lifecycle', 'connect', 'connected']),
+        );
+        expect(far.received.first.detail, 'app=started');
+        expect(far.received[1].detail, 'attempt=1 route=tunnel');
+        expectAllowed(far.received);
+        await app.close();
+      },
     );
-    expect(far.received.first.detail, 'app=started');
-    expect(far.received[1].detail, 'attempt=1 route=tunnel');
-    expectAllowed(far.received);
-    await app.close();
-  });
+  }
 
   test('turned off on the Claktory, the device stops recording and deletes '
       'what it kept', () async {

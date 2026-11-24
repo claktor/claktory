@@ -199,6 +199,26 @@ class DeviceAccountService {
   /// refusal, so a device with its clock off still signs in.
   Duration _skew = Duration.zero;
 
+  /// Each signed request's last time, by what else it signs, for the last
+  /// 5 minutes (see [_stamp]).
+  final _stamped = <String, int>{};
+
+  /// The time to sign a request with: [now], or a second past the last
+  /// time this device signed the same request. Signatures are the same for
+  /// the same request in the same second, so several callers asking at once
+  /// (the account's Claktories, when the service is back after a restart)
+  /// would be refused as replays. Never more than a minute ahead.
+  int _stamp(int now, String method, String pathAndQuery, List<int> bytes) {
+    _stamped.removeWhere((_, time) => time <= now - 300);
+    final key = '$method\n$pathAndQuery\n${base64.encode(bytes)}';
+    final last = _stamped[key];
+    final time = last != null && last >= now && last < now + 60
+        ? last + 1
+        : now;
+    _stamped[key] = time;
+    return time;
+  }
+
   static const _timeout = Duration(seconds: 20);
 
   /// Emails [email] a code that signs this device in to its account, as
@@ -340,10 +360,15 @@ class DeviceAccountService {
         request.contentLength = bytes.length;
       }
       if (signed) {
-        final time = (_now().add(_skew).millisecondsSinceEpoch / 1000).floor();
         final pathAndQuery = uri.hasQuery
             ? '${uri.path}?${uri.query}'
             : uri.path;
+        final time = _stamp(
+          (_now().add(_skew).millisecondsSinceEpoch / 1000).floor(),
+          method,
+          pathAndQuery,
+          bytes,
+        );
         request.headers
           ..set(
             HttpHeaders.authorizationHeader,

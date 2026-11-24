@@ -57,20 +57,53 @@ const NAME_LIMIT: usize = 200;
 /// What a model's answer may be capped at when OpenRouter doesn't say.
 const DEFAULT_MAX_TOKENS: u64 = 4096;
 
+/// QA only (`qa-provider`): where qa-model serves OpenRouter's model list,
+/// set once by factoryd after Fugo's guard (`anthropic::qa::models_url_for`).
+#[cfg(feature = "qa-provider")]
+static QA_MODELS_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// QA only: OpenRouter's model list comes from `url`, an address on this
+/// computer the guard let through, instead of openrouter.ai.
+#[cfg(feature = "qa-provider")]
+pub fn use_qa_models_url(url: String) {
+    let _ = QA_MODELS_URL.set(url);
+}
+
+/// Whether OpenRouter's list comes from qa-model (a QA build only): then
+/// it's read whatever OPENROUTER_BASE_URL says, with no sign-in, as
+/// openrouter.ai's is public.
+pub fn qa_models() -> bool {
+    #[cfg(feature = "qa-provider")]
+    return QA_MODELS_URL.get().is_some();
+    #[cfg(not(feature = "qa-provider"))]
+    false
+}
+
+/// Where the list comes from, and whether only HTTPS will do: openrouter.ai,
+/// or in a QA build qa-model on this computer.
+fn models_url() -> (&'static str, bool) {
+    #[cfg(feature = "qa-provider")]
+    if let Some(url) = QA_MODELS_URL.get() {
+        return (url.as_str(), false);
+    }
+    (OPENROUTER_MODELS_URL, true)
+}
+
 /// Fetches OpenRouter's model list: over HTTPS from openrouter.ai only
 /// (redirects aren't followed), within `OPENROUTER_LIST_LIMIT` and a
 /// timeout. The body as it came, for `parse_openrouter`.
 pub async fn fetch_openrouter() -> Result<Vec<u8>, String> {
+    let (url, https_only) = models_url();
     let client = reqwest::Client::builder()
         .use_preconfigured_tls((*crate::providers::tls_config()).clone())
         .redirect(reqwest::redirect::Policy::none())
-        .https_only(true)
+        .https_only(https_only)
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|error| format!("could not make a client: {error}"))?;
     let mut response = client
-        .get(OPENROUTER_MODELS_URL)
+        .get(url)
         .header(reqwest::header::ACCEPT, "application/json")
         .header(reqwest::header::USER_AGENT, crate::providers::user_agent())
         .send()

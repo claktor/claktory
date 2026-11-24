@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What ShareFiles may serve (#418): the files the app wrote to share,
+     in cache/claktory-share, and nothing else of the app's. -->
+<paths>
+    <cache-path name="share" path="claktory-share/" />
+</paths>

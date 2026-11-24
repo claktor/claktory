@@ -38,6 +38,13 @@
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <!-- Another app a file share from Claktory goes to (ShareFilesTest). -->
+        <activity
+            android:name="com.claktory.app.ShareReceiver"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <!-- tools/backup_exclusion_check.sh wakes its control with it. -->
         <receiver
             android:name="com.claktory.app.BackupControlWaker"

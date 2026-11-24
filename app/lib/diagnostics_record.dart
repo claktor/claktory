@@ -20,6 +20,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import 'network.dart';
 
 /// The areas diagnostics cover, as the Claktory files them.
@@ -491,17 +493,42 @@ int nextSession(File file) {
   return next;
 }
 
-/// The folder this device keeps its diagnostics in: the app's own in
-/// Application Support (the iPhone's and the iPad's container, the Mac's
-/// Claktory or Claktory Dev folder); null where there's none yet (Android).
+/// The folder this device keeps its diagnostics in: Android's private
+/// no_backup folder, or Application Support (the iPhone's and the iPad's
+/// container, the Mac's Claktory or Claktory Dev folder).
+/// Null on unsupported platforms and in unit tests.
 Directory? diagnosticsFolder() {
   // Never the person's own from a unit test (the app itself, driven by an
   // integration test, records as it would).
   if (Platform.resolvedExecutable.contains('flutter_tester')) return null;
-  if (Platform.isIOS) {
+  return diagnosticsFolderFor(
+    operatingSystem: Platform.operatingSystem,
+    temporary: Directory.systemTemp,
+    home: Platform.environment['HOME'],
+    dev: const bool.fromEnvironment('FACTORY_DEV'),
+  );
+}
+
+/// The device's folder selection, separate from the unit-test write guard.
+@visibleForTesting
+Directory? diagnosticsFolderFor({
+  required String operatingSystem,
+  required Directory temporary,
+  String? home,
+  bool dev = false,
+}) {
+  if (operatingSystem == 'android') {
+    // As for kept voice recordings (#401): Flutter gives Dart the app's
+    // code_cache as systemTemp. Its sibling no_backup is Android's
+    // Context.getNoBackupFilesDir(): private, persistent across updates,
+    // and excluded from backup and device transfer. Never clear its other
+    // contents (credentials, drafts and recordings); own only diagnostics.
+    return Directory('${temporary.parent.path}/no_backup/diagnostics');
+  }
+  if (operatingSystem == 'ios') {
     // The app's environment is empty here (no HOME); its temporary folder
     // is the container's tmp, beside its Library.
-    final temp = Directory.systemTemp;
+    final temp = temporary;
     if (temp.uri.pathSegments.where((s) => s.isNotEmpty).lastOrNull != 'tmp') {
       return null;
     }
@@ -509,12 +536,9 @@ Directory? diagnosticsFolder() {
       '${temp.parent.path}/Library/Application Support/diagnostics',
     );
   }
-  if (Platform.isMacOS) {
-    final home = Platform.environment['HOME'];
+  if (operatingSystem == 'macos') {
     if (home == null || home.isEmpty) return null;
-    const app = bool.fromEnvironment('FACTORY_DEV')
-        ? 'Claktory Dev'
-        : 'Claktory';
+    final app = dev ? 'Claktory Dev' : 'Claktory';
     return Directory('$home/Library/Application Support/$app/diagnostics');
   }
   return null;

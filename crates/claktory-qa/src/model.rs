@@ -11,6 +11,12 @@
 //! - anything else is answered "OK: <its first line>" (or the script's
 //!   `default`).
 //!
+//! It also serves OpenRouter's model list (`GET /api/v1/models`, #185 U4),
+//! which a QA build of factoryd fetches from here
+//! (`FACTORY_QA_OPENROUTER_MODELS_URL`): `openrouter-models.json` beside
+//! the script, as OpenRouter's answer (`{"data": [...]}`), read again for
+//! every fetch, else a built-in list (`default_models`).
+//!
 //! The script is read again for every request, so a test can change it
 //! between steps. Every request and its answer go to the log, one JSON line
 //! each, with the agent's system prompt and tools, so a test can check what
@@ -328,11 +334,56 @@ async fn handle(model: &Model, mut stream: TcpStream) -> std::io::Result<()> {
     if method == "POST" && path.ends_with("/chat/completions") {
         return chat_completions(model, &mut stream, &body).await;
     }
+    if method == "GET" && path.split('?').next() == Some("/api/v1/models") {
+        return models_list(model, &mut stream).await;
+    }
     if let Some(limit) = &model.claude {
         return claude::handle(model, limit, &mut stream, method, path, &head, &body).await;
     }
     respond(&mut stream, 404, "", &json!({"error": {"message": "qa-model answers only POST …/chat/completions"}})).await
 }
+
+/// The models a fresh sandbox's list has: as many as factoryd takes for a
+/// real list (50 at least), all able to run agents, the sandbox's own
+/// model (`MODEL`) among them.
+pub fn default_models() -> Value {
+    let entry = |id: &str, name: &str| {
+        json!({
+            "id": id,
+            "name": name,
+            "context_length": 128_000,
+            "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+            "supported_parameters": ["tools", "max_tokens"],
+            "top_provider": {"max_completion_tokens": 16_384},
+            "pricing": {"prompt": "0.0000004", "completion": "0.0000016"},
+        })
+    };
+    let mut data = vec![entry(MODEL.trim_start_matches("openrouter/"), "OpenAI: GPT-4.1 Mini")];
+    data.extend((1..=55).map(|number| entry(&format!("qa/model-{number:02}"), &format!("QA Model {number:02}"))));
+    json!({"data": data})
+}
+
+/// OpenRouter's model list: `openrouter-models.json` beside the script, as
+/// it is (a QA agent edits it between fetches), else `default_models`.
+async fn models_list(model: &Model, stream: &mut TcpStream) -> std::io::Result<()> {
+    let file = model.script.with_file_name(MODELS_FILE);
+    let list = match std::fs::read(&file) {
+        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(list) => list,
+            Err(error) => {
+                let message = format!("qa-model: {} isn't JSON: {error}", file.display());
+                return respond(stream, 500, "", &json!({"error": {"message": message}})).await;
+            }
+        },
+        Err(_) => default_models(),
+    };
+    // Not in the log: `model` lists requests to the model, and a refresh
+    // between steps would push one out of `--last`.
+    respond(stream, 200, "", &list).await
+}
+
+/// The file qa-model serves OpenRouter's model list from, beside its script.
+pub const MODELS_FILE: &str = "openrouter-models.json";
 
 /// A whole JSON answer, with `extra` header lines (each ending in CRLF).
 async fn respond(stream: &mut TcpStream, status: u16, extra: &str, body: &Value) -> std::io::Result<()> {

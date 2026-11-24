@@ -887,14 +887,17 @@ fn moved(
 /// Runs `script` as background tasks run: in its own process group, so it
 /// outlives whoever started it, its output appended to `log` and its exit
 /// code written to `log` with the extension `status` (removed first). Returns
-/// the shell, to reap, and its process group.
-pub fn spawn_detached(cwd: &Path, script: &str, log: &Path) -> std::io::Result<(Child, u32)> {
+/// the shell, to reap, and its process group. `environment`: variables set
+/// for it on top of what it inherits.
+pub fn spawn_detached(cwd: &Path, script: &str, log: &Path, environment: &[(String, String)]) -> std::io::Result<(Child, u32)> {
     let file = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
     match std::fs::remove_file(log.with_extension("status")) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
-    spawn_wrapped(cwd, script, log, file, &[], None)
+    let environment: Vec<(String, Zeroizing<String>)> =
+        environment.iter().map(|(name, value)| (name.clone(), Zeroizing::new(value.clone()))).collect();
+    spawn_wrapped(cwd, script, log, file, &environment, None)
 }
 
 /// `environment`: variables set for this command only, on top of what it

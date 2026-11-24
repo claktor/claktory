@@ -173,6 +173,31 @@ struct Inner {
     /// signed in: when to seal it under the account's current share, so it
     /// opens by itself after the next restart.
     reseal_due: Option<Instant>,
+    /// Each signed request's last time, by a digest of what else it signs
+    /// (`stamp`), for the last `MAX_SKEW` seconds.
+    stamped: std::collections::HashMap<[u8; 32], i64>,
+}
+
+/// The time to sign a request with, `now` by the service's clock: now, or
+/// a second past the last time the same request was signed (`stamped`, by
+/// a digest of what else it signs). Signatures are deterministic, so the
+/// same request twice in one second (several callers at once, as when the
+/// service comes back after a restart) would be refused as a replay. Never
+/// more than a minute ahead, well within what the service accepts.
+fn stamp(stamped: &mut std::collections::HashMap<[u8; 32], i64>, now: i64, method: &str, path: &str, body: &[u8]) -> i64 {
+    use sha2::Digest;
+    stamped.retain(|_, time| *time > now - api::MAX_SKEW);
+    let mut digest = sha2::Sha256::new();
+    for part in [method.as_bytes(), b"\n", path.as_bytes(), b"\n", body] {
+        digest.update(part);
+    }
+    let key: [u8; 32] = digest.finalize().into();
+    let time = match stamped.get(&key) {
+        Some(&last) if last >= now && last < now + 60 => last + 1,
+        _ => now,
+    };
+    stamped.insert(key, time);
+    time
 }
 
 /// The account's state, held by `Factory`.
@@ -343,6 +368,7 @@ impl State {
             next_check_in: now,
             endpoints_sent: None,
             reseal_due: None,
+            stamped: Default::default(),
         };
         let http = reqwest::Client::builder()
             .timeout(CALL_TIMEOUT)
@@ -479,7 +505,11 @@ impl State {
                 request = request.header(reqwest::header::CONTENT_TYPE, "application/json").body(body.clone());
             }
             if let Some((token, key)) = signer {
-                let time = now_s() + self.lock().clock_offset;
+                let time = {
+                    let mut inner = self.lock();
+                    let now = now_s() + inner.clock_offset;
+                    stamp(&mut inner.stamped, now, method, path, &body)
+                };
                 if !token.is_empty() {
                     request = request.bearer_auth(token);
                 }
@@ -1696,6 +1726,30 @@ async fn tick(factory: &Arc<Factory>) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_same_request_signed_again_within_a_second_signs_a_later_time_so_it_isnt_a_replay() {
+        let mut stamped = std::collections::HashMap::new();
+        let now = 1_800_000_000;
+        // Three callers list the same thing at once: three times, so three
+        // signatures, none refused as seen before.
+        let times: Vec<i64> = (0..3).map(|_| super::stamp(&mut stamped, now, "GET", "/v1/apps/grants", b"")).collect();
+        assert_eq!(times, [now, now + 1, now + 2]);
+        // Another request, or another body, is signed with now.
+        assert_eq!(super::stamp(&mut stamped, now, "GET", "/v1/claktories", b""), now);
+        assert_eq!(super::stamp(&mut stamped, now, "POST", "/v1/check-in", b"{\"a\":1}"), now);
+        assert_eq!(super::stamp(&mut stamped, now, "POST", "/v1/check-in", b"{\"a\":2}"), now);
+        // Once the clock passes the times used, it's now again.
+        assert_eq!(super::stamp(&mut stamped, now + 5, "GET", "/v1/apps/grants", b""), now + 5);
+        // Never more than a minute ahead: past it, now (the service's
+        // replay answer then waits a second).
+        let mut many = std::collections::HashMap::new();
+        let last = (0..80).map(|_| super::stamp(&mut many, now, "GET", "/v1/apps/grants", b"")).max();
+        assert_eq!(last, Some(now + 60));
+        // Forgotten once the service would refuse the time anyway.
+        super::stamp(&mut many, now + 400, "GET", "/v1/claktories", b"");
+        assert_eq!(many.len(), 1);
+    }
+
     #[test]
     fn a_long_wait_says_hours_or_tomorrow() {
         let at = |time: &str| -> jiff::ZonedDateTime { time.parse().expect("a time") };

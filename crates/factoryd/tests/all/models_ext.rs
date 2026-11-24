@@ -25,7 +25,7 @@ const HOUR: i64 = 3_600_000;
 
 fn model(id: &str, name: &str, efforts: &[&str], context_window: u64) -> v1::Model {
     let efforts = efforts.iter().map(|effort| (*effort).to_owned()).collect();
-    v1::Model { id: id.into(), name: name.into(), context_window, efforts, image_input: false, added: false }
+    v1::Model { id: id.into(), name: name.into(), context_window, efforts, image_input: false, added: false, image_output: false }
 }
 
 impl Models for Catalog {

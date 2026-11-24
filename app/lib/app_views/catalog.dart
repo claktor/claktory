@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show listEquals;
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -10,6 +12,7 @@ import '../mobile/metrics.dart';
 import '../move.dart' show MoveMeter;
 import 'charts.dart';
 import 'controller.dart';
+import 'menu.dart';
 import 'surface.dart';
 
 /// Catalog v1 ("https://claktory.com/a2ui/catalog/v1"): the components an
@@ -86,6 +89,16 @@ class _Renderer {
   /// Button takes only its own width (as it did when that line scrolled),
   /// never the whole line.
   var _inLine = false;
+
+  /// Whether the next component built is a button on a bar (a Row of
+  /// Buttons, one weighted: [_BarLayout]); only that one reads it.
+  var _inBar = false;
+
+  /// Whether what's being built is a bar button's face: one line, its
+  /// words ending in "…" when there isn't room. Only what's built at once
+  /// inside the face's _child reads it: a Text or List built later (in a
+  /// LayoutBuilder or Builder) wouldn't see it.
+  var _oneLine = false;
 
   /// How many TextFields component [id] holds, itself and in what it holds
   /// (a template's counts twice: it may repeat).
@@ -192,7 +205,9 @@ class _Renderer {
   Widget node(BuildContext context, String id, String scope, int depth) {
     final component = surface.components[id];
     if (component == null || depth > _maxDepth) return const SizedBox.shrink();
-    final built = _component(context, id, component, scope, depth);
+    final bar = _inBar;
+    _inBar = false;
+    final built = _component(context, id, component, scope, depth, bar: bar);
     return _accessible(component, scope, built);
   }
 
@@ -201,8 +216,9 @@ class _Renderer {
     String id,
     Map<String, Object?> c,
     String scope,
-    int depth,
-  ) {
+    int depth, {
+    bool bar = false,
+  }) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     List<Widget> children(Object? list) =>
@@ -212,6 +228,9 @@ class _Renderer {
         final variant = c['variant'];
         final text = Text(
           string(c['text'], scope),
+          maxLines: _oneLine ? 1 : null,
+          softWrap: !_oneLine,
+          overflow: _oneLine ? TextOverflow.ellipsis : null,
           style: switch (variant) {
             'heading' => type.emphasis.copyWith(
               color: palette.text,
@@ -225,12 +244,36 @@ class _Renderer {
             ? Semantics(header: true, child: text)
             : text;
       case 'Row':
-        final weighted = _weighted(context, c['children'], scope, depth);
-        final anyWeight = weighted.any((one) => one.$2 != null);
         final stackBelow = switch (c['stackBelow']) {
           final num n when n >= 320 && n <= 1200 => n.toDouble(),
           _ => null,
         };
+        // A bar (a dashboard's top line): only Buttons, one weighted. On
+        // one line whatever the width: the weighted one gives way first.
+        if (c['children'] case final List ids
+            when stackBelow == null &&
+                ids.isNotEmpty &&
+                ids.length <= 12 &&
+                ids.every(
+                  (id) =>
+                      id is String &&
+                      surface.components[id]?['component'] == 'Button',
+                ) &&
+                ids.any((id) => _weightOf(id as String) != null)) {
+          final buttons = <Widget>[];
+          for (final id in ids.cast<String>()) {
+            _inBar = true;
+            buttons.add(node(context, id, scope, depth + 1));
+            _inBar = false;
+          }
+          return _BarLayout(
+            weights: [for (final id in ids) _weightOf(id as String)],
+            hasWords: [for (final id in ids) _hasWords(id as String)],
+            children: buttons,
+          );
+        }
+        final weighted = _weighted(context, c['children'], scope, depth);
+        final anyWeight = weighted.any((one) => one.$2 != null);
         return LayoutBuilder(
           builder: (context, constraints) {
             // Weighted children (a dashboard's grid of stats) too narrow
@@ -321,6 +364,25 @@ class _Renderer {
           ),
         );
       case 'List':
+        if (c['direction'] == 'horizontal' && _oneLine) {
+          // A bar button's face: one line, its words giving way.
+          final ids = c['children'] is List ? c['children']! as List : const [];
+          // Gaps as boxes: a Row's spacing isn't in its intrinsic width,
+          // which the bar measures it by.
+          return Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final (i, child) in children(c['children']).indexed) ...[
+                if (i > 0) const SizedBox(width: Space.s),
+                if (i < ids.length &&
+                    surface.components[ids[i]]?['component'] == 'Text')
+                  Flexible(child: child)
+                else
+                  child,
+              ],
+            ],
+          );
+        }
         if (c['direction'] == 'horizontal') {
           // In a line while it fits; what doesn't fit goes on the next
           // line rather than off the screen (the largest text on a phone).
@@ -379,7 +441,7 @@ class _Renderer {
       case 'Icon':
         return AppViewIcon(name: string(c['name'], scope));
       case 'Button':
-        return _button(context, id, c, scope, depth);
+        return _button(context, id, c, scope, depth, bar: bar);
       case 'TextField':
         return _BoundTextField(
           key: ValueKey('$id@$scope'),
@@ -644,6 +706,27 @@ class _Renderer {
     int depth,
   ) => [for (final (child, _) in _weighted(context, list, scope, depth)) child];
 
+  /// Whether Button [id] shows words: a Text, or one in its List.
+  bool _hasWords(String id) {
+    final child = surface.components[surface.components[id]?['child']];
+    return switch (child?['component']) {
+      'Text' => true,
+      'List' => switch (child!['children']) {
+        final List ids => ids.any(
+          (id) => surface.components[id]?['component'] == 'Text',
+        ),
+        _ => false,
+      },
+      _ => false,
+    };
+  }
+
+  /// Component [id]'s weight as a flex, when it has one.
+  int? _weightOf(String id) => switch (surface.components[id]?['weight']) {
+    final num weight when weight > 0 => math.max(1, (weight * 100).round()),
+    _ => null,
+  };
+
   /// [_children], each with its weight (a flex) when it has one.
   List<(Widget, int?)> _weighted(
     BuildContext context,
@@ -651,15 +734,8 @@ class _Renderer {
     String scope,
     int depth,
   ) {
-    (Widget, int?) one(String id, String scope) {
-      final weight = surface.components[id]?['weight'];
-      return (
-        node(context, id, scope, depth + 1),
-        weight is num && weight > 0
-            ? math.max(1, (weight * 100).round())
-            : null,
-      );
-    }
+    (Widget, int?) one(String id, String scope) =>
+        (node(context, id, scope, depth + 1), _weightOf(id));
 
     if (list is List) {
       return [
@@ -692,14 +768,65 @@ class _Renderer {
     String id,
     Map<String, Object?> c,
     String scope,
-    int depth,
-  ) {
+    int depth, {
+    bool bar = false,
+  }) {
     final action = c['action'];
     final event = action is Map<String, Object?> ? action['event'] : null;
     final act = onAction;
     final onPressed = act != null && event is Map<String, Object?>
         ? () => act(id, event, scope)
         : null;
+    // With a menu: it opens the menu over the page rather than sending
+    // its own action, which is for apps that can't open one.
+    final menu = _menu(c['menu'], scope);
+    if (menu != null && act != null) {
+      final opener = AppMenuOpener();
+      return AppViewMenu(
+        opener: opener,
+        title: menu.title,
+        options: menu.options,
+        onChoose: (event) => act(id, event, scope),
+        child: _buttonFace(context, id, c, scope, depth, opener.open, bar: bar),
+      );
+    }
+    return _buttonFace(context, id, c, scope, depth, onPressed, bar: bar);
+  }
+
+  /// A Button's menu: its title and options, or null when it has none
+  /// (or none of its options has an event).
+  ({String title, List<AppMenuOption> options})? _menu(
+    Object? menu,
+    String scope,
+  ) {
+    if (menu is! Map<String, Object?>) return null;
+    final options = <AppMenuOption>[
+      if (menu['options'] case final List options)
+        for (final option in options.take(500))
+          if (option case {
+            'action': {'event': final Map<String, Object?> event},
+          })
+            (
+              label: string(option['label'], scope),
+              selected: boolean(option['selected'], scope),
+              event: event,
+              icon: string(option['icon'], scope),
+              section: string(option['section'], scope),
+            ),
+    ];
+    if (options.isEmpty) return null;
+    return (title: string(menu['title'], scope), options: options);
+  }
+
+  Widget _buttonFace(
+    BuildContext context,
+    String id,
+    Map<String, Object?> c,
+    String scope,
+    int depth,
+    VoidCallback? onPressed, {
+    bool bar = false,
+  }) {
     final childId = c['child'];
     final child = childId is String ? surface.components[childId] : null;
     // A Button's words are its Text child's, drawn as the app's buttons.
@@ -708,13 +835,13 @@ class _Renderer {
       if (c['variant'] == 'borderless') {
         return Align(
           alignment: Alignment.centerLeft,
-          widthFactor: _inLine ? 1 : null,
-          child: _QuietButton(label: label, onPressed: onPressed),
+          widthFactor: _inLine || bar ? 1 : null,
+          child: _QuietButton(label: label, onPressed: onPressed, oneLine: bar),
         );
       }
       return Align(
         alignment: Alignment.centerLeft,
-        widthFactor: _inLine ? 1 : null,
+        widthFactor: _inLine || bar ? 1 : null,
         child: Button(
           label: label,
           primary: c['variant'] == 'primary',
@@ -726,7 +853,8 @@ class _Renderer {
     // wrapping; the chosen one ("primary") filled, with an accent bar on
     // its left, as Grafana's pickers mark theirs.
     if (child?['children'] case [final String only]
-        when child!['component'] == 'List' &&
+        when !bar &&
+            child!['component'] == 'List' &&
             surface.components[only]?['component'] == 'Text') {
       return _MenuRow(
         chosen: c['variant'] == 'primary',
@@ -747,7 +875,10 @@ class _Renderer {
                 : null,
             borderRadius: BorderRadius.circular(Radii.control),
           );
+          final outer = _oneLine;
+          _oneLine = bar;
           final inside = _child(context, childId, scope, depth);
+          _oneLine = outer;
           if (!borderless) {
             return Container(
               padding: const EdgeInsets.all(Space.xs),
@@ -944,10 +1075,17 @@ class AppViewIcon extends StatelessWidget {
 /// A borderless Button: its words in label weight, `textMuted`, `text` on
 /// hover.
 class _QuietButton extends StatelessWidget {
-  const _QuietButton({required this.label, required this.onPressed});
+  const _QuietButton({
+    required this.label,
+    required this.onPressed,
+    this.oneLine = false,
+  });
 
   final String label;
   final VoidCallback? onPressed;
+
+  /// On a bar: one line, ending in "…" when there isn't room.
+  final bool oneLine;
 
   @override
   Widget build(BuildContext context) {
@@ -963,6 +1101,9 @@ class _QuietButton extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: Space.xs),
           child: Text(
             label,
+            maxLines: oneLine ? 1 : null,
+            softWrap: !oneLine,
+            overflow: oneLine ? TextOverflow.ellipsis : null,
             style: TypeScale.of(context).label.copyWith(
               color: onPressed == null
                   ? palette.textFaint
@@ -1493,4 +1634,242 @@ class _More extends StatelessWidget {
     style: TypeScale.of(context).caption
         .copyWith(color: Palette.of(context).textFaint),
   );
+}
+
+/// A bar of buttons on one line ([_Renderer]'s Row of Buttons with a
+/// weighted one: a dashboard's name, range, filters and •••): the
+/// unweighted ones at their own width, the weighted ones sharing the rest
+/// by weight, so the last stays at the line's end. The weighted ones give
+/// way first, down to [leastWeighted] (its chevron alone: the dashboard's
+/// name matters least, the range and filters' values most);
+/// only where the others don't fit even then (large text on a small
+/// phone) do they shrink, in proportion to what they have above it. Each
+/// button's words end in "…" where its room ends.
+class _BarLayout extends MultiChildRenderObjectWidget {
+  const _BarLayout({
+    required this.weights,
+    required this.hasWords,
+    required super.children,
+  });
+
+  /// Each child's weight, null for one at its own width.
+  final List<int?> weights;
+
+  /// Whether each child has words, which can end in "…".
+  final List<bool> hasWords;
+
+  /// The least a button with words gives way to: an icon and "…".
+  static const leastButton = 64.0;
+
+  /// The least the weighted ones give way to: a chevron and its gap.
+  static const leastWeighted = 24.0;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderBar(weights, hasWords, Directionality.of(context));
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderBar renderObject) {
+    renderObject
+      ..weights = weights
+      ..hasWords = hasWords
+      ..direction = Directionality.of(context);
+  }
+}
+
+class _BarParentData extends ContainerBoxParentData<RenderBox> {}
+
+class _RenderBar extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _BarParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _BarParentData> {
+  _RenderBar(this._weights, this._hasWords, this._direction);
+
+  List<bool> _hasWords;
+  set hasWords(List<bool> value) {
+    if (listEquals(value, _hasWords)) return;
+    _hasWords = value;
+    markNeedsLayout();
+  }
+
+  List<int?> _weights;
+  set weights(List<int?> value) {
+    if (listEquals(value, _weights)) return;
+    _weights = value;
+    markNeedsLayout();
+  }
+
+  TextDirection _direction;
+  set direction(TextDirection value) {
+    if (value == _direction) return;
+    _direction = value;
+    markNeedsLayout();
+  }
+
+  static const _gap = Space.s;
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _BarParentData) {
+      child.parentData = _BarParentData();
+    }
+  }
+
+  List<RenderBox> get _children {
+    final out = <RenderBox>[];
+    var child = firstChild;
+    while (child != null) {
+      out.add(child);
+      child = childAfter(child);
+    }
+    return out;
+  }
+
+  int? _weight(int index) => index < _weights.length ? _weights[index] : null;
+
+  bool _words(int index) => index < _hasWords.length && _hasWords[index];
+
+  @override
+  double computeMinIntrinsicWidth(double height) =>
+      computeMaxIntrinsicWidth(height);
+
+  @override
+  double computeMaxIntrinsicWidth(double height) {
+    final children = _children;
+    return children.fold(
+          0.0,
+          (sum, child) => sum + child.getMaxIntrinsicWidth(double.infinity),
+        ) +
+        _gap * math.max(0, children.length - 1);
+  }
+
+  @override
+  double computeMinIntrinsicHeight(double width) => _children.fold(
+    0.0,
+    (most, child) =>
+        math.max(most, child.getMinIntrinsicHeight(double.infinity)),
+  );
+
+  @override
+  double computeMaxIntrinsicHeight(double width) => _children.fold(
+    0.0,
+    (most, child) =>
+        math.max(most, child.getMaxIntrinsicHeight(double.infinity)),
+  );
+
+  /// Each child's width on a line [width] wide.
+  List<double> _widths(double width) {
+    final children = _children;
+    final natural = [
+      for (final child in children) child.getMaxIntrinsicWidth(double.infinity),
+    ];
+    if (!width.isFinite) return natural;
+    final room = math.max(0.0, width - _gap * math.max(0, children.length - 1));
+    var fixed = 0.0;
+    var wanted = 0.0;
+    var total = 0;
+    for (var i = 0; i < children.length; i++) {
+      final weight = _weight(i);
+      if (weight == null) {
+        fixed += natural[i];
+      } else {
+        wanted += natural[i];
+        total += weight;
+      }
+    }
+    // The weighted ones' share: the rest of the line, or on a short line
+    // their least.
+    final keep = math.min(wanted, _BarLayout.leastWeighted);
+    final shared = math.max(room - fixed, keep);
+    final left = room - shared;
+    final widths = [...natural];
+    if (fixed > left) {
+      // The others with words give way, each by what it has above its
+      // least (an icon and "…"); one of icons alone keeps its width.
+      double floor(int i) =>
+          _words(i) ? math.min(natural[i], _BarLayout.leastButton) : natural[i];
+      final others = [
+        for (var i = 0; i < children.length; i++)
+          if (_weight(i) == null) i,
+      ];
+      final slack = others.fold(0.0, (sum, i) => sum + natural[i] - floor(i));
+      final over = fixed - left;
+      if (slack > 0) {
+        final part = math.min(1.0, over / slack);
+        for (final i in others) {
+          widths[i] = natural[i] - (natural[i] - floor(i)) * part;
+        }
+      }
+    }
+    // Where even their least doesn't fit (icons alone at a large text
+    // size), the weighted ones give up the rest of their share.
+    var given = shared;
+    final rest = [
+      for (var i = 0; i < children.length; i++)
+        if (_weight(i) == null) widths[i],
+    ].fold(0.0, (sum, w) => sum + w);
+    if (rest + given > room) given = math.max(0.0, room - rest);
+    for (var i = 0; i < children.length; i++) {
+      if (_weight(i) case final weight?) {
+        widths[i] = total == 0 ? 0.0 : given * weight / total;
+      }
+    }
+    return widths;
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) {
+    final widths = _widths(constraints.maxWidth);
+    var height = 0.0;
+    for (final (i, child) in _children.indexed) {
+      height = math.max(
+        height,
+        child.getDryLayout(BoxConstraints(maxWidth: widths[i])).height,
+      );
+    }
+    final width =
+        widths.fold(0.0, (sum, w) => sum + w) +
+        _gap * math.max(0, widths.length - 1);
+    return constraints.constrain(Size(width, height));
+  }
+
+  @override
+  void performLayout() {
+    final children = _children;
+    final widths = _widths(constraints.maxWidth);
+    var height = 0.0;
+    for (final (i, child) in children.indexed) {
+      child.layout(
+        BoxConstraints(maxWidth: widths[i], maxHeight: constraints.maxHeight),
+        parentUsesSize: true,
+      );
+      height = math.max(height, child.size.height);
+    }
+    final width =
+        widths.fold(0.0, (sum, w) => sum + w) +
+        _gap * math.max(0, widths.length - 1);
+    size = constraints.constrain(Size(width, height));
+    // Left to right (right to left in a right-to-left language), each in
+    // its slot, centred on the line.
+    var x = 0.0;
+    for (final (i, child) in children.indexed) {
+      final slot = widths[i];
+      final left = _direction == TextDirection.ltr
+          ? x
+          : size.width - x - child.size.width;
+      (child.parentData! as _BarParentData).offset = Offset(
+        left,
+        (size.height - child.size.height) / 2,
+      );
+      x += slot + _gap;
+    }
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) =>
+      defaultPaint(context, offset);
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
 }

@@ -124,8 +124,10 @@ interface host {
 }
 
 /// Since 1.1: the views an app with views exports. A view is a surface
-/// the person opens in a pane or on their phone; it's one surface for
-/// every device showing it.
+/// the person opens in a pane or on their phone; each device has its own
+/// surface of it. Its params' `device` says which: never the device's id,
+/// but a stand-in, the same for that device every time it opens one of
+/// this app's views, that no other app can match.
 interface views {
   /// The person opened `view` (one of the manifest's `[[views]]`) with
   /// `params` (a JSON object, "{}" for none) as `surface`. Push its

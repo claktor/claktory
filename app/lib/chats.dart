@@ -26,6 +26,8 @@ import 'scope.dart';
 import 'settings_view.dart' show modelLabel;
 import 'transcript.dart';
 import 'usage_wait.dart' show UsageSwitchLine, chatAtWork, chatUsageWaitLine;
+import 'voice_keep.dart' show KeptKind;
+import 'voice_session.dart' show voiceOpener;
 
 /// A chat's color: its glyph, its bar's line and the person's bubbles in
 /// it. Slate, no agent's, since a chat is no one in particular; white text
@@ -239,7 +241,17 @@ class ChatMessageTarget extends MessageTarget {
   String get placeholder => 'Ask anything';
 
   @override
+  String get name => chatTitle(chat);
+
+  @override
+  VoidCallback? reopen(BuildContext context) =>
+      voiceOpener(context, (backend) => backend.selectChat(chat.id));
+
+  @override
   bool get takesFiles => false;
+
+  @override
+  KeptKind get voiceKind => KeptKind.chat;
 
   @override
   MessageBlocked? blocked(BuildContext context) {
@@ -272,9 +284,15 @@ class ChatMessageTarget extends MessageTarget {
 
   @override
   void send(String text, {List<LocalFile> files = const [], Duration? voice}) {
-    // A voice message is its recording alone; a chat takes no other file.
+    // A voice message is its recording, with what was typed (#425); a
+    // chat takes no other file.
     if (voice != null) {
-      backend.chatOutbox.send(chat.id, '', files: files, voice: voice);
+      backend.chatOutbox.send(
+        chat.id,
+        text,
+        files: files.take(1).toList(),
+        voice: voice,
+      );
       return;
     }
     if (text.isEmpty) return;

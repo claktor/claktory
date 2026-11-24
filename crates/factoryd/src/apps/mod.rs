@@ -187,7 +187,7 @@ impl Apps {
         self.wake.notify_one();
     }
 
-    fn manifest(&self, id: &str) -> Option<Arc<Manifest>> {
+    pub(crate) fn manifest(&self, id: &str) -> Option<Arc<Manifest>> {
         self.state().manifests.get(id).cloned()
     }
 }

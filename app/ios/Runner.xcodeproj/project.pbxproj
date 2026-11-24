@@ -19,6 +19,7 @@
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
 		7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */; };
 		7884E8692EC3CC0700C636F3 /* Scanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86A2EC3CC0400C636F3 /* Scanner.swift */; };
+		7884E8692EC3CC0700C63800 /* BackgroundGrace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86A2EC3CC0400C63800 /* BackgroundGrace.swift */; };
 		7884E8692EC3CC0700C63711 /* Capabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86A2EC3CC0400C63712 /* Capabilities.swift */; };
 		7884E8812EC3CC0700C63731 /* CommandMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8822EC3CC0400C63732 /* CommandMenu.swift */; };
 		1A2B3C4D5E6F708100000000 /* InkChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F708200000000 /* InkChannel.swift */; };
@@ -101,6 +102,7 @@
 		74858FAE1ED2DC5600515810 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		7884E86A2EC3CC0400C636F3 /* Scanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scanner.swift; sourceTree = "<group>"; };
+		7884E86A2EC3CC0400C63800 /* BackgroundGrace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundGrace.swift; sourceTree = "<group>"; };
 		7884E86A2EC3CC0400C63712 /* Capabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Capabilities.swift; sourceTree = "<group>"; };
 		7884E8822EC3CC0400C63732 /* CommandMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandMenu.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F708200000000 /* InkChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ink/InkChannel.swift; sourceTree = "<group>"; };
@@ -214,6 +216,7 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				7884E86A2EC3CC0400C636F3 /* Scanner.swift */,
+				7884E86A2EC3CC0400C63800 /* BackgroundGrace.swift */,
 				7884E86A2EC3CC0400C63712 /* Capabilities.swift */,
 				7884E8822EC3CC0400C63732 /* CommandMenu.swift */,
 				1A2B3C4D5E6F708200000000 /* InkChannel.swift */,
@@ -436,6 +439,7 @@
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 				7884E8692EC3CC0700C636F3 /* Scanner.swift in Sources */,
+				7884E8692EC3CC0700C63800 /* BackgroundGrace.swift in Sources */,
 				7884E8692EC3CC0700C63711 /* Capabilities.swift in Sources */,
 				7884E8812EC3CC0700C63731 /* CommandMenu.swift in Sources */,
 				1A2B3C4D5E6F708100000000 /* InkChannel.swift in Sources */,

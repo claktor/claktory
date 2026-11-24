@@ -406,6 +406,7 @@ impl Models for Scripted {
                     efforts: vec!["off".into()],
                     image_input: false,
                     added: false,
+                    image_output: false,
                 },
                 v1::Model {
                     id: OTHER_MODEL.into(),
@@ -414,6 +415,7 @@ impl Models for Scripted {
                     efforts: vec!["off".into()],
                     image_input: false,
                     added: false,
+                    image_output: false,
                 },
             ],
             None => Vec::new(),
@@ -426,6 +428,7 @@ impl Models for Scripted {
                 efforts: vec!["off".into()],
                 image_input: false,
                 added: false,
+                image_output: false,
             });
         }
         Box::pin(async move { models })

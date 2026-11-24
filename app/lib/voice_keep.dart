@@ -39,6 +39,43 @@ final _random = Random.secure();
 String newVoiceId() =>
     List.generate(16, (_) => _random.nextInt(16).toRadixString(16)).join();
 
+/// A file going with a kept voice message (#425): where it is on this
+/// device and its upload's id, so the message goes again whole.
+class KeptFile {
+  const KeptFile({
+    required this.path,
+    required this.name,
+    required this.size,
+    required this.uploadId,
+  });
+
+  final String path;
+  final String name;
+  final int size;
+  final String uploadId;
+
+  Map<String, Object?> toJson() => {
+    'path': path,
+    'name': name,
+    'size': size,
+    'upload_id': uploadId,
+  };
+
+  static KeptFile? fromJson(Object? json) {
+    if (json is! Map<String, Object?>) return null;
+    final path = json['path'];
+    final name = json['name'];
+    final upload = json['upload_id'];
+    if (path is! String || name is! String || upload is! String) return null;
+    return KeptFile(
+      path: path,
+      name: name,
+      size: (json['size'] as num?)?.toInt() ?? 0,
+      uploadId: upload,
+    );
+  }
+}
+
 /// A recording not yet confirmed by its Claktory, and what it's for.
 class KeptVoice extends Recording {
   KeptVoice({
@@ -54,6 +91,9 @@ class KeptVoice extends Recording {
     String? requestId,
     this.uploaded = false,
     this.kept = true,
+    this.text = '',
+    this.files = const [],
+    this.draft = false,
   }) : made = made ?? DateTime.now(),
        uploadId = uploadId ?? newVoiceId(),
        requestId = requestId ?? newVoiceId();
@@ -83,6 +123,22 @@ class KeptVoice extends Recording {
 
   /// A dictation's upload finished: it's asked for the words only.
   bool uploaded;
+
+  /// A voice message's typed text, sent with it as one message (#425).
+  String text;
+
+  /// The other files going with a voice message (#425), after the
+  /// recording.
+  List<KeptFile> files;
+
+  /// A voice note waiting in its message box, not sent yet (#425): after a
+  /// relaunch it goes back to the box, not to the outbox.
+  bool draft;
+
+  /// A dictation's words, already being asked for: it was finished from
+  /// the floating bar with its field gone (#409), so they're ready when
+  /// the field is back. In memory only; the field takes it.
+  Future<String>? heard;
 
   /// Kept on disk: false where the device has no folder for it (tests),
   /// when it lives only as long as the app does.
@@ -144,6 +200,9 @@ class KeptVoice extends Recording {
     'upload_id': uploadId,
     'request_id': requestId,
     'uploaded': uploaded,
+    if (text.isNotEmpty) 'text': text,
+    if (files.isNotEmpty) 'files': [for (final file in files) file.toJson()],
+    if (draft) 'draft': true,
   };
 
   /// The recording kept in [folder], from its kept.json; null if there's
@@ -175,6 +234,12 @@ class KeptVoice extends Recording {
         uploadId: text('upload_id').isEmpty ? null : text('upload_id'),
         requestId: text('request_id').isEmpty ? null : text('request_id'),
         uploaded: json['uploaded'] == true,
+        text: text('text'),
+        files: [
+          if (json['files'] case final List<Object?> files)
+            for (final file in files) ?KeptFile.fromJson(file),
+        ],
+        draft: json['draft'] == true,
       );
     } on Object catch (error) {
       developer.log('could not read a kept recording: $error', name: 'voice');
@@ -234,6 +299,45 @@ Future<({String path, bool kept})> newRecordingPath(DateTime now) async {
 /// end), or cancelled.
 const _strayAfter = Duration(hours: 1);
 
+/// A recording's folder with nothing in it is older than this when it's
+/// swept: the microphone gave up the file without the app knowing (the
+/// app closed while recording, as Android's Back can do), never a
+/// recording starting now, whose file comes with its folder.
+const _emptyAfter = Duration(minutes: 1);
+
+/// Sweeps [entry], a folder in the kept one that holds no recording kept
+/// for anything: once empty for a minute, or left over for an hour.
+void _sweepStray(Directory entry) {
+  try {
+    final age = DateTime.now().difference(entry.statSync().modified);
+    if (age > _strayAfter ||
+        (age > _emptyAfter && entry.listSync().isEmpty)) {
+      entry.deleteSync(recursive: true);
+    }
+  } on FileSystemException {
+    // Gone already.
+  }
+}
+
+/// Sweeps the kept folder's empty folders, left by recordings the app
+/// never heard the end of (Sale's row 86): when a recording starts, so
+/// they don't wait for the next launch.
+Future<void> sweepEmptyRecordings() async {
+  final path = await keptVoiceFolder();
+  if (path == null) return;
+  try {
+    for (final entry in Directory(path).listSync().whereType<Directory>()) {
+      try {
+        if (entry.listSync().isEmpty) _sweepStray(entry);
+      } on FileSystemException {
+        // Gone already.
+      }
+    }
+  } on FileSystemException {
+    // No kept folder yet.
+  }
+}
+
 /// [target]'s Claktory in the kept folder, by hash: 'local', its endpoint
 /// id, or for a code from before the tunnel its address with its
 /// certificate's fingerprint, so another Claktory at the same address
@@ -262,6 +366,25 @@ Future<void> forgetKeptVoices(String key) async {
     }
   } on Object catch (error) {
     developer.log('could not forget recordings: $error', name: 'voice');
+  }
+}
+
+/// How many recordings are kept on this device for the Claktory [key]
+/// ([keptClaktoryKey]), not sent yet: what forgetting it deletes too.
+Future<int> keptVoiceCount(String key) async {
+  try {
+    final path = await keptVoiceFolder();
+    if (path == null) return 0;
+    final root = Directory(path);
+    if (!root.existsSync()) return 0;
+    var count = 0;
+    for (final entry in root.listSync().whereType<Directory>()) {
+      if (KeptVoice.read(entry)?.claktory == key) count++;
+    }
+    return count;
+  } on Object catch (error) {
+    developer.log('could not count recordings: $error', name: 'voice');
+    return 0;
   }
 }
 
@@ -318,12 +441,7 @@ class KeptVoices extends ChangeNotifier {
     for (final entry in root.listSync().whereType<Directory>()) {
       final voice = KeptVoice.read(entry);
       if (voice == null) {
-        try {
-          final age = DateTime.now().difference(entry.statSync().modified);
-          if (age > _strayAfter) entry.deleteSync(recursive: true);
-        } on FileSystemException {
-          // Gone already.
-        }
+        _sweepStray(entry);
         continue;
       }
       if (voice.claktory == key) found.add(voice);
@@ -331,6 +449,9 @@ class KeptVoices extends ChangeNotifier {
     found.sort((a, b) => a.made.compareTo(b.made));
     for (final voice in found) {
       switch (voice.kind) {
+        // A voice note left in its message box (#425): back in the box.
+        case KeptKind.agent || KeptKind.chat when voice.draft:
+          VoiceNotes.of(backend).restore(voice);
         case KeptKind.agent:
           backend.outbox.restore(voice);
         case KeptKind.chat:
@@ -405,5 +526,61 @@ class KeptVoices extends ChangeNotifier {
     _disposed = true;
     backend.connected.removeListener(_connected);
     super.dispose();
+  }
+}
+
+/// The voice notes waiting in message boxes (#425), one per box at most,
+/// by the box's key ([MessageTarget.key]): recorded while the box had text
+/// (or files), they go with it as one message when it's sent. Kept on the
+/// device as any recording not sent yet ([KeptVoice.draft]), so a relaunch
+/// puts each back in its box; the rest of the box (its text, its files)
+/// is the drafts'.
+class VoiceNotes extends ChangeNotifier {
+  VoiceNotes._();
+
+  static final _of = Expando<VoiceNotes>('voice notes');
+
+  /// [backend]'s; made the first time it's asked for.
+  static VoiceNotes of(Backend backend) => _of[backend] ??= VoiceNotes._();
+
+  final _byBox = <String, KeptVoice>{};
+
+  /// The note waiting in the box [box], if any.
+  KeptVoice? note(String box) => _byBox[box];
+
+  /// [voice] waits in the box [box] from now on (its target), replacing
+  /// what waited there.
+  Future<void> put(String box, KeptVoice voice) async {
+    final was = _byBox[box];
+    voice.draft = true;
+    _byBox[box] = voice;
+    notifyListeners();
+    if (was != null && was != voice) await was.delete();
+    await voice.save();
+  }
+
+  /// One kept from before a relaunch, back in its box.
+  void restore(KeptVoice voice) {
+    if (voice.target.isEmpty || _byBox[voice.target] != null) return;
+    _byBox[voice.target] = voice;
+    notifyListeners();
+  }
+
+  /// Takes the note out of the box [box] to send it: still on the device,
+  /// for the outbox to keep until the Claktory has it.
+  KeptVoice? take(String box) {
+    final voice = _byBox.remove(box);
+    if (voice == null) return null;
+    voice.draft = false;
+    notifyListeners();
+    return voice;
+  }
+
+  /// The person removed the note from the box [box]: gone from the device.
+  Future<void> discard(String box) async {
+    final voice = _byBox.remove(box);
+    if (voice == null) return;
+    notifyListeners();
+    await voice.delete();
   }
 }

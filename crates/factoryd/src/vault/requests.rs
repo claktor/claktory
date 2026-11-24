@@ -535,7 +535,7 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
 /// The person gave `asked`'s agent `given` (the secret's id and name) for
 /// it, or dismissed it, or replied to it (`replied`, #370: nothing given):
 /// its entry shows the decision, an admin agent that was working it hears,
-/// and the agent is told, which wakes it.
+/// and the agent is told: quietly when dismissed with nothing more.
 fn settle_request(
     factory: &Arc<Factory>,
     asked: &v1::SecretRequest,
@@ -606,7 +606,10 @@ fn settle_request(
     } else {
         format!("{summary}{what}{}\n\nYou asked because: {}{about}", note(&person, comment), asked.reason)
     };
-    let event = host_event(summary);
+    // Dismissed with nothing more, it's told quietly, at the agent's next
+    // wake (friend bug #19): often it was settled elsewhere.
+    let bare = given.is_none() && !replied && comment.trim().is_empty();
+    let event = if bare { crate::needs_you::dismissed_event(summary) } else { host_event(summary) };
     factory.deliver_event(agent, text, event);
     Ok(())
 }

@@ -27,7 +27,12 @@ class PhoneComposerRow extends StatelessWidget {
     this.maxFieldHeight,
     this.recording,
     this.accent,
+    this.beside,
   });
+
+  /// Beside Send while there's something to send and nothing records: the
+  /// mic, for a voice note to go with what's written (#425).
+  final Widget? beside;
 
   /// Send's color, the target's ([SendButton.accent]).
   final Color? accent;
@@ -89,7 +94,16 @@ class PhoneComposerRow extends StatelessWidget {
       return Row(
         children: [
           Expanded(
-            child: SizedBox(height: target, child: recording),
+            // A finger's height, taller only for text that is (the time at
+            // the largest sizes, never cut off).
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: target),
+              child: Align(
+                alignment: AlignmentDirectional.centerStart,
+                heightFactor: 1,
+                child: recording,
+              ),
+            ),
           ),
           const SizedBox(width: Space.xs),
           primary ?? SendButton(onSend: canSend ? _send : null, accent: accent),
@@ -142,6 +156,11 @@ class PhoneComposerRow extends StatelessWidget {
           ),
         ),
         const SizedBox(width: Space.xs),
+        if (beside case final beside?) ...[
+          // Its own element, as Attach files is.
+          Semantics(container: true, child: beside),
+          const SizedBox(width: Space.xs),
+        ],
         if (canSend || primary == null)
           SendButton(onSend: canSend ? _send : null, accent: accent)
         else

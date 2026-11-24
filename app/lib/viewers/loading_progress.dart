@@ -9,8 +9,8 @@ import '../identity.dart';
 import '../mobile/metrics.dart' show TypeScale;
 import '../resources.dart' show formatBytes;
 
-/// "Loading video… 2.1 MB of 9.4 MB" over a bar; [label] alone before the
-/// size is known.
+/// The file's [name], then "Loading video… 2.1 MB of 9.4 MB" over a bar
+/// filled that far; [label] alone before the size is known.
 class LoadingProgress extends StatelessWidget {
   const LoadingProgress({
     super.key,
@@ -18,8 +18,16 @@ class LoadingProgress extends StatelessWidget {
     required this.received,
     required this.size,
     required this.connected,
+    this.name,
     this.note,
   });
+
+  /// The bar's length.
+  static const barWidth = 200.0;
+
+  /// What's coming, on top: "river.mp4" (#417), so what's on its way is
+  /// never only a bar.
+  final String? name;
 
   /// A line under it: "Full size: this Claktory can't make a smaller
   /// copy." (#379).
@@ -40,12 +48,23 @@ class LoadingProgress extends StatelessWidget {
       color: palette.textMuted,
       fontFeatures: const [FontFeature.tabularFigures()],
     );
+    final fraction = size == 0 ? 0.0 : (received / size).clamp(0.0, 1.0);
     return Center(
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(Space.xl),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (name case final name? when name.isNotEmpty) ...[
+              Text(
+                name,
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TypeScale.of(context).body.copyWith(color: palette.text),
+              ),
+              const SizedBox(height: Space.xs),
+            ],
             Text(
               size == 0
                   ? label
@@ -56,11 +75,9 @@ class LoadingProgress extends StatelessWidget {
             ),
             const SizedBox(height: Space.s),
             Semantics(
-              value: size == 0
-                  ? null
-                  : '${(received * 100 / size).clamp(0, 100).round()}%',
+              value: size == 0 ? null : '${(fraction * 100).round()}%',
               child: SizedBox(
-                width: 160,
+                width: barWidth,
                 height: 4,
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(2),
@@ -69,10 +86,14 @@ class LoadingProgress extends StatelessWidget {
                       Positioned.fill(
                         child: ColoredBox(color: palette.selected),
                       ),
-                      FractionallySizedBox(
-                        widthFactor: size == 0
-                            ? 0
-                            : (received / size).clamp(0.0, 1.0),
+                      // Its own height: as a loose child of the stack the
+                      // fill had none, and the bar never moved (#417).
+                      PositionedDirectional(
+                        key: const ValueKey('loading-fill'),
+                        start: 0,
+                        top: 0,
+                        bottom: 0,
+                        width: barWidth * fraction,
                         child: ColoredBox(color: palette.signal),
                       ),
                     ],

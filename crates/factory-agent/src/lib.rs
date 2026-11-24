@@ -15,6 +15,7 @@ pub mod credentials;
 pub mod errors;
 pub mod estimate;
 pub mod guard;
+pub mod images;
 pub mod json_parse;
 pub mod limits;
 pub mod login;

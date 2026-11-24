@@ -2,7 +2,7 @@
 //! see_all, everyone's; the owner hears who stopped one. Admin agents hear
 //! of tasks that run long, once.
 
-use crate::common::{Client, View, apply_request, create_agent, create_project, describe, send_message, start, temp_dir};
+use crate::common::{Client, View, apply_request, create_agent, create_project, describe, home, send_message, start, temp_dir};
 use factory_protocol::v1::{self, AgentStatus, client_message, entry::Kind};
 
 fn select(agent: &str) -> client_message::Body {
@@ -153,4 +153,40 @@ async fn an_agents_commands_and_background_tasks_know_its_id() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!(std::fs::read_to_string(&file).expect("the task wrote its id"), "builder\n");
+}
+
+/// ripgrep for every agent: `<home>/tools` is first on the PATH of its
+/// commands and background tasks; while it isn't there (no release, as here
+/// at first), it's passed over and the rest of the PATH works as before.
+#[tokio::test]
+async fn an_agents_commands_find_claktorys_own_tools_first() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    let tools = home(&dir).root().join("tools");
+
+    let shown = call(&mut client, &mut view, "builder", "bash", r#"{"command":"ls / > /dev/null && echo listed"}"#).await;
+    assert!(shown.starts_with("listed\n"), "no tools folder yet, the rest of the PATH as before: {shown}");
+
+    std::fs::create_dir_all(&tools).expect("tools");
+    std::fs::write(tools.join("rg"), "#!/bin/sh\necho \"Claktory's rg $*\"\n").expect("rg");
+    std::fs::set_permissions(tools.join("rg"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).expect("mode");
+    let shown = call(&mut client, &mut view, "builder", "bash", r#"{"command":"rg --version; echo \"path=$PATH\""}"#).await;
+    assert!(shown.starts_with("Claktory's rg --version\n"), "{shown}");
+    assert!(shown.contains(&format!("path={}:", tools.display())), "first, then the rest: {shown}");
+
+    let started =
+        call(&mut client, &mut view, "builder", "bash", r#"{"command":"rg in-task > background-rg","run_in_background":true}"#).await;
+    assert!(started.starts_with("Started task-"), "{started}");
+    let file = dir.join("site/background-rg");
+    for _ in 0..100 {
+        if std::fs::read_to_string(&file).is_ok_and(|text| text.ends_with('\n')) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(std::fs::read_to_string(&file).expect("the task ran rg"), "Claktory's rg in-task\n");
 }

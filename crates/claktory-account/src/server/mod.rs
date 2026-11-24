@@ -237,6 +237,10 @@ impl Service {
                 if let Err(error) = db::purge(&service.db(), service.now()) {
                     tracing::error!("upkeep: {error}");
                 }
+                // Last month's usage breakdowns, once it's over (#411).
+                if let Err(error) = stats::publish_due(&mut service.db(), service.now()) {
+                    tracing::error!("upkeep: the month's usage breakdowns weren't published: {error}");
+                }
             }
         });
     }

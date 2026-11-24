@@ -48,6 +48,11 @@ pub struct ModelInfo {
     /// The model takes image input (the catalog's input list, the same
     /// source as read_image's gate).
     pub image_input: bool,
+    /// An agent on it can make images (#403): its provider makes them on
+    /// this sign-in (ChatGPT's subscription, `Provider::images`) and the
+    /// model takes image input, as Codex's own rule has it. Whether the
+    /// plan allows it is factoryd's to add, from the plan it reads.
+    pub image_output: bool,
     /// Added by its id, as the provider's list doesn't have it.
     pub added: bool,
 }
@@ -526,7 +531,10 @@ impl Registry {
         let Some(provider) = self.provider(id) else { return false };
         let elsewhere = |variable: &str| (self.inner.env)(variable).is_some();
         match id {
-            "openrouter" => provider.base_url == crate::providers::catalog::OPENROUTER_BASE && !elsewhere("OPENROUTER_BASE_URL"),
+            "openrouter" => {
+                (provider.base_url == crate::providers::catalog::OPENROUTER_BASE && !elsewhere("OPENROUTER_BASE_URL"))
+                    || crate::providers::catalog::qa_models()
+            }
             "anthropic" => provider.base_url == "https://api.anthropic.com" && !elsewhere("ANTHROPIC_BASE_URL"),
             "openai" => provider.base_url == "https://api.openai.com/v1" && !elsewhere("OPENAI_BASE_URL"),
             "openai-codex" => provider.base_url == "https://chatgpt.com/backend-api",
@@ -557,6 +565,10 @@ impl Registry {
         if !self.fetches_models(id) {
             return Ok(None);
         }
+        // A QA build's list from qa-model: public, like openrouter.ai's.
+        if id == "openrouter" && crate::providers::catalog::qa_models() {
+            return crate::providers::catalog::fetch_openrouter().await.map(Some);
+        }
         let Some((base_url, auth)) = self.listing_auth(id).await? else { return Ok(None) };
         crate::providers::listing::fetch(id, &base_url, &auth).await.map(Some)
     }
@@ -581,6 +593,10 @@ impl Registry {
             return Ok(None);
         }
         let who = crate::providers::listing::name(id);
+        if id == "openrouter" && crate::providers::catalog::qa_models() {
+            let body = crate::providers::catalog::fetch_openrouter().await?;
+            return crate::providers::catalog::openrouter_model(&body, model).map(Some);
+        }
         let Some((base_url, auth)) = self.listing_auth(id).await? else {
             return Err(format!("Sign in to {who} first, in Settings → Providers."));
         };
@@ -631,8 +647,8 @@ impl Registry {
     pub async fn models(&self) -> Result<Vec<ModelInfo>, Error> {
         let mut models = Vec::new();
         for provider in &self.inner.providers {
-            match self.check_auth(provider.id).await {
-                Ok(Some(_)) => {}
+            let subscribed = match self.check_auth(provider.id).await {
+                Ok(Some(check)) => check.kind == "oauth",
                 Ok(None) => continue,
                 // One sign-in that can't be read (edited by hand, say) takes
                 // only its own provider's models away.
@@ -640,14 +656,16 @@ impl Registry {
                     tracing::warn!(provider = provider.id, %error, "its sign-in can't be read: its models aren't offered");
                     continue;
                 }
-            }
+            };
             for model in self.models_of(provider).iter() {
+                let image_input = model.input.iter().any(|input| input == "image");
                 models.push(ModelInfo {
                     id: format!("{}/{}", provider.id, model.id),
                     name: model.name.clone(),
                     context_window: model.context_window,
                     efforts: supported_thinking_levels(model),
-                    image_input: model.input.iter().any(|input| input == "image"),
+                    image_input,
+                    image_output: image_input && subscribed && provider.images.is_some(),
                     added: self.is_added(provider, &model.id),
                 });
             }
@@ -1026,6 +1044,39 @@ impl Registry {
         let Some(resolved) = resolved else { return Ok(None) };
         let base_url = resolved.auth.base_url.clone().unwrap_or_else(|| provider.base_url.to_owned());
         credit(base_url, resolved.auth).await.map(Some).map_err(Error::Other)
+    }
+
+    /// Makes one image on the provider (#403), on the account its requests
+    /// go to now (the first with room, else its first), signed in with its
+    /// subscription. Never sent again by itself.
+    pub async fn make_image(
+        &self,
+        id: &str,
+        request: crate::images::ImageRequest,
+    ) -> Result<crate::images::MadeImage, crate::images::ImageFailure> {
+        use crate::images::ImageFailure;
+        let Some(provider) = self.provider(id) else { return Err(ImageFailure::NotOffered) };
+        let Some(generate) = provider.images else { return Err(ImageFailure::NotOffered) };
+        let accounts = match self.candidates(id).await {
+            Ok(accounts) => accounts,
+            Err(error) if error.is_locked() => return Err(ImageFailure::SignedOut),
+            Err(error) => return Err(ImageFailure::Refused(error.to_string())),
+        };
+        let account = with_capacity(&accounts, &[], Pool::Normal, now_ms()).map(|(_, account)| account).or_else(|| accounts.first());
+        let Some(account) = account else { return Err(ImageFailure::SignedOut) };
+        if !matches!(account.credential, Credential::Oauth { .. }) {
+            return Err(ImageFailure::NotOffered);
+        }
+        let resolved =
+            resolve_account_auth(provider, &self.inner.store, &self.inner.env, Some(&account.id), &CancellationToken::new()).await;
+        let resolved = match resolved {
+            Ok(Some(resolved)) => resolved,
+            Ok(None) => return Err(ImageFailure::SignedOut),
+            Err(error) if error.is_locked() => return Err(ImageFailure::SignedOut),
+            Err(error) => return Err(ImageFailure::Refused(error.to_string())),
+        };
+        let base_url = resolved.auth.base_url.clone().unwrap_or_else(|| provider.base_url.to_owned());
+        generate(base_url, resolved.auth, request).await
     }
 
     /// The base url and auth of a provider's account signed in with a subscription; None when it isn't.

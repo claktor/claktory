@@ -194,6 +194,7 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
           : Commented(controller: commenting, insetInside: true, child: text);
     }
     return PaneScaffold(
+      share: sharePath,
       details: details,
       controls: controls,
       comments: commentable ? CommentsButton(controller: comments) : null,
@@ -222,6 +223,15 @@ void _commentFrom(
   comments.comment(suggest: suggest);
   region.hideToolbar();
   region.clearSelection();
+}
+
+/// The text under a selection changed (an agent rewrote the file): the
+/// selection goes, rather than staying where it was over other words, or
+/// over some blocks of it and not those between (Abbacchio's row 1012).
+void _clearSelection(BuildContext context) {
+  final region = context.findAncestorStateOfType<SelectableRegionState>();
+  region?.hideToolbar();
+  region?.clearSelection();
 }
 
 /// How the view shown answers the viewer's find: its items (blocks or
@@ -370,6 +380,24 @@ mixin _Blocks<T extends StatefulWidget> on State<T> {
       blocks.add(block);
     }
     return blocks[index];
+  }
+
+  /// The text changed: its blocks are made afresh. A block reused would
+  /// land somewhere else in the new text (a paragraph now in a quote), its
+  /// notifier going to the listener there while the one it left still
+  /// holds it (Bruno 26751: the pane's debug red box), and that one, gone,
+  /// then unregistering it from the new one. The old ones are disposed
+  /// after the frame, once their listeners are gone.
+  void renewBlocks() {
+    final old = List.of(blocks);
+    blocks.clear();
+    inUse = 0;
+    if (old.isEmpty) return;
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      for (final block in old) {
+        block.dispose();
+      }
+    });
   }
 
   @override
@@ -592,6 +620,10 @@ class _FormattedTextState extends State<_FormattedText>
   @override
   void didUpdateWidget(_FormattedText old) {
     super.didUpdateWidget(old);
+    if (old.text != widget.text) {
+      _clearSelection(context);
+      renewBlocks();
+    }
     if (old.comments != widget.comments) _attach();
     widget.hook.attach(_findItems, _findGo);
   }
@@ -901,6 +933,7 @@ class _NumberedTextState extends State<_NumberedText>
   void didUpdateWidget(_NumberedText old) {
     super.didUpdateWidget(old);
     if (old.text != widget.text) {
+      _clearSelection(context);
       _lines = _split(widget.text);
       _starts = _startsOf(_lines);
     }

@@ -388,6 +388,24 @@ async fn rivet_takes_an_agents_conversation_back_with_its_reason() {
     assert!(note.starts_with("Rivet switched you to another version of your conversation"), "{note}");
     assert!(note.contains("Rivet's reason: Back to where it was."), "{note}");
 
+    // A version set aside is deleted for good, with its reason in History (#423).
+    select(&mut client, &mut view, "rivet").await;
+    let aside = fork::branches_for_test(&factory, "builder");
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    let delete = serde_json::json!({"agent": "builder", "branch": aside[0].id, "reason": "Matt doesn't need it."});
+    let (done, _) = call(&mut client, &mut view, "rivet", "conversation_delete", delete).await;
+    assert_eq!(done, "Deleted that version of Builder's conversation, for good. It shows in the person's History.");
+    assert!(fork::branches_for_test(&factory, "builder").is_empty());
+    let records = changes(&mut client, &mut view).await;
+    assert_eq!((records[0].title.as_str(), records[0].agent_reason.as_str()), ("Rivet deleted one of Builder's other versions", "Matt doesn't need it."));
+    let again = serde_json::json!({"agent": "builder", "branch": aside[0].id, "reason": "Again."});
+    let (refused, _) = call(&mut client, &mut view, "rivet", "conversation_delete", again).await;
+    assert!(refused.ends_with("list them with conversation_points. Nothing was deleted."), "{refused}");
+    // Never without a reason: it can't be undone (Abbacchio's row 1047).
+    let bare = serde_json::json!({"agent": "builder", "branch": aside[0].id, "reason": " "});
+    let (refused, _) = call(&mut client, &mut view, "rivet", "conversation_delete", bare).await;
+    assert_eq!(refused, "Give reason: why this version can go, in a short line the person reads in History. Nothing was deleted.");
+
     // Never after reading a web page.
     factoryd::pipes::taint_for_test(&factory, "rivet", "browser:https://example.com");
     select(&mut client, &mut view, "rivet").await;
@@ -396,6 +414,10 @@ async fn rivet_takes_an_agents_conversation_back_with_its_reason() {
         refused.starts_with("You've read a page on https://example.com, so you can't look at or change other agents' conversations"),
         "{refused}"
     );
+    // A delete says where the person deletes a version instead.
+    let delete = serde_json::json!({"agent": "builder", "branch": "b1", "reason": "Gone."});
+    let (refused, _) = call(&mut client, &mut view, "rivet", "conversation_delete", delete).await;
+    assert!(refused.ends_with("The person can delete a version with Delete… in the agent's Other versions. Nothing was deleted."), "{refused}");
 }
 
 /// Abbacchio's row 753: a teammate's message queued while the agent works

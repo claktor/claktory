@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use factory_protocol::v1::{self, server_message::Body};
+use factory_protocol::v1;
 
 use crate::config::AgentConfig;
 use crate::factory::{Factory, RequestError, transcript_of};
@@ -65,11 +65,7 @@ impl Factory {
             let runtime = inner.agents.entry(id.to_owned()).or_default();
             let dropped = std::mem::take(&mut runtime.queue);
             self.settle(&dropped, Outcome::Dropped);
-            runtime.stopped = true;
-            if let Some(abort) = runtime.abort.take() {
-                abort.abort();
-            }
-            self.end_run(runtime, "stopped");
+            self.stop_run(runtime);
             // What the stopped run still reports belongs to the old conversation.
             runtime.epoch += 1;
             runtime.compact = None;
@@ -117,7 +113,7 @@ impl Factory {
         if inner.state.selected_agent.as_deref() == Some(id)
             && let Some(transcript) = transcript_of(&inner, id)
         {
-            self.send(Body::Transcript(transcript));
+            self.send_transcript(&inner, transcript);
         }
         self.broadcast_workspace(&inner);
         Ok(())

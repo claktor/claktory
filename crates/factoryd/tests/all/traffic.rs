@@ -70,6 +70,7 @@ fn models() -> Vec<v1::Model> {
             efforts: efforts(&["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
             image_input: false,
             added: false,
+            image_output: false,
         });
     }
     for name in ["gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6.1-sol"]
@@ -81,6 +82,7 @@ fn models() -> Vec<v1::Model> {
             efforts: efforts(&["off", "minimal", "low", "medium", "high", "xhigh"]),
             image_input: false,
             added: false,
+            image_output: false,
         });
     }
     models

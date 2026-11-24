@@ -56,8 +56,19 @@ async fn a_liaison_can_only_read_and_answer_its_pipe() {
     let status = call(&mut client, &mut view, "liaison", "pipe_status", "{}").await;
     assert!(status.contains("Website ⇄ Marketing"), "{status}");
     let request = last_request(&models);
-    let kept =
-        ["read_file", "read_image", "write_file", "edit_file", "pipe_send", "pipe_read", "pipe_status", "ask_person", "extension_call"];
+    let kept = [
+        "read_file",
+        "read_image",
+        "write_file",
+        "edit_file",
+        "pipe_send",
+        "pipe_read",
+        "pipe_status",
+        "pipe_withdraw",
+        "ask_person",
+        "ask_withdraw",
+        "extension_call",
+    ];
     assert!(request.tools.iter().all(|tool| kept.contains(&tool.as_str())), "{:?}", request.tools);
     assert!(request.tools.iter().any(|tool| tool == "pipe_send") && request.tools.iter().any(|tool| tool == "write_file"));
     let outbox = outbox(&dir);

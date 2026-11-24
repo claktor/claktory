@@ -91,6 +91,8 @@ class Adapters private constructor(private val all: List<AutoCloseable>) : AutoC
                     SecretClipboardChannel(messenger, context),
                     webAuth,
                     share,
+                    // factory/back-gesture: where the system's Back swipe doesn't start (the mic).
+                    BackGestureExclusion(messenger, activity),
                     // factory/links: claktory://add?code=… opens the app.
                     LinksChannel(messenger, activity),
                     // factory/shared: what other apps share to Claktory.

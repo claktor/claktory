@@ -23,8 +23,10 @@ pub const TABLE_ROWS: usize = 200;
 /// The most rows of all a view's panels together, so a refresh stays well
 /// under a message's megabyte.
 const VIEW_ROWS: usize = 16_000;
-/// A variable's most options shown.
-pub const MAX_OPTIONS: usize = 40;
+/// A variable's most options shown: 50 agents and more (Scolippi 27155:
+/// at 40, the last ten couldn't be chosen), within a view's 1,000
+/// components while its menu is open.
+pub const MAX_OPTIONS: usize = 200;
 
 /// What one surface shows, besides the dashboard itself.
 #[derive(Debug, Clone, Default)]
@@ -198,7 +200,7 @@ impl Draft {
             max: optional(viz.max),
             decimals: viz.decimals.map(|decimals| decimals.to_string()).unwrap_or_default(),
             // Unset is what stats showed before there was a choice.
-            reduce: viz.reduce.clone().unwrap_or_else(|| "sum".into()),
+            reduce: shown_reduce(viz),
             // A stat from before keeps its one color once edited.
             thresholds: thresholds_text(if legacy_stat(viz) { &legacy } else { &viz.thresholds }),
             color_mode: viz.color_mode.clone().unwrap_or_else(|| COLOR_MODE.into()),
@@ -307,7 +309,14 @@ impl Draft {
             decimals: self.decimals.parse().ok(),
             legend: (!self.legend).then_some(false),
             // A stat's always says, so a new one's last stays last.
-            reduce: if self.kind == "stat" { Some(self.reduce.clone()) } else { kept.reduce },
+            // Kept as the person left it, as the other hidden settings are
+            // (Abbacchio row 1050): changed while it was a number, then
+            // saved as something else, it's what they chose.
+            reduce: if self.kind == "stat" || old.is_some_and(|old| shown_reduce(old) != self.reduce) || (old.is_none() && self.reduce != model::NEW_REDUCE) {
+                Some(self.reduce.clone())
+            } else {
+                kept.reduce
+            },
             thresholds: read_thresholds(&self.thresholds).unwrap_or(kept.thresholds),
             color_mode: Some(self.color_mode.clone()).filter(|mode| !mode.is_empty() && mode != COLOR_MODE),
             graph: (!self.graph).then(|| "none".into()),
@@ -447,7 +456,11 @@ fn cell(value: &Value) -> String {
 /// What the view shows besides its own state: the dashboards there are,
 /// the one shown, the sources and what its queries came to.
 pub struct Scene<'a> {
+    /// The dashboards as their menu lists them: (id, name).
     pub boards: &'a [(String, String)],
+    /// Their ids in the person's order.
+    pub ids: &'a [String],
+    pub prefs: &'a model::Prefs,
     pub dashboard: Option<&'a Dashboard>,
     pub has_previous: bool,
     pub sources: &'a [DataSource],
@@ -469,29 +482,80 @@ fn button(out: &mut Vec<Value>, id: &str, label: &str, name: &str, context: Valu
     out.push(text(&format!("{id}_t"), label, "body"));
 }
 
-/// A button that opens a menu (`which`): its words and a chevron, the
-/// words `<id>_t`.
-fn menu_button(out: &mut Vec<Value>, id: &str, words: Value, which: &str) {
+/// The icons Charts' menus use (Lucide names).
+pub const STAR_ICON: &str = "star";
+pub const HOME_ICON: &str = "house";
+
+/// One of a menu's options: its words, the action choosing it sends, and
+/// how it shows (chosen; under a section's heading; an icon after it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Choice {
+    pub words: String,
+    pub action: &'static str,
+    pub context: Value,
+    pub chosen: bool,
+    pub section: Option<&'static str>,
+    pub icon: Option<&'static str>,
+}
+
+impl Choice {
+    fn new(words: impl Into<String>, action: &'static str, context: Value, chosen: bool) -> Self {
+        Self { words: words.into(), action, context, chosen, section: None, icon: None }
+    }
+
+    fn option(&self) -> Value {
+        let mut option = json!({"label": self.words, "action": {"event": {"name": self.action, "context": self.context}}});
+        if self.chosen {
+            option["selected"] = json!(true);
+        }
+        if let Some(section) = self.section {
+            option["section"] = json!(section);
+        }
+        if let Some(icon) = self.icon {
+            option["icon"] = json!(icon);
+        }
+        option
+    }
+}
+
+/// A button that opens a menu (`which`) over the page, `choices`, titled
+/// `title`: its words (`<id>_t`, after `icon` if any) and a chevron. An
+/// app without menus sends its action instead, and Charts opens the same
+/// menu inline (`menu`).
+fn menu_button(out: &mut Vec<Value>, id: &str, words: Value, which: &str, title: &str, choices: &[Choice], icon: Option<&str>) {
+    let mut menu = json!({"options": choices.iter().map(Choice::option).collect::<Vec<_>>()});
+    if !title.is_empty() {
+        menu["title"] = json!(title);
+    }
     out.push(json!({
         "id": id, "component": "Button", "child": format!("{id}_c"), "variant": "borderless",
-        "action": {"event": {"name": "menu", "context": {"which": which}}},
+        "action": {"event": {"name": "menu", "context": {"which": which}}}, "menu": menu,
     }));
-    out.push(json!({"id": format!("{id}_c"), "component": "List", "direction": "horizontal", "align": "center", "children": [format!("{id}_t"), format!("{id}_i")]}));
+    let mut parts = Vec::new();
+    if let Some(icon) = icon {
+        parts.push(format!("{id}_l"));
+        out.push(json!({"id": format!("{id}_l"), "component": "Icon", "name": icon}));
+    }
+    parts.extend([format!("{id}_t"), format!("{id}_i")]);
+    out.push(json!({"id": format!("{id}_c"), "component": "List", "direction": "horizontal", "align": "center", "children": parts}));
     out.push(text(&format!("{id}_t"), words, "body"));
     out.push(json!({"id": format!("{id}_i"), "component": "Icon", "name": "chevron-down"}));
 }
 
-/// The open menu's options, each (words, action, context, chosen), in a
-/// card under its button: rows, as Grafana's picker has them, each a
-/// Button over a List of its words, which a renderer draws as a full-width
-/// row, the chosen one ("primary") tinted with a bar on its left.
-fn menu(out: &mut Vec<Value>, children: &mut Vec<String>, options: Vec<(String, &str, Value, bool)>) {
+/// A menu opened inline, for an app without menus over the page: its
+/// options in a card under the bar, rows, as Grafana's picker has them,
+/// each a Button over a List of its words alone, which a renderer draws as
+/// a full-width row, the chosen one ("primary") tinted with a bar on its
+/// left.
+fn menu(out: &mut Vec<Value>, children: &mut Vec<String>, choices: Vec<Choice>) {
     let mut ids = Vec::new();
-    for (index, (words, name, context, chosen)) in options.into_iter().enumerate() {
+    for (index, choice) in choices.into_iter().enumerate() {
         let id = format!("menu_o{index}");
+        // A starred dashboard's star, where icons don't show.
+        let words = if choice.action == "board" && choice.icon == Some(STAR_ICON) { format!("\u{2605} {}", choice.words) } else { choice.words };
         out.push(json!({
-            "id": id, "component": "Button", "child": format!("{id}_c"), "variant": if chosen { "primary" } else { "borderless" },
-            "action": {"event": {"name": name, "context": context}},
+            "id": id, "component": "Button", "child": format!("{id}_c"), "variant": if choice.chosen { "primary" } else { "borderless" },
+            "action": {"event": {"name": choice.action, "context": choice.context}},
         }));
         out.push(json!({"id": format!("{id}_c"), "component": "List", "direction": "horizontal", "children": [format!("{id}_t")]}));
         out.push(text(&format!("{id}_t"), words, "body"));
@@ -500,6 +564,92 @@ fn menu(out: &mut Vec<Value>, children: &mut Vec<String>, options: Vec<(String, 
     out.push(json!({"id": "menu", "component": "Card", "child": "menu_col"}));
     out.push(json!({"id": "menu_col", "component": "Column", "children": ids}));
     children.push("menu".into());
+}
+
+/// The dashboards: the starred ones, then all the others, each in the
+/// person's order, the home one marked.
+fn board_choices(scene: &Scene, dashboard: Option<&Dashboard>) -> Vec<Choice> {
+    scene
+        .boards
+        .iter()
+        .map(|(id, name)| {
+            let starred = scene.prefs.starred.contains(id);
+            let home = scene.prefs.home.as_deref() == Some(id.as_str());
+            Choice {
+                section: Some(if starred { "Starred" } else { "All dashboards" }),
+                icon: if starred { Some(STAR_ICON) } else if home { Some(HOME_ICON) } else { None },
+                ..Choice::new(name.clone(), "board", json!({"id": id}), dashboard.is_some_and(|d| d.id == *id))
+            }
+        })
+        .collect()
+}
+
+/// The ranges: the dashboard's own first, when it isn't a quick one (""
+/// goes back to it), then Grafana's quick ranges.
+fn range_choices(view: &View, dashboard: &Dashboard) -> Vec<Choice> {
+    let (from, to) = range(view, Some(dashboard));
+    let own = &dashboard.time;
+    let mut choices = Vec::new();
+    if own.to != "now" || !RANGES.contains(&own.from.as_str()) {
+        choices.push(Choice::new(shown_range(&own.from, &own.to), "range", json!({"from": ""}), view.range.is_none()));
+    }
+    choices.extend(RANGES.iter().map(|range| Choice::new(range_label(range), "range", json!({"from": range}), to == "now" && *range == from)));
+    choices
+}
+
+/// A variable's values, All first, and the one chosen's words.
+fn variable_choices(view: &View, scene: &Scene, index: usize, variable: &model::Variable) -> (String, Vec<Choice>) {
+    let chosen = view.values.get(&variable.name).unwrap_or(&variable.default);
+    let all: Vec<(String, String)> =
+        std::iter::once((String::new(), "All".to_owned())).chain(scene.ran.options.get(index).cloned().unwrap_or_default()).collect();
+    let shown = all.iter().find(|(value, _)| value == chosen).map_or(chosen.clone(), |(_, shown)| shown.clone());
+    let choices = all
+        .into_iter()
+        .map(|(value, words)| {
+            let is = value == *chosen;
+            Choice::new(words, "variable", json!({"name": variable.name, "value": value}), is)
+        })
+        .collect();
+    (shown, choices)
+}
+
+/// \u{2022}\u{2022}\u{2022}: editing, the star, home and the dashboard's place in the menu.
+fn more_choices(view: &View, scene: &Scene, dashboard: &Dashboard, granted: bool) -> Vec<Choice> {
+    let mut choices = Vec::new();
+    if granted {
+        let (words, on) = if view.editing { ("Done editing", false) } else { ("Edit", true) };
+        choices.push(Choice::new(words, "edit_mode", json!({"on": on}), false));
+    }
+    let starred = scene.prefs.starred.contains(&dashboard.id);
+    // The filled star once starred, as Grafana's toggle; none before
+    // (Scolippi 27596: a star on "Star" read as starred already).
+    choices.push(Choice {
+        icon: starred.then_some(STAR_ICON),
+        ..Choice::new(if starred { "Unstar" } else { "Star" }, "star_board", json!({"on": !starred}), false)
+    });
+    if scene.prefs.home.as_deref() != Some(dashboard.id.as_str()) {
+        choices.push(Choice { icon: Some(HOME_ICON), ..Choice::new("Make home dashboard", "home_board", json!({}), false) });
+    }
+    if scene.boards.len() > 1 {
+        let (up, down) = model::can_move(scene.ids, scene.prefs, &dashboard.id);
+        if up {
+            choices.push(Choice::new("Move up", "move_board", json!({"up": true}), false));
+        }
+        if down {
+            choices.push(Choice::new("Move down", "move_board", json!({"up": false}), false));
+        }
+    }
+    choices
+}
+
+/// The range on the bar, short for a phone: "7 days", or
+/// a fixed one's `short_range`.
+pub fn bar_range(from: &str, to: &str, now: i64) -> String {
+    let words = short_range(from, to, now);
+    match words.strip_prefix("Last ") {
+        Some(rest) if to == "now" => rest.to_owned(),
+        _ => words,
+    }
 }
 
 /// How a range reads: "Last 7 days".
@@ -588,6 +738,13 @@ fn civil(ms: i64) -> (i64, i64, i64, i64, i64, i64) {
     (year, month, day, s / 3600, s / 60 % 60, s % 60)
 }
 
+/// What the editor's Number shows starts at for `viz`: what it says; a
+/// stat kept before reduce existed, its total; anything else, as a new
+/// number, the last.
+fn shown_reduce(viz: &Viz) -> String {
+    viz.reduce.clone().unwrap_or_else(|| if viz.kind == "stat" { "sum".into() } else { model::NEW_REDUCE.into() })
+}
+
 /// The whole view's components, root first.
 pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
     let mut out = Vec::new();
@@ -598,34 +755,93 @@ pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
     }
     let dashboard = scene.dashboard;
 
-    // The heading: the dashboard's name (a menu of the others, when there
-    // are), and Edit or Done.
-    let mut head = Vec::new();
+    // The bar, on one line as on a phone (Scolippi 27155): the
+    // dashboard's name, the range, the variables (past one, folded into
+    // Filters) and \u{2022}\u{2022}\u{2022}, each a menu over the page. An app without
+    // menus sends the button's action instead, and the menu opens inline
+    // under the bar.
+    let granted = dashboard.is_some() && !scene.ran.nothing_granted;
+    let mut bar = Vec::new();
+    let mut ids = vec!["name".to_owned()];
+    let mut inline: Option<Vec<Choice>> = None;
+    let mut open = |which: &str, choices: &[Choice]| {
+        if view.menu.as_deref() == Some(which) {
+            inline = Some(choices.to_vec());
+        }
+    };
     let name = dashboard.map_or("Charts", |d| d.name.as_str());
-    if scene.boards.len() > 1 {
-        menu_button(&mut head, "name", json!(name), "board");
-        head.iter_mut().find(|component| component["id"] == "name_t").expect("its words")["variant"] = json!("heading");
+    // A menu even of one dashboard, so every part of the bar is a button
+    // (Luca 27397); the name takes what the others leave, ending in "…".
+    if !scene.boards.is_empty() {
+        let choices = board_choices(scene, dashboard);
+        menu_button(&mut bar, "name", json!(name), "board", "Dashboards", &choices, None);
+        bar.iter_mut().find(|component| component["id"] == "name_t").expect("its words")["variant"] = json!("heading");
+        bar.iter_mut().find(|component| component["id"] == "name").expect("its button")["weight"] = json!(1);
+        open("board", &choices);
     } else {
-        head.push(json!({"id": "name", "component": "Text", "text": name, "variant": "heading"}));
+        bar.push(json!({"id": "name", "component": "Text", "text": name, "variant": "heading"}));
     }
-    let mut head_children = vec!["name".to_owned()];
-    if dashboard.is_some() && !scene.ran.nothing_granted {
-        let (label, on) = if view.editing { ("Done", false) } else { ("Edit", true) };
-        button(&mut head, "edit", label, "edit_mode", json!({"on": on}), "borderless");
-        head_children.push("edit".into());
+    let mut filters = Vec::new();
+    if let Some(dashboard) = dashboard.filter(|_| granted) {
+        let (from, to) = range(view, Some(dashboard));
+        let choices = range_choices(view, dashboard);
+        // No clock: "7 days" reads as a range, and a phone's bar needs the
+        // room (Scolippi 27596).
+        menu_button(&mut bar, "range", json!(bar_range(&from, &to, scene.ran.now)), "range", "Time range", &choices, None);
+        ids.push("range".into());
+        open("range", &choices);
+        let folded = dashboard.variables.len() > 1;
+        for (index, variable) in dashboard.variables.iter().enumerate() {
+            let id = format!("var{index}");
+            let (shown, choices) = variable_choices(view, scene, index, variable);
+            let label = if variable.label.is_empty() { &variable.name } else { &variable.label };
+            menu_button(if folded { &mut filters } else { &mut bar }, &id, json!(format!("{label}: {shown}")), &id, label, &choices, None);
+            if !folded {
+                ids.push(id.clone());
+            }
+            open(&id, &choices);
+        }
+        if folded {
+            let count = dashboard.variables.len();
+            // Its words and a chevron, as the menus beside it, though it
+            // opens their line rather than a menu.
+            bar.push(json!({
+                "id": "filters", "component": "Button", "child": "filters_c", "variant": "borderless",
+                "action": {"event": {"name": "menu", "context": {"which": "filters"}}},
+            }));
+            bar.push(json!({"id": "filters_c", "component": "List", "direction": "horizontal", "align": "center", "children": ["filters_t", "filters_i"]}));
+            bar.push(text("filters_t", format!("Filters ({count})"), "body"));
+            bar.push(json!({"id": "filters_i", "component": "Icon", "name": "chevron-down"}));
+            ids.push("filters".into());
+        }
     }
-    // Its natural width beside the name: a Row would give it half.
-    head.insert(0, json!({"id": "head", "component": "List", "direction": "horizontal", "align": "center", "children": head_children}));
-    add(&mut out, &mut children, "head", head);
-
-    // The dashboards, when that menu is open.
-    if view.menu.as_deref() == Some("board") && scene.boards.len() > 1 {
-        let options = scene
-            .boards
-            .iter()
-            .map(|(id, name)| (name.clone(), "board", json!({"id": id}), dashboard.is_some_and(|d| d.id == *id)))
-            .collect();
-        menu(&mut out, &mut children, options);
+    if let Some(dashboard) = dashboard {
+        let choices = more_choices(view, scene, dashboard, granted);
+        let mut more = Vec::new();
+        // Titled with the dashboard's name: what its choices apply to.
+        menu_button(&mut more, "more", json!(""), "more", &dashboard.name, &choices, None);
+        // An ellipsis alone, no words or chevron.
+        more.retain(|component| component["id"] != "more_t" && component["id"] != "more_i");
+        more.iter_mut().find(|component| component["id"] == "more_c").expect("its child")["children"] = json!(["more_l"]);
+        more.push(json!({"id": "more_l", "component": "Icon", "name": "ellipsis"}));
+        bar.extend(more);
+        ids.push("more".into());
+        open("more", &choices);
+    }
+    // One line, never stacked (no stackBelow): Luca draws a Row of buttons
+    // as a bar.
+    bar.insert(0, json!({"id": "bar", "component": "Row", "align": "center", "children": ids}));
+    add(&mut out, &mut children, "bar", bar);
+    // The variables, folded: on a line of their own while Filters is open,
+    // or one of them.
+    let filters_open = view.menu.as_deref().is_some_and(|which| which == "filters" || which.starts_with("var"));
+    if !filters.is_empty() && filters_open {
+        let ids: Vec<Value> = filters.iter().filter(|c| c["component"] == "Button").map(|c| c["id"].clone()).collect();
+        filters.insert(0, json!({"id": "filters_row", "component": "List", "direction": "horizontal", "align": "center", "children": ids}));
+        add(&mut out, &mut children, "filters_row", filters);
+    }
+    if let Some(choices) = inline {
+        menu(&mut out, &mut children, choices);
     }
 
     let Some(dashboard) = dashboard else {
@@ -658,62 +874,22 @@ pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
         return out;
     }
 
-    // The bar: the range and each variable, each a menu.
-    let (from, to) = range(view, Some(dashboard));
-    let range_words = short_range(&from, &to, scene.ran.now);
-    let mut built = Vec::new();
-    let mut ids = vec!["range".to_owned()];
-    menu_button(&mut built, "range", json!(range_words), "range");
-    let mut options = Vec::new();
-    for (index, variable) in dashboard.variables.iter().enumerate() {
-        let chosen = view.values.get(&variable.name).unwrap_or(&variable.default);
-        let label = if variable.label.is_empty() { &variable.name } else { &variable.label };
-        let id = format!("var{index}");
-        let all = std::iter::once((String::new(), "All".to_owned())).chain(scene.ran.options.get(index).cloned().unwrap_or_default());
-        let all: Vec<(String, String)> = all.collect();
-        let shown = all.iter().find(|(value, _)| value == chosen).map_or(chosen.as_str(), |(_, shown)| shown.as_str());
-        menu_button(&mut built, &id, json!(format!("{label}: {shown}")), &id);
-        ids.push(id.clone());
-        if view.menu.as_deref() == Some(id.as_str()) {
-            options = all
-                .into_iter()
-                .map(|(value, shown)| {
-                    let is = value == *chosen;
-                    (shown, "variable", json!({"name": variable.name, "value": value}), is)
-                })
-                .collect();
-        }
-    }
-    if view.menu.as_deref() == Some("range") {
-        // The dashboard's own range first, when it isn't a quick one: ""
-        // goes back to it.
-        let own = &dashboard.time;
-        if own.to != "now" || !RANGES.contains(&own.from.as_str()) {
-            options.push((shown_range(&own.from, &own.to), "range", json!({"from": ""}), view.range.is_none()));
-        }
-        options.extend(RANGES.iter().map(|range| (range_label(range), "range", json!({"from": range}), to == "now" && *range == from)));
-    }
-    built.insert(0, json!({"id": "bar", "component": "List", "direction": "horizontal", "align": "center", "children": ids}));
-    add(&mut out, &mut children, "bar", built);
-    if !options.is_empty() {
-        menu(&mut out, &mut children, options);
-    }
-
     // Changing it.
     if view.editing {
         let mut built = Vec::new();
         let mut ids = Vec::new();
-        let mut tool = |built: &mut Vec<Value>, id: &str, label: &str, name: &str| {
-            button(built, id, label, name, json!({}), "default");
+        let mut tool = |built: &mut Vec<Value>, id: &str, label: &str, name: &str, context: Value| {
+            button(built, id, label, name, context, "default");
             ids.push(id.to_owned());
         };
-        tool(&mut built, "add", "Add panel", "add_panel");
-        tool(&mut built, "rename", "Rename", "rename_board");
-        tool(&mut built, "new", "New dashboard", "new_board");
+        tool(&mut built, "done", "Done", "edit_mode", json!({"on": false}));
+        tool(&mut built, "add", "Add panel", "add_panel", json!({}));
+        tool(&mut built, "rename", "Rename", "rename_board", json!({}));
+        tool(&mut built, "new", "New dashboard", "new_board", json!({}));
         if scene.has_previous {
-            tool(&mut built, "restore", "Restore previous version", "restore");
+            tool(&mut built, "restore", "Restore previous version", "restore", json!({}));
         }
-        tool(&mut built, "remove", "Delete dashboard", "delete_board");
+        tool(&mut built, "remove", "Delete dashboard", "delete_board", json!({}));
         built.insert(0, json!({"id": "tools", "component": "List", "direction": "horizontal", "children": ids}));
         add(&mut out, &mut children, "tools", built);
     }
@@ -731,7 +907,7 @@ pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
     dashboard_form(view, &mut out, &mut children);
     if let Some(editor) = &view.editor {
         children.push("ed".into());
-        out.extend(editor_components(editor, scene.sources));
+        out.extend(editor_components(editor, scene.sources, view.menu.as_deref() == Some("kind")));
     }
     notice(view, &mut out, &mut children);
 
@@ -1076,8 +1252,18 @@ fn sizes(known: &[(u32, &str)], current: u32, unit: &str) -> Value {
 }
 
 /// The editor's fields, bound to `/editor`, its preview and its buttons.
-pub fn editor_components(editor: &Editor, sources: &[DataSource]) -> Vec<Value> {
+pub fn editor_components(editor: &Editor, sources: &[DataSource], kind_open: bool) -> Vec<Value> {
     let draft = &editor.draft;
+    // What Run and Save send: every field, shown or not.
+    let context = json!({
+        "title": {"@path": "/editor/title"}, "source": {"@path": "/editor/source"}, "sql": {"@path": "/editor/sql"},
+        "kind": {"@path": "/editor/kind"}, "x": {"@path": "/editor/x"}, "series_by": {"@path": "/editor/series_by"},
+        "unit": {"@path": "/editor/unit"}, "width": {"@path": "/editor/width"}, "height": {"@path": "/editor/height"},
+        "line_width": {"@path": "/editor/line_width"}, "fill": {"@path": "/editor/fill"}, "points": {"@path": "/editor/points"},
+        "min": {"@path": "/editor/min"}, "max": {"@path": "/editor/max"}, "decimals": {"@path": "/editor/decimals"},
+        "legend": {"@path": "/editor/legend"}, "reduce": {"@path": "/editor/reduce"},
+        "thresholds": {"@path": "/editor/thresholds"}, "color_mode": {"@path": "/editor/color_mode"}, "graph": {"@path": "/editor/graph"},
+    });
     let field = |id: &str, label: &str, key: &str, placeholder: &str, variant: &str| json!({"id": id, "component": "TextField", "label": label, "value": {"@path": format!("/editor/{key}")}, "placeholder": placeholder, "variant": variant});
     let mut sources: Vec<Value> =
         sources.iter().filter(|source| source.granted).map(|source| json!({"label": source.label, "value": source.id})).collect();
@@ -1095,7 +1281,6 @@ pub fn editor_components(editor: &Editor, sources: &[DataSource]) -> Vec<Value> 
             "One read-only SQL statement. $from and $to are the range shown, in milliseconds ($from_s and $to_s in seconds); $step is a bucket that suits it; and each of the dashboard's variables is $ and its name.",
             "caption",
         ),
-        json!({"id": "ed_kind", "component": "ChoicePicker", "label": "Show as", "options": KIND_LABELS.iter().map(|(value, label)| json!({"label": label, "value": value})).collect::<Vec<_>>(), "value": {"@path": "/editor/kind"}, "variant": "mutuallyExclusive", "displayStyle": "chips"}),
         json!({"id": "ed_reduce", "component": "ChoicePicker", "label": "Number shows", "options": choices(&REDUCE_LABELS, &draft.reduce, ""), "value": {"@path": "/editor/reduce"}, "variant": "mutuallyExclusive", "displayStyle": "chips"}),
         json!({"id": "ed_thresholds", "component": "TextField", "label": "Thresholds", "value": {"@path": "/editor/thresholds"}, "placeholder": "green, 80 red"}),
         json!({"id": "ed_color_mode", "component": "ChoicePicker", "label": "Color mode", "options": choices(&COLOR_MODE_LABELS, &draft.color_mode, ""), "value": {"@path": "/editor/color_mode"}, "variant": "mutuallyExclusive", "displayStyle": "chips"}),
@@ -1115,32 +1300,60 @@ pub fn editor_components(editor: &Editor, sources: &[DataSource]) -> Vec<Value> 
         json!({"id": "ed_decimals", "component": "TextField", "label": "Decimals", "value": {"@path": "/editor/decimals"}, "placeholder": "Auto", "variant": "number", "weight": 1}),
         json!({"id": "ed_legend", "component": "CheckBox", "label": "Legend", "value": {"@path": "/editor/legend"}}),
     ];
-    let mut col = vec![
-        "ed_heading", "ed_title", "ed_source", "ed_sql", "ed_help", "ed_kind", "ed_reduce", "ed_thresholds", "ed_color_mode", "ed_graph", "ed_columns", "ed_width", "ed_height", "ed_line", "ed_fill",
-        "ed_points", "ed_axis", "ed_legend",
-    ];
+    // Show as: a menu, as Grafana's visualization picker; choosing one
+    // draws the settings that kind has, and only those (Abbacchio, Bruno
+    // 28309).
+    let kinds: Vec<Choice> = KIND_LABELS
+        .iter()
+        .map(|(value, label)| {
+            let mut context = context.clone();
+            context["to"] = json!(value);
+            Choice::new(*label, "set_kind", context, draft.kind == *value)
+        })
+        .collect();
+    let shown_kind = KIND_LABELS.iter().find(|(value, _)| *value == draft.kind).map_or(draft.kind.as_str(), |(_, label)| label);
+    menu_button(&mut out, "ed_kind", json!(format!("Show as: {shown_kind}")), "kind", "Show as", &kinds, None);
+    let (before, after): (&[&str], &[&str]) = match draft.kind.as_str() {
+        "stat" => (&["ed_reduce", "ed_thresholds", "ed_color_mode", "ed_graph", "ed_axis"], &[]),
+        "timeseries" => (&[], &["ed_line", "ed_fill", "ed_points", "ed_axis", "ed_legend"]),
+        "scatter" => (&[], &["ed_points", "ed_axis", "ed_legend"]),
+        "bars" | "stackedBars" => (&[], &["ed_axis", "ed_legend"]),
+        "pie" => (&[], &["ed_legend"]),
+        _ => (&[], &[]),
+    };
+    // A number's axis is its decimals alone.
+    if draft.kind == "stat" {
+        out.iter_mut().find(|component| component["id"] == "ed_axis").expect("the axis")["children"] = json!(["ed_decimals"]);
+    }
+    let mut col: Vec<String> = ["ed_heading", "ed_title", "ed_source", "ed_sql", "ed_help", "ed_kind"].map(String::from).to_vec();
+    if kind_open {
+        let mut inline = Vec::new();
+        menu(&mut inline, &mut col, kinds);
+        out.extend(inline);
+    }
+    col.extend(before.iter().map(|id| (*id).to_owned()));
+    col.extend(["ed_columns", "ed_width", "ed_height"].map(String::from));
+    col.extend(after.iter().map(|id| (*id).to_owned()));
+    // What isn't shown isn't sent.
+    let shown: Vec<&str> = before.iter().chain(after).copied().collect();
+    let style = ["ed_reduce", "ed_thresholds", "ed_color_mode", "ed_graph", "ed_line", "ed_fill", "ed_points", "ed_axis", "ed_min", "ed_max", "ed_legend"];
+    out.retain(|component| {
+        let id = component["id"].as_str().unwrap_or_default();
+        !style.contains(&id) || shown.contains(&id) || (id.starts_with("ed_m") && shown.contains(&"ed_axis") && draft.kind != "stat")
+    });
     if let Some(preview) = &editor.preview {
         let viz = draft.viz(None);
         let grid = Grid { h: draft.height, ..Grid::default() };
         out.push(json!({"id": "ed_preview", "component": "Card", "child": "ed_preview_body"}));
         out.extend(panel_body("ed_preview_body", "/editor/preview", &draft.title, &viz, grid, preview));
-        col.push("ed_preview");
+        col.push("ed_preview".into());
     }
     if !editor.message.is_empty() {
         out.push(text("ed_message", editor.message.as_str(), "caption"));
-        col.push("ed_message");
+        col.push("ed_message".into());
     }
-    col.push("ed_buttons");
+    col.push("ed_buttons".into());
     out.push(json!({"id": "ed_col", "component": "Column", "children": col}));
-    let context = json!({
-        "title": {"@path": "/editor/title"}, "source": {"@path": "/editor/source"}, "sql": {"@path": "/editor/sql"},
-        "kind": {"@path": "/editor/kind"}, "x": {"@path": "/editor/x"}, "series_by": {"@path": "/editor/series_by"},
-        "unit": {"@path": "/editor/unit"}, "width": {"@path": "/editor/width"}, "height": {"@path": "/editor/height"},
-        "line_width": {"@path": "/editor/line_width"}, "fill": {"@path": "/editor/fill"}, "points": {"@path": "/editor/points"},
-        "min": {"@path": "/editor/min"}, "max": {"@path": "/editor/max"}, "decimals": {"@path": "/editor/decimals"},
-        "legend": {"@path": "/editor/legend"}, "reduce": {"@path": "/editor/reduce"},
-        "thresholds": {"@path": "/editor/thresholds"}, "color_mode": {"@path": "/editor/color_mode"}, "graph": {"@path": "/editor/graph"},
-    });
     let mut buttons = vec!["ed_run", "ed_save", "ed_cancel"];
     button(&mut out, "ed_run", "Run", "run", context.clone(), "default");
     button(&mut out, "ed_save", "Save", "save_panel", context, "primary");

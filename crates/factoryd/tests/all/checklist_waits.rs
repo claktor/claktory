@@ -484,10 +484,13 @@ async fn a_request_for_a_secret_or_a_proposal_about_an_item_shows_as_it_in_needs
         .await;
     let propose = r#"{"message":"Site needs a second backend agent."}"#;
     let proposed = call(&mut client, &mut view, "worker", "propose_to_rivet", propose).await;
-    assert_eq!(
-        proposed,
-        "Proposed; the person will approve or dismiss it. It's taken to be about #2 \"Add a backend agent\", the item you just \
-         blocked on the person, and shows with it in their Needs you; if it's about something else, give item when you ask."
+    assert!(proposed.starts_with("Proposed; the person will approve or dismiss it. Its id is "), "{proposed}");
+    assert!(
+        proposed.ends_with(
+            "take it back with proposal_withdraw, or change it with proposal_update if what you propose changes. It's taken to be about #2 \"Add a backend agent\", the item you just \
+             blocked on the person, and shows with it in their Needs you; if it's about something else, give item when you ask."
+        ),
+        "{proposed}"
     );
     view.follow(&mut client, |view| waiting(view).len() == 2).await;
     let proposal_seq = entry_seq(&view, |kind| matches!(kind, Kind::Proposal(_)));
@@ -600,4 +603,58 @@ async fn a_reply_to_a_question_about_an_item_counts_as_answered_and_is_never_ask
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     apply_request(&mut client, &mut view, select("worker")).await;
     assert!(events(&view, "Ask the person again").is_empty());
+}
+
+/// Friend bug #19: an item marked done or dropped while a card about it
+/// still waits for the person says which, so the agent takes it back if it
+/// no longer applies. Nothing is closed for it.
+#[tokio::test]
+async fn an_item_done_or_dropped_names_the_cards_still_waiting_about_it() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Worker", "")).await;
+    ack(apply_request(&mut client, &mut view, checklist_on("worker")).await);
+    let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(rivet)).await;
+    call(&mut client, &mut view, "worker", "checklist_add", r#"{"items":["Deploy the site","Add a backend agent"]}"#).await;
+    let id = |said: &str| said.split_once("Its id is ").and_then(|(_, rest)| rest.split(':').next()).expect("its id").to_owned();
+    let asked = call(&mut client, &mut view, "worker", "ask_person", r#"{"title":"Deploy now?","body":"It's ready.","item":"1"}"#).await;
+    let question = id(&asked);
+    let proposed =
+        call(&mut client, &mut view, "worker", "propose_to_rivet", r#"{"message":"Site needs a second backend agent.","item":"2"}"#).await;
+    let proposal = id(&proposed);
+    view.follow(&mut client, |view| view.agent("worker").waiting_seqs.len() == 2).await;
+
+    let said = call(
+        &mut client,
+        &mut view,
+        "worker",
+        "checklist_update",
+        r#"{"updates":[{"id":1,"status":"done"},{"id":2,"status":"dropped"}]}"#,
+    )
+    .await;
+    assert!(
+        said.contains(&format!(
+            " #1 is done, yet your question {question} about it still waits for the person: if it no longer applies, take it back with ask_withdraw."
+        )),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!(
+            " #2 is dropped, yet your proposal {proposal} about it still waits for the person: if it no longer applies, take it back with proposal_withdraw."
+        )),
+        "{said}"
+    );
+    assert_eq!(view.agent("worker").waiting_seqs.len(), 2, "nothing is closed for it");
+
+    // Two cards about one item: "they" (Abbacchio's row 1037).
+    call(&mut client, &mut view, "worker", "checklist_add", r#"{"items":["Ship it"]}"#).await;
+    for title in ["Ship today?", "Tell the list?"] {
+        call(&mut client, &mut view, "worker", "ask_person", &format!(r#"{{"title":"{title}","body":"Ready.","item":"3"}}"#)).await;
+    }
+    let said = call(&mut client, &mut view, "worker", "checklist_update", r#"{"updates":[{"id":3,"status":"done"}]}"#).await;
+    assert!(said.contains(" still wait for the person: if they no longer apply, take them back with ask_withdraw."), "{said}");
 }

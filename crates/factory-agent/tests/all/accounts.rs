@@ -775,6 +775,7 @@ fn pasted_registry(file: &std::path::Path) -> Registry {
         reset: None,
         check_key: None,
         credit: None,
+        images: None,
     };
     Registry::with_providers(FileCredentialStore::new(file.to_path_buf()), no_env(), vec![provider])
 }
@@ -1354,6 +1355,7 @@ async fn a_sign_in_the_provider_wont_refresh_is_refused() {
         reset: None,
         check_key: None,
         credit: None,
+        images: None,
     };
     let mut stale = account("s", "s@x.com", "stale");
     stale["expires"] = json!(0);
@@ -1422,6 +1424,7 @@ async fn a_refused_sign_in_is_skipped_until_it_is_signed_in_to_again() {
         reset: None,
         check_key: None,
         credit: None,
+        images: None,
     };
     let mut stale = account("s", "s@x.com", "stale");
     stale["expires"] = json!(0);
@@ -1492,6 +1495,7 @@ async fn a_usage_read_marks_a_refused_sign_in() {
         reset: None,
         check_key: None,
         credit: None,
+        images: None,
     };
     let mut stale = account("s", "s@x.com", "stale");
     stale["expires"] = json!(0);

@@ -720,7 +720,8 @@ fn keep(hits: Vec<Hit>, domains: &[String]) -> Vec<Hit> {
 }
 
 /// The answers as the agent reads them: each query, the engine that
-/// answered, and its results, each address on its own line.
+/// answered, and its results, each with its site (the address's origin) in
+/// brackets before its title and its address on its own line.
 pub(crate) fn render(answers: &[Answer]) -> String {
     let mut out = String::new();
     for (index, answer) in answers.iter().enumerate() {
@@ -734,7 +735,10 @@ pub(crate) fn render(answers: &[Answer]) -> String {
             None => {
                 out.push_str(&format!("Q{number} \"{}\" ({}):\n", answer.q, answer.engine));
                 for (rank, hit) in answer.results.iter().enumerate() {
-                    out.push_str(&format!("{}. {}\n   {}\n", rank + 1, hit.title, hit.url));
+                    // Its site first, in ASCII, from the address, so a title can't pass for another.
+                    let url = primp::Url::parse(hit.url.trim()).map_or_else(|_| hit.url.clone(), |url| url.to_string());
+                    let site = super::fence::origin(&url).unwrap_or_else(|| "unknown site".to_owned());
+                    out.push_str(&format!("{}. [{site}] {}\n   {url}\n", rank + 1, hit.title));
                     if !hit.snippet.is_empty() {
                         out.push_str(&format!("   {}\n", trimmed(&hit.snippet, SNIPPET)));
                     }
@@ -845,7 +849,7 @@ mod tests {
         let text = render(&answers);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "Q1 \"sqlite wal\" (DuckDuckGo):");
-        assert_eq!(lines[1..3], ["1. WAL", "   https://sqlite.org/wal.html"]);
+        assert_eq!(lines[1..3], ["1. [https://sqlite.org] WAL", "   https://sqlite.org/wal.html"]);
         assert_eq!(lines[3].chars().count(), 3 + 200 + 1, "trimmed with …");
         assert_eq!(lines[5], "Q2 \"other\": no results: Brave found nothing.");
         let empty = vec![Answer { q: "x".into(), engine: "DuckDuckGo".into(), results: vec![], unavailable: None }];

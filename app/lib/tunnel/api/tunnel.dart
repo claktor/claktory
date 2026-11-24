@@ -202,6 +202,20 @@ class TunnelStatus {
   /// Why its relay can't be reached, roughly, while it can't.
   final TunnelRelayTrouble relayTrouble;
 
+  /// Bytes received from the backend so far, as they arrive, wrapping:
+  /// while it moves, the link is delivering, even before a whole message
+  /// is in (#413).
+  final int received;
+
+  /// Bytes the open connection has received at all, QUIC's own traffic
+  /// included, wrapping: it moves while the link is alive even when a
+  /// backed-off connection holds the data back (#413).
+  final int linkReceived;
+
+  /// How long the next dial has, in ms: it grows after dials that timed
+  /// out, and the app's connect window with it (#413).
+  final int dialTimeoutMs;
+
   const TunnelStatus({
     required this.phase,
     required this.path,
@@ -210,6 +224,9 @@ class TunnelStatus {
     required this.relayConnected,
     required this.relayUpMs,
     required this.relayTrouble,
+    required this.received,
+    required this.linkReceived,
+    required this.dialTimeoutMs,
   });
 
   @override
@@ -220,7 +237,10 @@ class TunnelStatus {
       failure.hashCode ^
       relayConnected.hashCode ^
       relayUpMs.hashCode ^
-      relayTrouble.hashCode;
+      relayTrouble.hashCode ^
+      received.hashCode ^
+      linkReceived.hashCode ^
+      dialTimeoutMs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -233,5 +253,8 @@ class TunnelStatus {
           failure == other.failure &&
           relayConnected == other.relayConnected &&
           relayUpMs == other.relayUpMs &&
-          relayTrouble == other.relayTrouble;
+          relayTrouble == other.relayTrouble &&
+          received == other.received &&
+          linkReceived == other.linkReceived &&
+          dialTimeoutMs == other.dialTimeoutMs;
 }

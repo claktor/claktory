@@ -29,8 +29,9 @@ use crate::home::Home;
 use crate::move_export::{self, ItemKind, Moved, Options, Place, Tree, size_text};
 use crate::move_wire::{self, Entry, Frame, Kind, ReceiveCode};
 
-/// How long dialing the target may take.
-const DIAL: Duration = Duration::from_secs(30);
+/// How long dialing the target may take (less in tests, where it's on
+/// this computer and some aren't there to answer).
+const DIAL: Duration = if cfg!(test) { Duration::from_secs(5) } else { Duration::from_secs(30) };
 /// How long the target has to answer, within a step.
 const ANSWER: Duration = Duration::from_secs(120);
 /// How long the person on the target has to confirm the digits, and import
@@ -45,6 +46,11 @@ pub(crate) const MAX_ROUNDS: u32 = 5;
 /// How long a dropped connection is dialed again before the move gives up
 /// (before the commit; after it, it never does).
 pub(crate) const REDIAL: Duration = Duration::from_secs(120);
+/// While the target imports, how long dialing it again may go without any
+/// answer (its receive stopped, say) before the move gives up (friend bug
+/// #22): one that answers, even to turn this side away for now, gets
+/// `PATIENCE`.
+const UNHEARD: Duration = if cfg!(test) { Duration::from_secs(2) } else { REDIAL };
 /// A file changed this recently may change again within its mtime's
 /// precision: its hashes aren't kept for the next round.
 const RACY_MS: i64 = 2000;
@@ -75,6 +81,17 @@ impl Problem {
 
 fn lost(error: impl std::fmt::Display) -> Problem {
     Problem::Lost(error.to_string())
+}
+
+/// A target that can't be reached again, in a sentence for the person
+/// (friend bug #22): its receive has likely stopped.
+pub(crate) fn unanswered(machine: &str, problem: Problem) -> Problem {
+    match problem {
+        Problem::Lost(_) => Problem::Said(format!(
+            "{machine} stopped answering, so factoryd receive has likely stopped there. Check that it runs, and start the move again."
+        )),
+        problem => problem,
+    }
 }
 
 /// `<home>/moving`: the move's own key, its staging and (later) its state.
@@ -253,7 +270,16 @@ impl Mover {
     /// too: it turns a second connection away until it has closed the one
     /// that dropped.
     pub(crate) async fn redial(&self, within: Duration) -> Result<Link, Problem> {
-        let deadline = Instant::now() + within;
+        self.redial_heard(within, within).await
+    }
+
+    /// As `redial`, but gives up sooner, once nothing has answered at all
+    /// for `unheard`: a target that answers, even to turn this side away
+    /// for now, is still there; one that doesn't has likely stopped.
+    pub(crate) async fn redial_heard(&self, within: Duration, unheard: Duration) -> Result<Link, Problem> {
+        let started = Instant::now();
+        let deadline = started + within;
+        let mut heard = started;
         let mut wait = Duration::from_secs(1);
         loop {
             match self.connect().await {
@@ -266,8 +292,15 @@ impl Mover {
                     link.fail(&why).await;
                     return Err(Problem::Said(why));
                 }
-                Err(Problem::Lost(detail) | Problem::Said(detail)) if Instant::now() + wait < deadline => {
-                    tracing::debug!(%detail, "the move's target doesn't take the connection yet");
+                Err(problem @ (Problem::Lost(_) | Problem::Said(_))) => {
+                    let now = Instant::now();
+                    if matches!(problem, Problem::Said(_)) {
+                        heard = now;
+                    }
+                    if now + wait >= deadline || now + wait >= heard + unheard {
+                        return Err(problem);
+                    }
+                    tracing::debug!(?problem, "the move's target doesn't take the connection yet");
                     tokio::time::sleep(wait).await;
                     wait = (wait * 2).min(Duration::from_secs(10));
                 }
@@ -717,13 +750,50 @@ pub(crate) fn tools(tree: &Tree) -> Vec<String> {
         tools.insert("git".to_owned());
     }
     for task in &tree.manifest.tasks {
-        let word = task.command.split_whitespace().find(|word| !word.contains('=')).unwrap_or_default();
-        let name = word.rsplit('/').next().unwrap_or_default();
-        if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.+".contains(c)) {
-            tools.insert(name.to_owned());
-        }
+        tools.extend(commands(&task.command));
     }
     tools.into_iter().collect()
+}
+
+/// The shell's own words, never commands to look for on another computer
+/// (friend bug #25): builtins and keywords.
+const SHELL_WORDS: &str = "! . : [ [[ alias bg bind break builtin caller case cd command compgen complete continue coproc declare dirs disown do done echo elif else enable esac eval exec exit export false fg fi for function getopts hash help history if in jobs kill let local logout mapfile popd printf pushd pwd read readarray readonly return select set shift shopt source suspend test then time times trap true type typeset ulimit umask unalias unset until wait while";
+
+/// Words that run the command after them: it's that one that's needed.
+const RUNS_NEXT: &str = "! { } builtin command do elif else env exec if nohup then time until while";
+
+/// The commands a shell command line runs: each simple command's first
+/// word, past assignments, redirections and words such as exec, leaving
+/// out the shell's own words. Quoting isn't followed: a word that isn't a
+/// plain command name is passed over.
+fn commands(line: &str) -> Vec<String> {
+    // Redirections such as 2>&1 and &> aren't separators.
+    let line = line.replace(">&", "> ").replace("<&", "< ").replace("&>", " >");
+    let mut found = Vec::new();
+    for part in line.split([';', '&', '|', '\n', '(', ')', '`']) {
+        let mut words = part.split_whitespace();
+        let mut redirected = false;
+        let word = words.find(|word| {
+            if std::mem::take(&mut redirected) {
+                return false;
+            }
+            let redirection = word.trim_start_matches(|c: char| c.is_ascii_digit());
+            if redirection.starts_with(['<', '>']) {
+                // `> file` names its file in the next word.
+                redirected = redirection.trim_start_matches(['<', '>']).is_empty();
+                return false;
+            }
+            !word.contains('=') && !RUNS_NEXT.split(' ').any(|next| next == *word) && !word.starts_with('-')
+        });
+        let name = word.unwrap_or_default().rsplit('/').next().unwrap_or_default();
+        if name.starts_with(|c: char| c.is_ascii_alphabetic())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.+".contains(c))
+            && !SHELL_WORDS.split(' ').any(|shell| shell == name)
+        {
+            found.push(name.to_owned());
+        }
+    }
+    found
 }
 
 /// Plans and stages the tree afresh into `<home>/moving/staging`.
@@ -1051,7 +1121,7 @@ async fn round(
             Err(Problem::Lost(detail)) => {
                 tracing::info!(%detail, "the move's connection dropped; dialing again");
                 person.redialing(&machine);
-                *link = mover.redial(REDIAL).await?;
+                *link = mover.redial(REDIAL).await.map_err(|problem| unanswered(&machine, problem))?;
                 person.redialed(&machine);
                 let map = plan_map(place, &link.target, tree);
                 link.plan(tree, &map, &tools(tree)).await?;
@@ -1134,7 +1204,7 @@ pub(crate) async fn finish(
             Err(Problem::Lost(detail)) => {
                 tracing::info!(%detail, "the move's connection dropped during import; dialing again");
                 person.redialing(&machine);
-                *link = mover.redial(PATIENCE).await?;
+                *link = mover.redial_heard(PATIENCE, UNHEARD).await.map_err(|problem| unanswered(&machine, problem))?;
                 person.redialed(&machine);
             }
             done => return done,
@@ -1184,6 +1254,9 @@ mod tests {
         drop_at_round: Option<u32>,
         /// Says it knows the move (resumed) on the first connection too.
         claims_resumed: bool,
+        /// Stops for good once the last round is in, as a receive killed
+        /// there would (friend bug #22).
+        dies_at_import: bool,
     }
 
     /// What the fake target saw.
@@ -1199,6 +1272,7 @@ mod tests {
         committed: Option<String>,
         cancelled: Option<String>,
         failed: Option<String>,
+        dead: bool,
     }
 
     /// The target's side, just enough of it: one key may claim the code.
@@ -1237,6 +1311,13 @@ mod tests {
                 if ended {
                     let _ = send.finish();
                     let _ = tokio::time::timeout(Duration::from_secs(2), connection.closed()).await;
+                }
+                if shared.lock().unwrap().dead {
+                    // What it wrote arrives first, then it's gone.
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    connection.close(0u32.into(), b"gone");
+                    endpoint.close().await;
+                    break;
                 }
             }
         });
@@ -1292,6 +1373,10 @@ mod tests {
                         return false;
                     }
                     if !round(send, recv, n, last, seen).await {
+                        return false;
+                    }
+                    if last && script.dies_at_import {
+                        seen.lock().unwrap().dead = true;
                         return false;
                     }
                     if last {
@@ -1446,6 +1531,24 @@ mod tests {
         assert!(outside_map(&place, &Target::default(), folders.map(PathBuf::from)).is_empty());
     }
 
+    #[test]
+    fn the_commands_a_task_needs_leave_out_the_shells_own_words() {
+        let cases: [(&str, &[&str]); 9] = [
+            ("cd app && exec flutter run -d macos", &["flutter"]),
+            ("cd /tmp; exec ./serve.sh --port 80", &["serve.sh"]),
+            ("RUST_LOG=debug cargo test 2>&1 | tee log", &["cargo", "tee"]),
+            ("export A=1; source .env && npm start >&2", &["npm"]),
+            ("for f in *.md; do pandoc \"$f\"; done", &["pandoc"]),
+            ("if [ -e x ]; then make; else true; fi", &["make"]),
+            ("{ tail -f log & t=$!; wait; } | ssh box 'cat > x'", &["tail", "ssh"]),
+            ("env FOO=1 nohup /usr/local/bin/node app.js > out.log 2>&1 &", &["node"]),
+            ("echo \"$(date +%s)\" > \"${HOME}/stamp\"", &["date"]),
+        ];
+        for (line, expected) in cases {
+            assert_eq!(commands(line), expected, "{line}");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_claktory_moves_and_this_copy_is_fenced() {
         let place = claktory();
@@ -1549,6 +1652,26 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert!(seen.connections >= 2 && seen.plans >= 2, "dialed again and said the plan again");
         assert!(seen.committed.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_target_that_stops_while_importing_is_given_up_on() {
+        let place = claktory();
+        std::fs::create_dir_all(place.home.root().join("vault")).unwrap();
+        let (code, seen) = target(Script { dies_at_import: true, ..Script::default() }).await;
+        let started = Instant::now();
+        let error = drive(&place, &Options::default(), code, &mut Auto { yes: true, said: Vec::new() }).await.unwrap_err();
+        assert!(
+            error.starts_with("cloud-box stopped answering, so factoryd receive has likely stopped there.")
+                && error.contains("Nothing was moved, and Claktory runs here again"),
+            "{error}"
+        );
+        assert!(started.elapsed() < PATIENCE / 2, "gave up while nothing answered, not after import's patience");
+        let seen = seen.lock().unwrap();
+        assert!(seen.dead && seen.committed.is_none());
+        drop(seen);
+        assert!(move_export::read_moved(&place.home).is_none());
+        assert!(place.home.root().join("vault").is_dir(), "nothing was fenced");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -114,6 +114,9 @@ pub struct Provider {
     /// Reads what an API key has to spend (#343 U8); None when the provider
     /// can't say.
     pub credit: Option<keys::CreditFn>,
+    /// Makes an image on a subscription sign-in (#403); None when the
+    /// provider makes none.
+    pub images: Option<crate::images::GenerateFn>,
 }
 
 fn api_key(auth: impl ApiKeyAuth + 'static) -> Option<Arc<dyn ApiKeyAuth>> {
@@ -147,6 +150,7 @@ impl Provider {
             reset: None,
             check_key: None,
             credit: None,
+            images: None,
         }
     }
 }

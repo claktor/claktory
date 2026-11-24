@@ -89,6 +89,9 @@ struct Plan {
     plist: Option<PathBuf>,
     /// `~/.factory/bin`, when it's there.
     bin: Option<PathBuf>,
+    /// `~/.factory/tools`, the agents' tools (ripgrep), when it's there: it
+    /// goes with the backend.
+    tools: Option<PathBuf>,
     /// The rest of the data folder that goes, with `--delete-data`.
     data: Vec<PathBuf>,
     /// What stays in the data folder.
@@ -97,7 +100,7 @@ struct Plan {
 
 impl Plan {
     fn removes(&self) -> Vec<PathBuf> {
-        self.plist.iter().chain(&self.bin).chain(&self.data).cloned().collect()
+        self.plist.iter().chain(&self.bin).chain(&self.tools).chain(&self.data).cloned().collect()
     }
 }
 
@@ -105,13 +108,20 @@ fn plan(setup: &Setup, delete_data: bool) -> Plan {
     let root = setup.home.root();
     let ours = setup.plist.is_file() && crate::launch_agent::read(&setup.plist).is_ok_and(|plist| plist["Label"] == setup.label.as_str());
     let bin = root.join("bin");
-    let mut plan = Plan { plist: ours.then(|| setup.plist.clone()), bin: bin.exists().then_some(bin), data: Vec::new(), keeps: Vec::new() };
+    let tools = crate::update::tools_dir(&setup.home);
+    let mut plan = Plan {
+        plist: ours.then(|| setup.plist.clone()),
+        bin: bin.exists().then_some(bin),
+        tools: tools.exists().then_some(tools),
+        data: Vec::new(),
+        keeps: Vec::new(),
+    };
     let entries: Vec<PathBuf> =
         std::fs::read_dir(root).map(|entries| entries.filter_map(Result::ok).map(|entry| entry.path()).collect()).unwrap_or_default();
     let kept = kept_folders(root);
     for entry in entries {
         let name = entry.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-        if name == "bin" {
+        if name == "bin" || name == "tools" {
             continue;
         }
         let keep = !delete_data || name == "workspace" || kept.iter().any(|folder| folder.starts_with(&entry));
@@ -160,7 +170,7 @@ fn what(path: &Path) -> &'static str {
         "trees" => "checkouts",
         "trash" => "trash",
         name if name.starts_with("factoryd.log") => "log",
-        "bin" => "backend",
+        "bin" | "tools" => "backend",
         _ => "other",
     }
 }
@@ -208,7 +218,7 @@ pub(crate) fn dry_run(setup: &Setup, delete_data: bool) -> Report {
     let plan = plan(setup, delete_data);
     let deadline = Instant::now() + COUNT_WITHIN;
     let mut report = report(setup, Outcome::DryRun, "Nothing was changed.", "", &plan);
-    for path in plan.bin.iter().chain(&plan.data) {
+    for path in plan.bin.iter().chain(&plan.tools).chain(&plan.data) {
         let (bytes, complete) = size(path, deadline);
         report.items.push(Item { what: what(path), path: path.display().to_string(), bytes, complete });
     }
@@ -232,10 +242,10 @@ pub(crate) fn uninstall(setup: &Setup, delete_data: bool) -> Report {
     {
         failed.push(format!("{}: {error}", plist.display()));
     }
-    if let Some(bin) = &plan.bin
-        && let Err(error) = std::fs::remove_dir_all(bin)
-    {
-        failed.push(format!("{}: {error}", bin.display()));
+    for program in plan.bin.iter().chain(&plan.tools) {
+        if let Err(error) = std::fs::remove_dir_all(program) {
+            failed.push(format!("{}: {error}", program.display()));
+        }
     }
     if !plan.data.is_empty()
         && let Err(error) = delete(setup.home.root(), &plan)
@@ -284,14 +294,24 @@ fn stop(setup: &Setup) -> Result<(), String> {
 /// says still run. Only those started since this boot, whose pids can't be
 /// another's.
 pub(crate) fn stop_leftovers(home: &crate::home::Home) {
+    stop_leftovers_but(home, &|_, _| false);
+}
+
+/// As `stop_leftovers`, leaving running the background tasks `spare` (given
+/// the task's agent and command) says to.
+pub(crate) fn stop_leftovers_but(home: &crate::home::Home, spare: &dyn Fn(&str, &str) -> bool) {
     use factory_agent::tools::bash::{group_alive, started_before_boot};
     let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let Ok(db) = rusqlite::Connection::open_with_flags(home.db_path(), flags) else { return };
     let mut groups: Vec<(u32, i64)> = Vec::new();
-    if let Ok(mut statement) = db.prepare("SELECT pid, started FROM tasks WHERE ended IS NULL")
-        && let Ok(rows) = statement.query_map([], crate::store::row2::<i64, i64>)
+    if let Ok(mut statement) = db.prepare("SELECT pid, started, agent, command FROM tasks WHERE ended IS NULL")
+        && let Ok(rows) = statement.query_map([], crate::store::row4::<i64, i64, String, String>)
     {
-        groups.extend(rows.filter_map(Result::ok).filter_map(|(pid, started)| Some((u32::try_from(pid).ok()?, started))));
+        groups.extend(
+            rows.filter_map(Result::ok)
+                .filter(|(_, _, agent, command)| !spare(agent, command))
+                .filter_map(|(pid, started, _, _)| Some((u32::try_from(pid).ok()?, started))),
+        );
     }
     if let Ok(mut statement) = db.prepare("SELECT cursor FROM monitors")
         && let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0))
@@ -620,15 +640,17 @@ mod tests {
         let setup = installed(&dir);
         std::fs::remove_file(setup.home.db_path()).expect("rm");
         let db = rusqlite::Connection::open(setup.home.db_path()).expect("db");
-        db.execute_batch("CREATE TABLE tasks (pid INTEGER, started INTEGER, ended INTEGER); CREATE TABLE monitors (cursor TEXT);")
-            .expect("tables");
+        db.execute_batch(
+            "CREATE TABLE tasks (pid INTEGER, started INTEGER, ended INTEGER, agent TEXT NOT NULL DEFAULT 'ana', command TEXT NOT NULL DEFAULT 'sleep 60'); CREATE TABLE monitors (cursor TEXT);",
+        )
+        .expect("tables");
         use std::os::unix::process::CommandExt;
         let spawn = || Command::new("/bin/sleep").arg("60").process_group(0).spawn().expect("sleep");
         let (mut task, mut watch, mut old) = (spawn(), spawn(), spawn());
         let now = crate::transcript::now_ms();
-        db.execute("INSERT INTO tasks VALUES (?1, ?2, NULL)", (task.id(), now)).expect("task");
+        db.execute("INSERT INTO tasks (pid, started) VALUES (?1, ?2)", (task.id(), now)).expect("task");
         // From before the computer started: its pid could be anyone's now.
-        db.execute("INSERT INTO tasks VALUES (?1, 1, NULL)", (old.id(),)).expect("old");
+        db.execute("INSERT INTO tasks (pid, started) VALUES (?1, 1)", (old.id(),)).expect("old");
         db.execute("INSERT INTO monitors VALUES (?1)", (serde_json::json!({"pid": watch.id(), "started": now}).to_string(),))
             .expect("watch");
         drop(db);
@@ -636,5 +658,26 @@ mod tests {
         assert!(task.try_wait().expect("wait").is_some() && watch.try_wait().expect("wait").is_some(), "stopped");
         assert!(old.try_wait().expect("wait").is_none(), "left alone");
         let _ = old.kill();
+    }
+
+    #[test]
+    fn the_tasks_asked_for_are_spared() {
+        let dir = temp();
+        let setup = installed(&dir);
+        std::fs::remove_file(setup.home.db_path()).expect("rm");
+        let db = rusqlite::Connection::open(setup.home.db_path()).expect("db");
+        db.execute_batch("CREATE TABLE tasks (pid INTEGER, started INTEGER, ended INTEGER, agent TEXT, command TEXT);").expect("tables");
+        use std::os::unix::process::CommandExt;
+        let spawn = || Command::new("/bin/sleep").arg("60").process_group(0).spawn().expect("sleep");
+        let (mut kept, mut other) = (spawn(), spawn());
+        let now = crate::transcript::now_ms();
+        db.execute("INSERT INTO tasks VALUES (?1, ?2, NULL, 'rivet', 'ssh box receive')", (kept.id(), now)).expect("kept");
+        db.execute("INSERT INTO tasks VALUES (?1, ?2, NULL, 'ana', 'ssh box receive')", (other.id(), now)).expect("other");
+        drop(db);
+        stop_leftovers_but(&setup.home, &|agent, command| agent == "rivet" && command.contains("receive"));
+        assert!(other.try_wait().expect("wait").is_some(), "stopped");
+        assert!(kept.try_wait().expect("wait").is_none(), "spared");
+        let _ = kept.kill();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

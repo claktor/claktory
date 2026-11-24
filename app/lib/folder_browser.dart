@@ -9,6 +9,7 @@ import 'forms.dart';
 import 'identity.dart';
 import 'mobile/metrics.dart' show Touch, TypeScale;
 import 'protocol/factory/v1/factory.pb.dart';
+import 'visible_codes.dart' show shownName;
 
 /// Lets the person pick a folder on the machine a Factory runs on, which
 /// this Mac's folder sheet can't show: it opens at [from] (or the home
@@ -339,7 +340,7 @@ class _FolderRow extends StatelessWidget {
             const SizedBox(width: Space.s),
             Expanded(
               child: Text(
-                folder.name,
+                shownName(folder.name),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TypeScale.of(context).body.copyWith(color: color),

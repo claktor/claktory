@@ -47,6 +47,9 @@ static MANIFEST: Manifest = Manifest {
 
 const LIST: &str = "The models agents can run on now, by provider, each with its exact id (what an agent's model setting takes), its name, its efforts and its context size, and each provider's state: signed in or not, and whether it can take requests now (an account at its usage limit, out of credit or needing a new sign-in can't), and each subscription's limits: how much of each is used and when it resets. query: words that must all be in the id or the name, such as \"opus\" or \"sonnet 4.6\" (\"-\", \".\" and \"_\" alike). provider: one provider, by id or name, such as \"openrouter\".";
 const SET: &str = "Put an agent on a model, an effort, or both, from its next step; Claktory tells it. agent: its id or name (you included). model: an id exactly as models_list gives it. effort: one the model lists; left out, the agent keeps its effort if the model takes it, else gets \"high\" or the model's strongest. reason: why, in a sentence for the person, who sees every change in their History and can undo it. Refused for a model that isn't available now, saying which are close.";
+const REFRESH: &str = "Ask a provider for its list of models again now, as the person's refresh in Settings → Providers does, when a model they expect isn't listed (one just released, say). provider: its id or name, such as \"anthropic\"; left out, every signed-in provider whose list can be asked. Says how many models it lists after.";
+const AUTO_CONTINUE: &str = "Admin only: ask the person to turn Continue automatically (Settings → Providers) on or off, when they ask. On, an agent or chat waiting on a usage limit continues on another signed-in provider by itself, which spends that account's usage or credit. on: true or false; reason: why, in a sentence they read on the card. A card opens in your conversation (and their Needs you), and only their approval changes it; you're told which in an event.";
+const TRY_NOW: &str = "Have an agent waiting on a provider's usage limit or credit try again now, as the person's Try now beside the wait does, when they say usage is back (a reset claimed, credit added). agent: its id or name. Claktory asks the provider again: with room, the agent carries on; without, it keeps waiting, with the provider's new time.";
 /// The longest reason kept.
 const MOST_REASON: usize = 500;
 
@@ -95,10 +98,46 @@ impl Extension for Models {
             "additionalProperties": false,
         });
         let list = super::tool("models_list", "List models", LIST, list_parameters, super::typed_handler(factory, agent, list));
+        let refresh_parameters = json!({
+            "type": "object",
+            "properties": {"provider": {"type": "string"}},
+            "additionalProperties": false,
+        });
+        let refresh = async_tool(factory, agent, "models_refresh", "Refresh a provider's models", REFRESH, refresh_parameters, refresh);
+        let admin = factory.lock().config.agent(agent).is_some_and(crate::proposals::is_admin);
+        let auto_parameters = json!({
+            "type": "object",
+            "required": ["on", "reason"],
+            "properties": {"on": {"type": "boolean"}, "reason": {"type": "string", "minLength": 1, "maxLength": MOST_REASON}},
+            "additionalProperties": false,
+        });
+        let auto = admin.then(|| {
+            super::tool(
+                crate::card_actions::AUTO_CONTINUE_TOOL,
+                "Continue automatically",
+                AUTO_CONTINUE,
+                auto_parameters,
+                super::typed_handler(factory, agent, auto_continue),
+            )
+        });
         if !can_set(factory, agent) {
-            return vec![list];
+            return [list, refresh].into_iter().chain(auto).collect();
         }
-        vec![list, async_tool(factory, agent, "models_set", "Change an agent's model", SET, set_parameters, set)]
+        let try_parameters = json!({
+            "type": "object",
+            "required": ["agent"],
+            "properties": {"agent": {"type": "string", "minLength": 1}},
+            "additionalProperties": false,
+        });
+        vec![
+            list,
+            refresh,
+            async_tool(factory, agent, "models_set", "Change an agent's model", SET, set_parameters, set),
+            async_tool(factory, agent, "models_try_now", "Try a waiting agent now", TRY_NOW, try_parameters, try_now),
+        ]
+        .into_iter()
+        .chain(auto)
+        .collect()
     }
 
     fn admin_default(&self) -> bool {
@@ -420,6 +459,109 @@ pub(crate) async fn undo(factory: &Arc<Factory>, request: &v1::UndoModelChange) 
 }
 
 /// The agent may change models (Can change models, on unless turned off).
+#[derive(Deserialize)]
+struct RefreshArgs {
+    #[serde(default)]
+    provider: String,
+}
+
+/// models_refresh: asks a provider (or each that can be asked) for its
+/// models again, as Settings → Providers' refresh does (`catalog::refresh`).
+async fn refresh(factory: Arc<Factory>, caller: String, args: RefreshArgs) -> Result<ToolResult, String> {
+    let wanted = args.provider.trim();
+    let provider = {
+        let inner = factory.lock();
+        super::caller(&inner.config, &caller)?;
+        match wanted {
+            "" => None,
+            wanted => {
+                let found = inner.providers.iter().find(|provider| provider.id == wanted || provider.name.eq_ignore_ascii_case(wanted));
+                let Some(found) = found else {
+                    let known: Vec<&str> = inner.providers.iter().map(|provider| provider.id.as_str()).collect();
+                    return Err(format!("There's no provider \"{wanted}\": the providers are {}.", known.join(", ")));
+                };
+                Some((found.id.clone(), found.name.clone()))
+            }
+        }
+    };
+    crate::catalog::refresh(&factory, provider.as_ref().map_or("", |(id, _)| id.as_str())).await?;
+    let inner = factory.lock();
+    let said = match provider {
+        Some((id, name)) => {
+            let count = inner.models.iter().filter(|model| provider_of(&model.id) == id).count();
+            format!("Asked {name} for its models again: it lists {count} now. models_list shows them.")
+        }
+        None => format!("Asked each provider whose list can be asked for its models again: {} models are listed now. models_list shows them.", inner.models.len()),
+    };
+    Ok(ToolResult::text(said, json!({})))
+}
+
+#[derive(Deserialize)]
+struct TryArgs {
+    agent: String,
+}
+
+#[derive(Deserialize)]
+struct AutoArgs {
+    on: bool,
+    reason: String,
+}
+
+/// models_auto_continue (#423): asks the person, on a card, to turn
+/// Continue automatically on or off; only their approval does.
+fn auto_continue(factory: &Arc<Factory>, agent: &str, args: AutoArgs) -> Result<ToolResult, String> {
+    let (me, person) = {
+        let inner = factory.lock();
+        let me = super::caller(&inner.config, agent)?;
+        if !crate::proposals::is_admin(me) {
+            return Err("Only an admin agent can ask for this; the person can, in Settings → Providers.".to_owned());
+        }
+        (me.name.clone(), inner.config.person_capitalized().to_owned())
+    };
+    let reason = args.reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    if reason.is_empty() {
+        return Err(format!("Give reason: why, in a sentence {person} reads on the card. Nothing was asked."));
+    }
+    let on = factory.usage_switches.auto_continue();
+    if on == args.on {
+        let state = if on { "on" } else { "off" };
+        return Ok(ToolResult::text(format!("Continue automatically is {state} already. Nothing was asked."), json!({})));
+    }
+    let (title, what) = if args.on {
+        (
+            "Turn on Continue automatically",
+            "an agent or chat waiting on a usage limit would continue on another signed-in provider by itself, spending that account's usage or credit",
+        )
+    } else {
+        ("Turn off Continue automatically", "agents and chats waiting on a usage limit would wait until you continue them")
+    };
+    let description = format!("{me} asks to change it in Settings → Providers: {what}.");
+    crate::card_actions::ask(factory, agent, title, &description, &reason, &crate::card_actions::Action::AutoContinue { on: args.on })
+}
+
+/// models_try_now: an agent waiting on its provider's usage asks again now,
+/// as the person's Try now does (`Factory::try_again_now`).
+async fn try_now(factory: Arc<Factory>, caller: String, args: TryArgs) -> Result<ToolResult, String> {
+    let (id, name) = {
+        let inner = factory.lock();
+        super::caller(&inner.config, &caller)?;
+        let agent = agent(&inner.config, &args.agent)?;
+        (agent.id.clone(), agent.name.clone())
+    };
+    let waiting = factory.lock().agents.get(&id).is_some_and(|runtime| runtime.usage_wait.is_some());
+    if !waiting {
+        return Err(format!("{name} isn't waiting on a provider's usage, so there's nothing to try again. Nothing was done."));
+    }
+    factory.try_again_now(&id).await.map_err(|error| format!("{error} Nothing was done."))?;
+    let still = factory.lock().agents.get(&id).is_some_and(|runtime| runtime.usage_wait.is_some());
+    let said = if still {
+        format!("Asked {name}'s provider again. If it has room now, {name} carries on in a moment; if not, it keeps waiting, with the provider's new time.")
+    } else {
+        format!("Asked {name}'s provider again: {name} isn't waiting any more and carries on.")
+    };
+    Ok(ToolResult::text(said, json!({"agent": id})))
+}
+
 fn can_set(factory: &Factory, agent: &str) -> bool {
     factory.lock().config.agent(agent).is_some_and(|config| super::switch(config, ID, CAN_SET))
 }

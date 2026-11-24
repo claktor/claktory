@@ -475,6 +475,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
     }
 
     return PaneScaffold(
+      share: sharePath,
       details: details(
         page == null || !(showing || previewing)
             ? ''

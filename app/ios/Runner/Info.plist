@@ -62,6 +62,8 @@
 	<string>Connect straight to your Claktory when it's on the same network as this iPhone, for a faster connection.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Speak your messages and answers to your agents. Claktory turns them into text.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Claktory saves videos and pictures you choose to your Photos.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

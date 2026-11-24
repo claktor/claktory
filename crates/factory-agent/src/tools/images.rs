@@ -106,6 +106,30 @@ pub async fn read_image(cwd: &Path, args: &Value, cancel: &CancellationToken) ->
     })
 }
 
+/// An image's bytes as a tool result shows them to the model, as read_image
+/// sends a file (#403: an image an agent made): as they are when they fit
+/// what models take, else scaled down; with the size it shows at when
+/// scaled. `width` and `height` are the image's own.
+pub async fn model_part(bytes: Vec<u8>, width: u32, height: u32) -> Result<(ToolResultPart, Option<(u32, u32)>), String> {
+    let Some(mime) = sniff(&bytes) else { return Err("it isn't an image models read (PNG, JPEG, GIF or WebP)".to_owned()) };
+    if u64::from(width) * u64::from(height) > MAX_PIXELS {
+        return Err(format!("it's {width}×{height}, too many pixels to read"));
+    }
+    let fits = width.max(height) <= LONG_EDGE && bytes.len() as u64 <= MAX_IMAGE_BYTES;
+    let (out, out_mime, shown) = if fits {
+        (bytes, mime, None)
+    } else {
+        let fitted = tokio::task::spawn_blocking(move || fit(&bytes, mime)).await.map_err(|error| error.to_string())??;
+        (fitted.bytes, fitted.mime, Some((fitted.width, fitted.height)))
+    };
+    let part = ToolResultPart::Image {
+        data: base64::engine::general_purpose::STANDARD.encode(&out),
+        mime_type: out_mime.to_owned(),
+        digest: Some(digest(&out)),
+    };
+    Ok((part, shown))
+}
+
 /// The SHA-256 of an image's bytes, in hex: how a provider that keeps
 /// images as files (Anthropic's, #382) knows it has sent this one.
 pub fn digest(bytes: &[u8]) -> String {

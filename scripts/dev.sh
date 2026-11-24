@@ -42,6 +42,18 @@ backend() {
   # Speech recognition for voice messages, which factoryd also finds beside itself.
   cp "$ROOT/target/debug/claktory-speech" "$DEV_HOME/bin/claktory-speech.new"
   mv -f "$DEV_HOME/bin/claktory-speech.new" "$DEV_HOME/bin/claktory-speech"
+  # ripgrep for agents' bash (#215), as an install has it: <home>/tools/rg,
+  # built once from the pinned crate (scripts/build-rg.sh caches it).
+  if [[ "$(uname)" == Darwin && -x "$ROOT/scripts/build-rg.sh" ]]; then
+    local rg="${CLAKTORY_RG_CACHE:-$HOME/Library/Caches/claktory-ripgrep}/dev-rg"
+    [[ -x "$rg" && "$("$rg" --version | head -1)" == "ripgrep $(sed -n 's/^RG_VERSION=//p' "$ROOT/scripts/build-rg.sh")" ]] ||
+      "$ROOT/scripts/build-rg.sh" mac "$rg" --dev
+    if ! cmp -s "$rg" "$DEV_HOME/tools/rg"; then
+      mkdir -p "$DEV_HOME/tools"
+      cp "$rg" "$DEV_HOME/tools/rg.new"
+      mv -f "$DEV_HOME/tools/rg.new" "$DEV_HOME/tools/rg"
+    fi
+  fi
   # Phone-sized video previews (#379), on a Mac: factoryd finds it beside itself.
   local preview_src="$ROOT/app/macos/VideoPreview/main.swift" preview="$ROOT/target/debug/claktory-video-preview"
   if [[ "$(uname)" == Darwin && -f "$preview_src" ]]; then

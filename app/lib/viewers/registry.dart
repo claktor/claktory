@@ -22,6 +22,7 @@ import 'previews.dart';
 import '../paced.dart' show FilePreviews;
 import 'text.dart';
 import 'video.dart';
+import '../visible_codes.dart' show shownName;
 
 /// What a viewer pane shows: one entry per kind (`ViewLeaf.kind`). A new
 /// kind (PDFs, documents, dashboards, extension panels) is a new entry, and
@@ -103,6 +104,8 @@ Viewer? viewerFor(String kind) {
 Widget viewerBody(BuildContext context, ViewLeaf leaf) =>
     viewerFor(leaf.kind)?.build(context, leaf) ??
     PaneScaffold(
+      // Shown here or not, it can still go to an app that can (#418).
+      share: leaf.path,
       body: ViewerProblem(
         "Claktory can't show this kind of file here yet.",
         path: leaf.path,
@@ -111,9 +114,11 @@ Widget viewerBody(BuildContext context, ViewLeaf leaf) =>
 
 /// What [leaf]'s pane is called: its title, else its file's name.
 String viewerTitle(ViewLeaf leaf) {
-  if (leaf.title.isNotEmpty) return leaf.title;
-  return leaf.path.split('/').where((part) => part.isNotEmpty).lastOrNull ??
-      leaf.path;
+  if (leaf.title.isNotEmpty) return shownName(leaf.title);
+  return shownName(
+    leaf.path.split('/').where((part) => part.isNotEmpty).lastOrNull ??
+        leaf.path,
+  );
 }
 
 /// [leaf]'s kind's glyph; a plain file's for a kind this app doesn't know.
@@ -164,6 +169,12 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   String get path;
 
   FileContent? file;
+
+  /// What Share… sends (#418): the file, once a read of it worked.
+  String? get sharePath {
+    final file = this.file;
+    return file != null && file.error.isEmpty ? path : null;
+  }
 
   /// The request failed outright (rather than the file being unreadable).
   String? failure;

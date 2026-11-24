@@ -665,12 +665,19 @@ async fn stop(mut child: tokio::process::Child) -> Result<(), MainError> {
 
 /// The models and sign-ins factoryd uses. Built for QA (the `qa-provider`
 /// feature, claktory-qa's sandboxes only), FACTORY_QA_ANTHROPIC_URL points
-/// the Anthropic subscription at qa-model on this computer, within Fugo's
+/// the Anthropic subscription at qa-model on this computer, and
+/// FACTORY_QA_OPENROUTER_MODELS_URL OpenRouter's model list, within Fugo's
 /// guard; anything the guard refuses stops factoryd, saying why.
 fn registry(home: &Home, port: u16) -> Result<Registry, MainError> {
     #[cfg(feature = "qa-provider")]
     {
         use factory_agent::providers::anthropic::qa;
+        // OpenRouter's model list from qa-model (#185 U4), within the same guard.
+        let list = std::env::var_os(qa::MODELS_URL_VAR).map(|url| url.to_string_lossy().into_owned());
+        if let Some(url) = qa::models_url_for(list.as_deref(), home.root(), port).map_err(MainError::QaProvider)? {
+            tracing::warn!("QA OpenRouter model list override: {url}");
+            factory_agent::providers::catalog::use_qa_models_url(url);
+        }
         let url = std::env::var_os(qa::URL_VAR).map(|url| url.to_string_lossy().into_owned());
         if let Some((base, anthropic)) = qa::provider_for(url.as_deref(), home.root(), port).map_err(MainError::QaProvider)? {
             tracing::warn!("QA provider override: {base}");

@@ -38,6 +38,7 @@ static MANIFEST: Manifest = Manifest {
 const POINTS: &str = "Where an agent's conversation can go back to, newest first (30 at most), and its other versions. agent: its id or name. Each point is right before a message the agent was given: its number (what conversation_fork takes), its time and whom it came from; only the person's own words are quoted.";
 const FORK: &str = "Take an agent's conversation back to right before a point conversation_points lists. What came after is set aside as another version, which can be switched back to. The agent stops first if it's working; what's queued for it stays, and it's told what the part set aside did that still stands (files, messages, tasks). agent: its id or name, never you. point: as conversation_points gives it, such as \"p12\". reason: why, in a sentence: the agent reads it, and the person sees it in their History.";
 const SWITCH: &str = "Switch an agent to another version of its conversation, one conversation_points lists; the one it's in now is set aside as another version. The agent stops first if it's working, and is told. agent: its id or name, never you. branch: the version's id. reason: why, in a sentence: the agent reads it, and the person sees it in their History.";
+const DELETE: &str = "Delete one of an agent's other versions of its conversation, one conversation_points lists, as the person's Delete in its versions does: for good, it can't be switched back to. The version the agent is in now is never deleted. Only when the person asks. agent: its id or name, never you. branch: the version's id. reason: why, in a sentence: the person sees it in their History.";
 /// The longest reason kept.
 const MOST_REASON: usize = 500;
 /// The most points listed.
@@ -55,7 +56,7 @@ impl Extension for Conversations {
     fn prompt(&self, _factory: &Factory, inner: &Inner, _agent: &AgentConfig) -> Vec<PromptSection> {
         let person = inner.config.person();
         let text = format!(
-            "## Conversations\n\nconversation_points, conversation_fork and conversation_switch take another agent's conversation back to an earlier message, or switch it to another version, as {person} can from a message's menu. Do it only when {person} asks: the agent stops and forgets what came after, though it's told what that part did, and its files, messages, tasks and monitors stay as they are.\n"
+            "## Conversations\n\nconversation_points, conversation_fork and conversation_switch take another agent's conversation back to an earlier message, or switch it to another version, as {person} can from a message's menu; conversation_delete deletes a version set aside, for good. Do it only when {person} asks: the agent stops and forgets what came after, though it's told what that part did, and its files, messages, tasks and monitors stay as they are.\n"
         );
         vec![PromptSection::static_text(text)]
     }
@@ -90,7 +91,8 @@ impl Extension for Conversations {
         vec![
             async_tool(factory, agent, "conversation_points", "List where a conversation can go back to", POINTS, agent_only, points),
             async_tool(factory, agent, "conversation_fork", "Take a conversation back", FORK, fork_parameters, fork_to),
-            async_tool(factory, agent, "conversation_switch", "Switch a conversation's version", SWITCH, switch_parameters, switch_to),
+            async_tool(factory, agent, "conversation_switch", "Switch a conversation's version", SWITCH, switch_parameters.clone(), switch_to),
+            async_tool(factory, agent, "conversation_delete", "Delete a conversation's version", DELETE, switch_parameters, delete_version),
         ]
     }
 
@@ -100,7 +102,7 @@ impl Extension for Conversations {
 
     /// Its tools are named for what they change, not for it.
     fn owns_tool(&self, name: &str) -> bool {
-        matches!(name, "conversation_points" | "conversation_fork" | "conversation_switch")
+        matches!(name, "conversation_points" | "conversation_fork" | "conversation_switch" | "conversation_delete")
     }
 }
 
@@ -236,16 +238,40 @@ async fn switch_to(factory: Arc<Factory>, caller: String, args: SwitchArgs) -> R
     Ok(ToolResult::text(text, json!({"conversation_change": change.map(|id| id.to_string())})))
 }
 
+/// conversation_delete: deletes a version set aside (`fork::delete`), for
+/// good; kept in the person's History with the reason.
+async fn delete_version(factory: Arc<Factory>, caller: String, args: SwitchArgs) -> Result<ToolResult, String> {
+    let reason = reason(&args.reason)?;
+    let instead = "delete a version with Delete… in the agent's Other versions. Nothing was deleted.";
+    let (id, name) = subject_for(&factory, &caller, &args.agent, true, instead)?;
+    // For good: the person reads why in History.
+    if reason.is_empty() {
+        return Err("Give reason: why this version can go, in a short line the person reads in History. Nothing was deleted.".to_owned());
+    }
+    let branch = args.branch.trim();
+    fork::delete(&factory, &id, branch).await.map_err(|error| match error {
+        crate::factory::RequestError::NoBranch(_) => {
+            format!("{name} has no version \"{branch}\": list them with conversation_points. Nothing was deleted.")
+        }
+        error => format!("{error} Nothing was deleted."),
+    })?;
+    let change = history::record(&factory, &id, &caller, history::Kind::Deleted, reason, 0);
+    let person = factory.lock().config.person().to_owned();
+    let text = format!("Deleted that version of {} conversation, for good. It shows in {person}'s History.", possessive(&name));
+    Ok(ToolResult::text(text, json!({"conversation_change": change.map(|id| id.to_string())})))
+}
+
 /// The agent whose conversation the caller means, by id and name; refused
 /// for a caller that has read a web page, and, when it would `change` it,
 /// for the caller's own.
 fn subject(factory: &Factory, caller: &str, named: &str, change: bool) -> Result<(String, String), String> {
-    super::untainted(
-        factory,
-        caller,
-        "look at or change other agents' conversations",
-        "take a conversation back from a message's menu. Nothing was changed.",
-    )?;
+    subject_for(factory, caller, named, change, "take a conversation back from a message's menu. Nothing was changed.")
+}
+
+/// `subject`, with what the person does instead when the caller has read a
+/// web page (`instead`).
+fn subject_for(factory: &Factory, caller: &str, named: &str, change: bool, instead: &str) -> Result<(String, String), String> {
+    super::untainted(factory, caller, "look at or change other agents' conversations", instead)?;
     let inner = factory.lock();
     super::caller(&inner.config, caller)?;
     let agent = super::models::agent(&inner.config, named)?;

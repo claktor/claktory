@@ -1,5 +1,5 @@
 import 'package:factory_app/devices.dart' show QrCode;
-import 'package:factory_app/controls.dart' show Button, Field, Toggle;
+import 'package:factory_app/controls.dart' show Button, Field, Select, Toggle;
 import 'package:factory_app/decision.dart';
 import 'package:factory_app/inbox.dart' show InboxView;
 import 'package:factory_app/map.dart';
@@ -567,6 +567,38 @@ void main() {
     await settle(tester);
     expect(
       find.textContaining('Sent back to June · “Fix the date first.”'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Discarded'), findsNothing);
+  });
+
+  testWidgets("a held message its writer took back says why, in place of "
+      "Discarded (FB19, Abbacchio)", (tester) async {
+    final harness = await show(
+      tester,
+      _workspace([
+        _pipe(members: ['june'], lead: 'june'),
+      ], selected: 'pipe1'),
+    );
+    harness.backend.pipeChat.load(
+      PipeTranscript(
+        pipeId: 'pipe1',
+        messages: [
+          _message(
+            1,
+            'The launch is on the 3rd.',
+            PipeAuthorKind.PIPE_AUTHOR_KIND_MY_AGENT,
+            agentId: 'june',
+            state: PipeMessageState.PIPE_MESSAGE_STATE_DISCARDED,
+          )..note = 'June took it back: the date moved \u202Eto the 5th.',
+        ],
+      ),
+    );
+    await settle(tester);
+    expect(
+      find.textContaining(
+        r'June took it back: the date moved \u{202E}to the 5th.',
+      ),
       findsOneWidget,
     );
     expect(find.textContaining('Discarded'), findsNothing);
@@ -1459,6 +1491,244 @@ void main() {
     expect(pipeLiaisons(snapshot).keys, ['pipe1']);
   });
 
+  group('only sends (#414)', () {
+    Workspace senders({List<String> sendOnly = const []}) =>
+        _workspace([
+            _pipe(members: ['june', 'omar', ...sendOnly], lead: 'omar')
+              ..sendOnlyIds.addAll(sendOnly),
+          ], selected: 'pipe1')
+          ..agents.add(_agent('rivet', 'Rivet', project: ''))
+          ..agents.add(_agent('elsewhere', 'Elsewhere', project: 'p2'));
+
+    Future<Harness> settings(WidgetTester tester, Workspace snapshot) async {
+      final harness = await show(tester, snapshot);
+      harness.backend.pipeChat.load(PipeTranscript(pipeId: 'pipe1'));
+      await settle(tester);
+      await tester.tap(find.text('Acme launch').last);
+      await settle(tester);
+      return harness;
+    }
+
+    Finder choice(String name) => find.byWidgetPredicate(
+      (widget) => widget is Select<PipeAccess> && widget.title == name,
+    );
+
+    testWidgets("each member's choice: reads and runs commands, limited, or "
+        'only sends; one that only sends never leads', (tester) async {
+      final harness = await settings(tester, senders());
+      expect(
+        tester
+            .widget<Select<PipeAccess>>(choice('June'))
+            .options
+            .map((option) => option.label),
+        ['Reads and runs commands', 'Limited to the pipe', 'Only sends'],
+      );
+      expect(find.text('Reads and runs commands'), findsNWidgets(2));
+      tester
+          .widget<Select<PipeAccess>>(choice('June'))
+          .onChanged(PipeAccess.sendOnly);
+      await settle(tester);
+      expect(
+        find.text(
+          sendOnlyNote(
+            'June',
+            harness.backend.workspace.workspace.pipes.single,
+          ),
+        ),
+        findsOneWidget,
+      );
+      final lead = tester.widget<Select<String>>(
+        find.descendant(
+          of: find.ancestor(
+            of: find.text('Lead'),
+            matching: find.byType(Field),
+          ),
+          matching: find.byType(Select<String>),
+        ),
+      );
+      expect([for (final option in lead.options) option.value], ['omar']);
+      await tester.ensureVisible(find.text('Save'));
+      await tester.tap(find.text('Save'));
+      await settle(tester);
+      final update = harness.last.updatePipe;
+      expect(update.sendOnly.agentIds, ['june']);
+      expect(update.hasMembers(), isFalse);
+      expect(update.quarantined.agentIds, isNot(contains('june')));
+    });
+
+    testWidgets("on a phone, the settings raise no keyboard, and a choice "
+        "gives none back to the name (Sale's row 77)", (tester) async {
+      final harness = await show(tester, senders(), size: phone);
+      harness.backend.pipeChat.load(PipeTranscript(pipeId: 'pipe1'));
+      await settle(tester);
+      await tester.tap(find.text('Acme launch').last);
+      await settle(tester);
+      EditableText name() => tester.widget<EditableText>(
+        find.descendant(
+          of: find.ancestor(
+            of: find.text('Name'),
+            matching: find.byType(Field),
+          ),
+          matching: find.byType(EditableText),
+        ),
+      );
+      expect(name().focusNode.hasFocus, isFalse);
+      // Typed in, its keyboard then hidden: the focus stays.
+      name().focusNode.requestFocus();
+      await settle(tester);
+      await tester.ensureVisible(choice('June'));
+      await tester.tap(choice('June'));
+      await pumpFrames(tester);
+      await tester.tap(find.text('Only sends').last);
+      await pumpFrames(tester);
+      expect(name().focusNode.hasFocus, isFalse);
+      expect(
+        find.text(
+          sendOnlyNote(
+            'June',
+            harness.backend.workspace.workspace.pipes.single,
+          ),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets("Cancel on the ask to run commands comes back to the settings "
+        "where they were (Sale's row 79)", (tester) async {
+      // Short, so the settings scroll; a pointer's layout, where the ask's
+      // buttons fit the test's font.
+      await show(tester, senders(), size: const Size(1000, 520));
+      await tester.tap(find.text('Acme launch').last);
+      await settle(tester);
+      tester
+          .widget<Select<PipeAccess>>(choice('June'))
+          .onChanged(PipeAccess.limited);
+      await settle(tester);
+      await tester.ensureVisible(choice('June'));
+      await settle(tester);
+      ScrollPosition form() => tester
+          .state<ScrollableState>(
+            find
+                .descendant(
+                  of: find.byType(PipeSettingsForm),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          )
+          .position;
+      final at = form().pixels;
+      expect(at, greaterThan(0));
+      tester
+          .widget<Select<PipeAccess>>(choice('June'))
+          .onChanged(PipeAccess.commands);
+      await settle(tester);
+      expect(
+        find.text('Let June run commands on this computer?'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Cancel').last);
+      await settle(tester);
+      expect(find.text('Pipe settings'), findsOneWidget);
+      expect(form().pixels, at);
+      expect(
+        tester.widget<Select<PipeAccess>>(choice('June')).value,
+        PipeAccess.limited,
+      );
+    });
+
+    testWidgets("Rivet and the workspace's agents can be let in, only to "
+        "send; another project's agents aren't offered", (tester) async {
+      final harness = await settings(tester, senders());
+      expect(find.text('Elsewhere'), findsNothing);
+      final rivet = find.byWidgetPredicate(
+        (widget) => widget is Toggle && widget.label == 'Rivet',
+      );
+      await tester.ensureVisible(rivet);
+      await tester.tap(rivet);
+      await settle(tester);
+      expect(choice('Rivet'), findsNothing, reason: 'nothing else to choose');
+      expect(find.text('Only sends'), findsOneWidget);
+      await tester.ensureVisible(find.text('Save'));
+      await tester.tap(find.text('Save'));
+      await settle(tester);
+      final update = harness.last.updatePipe;
+      expect(
+        update.members.agentIds,
+        unorderedEquals(['june', 'omar', 'rivet']),
+      );
+      expect(update.sendOnly.agentIds, ['rivet']);
+    });
+
+    testWidgets('one that only sends, let read again, is asked first; a '
+        "refusal shows as it comes", (tester) async {
+      final harness = await settings(tester, senders(sendOnly: ['rivet']));
+      expect(find.text('Only sends'), findsWidgets);
+      tester
+          .widget<Select<PipeAccess>>(choice('June'))
+          .onChanged(PipeAccess.sendOnly);
+      await settle(tester);
+      tester
+          .widget<Select<PipeAccess>>(choice('June'))
+          .onChanged(PipeAccess.commands);
+      await settle(tester);
+      expect(
+        find.text('Let June run commands on this computer?'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Let it run commands'));
+      await settle(tester);
+      harness.backend.refuse = "Rivet can't only send: it's quarantined.";
+      await tester.ensureVisible(find.text('Save'));
+      await tester.tap(find.text('Save'));
+      await settle(tester);
+      expect(
+        find.text("Rivet can't only send: it's quarantined."),
+        findsOneWidget,
+      );
+    });
+  });
+
+  testWidgets("Needs you's History lists Rivet letting an agent only send, "
+      'in Claktory\'s words, and opens the pipe (#414)', (tester) async {
+    final now = DateTime.now();
+    final snapshot = _workspace([
+      _pipe(members: ['june'], lead: 'june'),
+    ])..agents.add(_agent('rivet', 'Rivet', project: ''));
+    final harness = Harness(snapshot)
+      ..backend.needsYouHistory = [
+        NeedsYouRecord(
+          kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_MEMBER,
+          outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_CHANGED,
+          agentId: 'rivet',
+          agentName: 'Rivet',
+          subjectAgentId: 'june',
+          pipeId: 'pipe1',
+          title: 'Rivet let June send to this pipe without reading it',
+          decidedMs: Int64(
+            now.subtract(const Duration(hours: 1)).millisecondsSinceEpoch,
+          ),
+        ),
+      ];
+    await harness.show(tester, size: const Size(1200, 900));
+    await settle(tester);
+    harness.page.value = AppPage.inbox;
+    await settle(tester);
+    await tester.tap(find.text('History'));
+    await settle(tester);
+    await settle(tester);
+    final title = find.text(
+      'Rivet let June send to this pipe without reading it',
+    );
+    expect(title, findsOneWidget);
+    expect(
+      find.textContaining('Rivet · Acme launch', findRichText: true),
+      findsOneWidget,
+    );
+    await tester.tap(title);
+    await settle(tester);
+    expect(harness.last.selectPipe.pipeId, 'pipe1');
+  });
+
   group('limited to the pipe', () {
     Workspace limits({
       List<String> members = const ['june', 'omar'],
@@ -1544,13 +1814,22 @@ void main() {
           canRunCommandsWarning(
             'June',
             harness.backend.workspace.workspace.pipes.single,
+            choice: true,
           ),
         ),
         findsOneWidget,
       );
-      final omarsSwitch = find.text('Can run commands on this computer').last;
-      await tester.ensureVisible(omarsSwitch);
-      await tester.tap(omarsSwitch);
+      // Each member's choice (#414): Omar's, the last.
+      void choose(PipeAccess access) => tester
+          .widget<Select<PipeAccess>>(find.byType(Select<PipeAccess>).last)
+          .onChanged(access);
+      expect(
+        tester
+            .widget<Select<PipeAccess>>(find.byType(Select<PipeAccess>).last)
+            .value,
+        PipeAccess.limited,
+      );
+      choose(PipeAccess.commands);
       await settle(tester);
       expect(
         find.text('Let Omar run commands on this computer?'),
@@ -1565,8 +1844,7 @@ void main() {
       await tester.tap(find.text('Cancel').last);
       await settle(tester);
       expect(find.text('Pipe settings'), findsOneWidget);
-      await tester.ensureVisible(omarsSwitch);
-      await tester.tap(omarsSwitch);
+      choose(PipeAccess.commands);
       await settle(tester);
       await tester.tap(find.text('Let it run commands'));
       await settle(tester);
@@ -1591,7 +1869,9 @@ void main() {
       expect(find.text('2 agents can run commands'), findsOneWidget);
       await tester.tap(find.text('Acme launch').last);
       await settle(tester);
-      await tester.tap(find.text('Can run commands on this computer').first);
+      tester
+          .widget<Select<PipeAccess>>(find.byType(Select<PipeAccess>).first)
+          .onChanged(PipeAccess.limited);
       await settle(tester);
       expect(find.text('Pipe settings'), findsOneWidget);
       await tester.ensureVisible(find.text('Save'));

@@ -473,7 +473,8 @@ pub(crate) fn cards(db: &Connection, team: &Team, window: Window, now: i64) -> r
     let in_window: Vec<_> = rows.iter().filter(|(_, _, created, _)| *created >= window.t0 && *created < window.t1).collect();
     let mut times: Vec<i64> = in_window
         .iter()
-        .filter(|(_, state, _, _)| state != "cleared")
+        // Closed without the person: /clear, or withdrawn by its agent.
+        .filter(|(_, state, _, _)| state != "cleared" && state != "withdrawn")
         .filter_map(|(_, _, created, decided)| decided.map(|decided| decided - created))
         .collect();
     times.sort_unstable();

@@ -297,7 +297,7 @@ fn switch_within(home: &Home, job: &Job, new: &NewSupervisor, port: u16, tries: 
 
 /// A shell running `script` in a session of its own (which `bootout`
 /// doesn't stop), its output going to `<home>/bin/launch-agent.log`.
-fn helper(home: &Home, script: &str) -> std::io::Result<Command> {
+pub(crate) fn helper(home: &Home, script: &str) -> std::io::Result<Command> {
     use std::os::unix::process::CommandExt;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(home.root().join("bin/launch-agent.log"))?;
     let mut command = Command::new("/bin/sh");

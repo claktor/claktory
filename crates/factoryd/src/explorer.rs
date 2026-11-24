@@ -78,7 +78,7 @@ impl Factory {
             self.set_view(&mut inner, view);
             self.broadcast_workspace(&inner);
             if let Some(transcript) = inner.state.selected_agent.as_deref().and_then(|agent| crate::factory::transcript_of(&inner, agent)) {
-                self.send(Body::Transcript(transcript));
+                self.send_transcript(&inner, transcript);
             }
         }
         self.save_state()?;

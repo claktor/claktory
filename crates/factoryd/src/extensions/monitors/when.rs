@@ -43,6 +43,10 @@ pub(crate) enum When {
         pattern: Option<String>,
         #[serde(default)]
         repeat: Repeat,
+        /// Secrets of the vault its command gets, as bash's `secrets`
+        /// does: named by the agent itself when it set the monitor.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        secrets: Vec<String>,
     },
     /// Fires when any of these files, or anything in these folders, changes.
     Files {
@@ -127,7 +131,7 @@ impl When {
             When::At { at } => format!("at {}", local(*at, now)),
             When::Every { every } => format!("every {}", duration(*every)),
             When::Cron { cron } => format!("cron {cron}"),
-            When::Check { command, every, fire_on, pattern, repeat } => {
+            When::Check { command, every, fire_on, pattern, repeat, secrets } => {
                 let on = match (fire_on, pattern) {
                     (FireOn::Match, Some(pattern)) => format!("match \"{pattern}\""),
                     (fire_on, _) => fire_on.name().to_owned(),
@@ -137,7 +141,12 @@ impl When {
                     Repeat::Again => ", each time",
                     Repeat::Always => ", whenever it holds",
                 };
-                format!("check `{}` every {}, fires on {on}{again}", short(command), duration(*every))
+                let with = match secrets.as_slice() {
+                    [] => String::new(),
+                    [one] => format!(", with the secret {one}"),
+                    many => format!(", with the secrets {}", many.join(", ")),
+                };
+                format!("check `{}` every {}, fires on {on}{again}{with}", short(command), duration(*every))
             }
             When::Files { paths, glob } => {
                 let only = glob.as_ref().map(|glob| format!(" ({glob})")).unwrap_or_default();
@@ -156,6 +165,31 @@ fn short(command: &str) -> String {
     let first = command.lines().next().unwrap_or_default().trim();
     let cut: String = first.chars().take(60).collect();
     if cut.len() < command.trim().len() { format!("{cut}…") } else { cut }
+}
+
+/// Secrets a check may name at most.
+const MAX_SECRETS: usize = 10;
+
+/// A check's `secrets`: a name or a list of names, each once.
+fn secrets(fields: &serde_json::Map<String, Value>) -> Result<Vec<String>, String> {
+    let listed: Vec<&Value> = match fields.get("secrets") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(names)) => names.iter().collect(),
+        Some(name) => vec![name],
+    };
+    let mut names: Vec<String> = Vec::new();
+    for name in listed {
+        let Some(name) = name.as_str().map(str::trim).filter(|name| !name.is_empty()) else {
+            return Err("secrets must be a secret's name or a list of names, as bash's secrets.".to_owned());
+        };
+        if !names.iter().any(|seen| seen == name) {
+            names.push(name.to_owned());
+        }
+    }
+    if names.len() > MAX_SECRETS {
+        return Err(format!("A check can use at most {MAX_SECRETS} secrets."));
+    }
+    Ok(names)
 }
 
 /// Reads the agent's `when`: what it waits for, and when it's first due (None
@@ -201,7 +235,10 @@ pub(crate) fn parse(when: &Value, folder: &Path, now: i64) -> Result<(When, Opti
             Some(Value::String(always)) if always == "always" => Repeat::Always,
             Some(other) => return Err(format!("repeat must be true, false or \"always\"; got {other}.")),
         };
-        return Ok((When::Check { command, every, fire_on, pattern, repeat }, Some(now)));
+        return Ok((When::Check { command, every, fire_on, pattern, repeat, secrets: secrets(fields)? }, Some(now)));
+    }
+    if fields.get("secrets").is_some_and(|secrets| !secrets.is_null()) {
+        return Err("secrets works only with check: a check's command gets them each time it runs.".to_owned());
     }
     if let Some(command) = text("watch")? {
         let gap = match text("gap")? {
@@ -511,7 +548,8 @@ mod tests {
                     every: 5 * MINUTE,
                     fire_on: FireOn::Match,
                     pattern: Some("success".into()),
-                    repeat: Repeat::Once
+                    repeat: Repeat::Once,
+                    secrets: Vec::new()
                 },
                 Some(now)
             )
@@ -543,6 +581,29 @@ mod tests {
         assert!(read(serde_json::json!({"cron": "61 * * * *"})).contains("minute"));
         assert!(read(serde_json::json!({"in": "30s"})).contains("at least 1m"));
         assert!(read(serde_json::json!({})).contains("one of"));
+    }
+
+    #[test]
+    fn a_check_names_secrets_once_each_and_only_a_check_can() {
+        let read = |json: Value| parse(&json, Path::new("/"), 0);
+        let (check, _) = read(serde_json::json!({"check": "./export.sh", "secrets": [" Export ", "Export", "Grafana"]})).expect("check");
+        let When::Check { secrets, .. } = &check else { panic!("a check") };
+        assert_eq!(secrets, &["Export".to_owned(), "Grafana".to_owned()]);
+        assert_eq!(check.describe(0), "check `./export.sh` every 5m, fires on success, with the secrets Export, Grafana");
+        let (one, _) = read(serde_json::json!({"check": "x", "secrets": "Export"})).expect("one");
+        assert!(one.describe(0).ends_with("fires on success, with the secret Export"));
+        // None named: kept as before, so an older Claktory reads it as it was.
+        let (plain, _) = read(serde_json::json!({"check": "x", "secrets": []})).expect("plain");
+        assert_eq!(serde_json::to_string(&plain).unwrap(), r#"{"kind":"check","command":"x","every":300000,"fire_on":"success","repeat":"once"}"#);
+        assert_eq!(serde_json::from_str::<When>(r#"{"kind":"check","command":"x","every":300000,"fire_on":"success"}"#).unwrap(), plain);
+
+        let refused = |json: Value| read(json).expect_err("refused");
+        assert!(refused(serde_json::json!({"watch": "tail -F log", "secrets": ["Export"]})).starts_with("secrets works only with check"));
+        assert!(refused(serde_json::json!({"every": "1h", "secrets": "Export"})).starts_with("secrets works only with check"));
+        assert!(refused(serde_json::json!({"check": "x", "secrets": [""]})).contains("a secret's name or a list of names"));
+        assert!(refused(serde_json::json!({"check": "x", "secrets": [1]})).contains("a secret's name or a list of names"));
+        let many: Vec<String> = (0..11).map(|n| format!("S{n}")).collect();
+        assert!(refused(serde_json::json!({"check": "x", "secrets": many})).contains("at most 10 secrets"));
     }
 
     #[test]

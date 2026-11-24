@@ -4952,8 +4952,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TunnelStatus dco_decode_tunnel_status(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 10)
+      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
     return TunnelStatus(
       phase: dco_decode_tunnel_phase(arr[0]),
       path: dco_decode_tunnel_path(arr[1]),
@@ -4962,6 +4962,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       relayConnected: dco_decode_bool(arr[4]),
       relayUpMs: dco_decode_u_32(arr[5]),
       relayTrouble: dco_decode_tunnel_relay_trouble(arr[6]),
+      received: dco_decode_u_32(arr[7]),
+      linkReceived: dco_decode_u_32(arr[8]),
+      dialTimeoutMs: dco_decode_u_32(arr[9]),
     );
   }
 
@@ -6084,6 +6087,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_relayConnected = sse_decode_bool(deserializer);
     var var_relayUpMs = sse_decode_u_32(deserializer);
     var var_relayTrouble = sse_decode_tunnel_relay_trouble(deserializer);
+    var var_received = sse_decode_u_32(deserializer);
+    var var_linkReceived = sse_decode_u_32(deserializer);
+    var var_dialTimeoutMs = sse_decode_u_32(deserializer);
     return TunnelStatus(
       phase: var_phase,
       path: var_path,
@@ -6092,6 +6098,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       relayConnected: var_relayConnected,
       relayUpMs: var_relayUpMs,
       relayTrouble: var_relayTrouble,
+      received: var_received,
+      linkReceived: var_linkReceived,
+      dialTimeoutMs: var_dialTimeoutMs,
     );
   }
 
@@ -7137,6 +7146,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.relayConnected, serializer);
     sse_encode_u_32(self.relayUpMs, serializer);
     sse_encode_tunnel_relay_trouble(self.relayTrouble, serializer);
+    sse_encode_u_32(self.received, serializer);
+    sse_encode_u_32(self.linkReceived, serializer);
+    sse_encode_u_32(self.dialTimeoutMs, serializer);
   }
 
   @protected

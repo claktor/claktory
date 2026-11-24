@@ -2177,7 +2177,75 @@ fn run_update(factory: &Arc<Factory>, agent: &str, args: serde_json::Value) -> R
             )
         };
     }
+    // Done or dropped while cards about it still wait for the person: they
+    // may no longer apply, which only the agent can tell, so it's told
+    // which, and nothing is closed for it (friend bug #19).
+    for update in &updates {
+        let Some(status @ (Status::Done | Status::Dropped)) = update.status else { continue };
+        let Some(item) = now.iter().find(|item| item.id == update.id && item.status == status) else { continue };
+        let key = item_key(agent, item.id);
+        let owner = owning(agent, &item.owner);
+        for asker in std::iter::once(agent).chain((owner != agent).then_some(owner)) {
+            let cards = cards_about(factory, asker, &key);
+            if cards.is_empty() {
+                continue;
+            }
+            let (named, tools) = waiting_cards(&cards);
+            let (wait, they, them, apply) = if cards.len() == 1 { ("waits", "it", "it", "applies") } else { ("wait", "they", "them", "apply") };
+            let _ = if asker == agent {
+                write!(
+                    text,
+                    " #{} is {}, yet your {named} about it still {wait} for {person}: if {they} no longer {apply}, take {them} back with {tools}.",
+                    item.id,
+                    status.name()
+                )
+            } else {
+                let name = factory.lock().config.agent(asker).map_or_else(|| asker.to_owned(), |owner| owner.name.clone());
+                write!(
+                    text,
+                    " #{} is {}, yet {name}'s {named} about it still {wait} for {person}: tell {name}, so it takes {them} back if {they} no longer {apply}.",
+                    item.id,
+                    status.name()
+                )
+            };
+        }
+    }
     Ok(ToolResult::text(text, json!({"agent": agent, "items": items})))
+}
+
+/// Cards waiting for the person, as the agent reads them ("question 12 and
+/// proposal 3"), and the tools that take them back.
+fn waiting_cards(cards: &[Card]) -> (String, String) {
+    let named: Vec<String> = cards
+        .iter()
+        .map(|card| match card {
+            Card::Ask(id) => format!("question {id}"),
+            Card::Secret(id) => format!("request for a secret {id}"),
+            Card::Proposal(id) => format!("proposal {id}"),
+        })
+        .collect();
+    let mut tools: Vec<&str> = Vec::new();
+    for card in cards {
+        let tool = match card {
+            Card::Ask(_) => "ask_withdraw",
+            Card::Secret(_) => "secrets_request_cancel",
+            Card::Proposal(_) => "proposal_withdraw",
+        };
+        if !tools.contains(&tool) {
+            tools.push(tool);
+        }
+    }
+    (listed(&named, "and"), listed(&tools, "or"))
+}
+
+/// "a", "a and b", "a, b and c" (with `and`, or another word).
+fn listed(parts: &[impl AsRef<str>], and: &str) -> String {
+    let parts: Vec<&str> = parts.iter().map(AsRef::as_ref).collect();
+    match parts.as_slice() {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} {and} {last}", rest.join(", ")),
+    }
 }
 
 #[derive(Deserialize)]

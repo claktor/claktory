@@ -387,6 +387,39 @@ class ErrorCode extends $pb.ProtobufEnum {
   const ErrorCode._(super.value, super.name);
 }
 
+class BackendServiceState extends $pb.ProtobufEnum {
+  /// Nothing to say: not a Mac, the dev Claktory, or one run elsewhere for
+  /// tests.
+  static const BackendServiceState BACKEND_SERVICE_STATE_UNSPECIFIED =
+      BackendServiceState._(
+          0, _omitEnumNames ? '' : 'BACKEND_SERVICE_STATE_UNSPECIFIED');
+
+  /// Its service runs it, as installed.
+  static const BackendServiceState BACKEND_SERVICE_STATE_RUNNING =
+      BackendServiceState._(
+          1, _omitEnumNames ? '' : 'BACKEND_SERVICE_STATE_RUNNING');
+
+  /// It was started some other way (by hand, in Terminal), so it doesn't
+  /// start again by itself if it stops or the Mac restarts, and it can't
+  /// stop and start itself to move to another computer.
+  static const BackendServiceState BACKEND_SERVICE_STATE_BY_HAND =
+      BackendServiceState._(
+          2, _omitEnumNames ? '' : 'BACKEND_SERVICE_STATE_BY_HAND');
+
+  static const $core.List<BackendServiceState> values = <BackendServiceState>[
+    BACKEND_SERVICE_STATE_UNSPECIFIED,
+    BACKEND_SERVICE_STATE_RUNNING,
+    BACKEND_SERVICE_STATE_BY_HAND,
+  ];
+
+  static final $core.List<BackendServiceState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static BackendServiceState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const BackendServiceState._(super.value, super.name);
+}
+
 class UpdateCheckState extends $pb.ProtobufEnum {
   /// Nobody has checked since the backend started: show only the button.
   static const UpdateCheckState UPDATE_CHECK_STATE_NONE =
@@ -2569,6 +2602,16 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
       NeedsYouRecordKind._(
           15, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_CONVERSATION');
 
+  /// An admin agent (Rivet) let an agent only send to a pipe, or stopped
+  /// it, with pipes_sender (#414): outcome CHANGED, agent_id who did it,
+  /// subject_agent_id the agent let send or stopped, pipe_id the pipe,
+  /// title Claktory's sentence ("Rivet let Mike send to this pipe without
+  /// reading it", "Rivet stopped Mike sending to this pipe"). The
+  /// person's own changes in the pipe's settings aren't listed.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_PIPE_MEMBER =
+      NeedsYouRecordKind._(
+          16, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_PIPE_MEMBER');
+
   static const $core.List<NeedsYouRecordKind> values = <NeedsYouRecordKind>[
     NEEDS_YOU_RECORD_KIND_UNSPECIFIED,
     NEEDS_YOU_RECORD_KIND_QUESTION,
@@ -2586,10 +2629,11 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
     NEEDS_YOU_RECORD_KIND_APP_ACCESS,
     NEEDS_YOU_RECORD_KIND_MODEL,
     NEEDS_YOU_RECORD_KIND_CONVERSATION,
+    NEEDS_YOU_RECORD_KIND_PIPE_MEMBER,
   ];
 
   static final $core.List<NeedsYouRecordKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 15);
+      $pb.ProtobufEnum.$_initByValueList(values, 16);
   static NeedsYouRecordKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -2623,6 +2667,12 @@ class NeedsYouOutcome extends $pb.ProtobufEnum {
   static const NeedsYouOutcome NEEDS_YOU_OUTCOME_REPLIED =
       NeedsYouOutcome._(7, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_REPLIED');
 
+  /// The agent took the card back before the person decided (#407:
+  /// ask_withdraw, proposal_withdraw; QUESTION, REVIEW and PROPOSAL only):
+  /// decided_ms is when, agent_reason its reason, and `reply` is empty.
+  static const NeedsYouOutcome NEEDS_YOU_OUTCOME_WITHDRAWN =
+      NeedsYouOutcome._(8, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_WITHDRAWN');
+
   static const $core.List<NeedsYouOutcome> values = <NeedsYouOutcome>[
     NEEDS_YOU_OUTCOME_UNSPECIFIED,
     NEEDS_YOU_OUTCOME_ANSWERED,
@@ -2632,10 +2682,11 @@ class NeedsYouOutcome extends $pb.ProtobufEnum {
     NEEDS_YOU_OUTCOME_FAILED,
     NEEDS_YOU_OUTCOME_CHANGED,
     NEEDS_YOU_OUTCOME_REPLIED,
+    NEEDS_YOU_OUTCOME_WITHDRAWN,
   ];
 
   static final $core.List<NeedsYouOutcome?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 7);
+      $pb.ProtobufEnum.$_initByValueList(values, 8);
   static NeedsYouOutcome? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 

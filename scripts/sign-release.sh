@@ -60,6 +60,8 @@ SPEECH="$DIR/claktory-speech"
 [[ -f "$SPEECH" ]] || SPEECH=""
 VIDEO="$DIR/claktory-video-preview"
 [[ -f "$VIDEO" ]] || VIDEO=""
+RG="$DIR/tools/rg"
+[[ -f "$RG" ]] || RG=""
 
 # No root daemon ships (#371: the lid-closed helper was dropped for good).
 if [[ -e "$APP/Contents/Library/LaunchDaemons" || -e "$APP/Contents/Helpers/claktory-lid-helper" ]]; then
@@ -83,6 +85,7 @@ if ! $DRY_RUN && ! { [[ -n "$IDENTITY" ]] && $KEY; }; then
     case "$(basename "$helper")" in
       claktory-browser-host) codesign --force --sign - --identifier com.claktory.browser-host "$helper" ;;
       claktory-video-preview) codesign --force --sign - --identifier dev.factory.claktory-video-preview "$helper" ;;
+      tools) [[ ! -f "$helper/rg" ]] || codesign --force --sign - --identifier dev.factory.rg "$helper/rg" ;;
       *) codesign --force --sign - "$helper" ;;
     esac
   done
@@ -124,6 +127,12 @@ if [[ -n "$VIDEO" ]]; then
   sign --identifier dev.factory.claktory-video-preview "$VIDEO"
   codesign --verify --strict "$VIDEO"
 fi
+# Agents' tools (ripgrep, scripts/build-rg.sh): a stable identifier, no
+# entitlements.
+if [[ -n "$RG" ]]; then
+  sign --identifier dev.factory.rg "$RG"
+  codesign --verify --strict "$RG"
+fi
 # The supervisor's app: its identity is its bundle's (dev.factory.supervisor),
 # which a Developer Tools grant keeps across reinstalls.
 if [[ -n "$SUPERVISOR" ]]; then
@@ -138,6 +147,7 @@ if [[ -d "$HELPERS" ]]; then
   if [[ -n "$APPS_HOST" ]]; then cp "$APPS_HOST" "$HELPERS/claktory-apps"; fi
   if [[ -n "$SPEECH" ]]; then cp "$SPEECH" "$HELPERS/claktory-speech"; fi
   if [[ -n "$VIDEO" ]]; then cp "$VIDEO" "$HELPERS/claktory-video-preview"; fi
+  if [[ -n "$RG" ]]; then mkdir -p "$HELPERS/tools"; cp "$RG" "$HELPERS/tools/rg"; fi
   if [[ -n "$SUPERVISOR" ]]; then
     rm -rf "$HELPERS/Claktory Agents.app"
     ditto "$SUPERVISOR" "$HELPERS/Claktory Agents.app"
@@ -200,6 +210,7 @@ cp "$DIR/factoryd" "$STAGE/release/factoryd"
 if [[ -n "$APPS_HOST" ]]; then cp "$APPS_HOST" "$STAGE/release/claktory-apps"; fi
 if [[ -n "$SPEECH" ]]; then cp "$SPEECH" "$STAGE/release/claktory-speech"; fi
 if [[ -n "$VIDEO" ]]; then cp "$VIDEO" "$STAGE/release/claktory-video-preview"; fi
+if [[ -n "$RG" ]]; then mkdir -p "$STAGE/release/tools"; cp "$RG" "$STAGE/release/tools/rg"; fi
 if [[ -n "$SUPERVISOR" ]]; then
   ditto "$SUPERVISOR" "$STAGE/release/supervisor/$(basename "$SUPERVISOR")"
 fi

@@ -431,3 +431,80 @@ async fn the_real_host_runs_a_real_apps_views() {
     assert!(failed.error.contains("VALIDATION_FAILED at /version"), "{}", failed.error);
     client.ok(Request::CloseAppView(v1::CloseAppView { surface_id: shown.surface_id })).await;
 }
+
+/// Bruno 28347, Fugo 28393: each device has its own surface of a view
+/// (the app asks with "device" in the params, which is always the device
+/// the connection is from), the app is given only an opaque stand-in for
+/// it, the same every time, and the views an app may have open count per
+/// device, which a device can't get past by naming another each time.
+#[tokio::test]
+async fn each_device_has_its_own_surfaces_and_the_app_never_sees_its_id() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_app_view_grace(Duration::from_millis(100));
+    let stand = Stand::default();
+    factory.set_apps_host(stand.launcher());
+    let (mut client, _, _) = Client::connect(addr).await;
+    let bundle = clapp(MANIFEST, b"\0asm\x01\0\0\0 views", &SigningKey::from_bytes(&[9; 32]));
+    let install = |approve: bool, sha256: &str| {
+        Request::InstallLocalApp(v1::InstallLocalApp { path: String::new(), approve, sha256: sha256.into(), content: bundle.clone(), ..Default::default() })
+    };
+    let Body::AppPermissions(permissions) = client.request(install(false, "")).await.body else { panic!("permissions") };
+    client.ok(install(true, &permissions.sha256)).await;
+    stand.wait_for("load claktory:app@1.1").await;
+    let opened_with = |stand: &Stand| -> Vec<Value> {
+        stand.log().iter().filter_map(|line| line.strip_prefix("open main ")).map(|params| serde_json::from_str(params).expect("JSON")).collect()
+    };
+    let opened = |stand: &Stand, count: usize| {
+        let stand = stand.clone();
+        async move {
+            for _ in 0..200 {
+                if opened_with(&stand).len() >= count {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!("the app opened fewer than {count}: {:?}", stand.log());
+        }
+    };
+    let view = |params: &str| v1::OpenAppView { app_id: "charts".into(), view: "main".into(), params: params.into(), catalogs: vec![CATALOG.into()] };
+
+    // This Mac and a phone, the phone saying it's the Mac: a surface each,
+    // and the app sees neither id.
+    let mac = factory.app_viewer_for_test("");
+    let on_mac = surface(mac.open(&factory, &view(r#"{"device":"local","range":"7d"}"#)));
+    opened(&stand, 1).await;
+    let phone = factory.app_viewer_for_test("dev-0123456789");
+    let on_phone = surface(phone.open(&factory, &view(r#"{"device":"local","range":"7d"}"#)));
+    assert_ne!(on_mac.surface_id, on_phone.surface_id, "the phone can't take the Mac's");
+    assert_eq!(on_phone.params, r#"{"device":"dev-0123456789","range":"7d"}"#);
+    opened(&stand, 2).await;
+    let seen = opened_with(&stand);
+    let log = stand.log().join("\n");
+    assert!(!log.contains("dev-0123456789") && !log.contains("\"local\""), "{log}");
+    let (mac_seen, phone_seen) = (seen[0]["device"].as_str().expect("text"), seen[1]["device"].as_str().expect("text"));
+    assert!(mac_seen.starts_with("d-") && phone_seen.starts_with("d-") && mac_seen != phone_seen, "{seen:?}");
+    assert_eq!(seen[1]["range"], "7d");
+    // A connection that doesn't ask for its device's own shares one, as before.
+    let shared = surface(phone.open(&factory, &view(r#"{"range":"30d"}"#)));
+    assert_eq!(surface(mac.open(&factory, &view(r#"{"range":"30d"}"#))).surface_id, shared.surface_id);
+
+    // Gone and opened again later: the app sees the same stand-in.
+    drop(phone);
+    stand.wait_for(&format!("closed {}", on_phone.surface_id)).await;
+    let phone = factory.app_viewer_for_test("dev-0123456789");
+    let again = surface(phone.open(&factory, &view(r#"{"range":"7d","device":"dev-0123456789"}"#)));
+    assert_ne!(again.surface_id, on_phone.surface_id);
+    opened(&stand, 4).await;
+    assert_eq!(opened_with(&stand).last().expect("it")["device"], phone_seen);
+
+    // 16 views open on the phone, each naming another device: a 17th is
+    // refused, while the Mac still opens more.
+    for n in 1..16 {
+        surface(phone.open(&factory, &view(&format!(r#"{{"device":"fresh-{n}","n":{n}}}"#))));
+    }
+    let (code, why) = failure(&phone.open(&factory, &view(r#"{"device":"fresh-16","n":16}"#)));
+    assert_eq!((code, why.as_str()), (v1::ErrorCode::InvalidRequest, "The Charts app has 16 views open on this device already. Close one first."));
+    let more = surface(mac.open(&factory, &view(r#"{"device":"local","n":1}"#)));
+    assert!(more.surface_id.starts_with("charts-"));
+}

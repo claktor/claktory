@@ -41,6 +41,15 @@ impl Factory {
         }
     }
 
+    /// Stops the current reply without dropping what's queued, then records its end.
+    pub(crate) fn stop_run(&self, runtime: &mut Runtime) {
+        runtime.stopped = true;
+        if let Some(abort) = runtime.abort.take() {
+            abort.abort();
+        }
+        self.end_run(runtime, "stopped");
+    }
+
     /// Ends the agent's run, if it's in one; returns whether it was.
     pub(crate) fn end_run(&self, runtime: &mut Runtime, outcome: &str) -> bool {
         // The run reached them, whether or not it got to save them.

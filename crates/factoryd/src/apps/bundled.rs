@@ -72,7 +72,7 @@ impl Bundled {
             return Some(PathBuf::from(folder));
         }
         let release = factory.home.releases().join(crate::update::VERSION).join(FOLDER);
-        let beside = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join(FOLDER)));
+        let beside = crate::update::running_exe().and_then(|exe| Some(exe.parent()?.join(FOLDER)));
         [Some(release), beside].into_iter().flatten().find(|folder| folder.is_dir())
     }
 }

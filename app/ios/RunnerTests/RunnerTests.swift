@@ -218,9 +218,13 @@ struct VoiceTests {
     #expect(values.isExcludedFromBackup == true)
     let attributes = try FileManager.default.attributesOfItem(atPath: path)
     #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
-    #expect(
-      attributes[.protectionKey] as? FileProtectionType
-        == .completeUntilFirstUserAuthentication)
+    // The Simulator keeps no file-protection class (it reads nil there),
+    // so only a device can show it.
+    #if !targetEnvironment(simulator)
+      #expect(
+        attributes[.protectionKey] as? FileProtectionType
+          == .completeUntilFirstUserAuthentication)
+    #endif
     // Asked again, the same folder, still so.
     #expect(await messenger.call("factory/recorder", "voiceFolder") as? String == path)
   }

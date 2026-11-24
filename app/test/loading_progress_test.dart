@@ -13,6 +13,7 @@ Future<ValueNotifier<bool>> _show(
   required int size,
   Size screen = const Size(393, 852),
   String? note,
+  String? name,
 }) async {
   final connected = ValueNotifier(true);
   final harness = Harness(Workspace());
@@ -24,6 +25,7 @@ Future<ValueNotifier<bool>> _show(
       received: received,
       size: size,
       connected: connected,
+      name: name,
       note: note,
     ),
   );
@@ -54,10 +56,23 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await _show(tester, received: 2100000, size: 9400000);
     expect(find.text('Loading video… 2.1 MB of 9.4 MB'), findsOneWidget);
-    final bar = tester.widget<FractionallySizedBox>(
-      find.byType(FractionallySizedBox),
+    // Drawn that far, the bar's own height (#417: it was drawn with
+    // none, and never seemed to move).
+    final fill = tester.getSize(find.byKey(const ValueKey('loading-fill')));
+    expect(
+      fill.width,
+      closeTo(LoadingProgress.barWidth * 2100000 / 9400000, 0.01),
     );
-    expect(bar.widthFactor, closeTo(2100000 / 9400000, 1e-9));
+    expect(fill.height, 4);
+  });
+
+  testWidgets("the file's name is over it (#417)", (tester) async {
+    await _show(tester, received: 0, size: 0, name: 'river.mp4');
+    final name = tester.getRect(find.text('river.mp4'));
+    expect(
+      name.bottom,
+      lessThan(tester.getRect(find.text('Loading video…')).top),
+    );
   });
 
   testWidgets('while the connection is away it says it carries on once '

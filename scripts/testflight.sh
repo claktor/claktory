@@ -126,7 +126,8 @@ fi
 src="$(release_tree "$root" "$commit")"
 signing="$(mktemp -d)"
 trap 'rm -rf "$signing"; release_unlock' EXIT
-release_pub_cache
+release_inputs
+release_pub_get "$src/app"
 
 version="$(sed -n 's/^## v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' "$src/docs/CHANGELOG.md" | head -1)"
 if [ -z "$version" ]; then

@@ -41,6 +41,8 @@
 	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Speak your messages and answers to your agents. Claktory turns them into text.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Claktory saves videos and pictures you choose to your Photos.</string>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>

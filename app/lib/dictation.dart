@@ -26,6 +26,7 @@ import 'recorder.dart';
 import 'scope.dart';
 import 'voice.dart';
 import 'voice_keep.dart';
+import 'voice_session.dart';
 
 /// Why a recording couldn't become words, in the person's terms.
 class DictationFailure implements Exception {
@@ -174,7 +175,7 @@ enum DictationState { idle, recording, transcribing, unsent }
 /// What a field's dictation is for, so a recording kept on the device
 /// comes back to that field after a relaunch (#401).
 class DictationFor {
-  const DictationFor(this.key, this.label);
+  const DictationFor(this.key, this.label, {this.select});
 
   /// The same for as long as it's the same field, across launches (the
   /// kind of card and its id, say), and never another's.
@@ -183,6 +184,10 @@ class DictationFor {
   /// What it was for, in the person's words ("Your answer to June"), for
   /// when the field has gone: Settings → Voice lists it then.
   final String label;
+
+  /// Shows the conversation the field is in, for the floating bar's name
+  /// to go back to it (#409); none where there's no going back.
+  final Future<void> Function(Backend backend)? select;
 }
 
 /// [child] (a text field, editing [controller]) with a mic at its end: tap
@@ -225,7 +230,13 @@ class Dictation extends StatefulWidget {
 
 @visibleForTesting
 class DictationFieldState extends State<Dictation> {
-  final _voice = VoiceRecording();
+  /// The answer being said into this field, or one said into it before it
+  /// was built again (#409): it goes on when the field goes, the floating
+  /// bar finishing it.
+  late _FieldVoice _session;
+
+  VoiceRecording get _voice => _session.recording;
+
   var _state = DictationState.idle;
   String? _error;
 
@@ -249,7 +260,19 @@ class DictationFieldState extends State<Dictation> {
   @override
   void initState() {
     super.initState();
-    _voice.onEnded = _ended;
+    final keep = widget.keep;
+    final key = dictationVoiceKey(keep?.key ?? '${identityHashCode(this)}');
+    final live = activeVoice.value;
+    if (keep != null && live is _FieldVoice && live.key == key) {
+      // Said into this field before it went: it shows here again.
+      _session = live;
+      _state = DictationState.recording;
+    } else {
+      _session = _FieldVoice(key, keep?.label ?? 'Your answer');
+    }
+    _session
+      ..field = this
+      ..keep = keep;
   }
 
   @override
@@ -265,6 +288,9 @@ class DictationFieldState extends State<Dictation> {
     }
     _backend = backend;
     final voices = _voices = KeptVoices.of(backend);
+    _session
+      ..backend = backend
+      ..voices = voices;
     backend.connected.addListener(_connectedChanged);
     voices.addListener(_keptChanged);
     _takeKept();
@@ -273,7 +299,9 @@ class DictationFieldState extends State<Dictation> {
   @override
   void dispose() {
     _unlisten();
-    _voice.dispose();
+    // Being recorded, it goes on: the floating bar finishes or cancels it.
+    if (_session.field == this) _session.field = null;
+    if (!_session.live && _session.field == null) _session.dispose();
     _recordingFocus.dispose();
     super.dispose();
   }
@@ -334,6 +362,9 @@ class DictationFieldState extends State<Dictation> {
   /// then records.
   Future<void> _record() async {
     if (_state != DictationState.idle) return;
+    if (voiceBusy(_session.key) case final why?) {
+      return _set(DictationState.idle, error: why);
+    }
     final backend = AppScope.of(context);
     if (await deviceRecorder.access() == MicAccess.unavailable) {
       return _set(
@@ -347,6 +378,7 @@ class DictationFieldState extends State<Dictation> {
       return _set(DictationState.idle, error: why);
     }
     if (!await readyForVoice(context) || !mounted) return;
+    _session.from(context);
     _set(DictationState.recording);
     if (!await _voice.start()) {
       return _set(DictationState.idle, error: _voice.error);
@@ -356,8 +388,10 @@ class DictationFieldState extends State<Dictation> {
     _recordingFocus.requestFocus();
   }
 
-  Future<void> _cancel() async {
-    await _voice.cancel();
+  Future<void> _cancel() => _session.cancel();
+
+  /// Cancelled, here or from the floating bar: the field as it was.
+  void _cancelled() {
     _set(DictationState.idle);
     widget.focusNode?.requestFocus();
   }
@@ -405,8 +439,12 @@ class DictationFieldState extends State<Dictation> {
     // Its field closed meanwhile, or the person deleted it: what came is
     // for no one here (the recording stays kept until a field has it).
     bool gone() => !mounted || _kept != kept;
+    // Asked for already, as it was finished with its field gone.
+    final heard = kept.heard;
+    kept.heard = null;
     try {
-      final words = (await transcribeRecording(backend, kept)).trim();
+      final words = (await (heard ?? transcribeRecording(backend, kept)))
+          .trim();
       if (gone()) return;
       _drop(kept);
       if (words.isEmpty) {
@@ -526,7 +564,14 @@ class DictationFieldState extends State<Dictation> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => VoiceInPlace(
+    // While it's in view, the field shows its recording itself: the
+    // floating bar steps aside.
+    session: _session,
+    child: _build(context),
+  );
+
+  Widget _build(BuildContext context) {
     final workspace = AppScope.of(context).workspace;
     return ListenableBuilder(
       listenable: workspace,
@@ -677,6 +722,136 @@ class _Unsent extends StatelessWidget {
 
 /// In the field's place while recording: a live dot, the waveform as it's
 /// heard, the time, Cancel and Done. Esc cancels, Return is Done.
+/// An answer said into a [Dictation]'s field (#409): it goes on when the
+/// field goes (another conversation, a page over it), the floating bar
+/// ([VoiceBar]) saying so, and Done and Cancel work without it. Done with
+/// the field gone keeps the recording on the device for it (#401) and
+/// asks for its words at once: they go in when the field is back.
+class _FieldVoice extends VoiceSession {
+  _FieldVoice(String key, this.title)
+    : super(key: key, recording: VoiceRecording()) {
+    recording.onEnded = _ended;
+  }
+
+  @override
+  final String title;
+
+  @override
+  bool get message => false;
+
+  VoidCallback? _open;
+
+  @override
+  VoidCallback? get open => _open;
+
+  /// It's being started from [context]'s field: the bar's name goes back
+  /// to the conversation it's in, where there's one.
+  void from(BuildContext context) {
+    final select = keep?.select;
+    _open = select == null ? null : voiceOpener(context, select);
+  }
+
+  /// The field that has it now, if any, and the latest one's Claktory.
+  DictationFieldState? field;
+  DictationFor? keep;
+  Backend? backend;
+  KeptVoices? voices;
+
+  DictationFieldState? get _here {
+    final field = this.field;
+    return field != null && field.mounted ? field : null;
+  }
+
+  @override
+  Future<bool> send() async {
+    if (_here case final field?) {
+      // Its field is there but out of sight (behind a phone's drawer, say):
+      // the bar says where the words go (Zucchero's row 348).
+      sayAway(wordsGoIn(title));
+      await field._done();
+      return true;
+    }
+    return _keepForField();
+  }
+
+  @override
+  Future<void> cancel() async {
+    await recording.cancel();
+    _here?._cancelled();
+  }
+
+  /// Done with the field gone: kept for it, and its words asked for.
+  Future<bool> _keepForField() async {
+    final voices = this.voices;
+    final backend = this.backend;
+    final made = await recording.finish();
+    if (made == null || voices == null || backend == null) return false;
+    final kept = KeptVoice(
+      path: made.path,
+      duration: made.duration,
+      claktory: voices.claktory,
+      kind: KeptKind.dictation,
+      target: keep?.key ?? '',
+      label: keep?.label ?? '',
+      kept: recording.kept,
+    );
+    final file = File(made.path);
+    if (!file.existsSync() || file.lengthSync() == 0) {
+      unawaited(kept.delete());
+      sayAway('Nothing was recorded.');
+      return false;
+    }
+    await voices.add(kept);
+    // For its field to take when it's back (Settings → Voice lists it
+    // meanwhile).
+    voices.release(kept);
+    if (backend.connected.value) {
+      kept.heard = transcribeRecording(backend, kept)..ignore();
+    }
+    sayAway(keptForField);
+    return true;
+  }
+
+  /// The recording stopped by itself with its field gone: at its time
+  /// limit (or a call) what was said is kept for it; if the microphone
+  /// failed, it's gone.
+  void _ended(RecordingEnd end) {
+    if (_here case final field?) return field._ended(end);
+    if (end == RecordingEnd.error) {
+      unawaited(recording.cancel());
+      sayAway('The recording stopped because the microphone failed.');
+      return;
+    }
+    unawaited(_keepForField());
+  }
+
+  @override
+  void ended() {
+    if (field == null) dispose();
+  }
+}
+
+/// The [VoiceSession.key] of an answer being said into the field kept as
+/// [key] ([DictationFor.key]).
+String dictationVoiceKey(String key) => 'dictation:$key';
+
+/// Whether an answer is being said now into the field kept as [key], with
+/// the field gone: a field that opens on a tap opens itself for it.
+bool dictationLive(String key) =>
+    activeVoice.value?.key == dictationVoiceKey(key);
+
+/// What the floating bar says when an answer is finished there, its field
+/// gone.
+const keptForField = 'Done. Your words go in when you go back to it.';
+
+/// Done from the floating bar with its field still there, out of sight:
+/// "Done. Your words go in your answer to June."
+String wordsGoIn(String title) {
+  final what = title.startsWith('Your ') ? 'your ${title.substring(5)}' : title;
+  final end = RegExp(r'[.?!]$').hasMatch(what) ? '' : '.';
+  return 'Done. Your words go in $what$end';
+}
+
 class _RecordingLine extends StatelessWidget {
   const _RecordingLine({
     required this.voice,

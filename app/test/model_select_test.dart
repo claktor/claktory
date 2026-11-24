@@ -22,7 +22,7 @@ Workspace _workspace() => Workspace(
     Model(id: 'anthropic/claude-sonnet-5', name: 'Claude Sonnet 5'),
     Model(id: 'openrouter/anthropic/claude-opus-5', name: 'Claude Opus 5'),
     Model(id: 'openrouter/openai/gpt-5.5', name: 'OpenAI: GPT-5.5'),
-    Model(id: 'openai-codex/gpt-5.5', name: 'GPT-5.5'),
+    Model(id: 'openai-codex/gpt-5.5', name: 'GPT-5.5', imageOutput: true),
   ],
 );
 
@@ -69,6 +69,17 @@ void main() {
       find.text('Claude Opus 5  OpenRouter', findRichText: true),
       findsOneWidget,
     );
+  });
+
+  testWidgets('a model that can make images says so in the list (#403), '
+      'and only that one', (tester) async {
+    await _show(tester);
+    await _open(tester);
+    expect(
+      find.text('GPT-5.5  $modelMakesImages', findRichText: true),
+      findsOneWidget,
+    );
+    expect(find.textContaining(modelMakesImages, findRichText: true), findsOne);
   });
 
   testWidgets("the list is grouped by provider in Settings' order", (

@@ -99,6 +99,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "devices",
             "handoff",
             "highlight",
+            "images",
             "memory",
             "memory:factory",
             "models",
@@ -107,6 +108,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "pipes",
             "resources",
             "secrets",
+            "settings",
             "swarm",
             "tasks",
             "tree",
@@ -114,7 +116,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "web"
         ]
     );
-    let manual = &view.workspace.extensions[12];
+    let manual = &view.workspace.extensions[13];
     assert_eq!((manual.name.as_str(), manual.base.as_str(), manual.admin_default), ("Claktory manual", "memory", true));
     let records = &view.workspace.extensions[7];
     assert_eq!((records.name.as_str(), records.base.as_str(), records.admin_default), ("Claktory's records", "database", true));
@@ -125,9 +127,9 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
     assert!(rivet.options["admin"].on && !rivet.options["reachable"].on, "Rivet is the admin agent, and no one messages it");
     assert!(view.agent("rivet").extensions[10].enabled && !builder[10].enabled, "a new Factory's Rivet points at things");
     assert!(view.agent("rivet").extensions[8].enabled && !builder[8].enabled, "admins add the person's devices");
-    assert!(view.agent("rivet").extensions[13].enabled && !builder[13].enabled, "admins put agents on models for the person");
-    assert!(view.agent("rivet").extensions[15].enabled && !builder[15].enabled, "admins move Claktory for the person");
-    assert!(view.agent("rivet").extensions[16].enabled && !builder[16].enabled, "admins start pipes for the person");
+    assert!(view.agent("rivet").extensions[14].enabled && !builder[14].enabled, "admins put agents on models for the person");
+    assert!(view.agent("rivet").extensions[16].enabled && !builder[16].enabled, "admins move Claktory for the person");
+    assert!(view.agent("rivet").extensions[17].enabled && !builder[17].enabled, "admins start pipes for the person");
     assert!(view.agent("rivet").extensions[1].enabled && !builder[1].enabled, "admins propose app access for the person");
     assert!(builder[4].enabled, "comments on unless turned off");
     assert!(

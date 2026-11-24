@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
@@ -6,22 +8,24 @@ import 'package:flutter/widgets.dart';
 import 'package:markdown/markdown.dart' as md;
 
 import 'agent_name.dart';
-import 'backend.dart' show fireAndLog;
+import 'backend.dart' show RequestFailure, fireAndLog;
 import 'characters/character.dart';
 import 'controls.dart';
-import 'explorer.dart' show shortPath;
+import 'explorer.dart' show openFile, shortPath;
 import 'extensions.dart' show StatusMark, statusLabel;
 import 'find.dart' show FindHighlight;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
 import 'mobile/metrics.dart';
 import 'mobile/navigation.dart' show PhoneRoutesScope;
+import 'paced.dart' show PreviewBox;
 import 'layout.dart';
 import 'loopback_forward.dart' show openLink;
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart' show Unselectable;
+import 'share_files.dart' show ShareHold;
 import 'state.dart';
 import 'transcript.dart' show AgentTints;
 import 'visible_codes.dart';
@@ -70,19 +74,24 @@ ToolView? toolViewFor(ToolCallInfo call) {
 /// [proseCodes]): an agent chose them (Fugo).
 class ToolCallInfo {
   factory ToolCallInfo(ToolCall call, {int seq = 0}) {
-    final input = _object(call.input);
-    final details = _object(call.details) ?? const <String, Object?>{};
+    final rawInput = _raw(call.input);
+    final rawDetails = _raw(call.details) ?? const <String, Object?>{};
+    final input = _shown(rawInput);
+    final details = _shown(rawDetails) ?? const <String, Object?>{};
     // A tool of an extension turned on mid-context, called through
     // extension_call {tool, args}: shown as that tool.
     final inner = input?['tool'];
     if (call.name == 'extension_call' && inner is String) {
       final args = input?['args'];
+      final rawArgs = rawInput?['args'];
       return ToolCallInfo._(
         call,
         seq,
         name: inner,
         input: args is Map<String, Object?> ? args : const {},
         details: details,
+        rawInput: rawArgs is Map<String, Object?> ? rawArgs : const {},
+        rawDetails: rawDetails,
       );
     }
     return ToolCallInfo._(
@@ -91,6 +100,8 @@ class ToolCallInfo {
       name: call.name,
       input: input,
       details: details,
+      rawInput: rawInput,
+      rawDetails: rawDetails,
     );
   }
 
@@ -100,6 +111,8 @@ class ToolCallInfo {
     required this.name,
     required this.input,
     required this.details,
+    required this.rawInput,
+    required this.rawDetails,
   });
 
   final ToolCall call;
@@ -116,6 +129,22 @@ class ToolCallInfo {
   /// What the result says for the app; empty while it runs, when it failed,
   /// and for calls from before details.
   final Map<String, Object?> details;
+
+  /// [input] and [details] as the agent wrote them, hidden characters and
+  /// all: never to show, only to act on (a file's path, to open or share
+  /// it, Zucchero's row 343).
+  final Map<String, Object?>? rawInput;
+  final Map<String, Object?> rawDetails;
+
+  /// The string [key] of the details, else of the input, as written: what
+  /// a file's path really is, where the shown one has codes for what's
+  /// hidden in it.
+  String actual(String key) {
+    final value = rawDetails[key];
+    if (value is String && value.isNotEmpty) return value;
+    final written = rawInput?[key];
+    return written is String ? written : '';
+  }
 
   bool get running =>
       call.state == ToolCallState.TOOL_CALL_STATE_PENDING ||
@@ -142,17 +171,18 @@ class ToolCallInfo {
   /// The list argument [key]; empty while it's being written.
   List<Object?> list(String key) => _list(input?[key]);
 
-  static Map<String, Object?>? _object(String json) {
+  static Map<String, Object?>? _raw(String json) {
     if (json.trim().isEmpty) return null;
     try {
       final decoded = jsonDecode(json);
-      return decoded is Map<String, Object?>
-          ? visibleCodesIn(decoded) as Map<String, Object?>
-          : null;
+      return decoded is Map<String, Object?> ? decoded : null;
     } on FormatException {
       return null;
     }
   }
+
+  static Map<String, Object?>? _shown(Map<String, Object?>? raw) =>
+      raw == null ? null : visibleCodesIn(raw) as Map<String, Object?>;
 }
 
 List<Object?> _list(Object? value) => value is List ? value : const [];
@@ -223,6 +253,7 @@ final Map<String, ToolView> toolViews = {
     applies: (call) => _string(call.details['task']).isNotEmpty,
   ),
   'show': ToolView(icon: 'panels-top-left', line: (_, call) => _ShowLine(call)),
+  'image_generate': ToolView(icon: 'image', line: _imageLine, body: _imageBody),
   'web_search': ToolView(
     icon: 'globe',
     line: _webSearchLine,
@@ -1735,7 +1766,9 @@ class _ShowLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Shown with codes for what's hidden in it; opened and shared as it is.
     final path = _string(call.details['path']).ifEmpty(call.argument('path'));
+    final actual = call.actual('path');
     final slash = path.lastIndexOf('/');
     final name = slash < 0 ? path : path.substring(slash + 1);
     final folder = slash <= 0 ? '' : shortPath(path.substring(0, slash));
@@ -1755,11 +1788,15 @@ class _ShowLine extends StatelessWidget {
               children: [
                 ConstrainedBox(
                   constraints: BoxConstraints(maxWidth: constraints.maxWidth),
-                  child: _Link(
-                    text: name,
-                    onTap: call.done && path.isNotEmpty
-                        ? () => _focus(context, call, path)
-                        : null,
+                  // Touched and held: Share… (#418).
+                  child: ShareHold(
+                    path: call.done ? actual : '',
+                    child: _Link(
+                      text: name,
+                      onTap: call.done && actual.isNotEmpty
+                          ? () => _focus(context, call, actual)
+                          : null,
+                    ),
                   ),
                 ),
                 if (folder.isNotEmpty)
@@ -1816,6 +1853,218 @@ class _ShowLine extends StatelessWidget {
       return;
     }
     fireAndLog(backend.setLayout(agent.id, shown.root));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Images (#403).
+
+/// `image_generate`: what it was asked for, and the picture it made.
+Widget _imageLine(BuildContext context, ToolCallInfo call) => ToolLine(
+  call.running
+      ? 'Making an image'
+      : call.failed
+      ? "Couldn't make an image"
+      : 'Made an image',
+  subject: (call.argument('prompt') ?? '').replaceAll(RegExp(r'\s+'), ' '),
+);
+
+/// While it works, how long it can take; once made, the picture. A refusal
+/// is the call's output, which every failed view shows under its line.
+Widget? _imageBody(BuildContext context, ToolCallInfo call) {
+  if (call.running) {
+    final palette = Palette.of(context);
+    return Text(
+      'It can take up to 2 minutes.',
+      style: TypeScale.of(context).caption.copyWith(color: palette.textFaint),
+    );
+  }
+  // The file itself, every character as it is (Zucchero's row 343).
+  final path = call.actual('path');
+  if (!call.done || path.isEmpty) return null;
+  return Align(
+    alignment: AlignmentDirectional.centerStart,
+    // Touched and held: Share… (#418), to save it to Photos say.
+    child: ShareHold(
+      path: path,
+      child: MadeImage(
+        path: path,
+        width: _int(call.details['width']) ?? 0,
+        height: _int(call.details['height']) ?? 0,
+        label: _string(call.details['prompt']).ifEmpty(call.argument('prompt')),
+        agentId: ToolViewScope.of(context)?.agentId ?? '',
+      ),
+    ),
+  );
+}
+
+/// A picture an agent made, at most [side] points either way, the room
+/// for it kept from its size before it comes; a click or tap opens it in
+/// the image viewer. It's read as a preview made for its size (#379), so a
+/// phone doesn't fetch the whole PNG to show a thumbnail.
+class MadeImage extends StatefulWidget {
+  const MadeImage({
+    super.key,
+    required this.path,
+    required this.width,
+    required this.height,
+    required this.label,
+    required this.agentId,
+  });
+
+  final String path;
+
+  /// Its pixels, from the call's details; 0 when they don't say.
+  final int width;
+  final int height;
+
+  /// What it shows, for VoiceOver: the prompt.
+  final String label;
+
+  /// Whose conversation it's in, whose panes it opens in.
+  final String agentId;
+
+  /// The most it takes either way.
+  static const side = 320.0;
+
+  /// Pictures read, by path, the latest last: a conversation scrolled back
+  /// and forth doesn't read them again.
+  static final _cache = <String, Uint8List>{};
+  static const _kept = 40;
+
+  @override
+  State<MadeImage> createState() => _MadeImageState();
+}
+
+class _MadeImageState extends State<MadeImage> {
+  Uint8List? _bytes;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    final cached = MadeImage._cache.remove(widget.path);
+    if (cached != null) {
+      MadeImage._cache[widget.path] = cached;
+      _bytes = cached;
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_bytes == null && _error == null && !_reading) {
+      _reading = true;
+      unawaited(_read(MediaQuery.devicePixelRatioOf(context)));
+    }
+  }
+
+  var _reading = false;
+
+  Future<void> _read(double ratio) async {
+    final side = (MadeImage.side * ratio).round();
+    final PreviewBox box = (width: side, height: side);
+    try {
+      final content = await AppScope.of(context)
+          .readFile(widget.path, preview: box);
+      if (content.error.isNotEmpty) throw RequestFailure(content.error);
+      if (content.truncated) {
+        throw const RequestFailure("This image is too big to show here.");
+      }
+      final bytes = Uint8List.fromList(content.data);
+      MadeImage._cache[widget.path] = bytes;
+      while (MadeImage._cache.length > MadeImage._kept) {
+        MadeImage._cache.remove(MadeImage._cache.keys.first);
+      }
+      if (mounted) setState(() => _bytes = bytes);
+    } on RequestFailure catch (failure) {
+      if (mounted) {
+        setState(
+          () => _error = failure.message.ifEmpty("Couldn't load the image."),
+        );
+      }
+    }
+  }
+
+  void _open() {
+    final scope = context.getInheritedWidgetOfExactType<AppScope>();
+    final agent = scope?.backend.workspace.agent(widget.agentId);
+    if (scope == null || agent == null) {
+      openFile(context, widget.path);
+      return;
+    }
+    final backend = scope.backend;
+    final phone = context
+        .getInheritedWidgetOfExactType<PhoneRoutesScope>()
+        ?.routes;
+    if (phone != null && phone.showFile(agent.id, widget.path)) return;
+    final root = layoutOf(agent);
+    final shown = open(root, widget.path);
+    if (identical(shown.root, root)) {
+      final key = 'pane:${agent.id}:${shown.paneId}';
+      backend.highlights.pointedAt.value = (keys: [key], at: DateTime.now());
+      backend.highlights.glow(key, [agentColor(agent.color)]);
+      return;
+    }
+    fireAndLog(backend.setLayout(agent.id, shown.root));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final error = _error;
+    if (error != null) {
+      return Text(
+        error,
+        style: TypeScale.of(context).caption.copyWith(color: palette.textMuted),
+      );
+    }
+    final bytes = _bytes;
+    final ratio = widget.width > 0 && widget.height > 0
+        ? widget.width / widget.height
+        : 1.0;
+    // Fitted in side × side, its shape kept.
+    final width = ratio >= 1 ? MadeImage.side : MadeImage.side * ratio;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: Space.xs),
+      child: Semantics(
+        image: true,
+        button: true,
+        label: widget.label,
+        excludeSemantics: true,
+        child: Pressable(
+          onTap: _open,
+          builder: (context, hovered) => ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: width),
+            child: AspectRatio(
+              aspectRatio: ratio,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: palette.sidebar,
+                  borderRadius: BorderRadius.circular(Radii.panel),
+                  border: Border.all(color: palette.hairline),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: bytes == null
+                    ? const SizedBox.expand()
+                    : Image.memory(
+                        bytes,
+                        fit: BoxFit.cover,
+                        gaplessPlayback: true,
+                        errorBuilder: (context, error, stack) => Center(
+                          child: Text(
+                            "Couldn't show the image.",
+                            style: TypeScale.of(context).caption
+                                .copyWith(color: palette.textMuted),
+                          ),
+                        ),
+                      ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

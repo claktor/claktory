@@ -23,6 +23,7 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'recorder.dart';
 import 'resources.dart' show formatBytes;
 import 'scope.dart';
+import 'mobile/metrics.dart';
 import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'settings_view.dart' show SettingRequests, SettingRow;
 import 'usage.dart' show formatAge;
@@ -121,6 +122,8 @@ class VoiceRecording extends ChangeNotifier {
       // Straight into the folder it's kept in until sent (#401).
       final into = await newRecordingPath(now());
       _into = into;
+      // What earlier recordings left behind unknown to the app goes now.
+      unawaited(sweepEmptyRecordings());
       _events = _mic.events.listen(_heard);
       try {
         await _mic.start(into.path);
@@ -166,7 +169,16 @@ class VoiceRecording extends ChangeNotifier {
     _events = null;
     notifyListeners();
     await events?.cancel();
-    return _mic.stop();
+    final made = await _mic.stop();
+    // Nothing in it (too short for the microphone to make a file of): its
+    // folder goes, as a cancelled one's, and the caller says so.
+    if (made == null || !_hasSound(made.path)) _dropFolder();
+    return made;
+  }
+
+  static bool _hasSound(String path) {
+    final file = File(path);
+    return file.existsSync() && file.lengthSync() > 0;
   }
 
   /// Stops and throws the recording away.
@@ -220,6 +232,97 @@ class VoiceRecording extends ChangeNotifier {
 String voiceDuration(Duration duration) {
   final seconds = duration.inSeconds;
   return '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}';
+}
+
+/// A voice note waiting in a message box (#425), recorded while the box
+/// had something written: a chip over the text, as a file's is, with the
+/// mic, "Voice note" and its length, and × to take it out. It goes with
+/// the text when the box is sent.
+class VoiceNoteChip extends StatelessWidget {
+  const VoiceNoteChip({
+    super.key,
+    required this.duration,
+    required this.onRemove,
+  });
+
+  final Duration duration;
+  final VoidCallback onRemove;
+
+  static const label = 'Voice note';
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    // On a phone, a finger's size, its × too, as a file's chip.
+    final phone = isPhoneLayout(context);
+    return Container(
+      height: phone ? Touch.target : 28,
+      decoration: BoxDecoration(
+        color: palette.canvas,
+        borderRadius: BorderRadius.circular(Radii.control),
+        border: Border.all(color: palette.hairline),
+      ),
+      padding: const EdgeInsets.only(left: Space.s, right: 2),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Semantics(
+            container: true,
+            label: '$label, ${voiceDuration(duration)}',
+            excludeSemantics: true,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ExtensionGlyph(
+                  icon: 'mic',
+                  name: label,
+                  color: palette.textMuted,
+                  size: 14,
+                ),
+                const SizedBox(width: Space.xs + 2),
+                Text(
+                  label,
+                  maxLines: 1,
+                  style: (phone ? type.secondary : TextStyles.label).copyWith(
+                    color: palette.text,
+                  ),
+                ),
+                const SizedBox(width: Space.xs + 2),
+                Text(
+                  voiceDuration(duration),
+                  style: type.caption.copyWith(
+                    color: palette.textFaint,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Pressable(
+            onTap: onRemove,
+            builder: (context, hovered) => Semantics(
+              container: phone,
+              button: true,
+              label: 'Remove voice note',
+              onTap: phone ? onRemove : null,
+              child: SizedBox.square(
+                dimension: phone ? Touch.target : 24,
+                child: Center(
+                  child: ExtensionGlyph(
+                    icon: 'x',
+                    name: 'Remove',
+                    color: hovered ? palette.text : palette.textFaint,
+                    size: phone ? 16 : 12,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// What shows in the message box's place while recording: a live dot, the

@@ -83,7 +83,7 @@ sha256           32 bytes, the content's SHA-256 (files only)
 - `path` is relative, `/`-separated, with no `.`, `..` or empty parts. A
   reader refuses anything else, and a symlink whose `target` is absolute or
   leaves the bundle's tree.
-- `mode` is the Unix permission bits (`0o600` for keys: keep them).
+- `mode` is the Unix permission bits (`0o600` for keys: keep them). The target gives a file them when a round leaves it whole, and makes it its owner's to write again before a later round writes it (friend bug #21: files the source has read-only), so it ends with the source's mode, less any setuid, setgid or sticky bit, which a move never carries.
 - The first record is always the file `manifest.json`.
 - The hash after each file is checked as it's written; a file whose hash
   doesn't match fails the whole unpack.
@@ -277,6 +277,7 @@ claktory-move://?e=<endpoint id>&s=<secret: 64 hex>&m=<machine>&v=<version>&o=<o
 
 - `s` is 32 random bytes, kept beside the key, so running receive again shows the same code. A pairing that fails (digits turned down on either side, or the source gone before both confirmed) replaces it, and the new code is shown: whoever saw the old one can't ask again.
 - The code has no expiry, and it's one-time: the first source key that proves the secret and has the digits confirmed on both sides claims it, and only that key can reconnect after that, to resume. While one source is pairing, another is turned away; a decline on either side frees the code again.
+- A source starts each try of a move with a new key, so after a failed try the same computer comes back with another one (friend bug #23). While the claimed key isn't connected and nothing here is switched over (the import hasn't got past Prepare), a new key from the computer with the claimed machine name is let in as a new try: `welcome` with `resumed: false`, the person told it's starting again, and the digits confirmed on both sides once more. Confirmed, it claims the code in place of the old key, and its plan and rounds start over onto what's staged, which stays. Any other machine name, or a move already being put in place, gets `failed` as before.
 - The target talks to one source at a time: any other connection, while one is pairing or moving, gets `failed` ("Another computer is moving its Claktory here right now.") and no digits are shown for it. The source that claimed the code is the exception: a new connection from its key (it restarted, or its connection broke without a word) takes the place of its session at once, so it never waits for the old one to time out. An import or commit the old session started runs on, and the new session waits for it; a `commit` the source sent but didn't hear `done` for gets `done` again.
 - `m`, `v`, `o` and `h` let the source's app say "Move to cloud-box (Linux x86_64)" and refuse an older target before it dials.
 - Values are percent-encoded as in pairing codes (`remote::code_values`).
@@ -296,7 +297,7 @@ claktory-move://?e=<endpoint id>&s=<secret: 64 hex>&m=<machine>&v=<version>&o=<o
    - `failed {why}`, for any of: a wrong secret (after a one-second pause), a code another source key claimed, a target Claktory that's running or has work in it, a network disk, or a target older than the source.
 3. **Digits.** Both sides work them out; they're never sent. SHA-256 of `"claktory move\n{target id}\n{source id}\n{secret hex}"`; its first 4 bytes, big-endian, modulo 1 000 000; shown as "123 456". A source that copied the code has another key, so it shows other digits.
 4. Each side sends `confirmed {}` once its person has confirmed the digits: in the app on the source, and on the target's terminal. Either side may send `failed` instead.
-5. A reconnect by the key that already claimed the code skips the digits: `welcome` has `resumed: true`. Any other key is then turned away with `failed`, even with the right secret.
+5. A reconnect by the key that already claimed the code skips the digits: `welcome` has `resumed: true`. Any other key is then turned away with `failed`, even with the right secret, except the same computer starting its move again (above), which pairs anew.
 
 ### 2. Plan and checks
 
@@ -340,13 +341,13 @@ On the source:
 1. **Pre-copy, while agents work.** Rounds run in the normal backend, reading the Claktory live as a plain export does. Older conversation segments don't change, so later rounds send little. Pre-copy ends when a round sends less than 64 MiB or takes under 30 seconds, after at most 5 rounds.
 2. **Freeze.** The source writes `<home>/moving/state.json` (phase `frozen`, the code, the export id), then exits the way an update does: runs are left open and every transcript is written. The supervisor starts it again, and at start, `moving/state.json` comes before everything else, `moved.json` included:
    - In **frozen mode** the backend opens no Factory, runs no agent and starts no identity endpoint. It answers the app with the move's progress.
-   - Background tasks are stopped.
+   - Background tasks are stopped, except the receive side of a move an agent started, when it runs as one of that agent's own tasks (its command says `receive`): the move needs it (friend bug #22). Rivet's recipe starts receive detached on the target anyway, so the freeze can't stop it.
    - Agents' steps that were under way show "Interrupted", as after an update. On the target they carry on from there (the runs are open, so they resume).
 3. **Final round.** From frozen mode, the source dials again (`resumed: true`) and sends the last round (`final: true`). SQLite databases are snapshotted again; git bundles and patches are made again.
 
 ### 5. Import, READY, commit
 
-1. After the final round, the target runs import from Prepare to Verify. Meanwhile it streams `progress {step, text}`.
+1. After the final round, the target runs import from Prepare to Verify. Meanwhile it streams `progress {step, text}`. If the connection drops, the source dials again for up to 30 minutes while the target answers (even with `failed`, turning it away for now), but gives up after two minutes in which nothing answers at all, saying receive has likely stopped there, and unfreezes.
 2. It then sends `ready {old_app_code}` or `failed {why}`. A failure before the home was switched over keeps what's staged, so the source can try again; one after it undoes the import here, and receive ends.
    - A source that reconnects after `ready` gets `ready` again.
    - Until it's committed, the target is never started: import's `state.json` stays, so its backend refuses to start.
@@ -387,7 +388,7 @@ On the source:
   fence): Welcome, then a Workspace with only `move` and `version`, again on
   every change. CancelMove is taken while `can_cancel`; everything else is
   refused. It starts no Factory, no tunnel and no agent, and stops leftover
-  background tasks first.
+  background tasks first (all but the moving agent's receive task).
 - A failure or cancel in frozen mode deletes `moving/` and hands the vault's
   key back to the supervisor, so the Claktory starts again unlocked. A
   failure, in frozen mode or before it, is kept in `move-failed.json`
@@ -404,7 +405,8 @@ prints each round. Instead of frozen mode it freezes the way `--final`
 does: it stops the service (and turns it off) and its background tasks,
 sends the final round itself, and starts the service again if anything
 fails before `commit`. A dropped connection is dialed again for two
-minutes before a round gives up; after the fence it's dialed again until
+minutes before a round gives up (during import, two minutes with no
+answer at all); after the fence it's dialed again until
 `done`. Ctrl-C before the fence cancels the move.
 
 ### 6. After the move

@@ -159,7 +159,11 @@ code (a Claktory's, a device's, the web pages', Delete account's among them)
 works as above, with the same request, 15 minutes, 5 tries, limits and
 answers, except:
 - no code is emailed, and nothing else is sent to it (unlock and move
-  notices included); the code is the fixed one;
+  notices included), and its unlocks are recorded as not emailed, so its
+  account page never says one was; the code is the fixed one;
+- no per-email limits (5 sign-ins an hour, 20 a day): they're for the
+  emails sign-ins send, and a reviewer may sign in on many devices. The
+  per-IP limit (30 a day) stays, and so does the lock below;
 - 5 wrong codes in an hour, counted by the email and by the address they
   come from, across sign-ins, lock it for the rest of the hour: every code,
   the right one too, is `400 wrong_code`, and a new start is `429
@@ -177,7 +181,7 @@ After a restart. `epoch` is optional: without it, the current epoch's share;
 with it, that epoch's, which may be the current one or the one before it
 only (else `400 invalid_request`): a backend signed in again while its vault
 was locked needs the old share once, to reseal its vault under the new one. Each release is recorded with the IP (kept 30 days) and
-whether the account was emailed about it ("Mac mini unlocked its secrets"), which happens only when it's unusual (#412):
+whether the account was emailed about it ("Mac mini unlocked its secrets"; not when the email couldn't be sent), which happens only when it's unusual (#412):
 - from a network none of this Claktory's releases in the last 30 days came from (an IPv4 /24, an IPv6 /48; an IPv4 address
   mapped into IPv6 counts as the IPv4 one), which also covers the first release after 30 days or more without one;
 - or asking for the epoch before the current one after the current one's share was released (a copy of its disk from before
@@ -630,6 +634,100 @@ Claktory's mark, as sign-in emails sent before v0.1.16 showed it from
 `--public-url`: a PNG, cached a week, and not counted against the IP's
 requests a minute, since mail providers fetch it through a few image proxies.
 Emails now draw the mark in HTML and load nothing (Gmail hides remote images).
+
+## Usage export for Charts
+
+`claktory-account stats --db FILE --format charts-json` (#411; without
+`--format`, or with `text`, it prints the report as before) prints Claktory's
+usage as global counts for Claktory's own "Claktory usage" dashboard in
+Charts. It opens the database read only, reads everything in one read
+transaction (every number from the same moment) and writes nothing. It takes
+no other input: no filter, range, label or query. Errors say what failed,
+never what was read.
+
+Its JSON is `{"schema_version": 1, "generated_at_ms": …, "rows": [...]}`, each
+row a flat object with exactly these eleven columns (schema version 1):
+
+| Column | |
+|---|---|
+| `schema_version` | `1`. A reader refuses any other. |
+| `generated_at_ms` | When the export ran (the service's clock). |
+| `published_at_ms` | When the row's numbers were taken: the export's time for daily rows, the publication's for a month's. |
+| `bucket_start_ms`, `bucket_end_ms` | The UTC day or calendar month it counts, end exclusive. |
+| `window` | `day`, `today`, `rolling30`, `snapshot` or `month`. All but `month` are global only. |
+| `metric` | One of the metrics below. |
+| `dimension` | `none`, or a month's breakdown: `provider`, `model`, `backend_version`, `backend_platform`, `country`, `device_platform`, `device_kind`, `app_version`. |
+| `label` | `All` with `none`; else a fixed label of the dimension's, `Other` or `Unknown`. |
+| `value` | A count, never negative; null when suppressed. |
+| `status` | `ok`, `partial` (`today`'s) or `suppressed`. |
+
+Completed UTC days, the last 90, ending yesterday, as `day`; and today so
+far, as `today` (Fugo, for the 5-minute refresh): the same global metrics as
+a day's but `rolling30`, `status` `partial`, bucketed by today's UTC day,
+never a completed day. A reader replaces them at each export and keeps no
+series of them: the differences between two exports minutes apart would be
+an activity log. Every row is a total over all Claktories: no identifier,
+email, address, place, name, model, version or record of any one Claktory,
+account or device. The metrics:
+
+- `contact_claktories`, `day`: Claktories in touch with the service that day
+  (a check-in, a sign-in, an unlock: contact, not people or work).
+  `rolling30`: those in touch in the 30 days ending that day, each counted
+  once. Never add up days for it.
+- `registered_claktories`, `day`: registered at the day's end and not
+  removed by then (Claktories deleted since aren't counted; not installs).
+- `requests`, `input_tokens`, `output_tokens`, `cache_read_tokens`,
+  `cache_write_tokens`, `day`: model calls the check-ins reported, by the day
+  their period started; deleted accounts' stay in the totals.
+- `agent_minutes`, `runs`, `day`: agents' work, summed over agents.
+- `rolled_back`, `crashes`, `day`: updates rolled back, and backends stopped
+  without stopping cleanly (a power cut counts).
+- `model_connected_claktories`, `first_run_claktories`, `snapshot`: of the
+  Claktories registered by yesterday's end and not removed, how many have
+  connected a model, and run an agent, as of the export (setup steps have no
+  date of their own). The bucket is yesterday.
+
+Check-ins come late at times, so a recent day's numbers can still grow at
+the next export: a reader replaces what it had, rather than adding to it.
+An export over 10,000 rows or 2 MB fails rather than cut anything off.
+
+**Monthly publications.** Once a calendar month (UTC) is over, the service's
+hourly upkeep publishes its breakdowns, once: kept in `analytics_months`,
+written once (a second publication of a month is refused and logged, and the
+table refuses any change or deletion), and in every export after, the latest
+six, as they were published. A month the service was down for entirely isn't
+published later. Each has the month's global totals (`dimension` `none`:
+`contact_claktories`, distinct over the month; `requests` and the token
+kinds; `rolled_back`, `crashes`; `backend_claktories`; `reported_devices`),
+and these breakdowns, one dimension at a time, never crossed:
+
+- `requests` and the token kinds by `provider`, and by `model`;
+- `rolled_back`, `crashes` by `backend_version`;
+- `backend_claktories` (Claktories registered by the month's end and not
+  removed) by `backend_version`, `backend_platform` and `country`;
+- `reported_devices` (devices as the Claktories last reported them) by
+  `device_platform`, `device_kind` and `app_version`.
+
+What Claktories last reported (versions, platforms, countries, devices) is
+counted when the month is published, `published_at_ms`: it isn't
+reconstructed as of the month's end. A raw value becomes a label before
+anything is counted: one of a fixed, reviewed list per dimension (providers,
+models, backend platforms, device systems and kinds, countries in English),
+for versions `v` and three numbers, `Unknown` when there's none, else
+`Other`; no other text is ever published. Then (Fugo's rules): at most 12
+labels, the rest folded into `Other`; every label with fewer than 5 distinct
+Claktories behind it folded into `Other` too; while `Other` has fewer than
+5, the next smallest label is folded into it. Claktories are counted once,
+however many labels they're behind; anonymous totals (deleted accounts')
+count in the amounts and toward no label's 5. When even the whole breakdown
+has fewer than 5, it's one `Other` row per metric, `suppressed`, with no
+value, and only the global total stands.
+
+Global totals (`dimension` `none`, daily and monthly) are never suppressed:
+in a quiet month or day one can be a single Claktory's number (its crashes,
+say). That's accepted for totals over everyone, for whoever runs the service
+(Fugo). The five-Claktory rule covers only breakdowns: never add a dimension
+to a total, or a breakdown of it, without the rule.
 
 ## Error codes
 

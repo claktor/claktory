@@ -27,6 +27,12 @@ import 'registry.dart';
 /// How much of a video one read brings (the backend's cap).
 const videoChunk = 8 * 1024 * 1024;
 
+/// How much each read after the original's start brings: it comes in
+/// pieces sized to the link, but a read given up on (the connection gone
+/// over a minute) keeps none of it, so each is written as it comes and a
+/// drop costs at most this (Sale's row 87: a preview carried on from 0).
+const videoPiece = 1024 * 1024;
+
 /// What the player is doing, as the viewer shows it.
 @immutable
 class PlaybackState {
@@ -375,7 +381,7 @@ class _VideoViewerState extends State<VideoViewer>
         preview = previewScreen();
         first = await backend.readFile(
           path,
-          maxBytes: videoChunk,
+          maxBytes: videoPiece,
           onProgress: progress,
           preview: preview,
         );
@@ -424,7 +430,7 @@ class _VideoViewerState extends State<VideoViewer>
         while (offset < _size) {
           final chunk = await backend.readFile(
             path,
-            maxBytes: videoChunk,
+            maxBytes: videoPiece,
             offset: offset,
             expectedSha256: first.sha256,
             onProgress: progress,
@@ -659,6 +665,7 @@ class _VideoViewerState extends State<VideoViewer>
       body = problem;
     } else if (!state.ready) {
       body = LoadingProgress(
+        name: path.split('/').last,
         label: 'Loading video…',
         received: _received,
         size: _size,
@@ -705,6 +712,7 @@ class _VideoViewerState extends State<VideoViewer>
       child: body,
     );
     return PaneScaffold(
+      share: sharePath,
       details: details,
       controls: controls,
       comments: comments == null ? null : CommentsButton(controller: comments),

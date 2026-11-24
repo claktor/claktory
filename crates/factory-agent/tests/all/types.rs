@@ -304,7 +304,7 @@ fn a_voice_message_says_it_was_spoken() {
     let said = |duration_ms, sent_from: Option<factory_agent::SentFrom>| UserMessage {
         sent_from,
         attachments: vec![recording.clone()],
-        voice: Some(factory_agent::Voice { duration_ms, language: String::new() }),
+        voice: Some(factory_agent::Voice { duration_ms, language: String::new(), typed: String::new() }),
         ..UserMessage::text("Ship it.", 1)
     };
     let phone = Some(factory_agent::SentFrom { device: "Matt's iPhone".into(), kind: "phone".into() });

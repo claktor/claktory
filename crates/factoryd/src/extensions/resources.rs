@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use factory_agent::Tool;
+use factory_agent::{Tool, ToolResult};
 use factory_protocol::v1;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -55,6 +55,51 @@ The resources tool shows how this machine and Claktory use its processors, memor
 ";
 
 const ABOUT: &str = "How this machine and Claktory use its resources, in a few lines: processors, memory, swap and free disk; Claktory's processes; the other programs using the most memory; alerts in effect. `detail`: \"processes\" (every process group of Claktory's and the top others), \"disk\" (each volume, and what Claktory's data, agents and projects take) or \"history\" (the last hour, every 5 minutes). `clear_cache`: the path of a build cache (shown under detail \"disk\") to clear now, only when the person asks: it's moved aside and deleted, and the next build there is cold.";
+
+/// Check for updates now, as Settings' button does.
+pub(crate) const UPDATES_TOOL: &str = "updates_check";
+const UPDATES: &str = "Check now for a newer version of Claktory, as the person's Check for updates in Settings does, and say what it found: up to date, a new version downloading, or one ready to install. Only the person installs it, from the Update banner in the app, when they choose.";
+/// How long updates_check waits for the check to finish.
+const UPDATES_WAIT: Duration = Duration::from_secs(60);
+
+#[derive(Deserialize)]
+struct NoArgs {}
+
+/// updates_check: checks the release channel now (`Factory::check_for_updates`,
+/// which a check run lately answers without asking again) and says what it
+/// found, once it's done or after a minute.
+async fn check_updates(factory: Arc<Factory>, agent: String, _args: NoArgs) -> Result<ToolResult, String> {
+    let person = {
+        let inner = factory.lock();
+        super::caller(&inner.config, &agent)?;
+        inner.config.person_capitalized().to_owned()
+    };
+    factory.check_for_updates().map_err(|error| error.to_string())?;
+    let started = Instant::now();
+    let check = loop {
+        let check = factory.lock().update_check.clone();
+        if check.state() != v1::UpdateCheckState::Checking || started.elapsed() > UPDATES_WAIT {
+            break check;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    let running = crate::update::VERSION;
+    let said = match check.state() {
+        v1::UpdateCheckState::Ready => format!(
+            "Claktory {} is ready to install (this one is {running}). {person} installs it from the Update banner in the app when they choose; you can't install it.",
+            check.version
+        ),
+        v1::UpdateCheckState::Downloading => {
+            format!("Claktory {} is downloading. Once it's ready, {person} sees the Update banner in the app and installs it when they choose.", check.version)
+        }
+        v1::UpdateCheckState::UpToDate => format!("This Claktory is up to date: {running} is the latest."),
+        v1::UpdateCheckState::Failed => format!("Claktory couldn't check for updates: {}", check.error),
+        v1::UpdateCheckState::Checking | v1::UpdateCheckState::None => {
+            "The check is still going after a minute; Settings shows what it finds.".to_owned()
+        }
+    };
+    Ok(ToolResult::text(said, json!({"state": check.state().as_str_name(), "version": check.version})))
+}
 
 /// Samples kept: an hour's.
 const HISTORY: usize = 60;
@@ -720,7 +765,15 @@ impl Extension for Resources {
             },
             "additionalProperties": false,
         });
-        vec![factory_tool(factory, agent, "resources", "Resources", ABOUT, parameters, run)]
+        let nothing = json!({"type": "object", "properties": {}, "additionalProperties": false});
+        vec![
+            factory_tool(factory, agent, "resources", "Resources", ABOUT, parameters, run),
+            super::async_tool(factory, agent, UPDATES_TOOL, "Check for updates", UPDATES, nothing, check_updates),
+        ]
+    }
+
+    fn owns_tool(&self, name: &str) -> bool {
+        name == ID || name == UPDATES_TOOL
     }
 
     fn view(&self, factory: &Factory, _inner: &Inner, agent: &str) -> Option<v1::ExtensionView> {

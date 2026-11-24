@@ -222,4 +222,14 @@ async fn a_mail_outage_refuses_codes_but_still_unlocks() {
     // a new network) still gets its share while no mail goes.
     instance.advance(16 * 60);
     assert!(instance.share(&claktory, None).await.is_ok());
+    // …and is recorded as not emailed, since it wasn't (Fugo's LOW on #412);
+    // once mail works again, the next unusual one is.
+    instance.mail.fail.store(false, Ordering::SeqCst);
+    claktory.ip = "203.0.113.9".into();
+    instance.advance(3600);
+    assert!(instance.share(&claktory, None).await.is_ok());
+    let conn = rusqlite::Connection::open(&instance.db).unwrap();
+    let mailed: Vec<bool> =
+        conn.prepare("SELECT mailed FROM share_releases ORDER BY time").unwrap().query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+    assert_eq!(mailed, [false, true]);
 }

@@ -157,7 +157,8 @@ class _DecisionCommentState extends State<DecisionComment> {
 
   bool _holdsKept() {
     final key = widget.keep?.key;
-    return key != null && (_voices?.holds(key) ?? false);
+    return key != null &&
+        ((_voices?.holds(key) ?? false) || dictationLive(key));
   }
 
   /// A recording kept for this comment from before: the field opens, so

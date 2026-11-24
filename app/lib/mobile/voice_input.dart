@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 
+import '../android/gesture_exclusion.dart';
 import '../controls.dart';
 import '../identity.dart';
 import '../recorder.dart' show RecordingEnd;
@@ -195,65 +196,69 @@ class PhoneMicButton extends StatelessWidget {
           onTap: voice.tap,
           excludeSemantics: true,
           child: NoDrawerGesture(
-            child: Listener(
-              onPointerCancel: (_) => voice.holdLost(),
-              child: RawGestureDetector(
-                behavior: HitTestBehavior.opaque,
-                gestures: {
-                  TapGestureRecognizer:
-                      GestureRecognizerFactoryWithHandlers<
-                        TapGestureRecognizer
-                      >(
-                        TapGestureRecognizer.new,
-                        (tap) => tap.onTap = voice.tap,
-                      ),
-                  LongPressGestureRecognizer:
-                      GestureRecognizerFactoryWithHandlers<
-                        LongPressGestureRecognizer
-                      >(
-                        // Quicker than a menu's hold: it's how it's used.
-                        () => LongPressGestureRecognizer(
-                          duration: const Duration(milliseconds: 200),
+            child: AndroidBackGestureExclusion(
+              child: Listener(
+                onPointerCancel: (_) => voice.holdLost(),
+                child: RawGestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  gestures: {
+                    TapGestureRecognizer:
+                        GestureRecognizerFactoryWithHandlers<
+                          TapGestureRecognizer
+                        >(
+                          TapGestureRecognizer.new,
+                          (tap) => tap.onTap = voice.tap,
                         ),
-                        (hold) {
-                          hold
-                            ..onLongPressStart = (_) {
-                              unawaited(voice.holdStarted());
-                            }
-                            ..onLongPressMoveUpdate = (details) {
-                              voice.holdMoved(details.offsetFromOrigin.dx);
-                            }
-                            ..onLongPressEnd = (_) {
-                              unawaited(
-                                voice.holdEnded(recording: recording.recording),
-                              );
-                            };
-                        },
-                      ),
-                },
-                child: SizedBox.square(
-                  dimension: Touch.target,
-                  child: Center(
-                    child: AnimatedContainer(
-                      duration: Motion.fast,
-                      width: held ? 40 : 32,
-                      height: held ? 40 : 32,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: held
-                            ? (cancelling ? palette.selected : palette.danger)
-                            : null,
-                      ),
-                      alignment: Alignment.center,
-                      child: ExtensionGlyph(
-                        icon: 'mic',
-                        name: 'Record a voice message',
-                        color: held
-                            ? const Color(0xFFFFFFFF)
-                            : (unavailable == null
-                                  ? palette.textMuted
-                                  : palette.textFaint),
-                        size: 22,
+                    LongPressGestureRecognizer:
+                        GestureRecognizerFactoryWithHandlers<
+                          LongPressGestureRecognizer
+                        >(
+                          // Quicker than a menu's hold: it's how it's used.
+                          () => LongPressGestureRecognizer(
+                            duration: const Duration(milliseconds: 200),
+                          ),
+                          (hold) {
+                            hold
+                              ..onLongPressStart = (_) {
+                                unawaited(voice.holdStarted());
+                              }
+                              ..onLongPressMoveUpdate = (details) {
+                                voice.holdMoved(details.offsetFromOrigin.dx);
+                              }
+                              ..onLongPressEnd = (_) {
+                                unawaited(
+                                  voice.holdEnded(
+                                    recording: recording.recording,
+                                  ),
+                                );
+                              };
+                          },
+                        ),
+                  },
+                  child: SizedBox.square(
+                    dimension: Touch.target,
+                    child: Center(
+                      child: AnimatedContainer(
+                        duration: Motion.fast,
+                        width: held ? 40 : 32,
+                        height: held ? 40 : 32,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: held
+                              ? (cancelling ? palette.selected : palette.danger)
+                              : null,
+                        ),
+                        alignment: Alignment.center,
+                        child: ExtensionGlyph(
+                          icon: 'mic',
+                          name: 'Record a voice message',
+                          color: held
+                              ? const Color(0xFFFFFFFF)
+                              : (unavailable == null
+                                    ? palette.textMuted
+                                    : palette.textFaint),
+                          size: 22,
+                        ),
                       ),
                     ),
                   ),
@@ -294,90 +299,154 @@ class PhoneRecordingRow extends StatelessWidget {
             mode == PhoneVoiceMode.holding || mode == PhoneVoiceMode.cancelling;
         final paused = mode == PhoneVoiceMode.paused;
         final time = voiceDuration(recording.elapsed);
-        return Row(
-          children: [
-            if (held)
-              const SizedBox(width: Space.m)
-            else
-              Semantics(
-                container: true,
-                button: true,
-                label: 'Cancel',
-                onTap: voice.cancelNow,
-                excludeSemantics: true,
-                child: Pressable(
+        return _fitted(
+          context,
+          time,
+          Row(
+            children: [
+              if (held)
+                const SizedBox(width: Space.m)
+              else
+                Semantics(
+                  container: true,
+                  button: true,
+                  label: 'Cancel',
                   onTap: voice.cancelNow,
-                  builder: (context, pressed) => SizedBox(
-                    height: Touch.target,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: Space.s),
-                      child: Center(
-                        child: Text(
-                          'Cancel',
-                          style: type.label.copyWith(
-                            color: pressed ? palette.textMuted : palette.danger,
+                  excludeSemantics: true,
+                  child: Pressable(
+                    onTap: voice.cancelNow,
+                    builder: (context, pressed) => ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        minHeight: Touch.target,
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Space.s,
+                        ),
+                        child: Align(
+                          widthFactor: 1,
+                          heightFactor: 1,
+                          child: Text(
+                            'Cancel',
+                            style: type.label.copyWith(
+                              color: pressed
+                                  ? palette.textMuted
+                                  : palette.danger,
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
                 ),
-              ),
-            Semantics(
-              container: true,
-              liveRegion: paused,
-              label: paused ? 'Paused, $time' : 'Recording, $time',
-              excludeSemantics: true,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (paused)
-                    SizedBox.square(
-                      dimension: 8,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: palette.textFaint,
+              Semantics(
+                container: true,
+                liveRegion: paused,
+                label: paused ? 'Paused, $time' : 'Recording, $time',
+                excludeSemantics: true,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (paused)
+                      SizedBox.square(
+                        dimension: 8,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: palette.textFaint,
+                          ),
                         ),
+                      )
+                    else
+                      LiveDot(color: palette.danger),
+                    const SizedBox(width: Space.s),
+                    Text(
+                      time,
+                      style: type.body.copyWith(
+                        color: palette.text,
+                        fontFeatures: const [FontFeature.tabularFigures()],
                       ),
-                    )
-                  else
-                    LiveDot(color: palette.danger),
-                  const SizedBox(width: Space.s),
-                  Text(
-                    time,
-                    style: type.body.copyWith(
-                      color: palette.text,
-                      fontFeatures: const [FontFeature.tabularFigures()],
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(width: Space.s),
-            Expanded(
-              child: held
-                  ? _SlideHint(cancelling: mode == PhoneVoiceMode.cancelling)
-                  : paused
-                  ? Text(
-                      'Paused',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: type.secondary.copyWith(color: palette.textMuted),
-                    )
-                  : ExcludeSemantics(
-                      child: SizedBox(
-                        height: 24,
-                        child: CustomPaint(
-                          painter: Waveform(
-                            recording.levels,
-                            color: palette.textMuted,
+              const SizedBox(width: Space.s),
+              Expanded(
+                child: held
+                    ? _SlideHint(cancelling: mode == PhoneVoiceMode.cancelling)
+                    : paused
+                    ? Text(
+                        'Paused',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: type.secondary.copyWith(
+                          color: palette.textMuted,
+                        ),
+                      )
+                    : ExcludeSemantics(
+                        child: SizedBox(
+                          height: 24,
+                          child: CustomPaint(
+                            painter: Waveform(
+                              recording.levels,
+                              color: palette.textMuted,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-            ),
-          ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// The least room the waveform or its words keep beside the rest.
+  static const _leastLine = Touch.target;
+
+  /// [row] with its text no larger than fits the box's width: at the
+  /// largest text sizes, Cancel and the time grow only as far as leaves
+  /// [_leastLine] for the waveform, as iOS's own recording bars shrink
+  /// their words rather than spill. Measured with Cancel shown, so the time
+  /// keeps one size between a hold and a tap.
+  Widget _fitted(BuildContext context, String time, Widget row) {
+    final type = TypeScale.of(context);
+    final scaler = MediaQuery.textScalerOf(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        double words(TextScaler scaler) {
+          double width(String text, TextStyle style) {
+            final painter = TextPainter(
+              text: TextSpan(text: text, style: style),
+              textDirection: TextDirection.ltr,
+              textScaler: scaler,
+              maxLines: 1,
+            )..layout();
+            final width = painter.width;
+            painter.dispose();
+            return width;
+          }
+
+          return width('Cancel', type.label) +
+              width(
+                time,
+                type.body.copyWith(
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              );
+        }
+
+        // Cancel's padding, the dot and the gaps after it and the time.
+        const fixed = Space.s * 2 + 8 + Space.s + Space.s + _leastLine;
+        final room = constraints.maxWidth - fixed;
+        if (!constraints.hasBoundedWidth || words(scaler) <= room) return row;
+        final unscaled = words(TextScaler.noScaling);
+        final fits = unscaled <= 0 ? 1.0 : room / unscaled;
+        return MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: TextScaler.linear(fits < 1 ? 1 : fits)),
+          child: row,
         );
       },
     );
@@ -394,15 +463,20 @@ class _SlideHint extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
+    // Smaller rather than cut short where it doesn't fit (the largest text
+    // sizes): the instruction is the point.
     return Align(
       alignment: AlignmentDirectional.centerEnd,
-      child: Text(
-        cancelling ? 'Let go to cancel' : '‹ Slide to cancel',
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: type.secondary.copyWith(
-          color: cancelling ? palette.danger : palette.textMuted,
-          fontWeight: cancelling ? FontWeight.w600 : null,
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        alignment: AlignmentDirectional.centerEnd,
+        child: Text(
+          cancelling ? 'Let go to cancel' : '‹ Slide to cancel',
+          maxLines: 1,
+          style: type.secondary.copyWith(
+            color: cancelling ? palette.danger : palette.textMuted,
+            fontWeight: cancelling ? FontWeight.w600 : null,
+          ),
         ),
       ),
     );

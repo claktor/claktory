@@ -82,7 +82,25 @@ async fn a_message_to_an_agent_without_a_usable_model_says_why_it_was_not_sent()
     view.follow(&mut client, |view| view.entries.len() == 2 && idle(view, "writer")).await;
     let entries = describe(&view.entries);
     assert_eq!(entries[0], "user: draft it");
-    assert!(entries[1].starts_with("notice: No model available: \"anthropic/not-signed-in\""), "{entries:?}");
+    assert!(entries[1].starts_with("notice: No model available: \"anthropic/not-signed-in\" needs its provider signed in."), "{entries:?}");
+
+    // A provider that's signed in but no longer offers the model says so,
+    // rather than to sign in (Abbacchio's LOW on #185 U4).
+    let gone = client_message::Body::UpdateAgent(v1::UpdateAgent {
+        agent_id: "writer".into(),
+        model: Some("scripted/gone".into()),
+        ..Default::default()
+    });
+    for event in client.ok(gone).await {
+        view.apply(&event.body.expect("body"));
+    }
+    for event in client.ok(send_message("writer", "again")).await {
+        view.apply(&event.body.expect("body"));
+    }
+    view.follow(&mut client, |view| view.entries.len() == 4 && idle(view, "writer")).await;
+    let entries = describe(&view.entries);
+    assert!(entries[3].starts_with("notice: No model available: "), "{entries:?}");
+    assert!(entries[3].contains("doesn't offer \"scripted/gone\" any more. Choose another model in this agent's settings."), "{entries:?}");
 }
 
 #[tokio::test]

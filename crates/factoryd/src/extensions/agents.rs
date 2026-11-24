@@ -77,13 +77,14 @@ const MAP: &str =
 const STATUS: &str = "Whether agents are idle or working, one line each: every agent you can message, or only `agent`.";
 const INSPECT: &str = "How an agent on your team is set up, read only: you, the agents you lead (directly or through others), or, as an admin agent, every agent. `agent` (an id or name) gives its name, role, project and folder, model and effort, lead, extensions with their options, secrets (by name, never values), monitors, prompt and whether it's working; `agent` \"team\", or none, lists your team, one line each.";
 const COMPACT: &str = "Admin only, when the person asks: summarize another agent's conversation, as their /compact does, so it carries on from the summary with less context. Idle, it's summarized now; working, as soon as its current work ends, before it reads anything new. `agent`: its id or name.";
+const STOP: &str = "Admin only, when the person asks: stop another agent's current work, as their Stop does. It stops where it is, mid-reply or mid-command; what's already queued for it stays and reaches it afterwards, as a new run. `agent`: its id or name.";
 const CLEAR: &str = "Admin only, when the person asks: ask them to clear another agent's conversation, as their /clear does. It never clears by itself: it opens a card in your conversation, and only their approval clears it (the agent stops, its conversation is archived and it starts on an empty one; its checklist and memory stay). You're told in an event whether they approved. `agent`: its id or name.";
 const SUGGEST: &str = "Suggest that the person talk to another agent (`agent`, by id or name, one you can message) themselves: they see a card in your conversation, with `reason`, and a button that opens that agent's conversation with `message` in its message box, drafted and not sent, for them to change or send. Write `message` as the person would send it, in their voice, saying everything that agent needs; `reason` is one line on why they should talk to it.";
 /// The prompt's line on suggesting a talk. `{person}`: the user's name, or
 /// "the person".
 const SUGGEST_PROMPT: &str = "When {person} should give another agent something or settle something with it directly (secrets it will ask them for, a decision that's theirs), rather than you passing it on, suggest it with agents_suggest_talk: they get a button that opens that agent with your message drafted for them.\n";
 /// `{person}`: the user's name, or "the person".
-const PROPOSE: &str = "Rivet, the admin agent, can't be messaged: only {person} talks to it. When you reach a conclusion Rivet should act on (another agent is needed, say), propose a message with propose_to_rivet, written to stand alone; {person} approves or dismisses it, and you're told which.\n";
+const PROPOSE: &str = "Rivet, the admin agent, can't be messaged: only {person} talks to it. When you reach a conclusion Rivet should act on (another agent is needed, say), propose a message with propose_to_rivet, written to stand alone; {person} approves or dismisses it, and you're told which (a dismissal without a comment quietly, with whatever next wakes you). If it stops applying before they decide (they settle it in your chat, say), take it back with proposal_withdraw; if what you propose changes, change it in place with proposal_update.\n";
 
 pub(crate) struct Agents;
 
@@ -241,7 +242,7 @@ impl Extension for Agents {
             text.push_str("You lead every agent: agents_inspect shows how any of them is set up, read only.\n");
             let _ = writeln!(
                 text,
-                "When {} asks, agents_compact summarizes an agent's conversation, as their /compact does, and agents_clear asks them to approve clearing one, as their /clear does; never on your own.",
+                "When {} asks, agents_stop stops an agent's current work, as their Stop does, agents_compact summarizes an agent's conversation, as their /compact does, and agents_clear asks them to approve clearing one, as their /clear does; never on your own.",
                 config.person()
             );
         } else {
@@ -278,16 +279,22 @@ impl Extension for Agents {
             tools.push(map_tool(factory, agent));
         }
         if admin {
+            tools.push(stop_tool(factory, agent));
             tools.push(compact_tool(factory, agent));
             tools.push(clear_tool(factory, agent));
         } else {
             tools.push(crate::proposals::tool(factory, agent));
+            tools.push(crate::proposals::update_tool(factory, agent));
+            tools.push(crate::proposals::withdraw_tool(factory, agent));
         }
         tools
     }
 
     fn owns_tool(&self, name: &str) -> bool {
-        name == crate::proposals::TOOL || name.strip_prefix(ID).is_some_and(|verb| verb.starts_with('_'))
+        name == crate::proposals::TOOL
+            || name == crate::proposals::UPDATE_TOOL
+            || name == crate::proposals::WITHDRAW_TOOL
+            || name.strip_prefix(ID).is_some_and(|verb| verb.starts_with('_'))
     }
 
     /// Whom it can message and who can message it. The view is resent with
@@ -884,6 +891,16 @@ fn inspect_tool(factory: &Arc<Factory>, asker: &str) -> Tool {
     )
 }
 
+fn stop_tool(factory: &Arc<Factory>, admin: &str) -> Tool {
+    let parameters = json!({
+        "type": "object",
+        "required": ["agent"],
+        "properties": {"agent": {"type": "string", "minLength": 1}},
+        "additionalProperties": false,
+    });
+    super::tool("agents_stop", "Stop an agent", STOP, parameters, super::typed_handler(factory, admin, stop))
+}
+
 fn compact_tool(factory: &Arc<Factory>, admin: &str) -> Tool {
     let parameters = json!({
         "type": "object",
@@ -907,7 +924,7 @@ fn clear_tool(factory: &Arc<Factory>, admin: &str) -> Tool {
         CLEAR,
         parameters,
         super::typed_handler(factory, admin, |factory, admin, args: TargetArgs| {
-            let (id, name) = other_agent(factory, admin, &args.agent, "clear")?;
+            let (id, name) = other_agent(factory, admin, &args.agent, "clear", true)?;
             crate::extensions::ask::ask_to_clear(factory, admin, &id, &name)
         }),
     )
@@ -918,20 +935,25 @@ struct TargetArgs {
     agent: String,
 }
 
-/// The agent an admin agent's agents_compact or agents_clear means (its id
-/// and name), or why not: another agent, and the caller still an admin.
-/// `verb`: what it would do, for the refusals.
-fn other_agent(factory: &Factory, admin: &str, wanted: &str, verb: &str) -> Result<(String, String), String> {
+/// The agent an admin agent's agents_stop, agents_compact or agents_clear
+/// means (its id and name), or why not: another agent, and the caller still
+/// an admin. `verb`: what it would do, to the agent's `conversation` or to
+/// the agent, for the refusals.
+fn other_agent(factory: &Factory, admin: &str, wanted: &str, verb: &str, conversation: bool) -> Result<(String, String), String> {
     let inner = factory.lock();
     let config = &inner.config;
     let me = super::caller(config, admin)?;
+    let whose = if conversation { "another agent's conversation" } else { "another agent" };
     if !crate::proposals::is_admin(me) {
-        return Err(format!("Only an admin agent can {verb} another agent's conversation. Nothing was done."));
+        return Err(format!("Only an admin agent can {verb} {whose}. Nothing was done."));
     }
     let others: Vec<&AgentConfig> = led(config, me);
     let wanted = wanted.trim();
     match find(config, me, &others, wanted)? {
         Some(agent) => Ok((agent.id.clone(), agent.name.clone())),
+        None if (wanted == me.id || wanted.eq_ignore_ascii_case(&me.name)) && !conversation => {
+            Err("That's you: you stop when you end your reply. Nothing was done.".to_owned())
+        }
         None if wanted == me.id || wanted.eq_ignore_ascii_case(&me.name) => {
             Err(format!("That's you: only {} can {verb} your own conversation, with /{verb}.", config.person()))
         }
@@ -939,10 +961,31 @@ fn other_agent(factory: &Factory, admin: &str, wanted: &str, verb: &str) -> Resu
     }
 }
 
+/// agents_stop: stops the agent's current work, as the person's Stop does;
+/// what's queued for it stays.
+fn stop(factory: &Arc<Factory>, admin: &str, args: TargetArgs) -> Result<ToolResult, String> {
+    // A page or a pipe it read mustn't stop the person's agents mid-task
+    // (Fugo, Abbacchio's row 1047).
+    super::untainted(factory, admin, "stop other agents", "stop one with Stop in its conversation. Nothing was done.")?;
+    let (id, name) = other_agent(factory, admin, &args.agent, "stop", false)?;
+    let (running, queued) =
+        factory.lock().agents.get(&id).map_or((false, 0), |runtime| (runtime.running, runtime.queue.len() - runtime.quiet_waiting()));
+    if !running {
+        return Ok(ToolResult::text(format!("{name} isn't working, so there was nothing to stop."), json!({"agent": id, "stopped": false})));
+    }
+    factory.stop_agent(&id).map_err(|error| format!("{error} Nothing was done."))?;
+    let after = match queued {
+        0 => String::new(),
+        1 => " 1 message waiting for it still reaches it, as a new run.".to_owned(),
+        count => format!(" {count} messages waiting for it still reach it, as a new run."),
+    };
+    Ok(ToolResult::text(format!("Stopped {name}: its current work ended where it was.{after}"), json!({"agent": id, "stopped": true})))
+}
+
 /// agents_compact: summarizes the agent's conversation as /compact does,
 /// now or, working, when its current work ends.
 async fn compact(factory: Arc<Factory>, admin: String, args: TargetArgs) -> Result<ToolResult, String> {
-    let (id, name) = other_agent(&factory, &admin, &args.agent, "compact")?;
+    let (id, name) = other_agent(&factory, &admin, &args.agent, "compact", true)?;
     factory.ensure_loaded(&id).await.map_err(|error| format!("Couldn't read {name}'s conversation: {error}"))?;
     {
         let inner = factory.lock();

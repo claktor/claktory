@@ -781,11 +781,14 @@ String canRunCommandsText(int count) =>
 
 /// What a member that can run commands could do if the other side misled
 /// it, under its switch.
-String canRunCommandsWarning(String agent, Pipe pipe) =>
+/// [choice]: under the three-way choice of the pipe's settings (#414),
+/// rather than a switch.
+String canRunCommandsWarning(String agent, Pipe pipe, {bool choice = false}) =>
     '$agent can run commands on this computer. If a message from '
     '${pipePeerClaktory(pipe)} misleads it, it could reach your files, '
-    'secrets and network before you see anything. Turn this off unless it '
-    'needs to run commands.';
+    'secrets and network before you see anything. '
+    '${choice ? 'Choose Limited to the pipe or Only sends' : 'Turn this off'} '
+    'unless it needs to run commands.';
 
 /// What "Not verified" means for [pipe]: what is and isn't checked about
 /// the other side.
@@ -2505,6 +2508,10 @@ class _PipeMessageViewState extends State<PipeMessageView> {
               : 'Sent back to ${_writer()} · “$note” · $time',
           color: palette.textMuted,
         ),
+      // Taken back by the agent that wrote it (pipe_withdraw): Claktory's
+      // "Lea took it back: …", its reason in the agent's words.
+      PipeMessageState.PIPE_MESSAGE_STATE_DISCARDED when note.isNotEmpty =>
+        line('${proseCodes(note)} · $time', color: palette.textMuted),
       PipeMessageState.PIPE_MESSAGE_STATE_DISCARDED => line(
         'Discarded · $time',
       ),
@@ -2824,6 +2831,10 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
   /// has them.
   late final _limited = {..._start.quarantinedIds};
 
+  /// The members that only send to it (Pipe.send_only_ids, #414), as the
+  /// form has them.
+  late final _sendOnly = {..._start.sendOnlyIds};
+
   /// The lead the person chose; kept while it's unticked, so ticking it
   /// back brings it back. [_shownLead] is the one that counts.
   late var _lead = _start.leadId;
@@ -2867,9 +2878,11 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
   String _shownLead(Pipe pipe) {
     // Only those still in its project count, as for the backend.
     final store = AppScope.of(context).workspace;
+    // One that only sends never leads.
     final members = [
       for (final agent in store.agentsIn(pipe.projectId))
-        if (_members.contains(agent.id)) agent.id,
+        if (_members.contains(agent.id) && !_sendOnly.contains(agent.id))
+          agent.id,
     ];
     if (members.contains(_lead)) return _lead;
     return pipeLeadFor(
@@ -2932,9 +2945,14 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
       update.members = PipeMembers(agentIds: _members);
     }
     // All of them: a member left out is let run commands again.
-    final limited = _limited.intersection(_members);
+    final sendOnly = _sendOnly.intersection(_members);
+    final limited = _limited.intersection(_members).difference(sendOnly);
     if (!_sameSet(limited, pipe.quarantinedIds)) {
       update.quarantined = PipeMembers(agentIds: limited);
+    }
+    // All of them too: a member left out reads the pipe again.
+    if (!_sameSet(sendOnly, pipe.sendOnlyIds)) {
+      update.sendOnly = PipeMembers(agentIds: sendOnly);
     }
     final lead = _shownLead(pipe);
     if (lead != pipe.leadId) update.leadId = lead;
@@ -3012,8 +3030,12 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
         _capFilled = true;
       }
     }
+    // An ask over the settings keeps them as they were beneath it (where
+    // they're scrolled to, what's typed), for Cancel to come back to
+    // (Sale's row 77).
+    Widget? over;
     if (_confirmingClose) {
-      return FormFrame(
+      over = FormFrame(
         title: 'Close ${pipe.name}?',
         body:
             'Nothing goes through it again, either way, and $who is told. '
@@ -3029,9 +3051,8 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
               ),
         onCancel: () => setState(() => _confirmingClose = false),
       );
-    }
-    if (_letting case final agent?) {
-      return FormFrame(
+    } else if (_letting case final agent?) {
+      over = FormFrame(
         title: 'Let ${agent.name} run commands on this computer?',
         body: 'It will be able to reach your files, secrets and network.',
         error: null,
@@ -3039,13 +3060,13 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
         submitLabel: 'Let it run commands',
         onSubmit: () => setState(() {
           _limited.remove(agent.id);
+          _sendOnly.remove(agent.id);
           _letting = null;
         }),
         onCancel: () => setState(() => _letting = null),
       );
-    }
-    if (_addingLiaison) {
-      return FormFrame(
+    } else if (_addingLiaison) {
+      over = FormFrame(
         title: 'Add a liaison agent',
         body:
             'A new agent to lead this pipe and do nothing else. It can only '
@@ -3068,7 +3089,29 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
         onCancel: () => setState(() => _addingLiaison = false),
       );
     }
+    return Stack(
+      children: [
+        Offstage(
+          offstage: over != null,
+          child: TickerMode(enabled: over == null, child: _settings(pipe)),
+        ),
+        ?over,
+      ],
+    );
+  }
+
+  Widget _settings(Pipe pipe) {
     final agents = AppScope.of(context).workspace.agentsIn(pipe.projectId);
+    // From outside its project, only to send (#414): the workspace's own
+    // agents (Rivet among them), and any such member already.
+    final outside = [
+      for (final agent in AppScope.of(context).workspace.workspace.agents)
+        if (agent.projectId != pipe.projectId &&
+            (agent.projectId.isEmpty ||
+                _members.contains(agent.id) ||
+                pipe.memberIds.contains(agent.id)))
+          agent,
+    ];
     final lead = _shownLead(pipe);
     final open =
         pipe.state == PipeState.PIPE_STATE_OPEN ||
@@ -3106,7 +3149,8 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
           ),
         Field(
           label: 'Name',
-          child: TextField(controller: _name, autofocus: true),
+          // No keyboard raised by itself on a phone, over the settings.
+          child: TextField(controller: _name, autofocus: !touchFirst(context)),
         ),
         Field(
           label: 'What it’s for',
@@ -3158,19 +3202,58 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
                         }),
                       ),
                       if (_members.contains(agent.id))
-                        _CommandsLine(
+                        _AccessLine(
                           agent: agent,
                           pipe: pipe,
-                          value: !_limited.contains(agent.id),
-                          onChanged: (on) => setState(() {
-                            if (on) {
-                              // Letting it out of the pipe is asked first.
-                              _letting = agent;
-                              _error = null;
-                            } else {
-                              _limited.add(agent.id);
+                          value: _sendOnly.contains(agent.id)
+                              ? PipeAccess.sendOnly
+                              : _limited.contains(agent.id)
+                              ? PipeAccess.limited
+                              : PipeAccess.commands,
+                          onChanged: (access) => setState(() {
+                            switch (access) {
+                              case PipeAccess.commands:
+                                // Letting it out of the pipe is asked
+                                // first.
+                                _letting = agent;
+                                _error = null;
+                              case PipeAccess.limited:
+                                _sendOnly.remove(agent.id);
+                                _limited.add(agent.id);
+                              case PipeAccess.sendOnly:
+                                _limited.remove(agent.id);
+                                _sendOnly.add(agent.id);
                             }
                           }),
+                        ),
+                    ],
+                  ),
+                ),
+              for (final agent in outside)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: Space.xs),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _MemberLine(
+                        agent: agent,
+                        value: _members.contains(agent.id),
+                        onChanged: (on) => setState(() {
+                          if (on) {
+                            _members.add(agent.id);
+                            _sendOnly.add(agent.id);
+                          } else {
+                            _members.remove(agent.id);
+                            _sendOnly.remove(agent.id);
+                          }
+                        }),
+                      ),
+                      if (_members.contains(agent.id))
+                        _AccessLine(
+                          agent: agent,
+                          pipe: pipe,
+                          value: PipeAccess.sendOnly,
+                          onChanged: null,
                         ),
                     ],
                   ),
@@ -3197,7 +3280,8 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
               // Only while none leads it: never chosen on purpose.
               if (lead.isEmpty) const SelectOption('', 'No lead'),
               for (final agent in agents)
-                if (_members.contains(agent.id))
+                if (_members.contains(agent.id) &&
+                    !_sendOnly.contains(agent.id))
                   SelectOption(agent.id, agent.name),
             ],
             onChanged: (lead) => setState(() => _lead = lead),
@@ -3348,6 +3432,88 @@ class _CommandsLine extends StatelessWidget {
               padding: const EdgeInsets.only(top: 2, right: Space.xl),
               child: Text(
                 canRunCommandsWarning(agent.name, pipe),
+                style: TextStyles.caption.copyWith(color: palette.textMuted),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// What a member of a pipe may do (#414): read it and run commands on this
+/// computer, read it limited to the pipe, or only send to it.
+enum PipeAccess { commands, limited, sendOnly }
+
+/// What each [PipeAccess] is called where it's chosen.
+String pipeAccessLabel(PipeAccess access) => switch (access) {
+  PipeAccess.commands => 'Reads and runs commands',
+  PipeAccess.limited => 'Limited to the pipe',
+  PipeAccess.sendOnly => 'Only sends',
+};
+
+/// What an agent that only sends to a pipe can and can't do, under its
+/// choice.
+String sendOnlyNote(String agent, Pipe pipe) =>
+    '$agent can send to ${pipePeerClaktory(pipe)} but never reads what '
+    'comes back, and isn\'t told when it does.';
+
+/// Under a member's line: what it may do with the pipe ([PipeAccess]),
+/// indented to its name, with what that means: the risk while it can run
+/// commands, and what sending only leaves out. [onChanged] null: one from
+/// outside the pipe's project, which can only send.
+class _AccessLine extends StatelessWidget {
+  const _AccessLine({
+    required this.agent,
+    required this.pipe,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final Agent agent;
+  final Pipe pipe;
+  final PipeAccess value;
+  final ValueChanged<PipeAccess>? onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final onChanged = this.onChanged;
+    final note = switch (value) {
+      PipeAccess.commands => canRunCommandsWarning(
+        agent.name,
+        pipe,
+        choice: true,
+      ),
+      PipeAccess.limited => null,
+      PipeAccess.sendOnly => sendOnlyNote(agent.name, pipe),
+    };
+    return Padding(
+      // Under the name, past the 20px character and its gap.
+      padding: const EdgeInsets.only(left: 20 + Space.s, top: Space.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (onChanged == null)
+            Text(
+              pipeAccessLabel(value),
+              style: TextStyles.caption.copyWith(color: palette.text),
+            )
+          else
+            Select<PipeAccess>(
+              value: value,
+              title: agent.name,
+              options: [
+                for (final access in PipeAccess.values)
+                  SelectOption(access, pipeAccessLabel(access)),
+              ],
+              onChanged: onChanged,
+            ),
+          if (note != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2, right: Space.xl),
+              child: Text(
+                note,
                 style: TextStyles.caption.copyWith(color: palette.textMuted),
               ),
             ),

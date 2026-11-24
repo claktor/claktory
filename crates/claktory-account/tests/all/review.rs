@@ -125,6 +125,96 @@ async fn without_the_option_the_review_email_is_an_email_like_any() {
         assert_eq!(device_verify(&instance, &phone, &request_id, CODE).await.error(), "wrong_code");
     }
     assert_eq!(device_verify(&instance, &phone, &request_id, &instance.last_code(EMAIL)).await.status, 200);
+
+    // Its per-email limits too: the 6th sign-in in an hour is refused.
+    instance.advance(3600 - instance.now().rem_euclid(3600));
+    for at in 0..5 {
+        device_start(&instance, &Device::new(&format!("198.51.100.{}", 81 + at))).await;
+    }
+    let answer = instance.start_device_sign_in(&Device::new("198.51.100.86"), EMAIL, "iPhone").await;
+    assert_eq!((answer.status, answer.error().as_str()), (429, "rate_limited"));
+}
+
+/// A reviewer signs in on every device they try (Abbacchio's R3 was locked
+/// out on its 6th): the review email has no per-email limits, as nothing is
+/// sent to it. Its code is still kept by the per-IP limit and the lock after
+/// 5 wrong codes an hour.
+#[tokio::test]
+async fn the_review_email_signs_in_on_many_devices_but_wrong_codes_and_one_ip_still_lock_it() {
+    let instance = with_review().await;
+    instance.advance(3600 - instance.now().rem_euclid(3600));
+    // 10 sign-ins within the hour, each from its own address: all start,
+    // and the last one too signs in.
+    let mut last = None;
+    for at in 0..10 {
+        let device = Device::new(&format!("198.51.100.{}", 100 + at));
+        let request_id = device_start(&instance, &device).await;
+        last = Some((device, request_id));
+    }
+    let (device, request_id) = last.unwrap();
+    assert_eq!(device_verify(&instance, &device, &request_id, CODE).await.status, 200);
+
+    // 5 wrong codes still lock it for the hour: the right one answers as
+    // wrong, and a new sign-in is refused.
+    let (lock, other) = (Device::new("198.51.100.120"), Device::new("198.51.100.122"));
+    let (request_id, other_request) = (device_start(&instance, &lock).await, device_start(&instance, &other).await);
+    for code in ["000000", "111111", "222222"] {
+        assert_eq!(device_verify(&instance, &lock, &request_id, code).await.error(), "wrong_code");
+    }
+    for code in ["333333", "555555"] {
+        assert_eq!(device_verify(&instance, &other, &other_request, code).await.error(), "wrong_code");
+    }
+    assert_eq!(device_verify(&instance, &lock, &request_id, CODE).await.error(), "wrong_code");
+    let answer = instance.start_device_sign_in(&Device::new("198.51.100.121"), EMAIL, "iPhone").await;
+    assert_eq!((answer.status, answer.error().as_str()), (429, "rate_limited"));
+
+    // The per-IP limit still holds: 30 sign-ins a day from one address.
+    instance.advance(3600);
+    let one = Device::new("198.51.100.130");
+    for _ in 0..30 {
+        let answer = instance.start_device_sign_in(&one, EMAIL, "iPhone").await;
+        assert_eq!(answer.status, 200, "{}", answer.text());
+    }
+    let answer = instance.start_device_sign_in(&one, EMAIL, "iPhone").await;
+    assert_eq!((answer.status, answer.error().as_str()), (429, "rate_limited"));
+    assert_eq!(mails_to(&instance, EMAIL), 0, "nothing goes to it");
+}
+
+/// Fugo 27568: the review account's unlocks from a new network aren't
+/// mailed, and are recorded as not, so its account page doesn't say
+/// "emailed you"; an ordinary account's still are.
+#[tokio::test]
+async fn the_review_accounts_unlocks_are_never_mailed_nor_recorded_as_mailed() {
+    let instance = with_review().await;
+    let mut review_box = Claktory::new("198.51.100.60");
+    let started: SignInStarted = instance.start_sign_in(&review_box, EMAIL, "Review Mac").await.json();
+    let verify = SignInVerify { request_id: started.request_id, code: CODE.into(), eph_pub: Ephemeral::new().public_b64() };
+    review_box.token = instance.post("/v1/sign-in/verify", &verify, &review_box.ip).await.json::<SignedIn>().machine_token;
+    let mut ordinary = Claktory::new("203.0.113.7");
+    instance.sign_in(&mut ordinary, "ana@example.com", "Mac mini").await;
+
+    // Not just after signing in, each from a network it hasn't unlocked from.
+    instance.advance(16 * 60);
+    for ip in ["198.51.100.60", "192.0.2.9"] {
+        review_box.ip = ip.into();
+        instance.share(&review_box, None).await.expect("a share");
+        instance.advance(3600);
+    }
+    instance.share(&ordinary, None).await.expect("a share");
+
+    assert_eq!(mails_to(&instance, EMAIL), 0, "nothing goes to it");
+    let notices = instance.mail.sent().into_iter().filter(|mail| mail.subject.ends_with("unlocked its secrets")).count();
+    assert_eq!(notices, 1, "Ana's unlock is mailed");
+    let conn = rusqlite::Connection::open(&instance.db).expect("the database");
+    let mailed: Vec<(String, bool)> = conn
+        .prepare("SELECT c.name, r.mailed FROM share_releases r JOIN claktories c ON c.id = r.claktory_id ORDER BY r.time")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let expected = [("Review Mac", false), ("Review Mac", false), ("Mac mini", true)];
+    assert_eq!(mailed, expected.map(|(name, mailed)| (name.to_owned(), mailed)));
 }
 
 #[test]

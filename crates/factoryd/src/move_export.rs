@@ -43,8 +43,11 @@ const STOP_WITHIN: Duration = Duration::from_secs(40);
 /// leaf's store: two copies of a leaf would reuse its keys, so a moved or
 /// restored Claktory enrolls a new one (dms-e2ee.md §5.2). `cache` holds
 /// what's made again when asked, such as phones' image previews (#379).
-const LEFT_OUT: [&str; 14] = [
+/// `tools` (ripgrep) is this computer's kind, as `bin` is: the other
+/// computer's install has its own.
+const LEFT_OUT: [&str; 15] = [
     "bin",
+    "tools",
     "cache",
     "dm",
     "releases",

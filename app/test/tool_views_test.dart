@@ -959,6 +959,33 @@ void main() {
       expect(harness.last.hasSetLayout(), isTrue);
       expect(harness.last.setLayout.agentId, 'a1');
     });
+
+    // Zucchero's row 343: a name with a hidden character shows its code,
+    // but the file opened is the real one, not one named with the code.
+    testWidgets('a hidden character in its name shows as its code; the '
+        'click opens the file as it is', (tester) async {
+      const real = '/tmp/media/invoice\u202Efdp.mp4';
+      final harness = await showing(tester, [
+        call(
+          'show',
+          {'path': real},
+          details: {
+            'path': real,
+            'kind': 'video',
+            'pane': 'gone',
+            'agent': 'a1',
+          },
+        ),
+      ]);
+      final shown = find.text(r'invoice\u{202E}fdp.mp4');
+      expect(shown, findsOneWidget);
+      await tester.tap(shown);
+      await tester.pump();
+      List<String> paths(ViewNode node) => node.hasLeaf()
+          ? [node.leaf.path]
+          : [for (final child in node.split.children) ...paths(child)];
+      expect(paths(harness.last.setLayout.root), contains(real));
+    });
   });
 
   group('web', () {

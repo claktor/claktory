@@ -4,11 +4,14 @@
 //!
 //! Read only, over the tables the cards are kept in: asks, proposals,
 //! pipe_secret_approvals, pipe_starts, app_grant_proposals and
-//! pipe_handoff_changes (where reports go, changed) in factory.db; requests and
+//! pipe_handoff_changes (where reports go, changed) and pipe_member_changes
+//! (who only sends to a pipe, #414) in factory.db; requests and
 //! connect_proposals in vault.db (names, comments and states only, never a
 //! value), and pipe_decisions, kept here, for the decisions on a pipe that
 //! leave no other trace (a held message let through or discarded, a loop
-//! pause continued). Expired, withdrawn and waiting cards aren't listed.
+//! pause continued). Expired and waiting cards aren't listed, nor
+//! withdrawn requests for secrets; questions and proposals their agents
+//! withdrew (#407) are, with the agent's reason.
 //! What the other side of a pipe wrote never becomes a title: a held
 //! message's text goes only in `excerpt`, for the app to frame; an ask
 //! keeps its taint, as on its card; a pipe start is named by its kind, and
@@ -99,6 +102,19 @@ pub(crate) fn keep_note(factory: &Factory, kind: &str, reference: &str, comment:
     }
 }
 
+/// What tells an agent the person dismissed its card (a question, a
+/// proposal, a held pipe message) with nothing to say about it (friend bug
+/// #19): an event from Claktory, sent quietly, as agents_send's `quiet`
+/// is. It waits for the agent's next wake rather than waking it, since
+/// often the card was settled elsewhere (in its chat, say), and the agent
+/// still reads it then, so it doesn't ask again. A dismissal with the
+/// person's words, an answer or an approval wakes it as before.
+pub(crate) fn dismissed_event(summary: String) -> factory_agent::Event {
+    let mut event = crate::factory::host_event(summary);
+    event.provenance = Some(factory_agent::Provenance { quiet: true, ..Default::default() });
+    event
+}
+
 /// What the person decided on a pipe (`pipe_decided`).
 #[derive(Clone, Copy)]
 pub(crate) enum PipeDecision {
@@ -173,6 +189,12 @@ struct Row {
     model: ModelChange,
     /// CONVERSATION: what History shows of it.
     conversation: ConversationChange,
+    /// PIPE_MEMBER: the agent let send to the pipe, or stopped.
+    member: String,
+    /// WITHDRAWN: the agent's reason, cut.
+    reason: String,
+    /// QUESTION, REVIEW and PROPOSAL: how many times its agent changed it (#428).
+    updates: u32,
     /// All the text a search looks in, lowercase.
     search: String,
 }
@@ -245,6 +267,9 @@ impl Row {
             app: AppAccess::default(),
             model: ModelChange::default(),
             conversation: ConversationChange::default(),
+            member: String::new(),
+            reason: String::new(),
+            updates: 0,
             search: String::new(),
         }
     }
@@ -287,6 +312,17 @@ fn outcome(
 ) -> rusqlite::Result<Outcome> {
     let state: String = row.get(state)?;
     Ok(if row.get::<_, bool>(replied)? { Outcome::Replied } else if state == when.0 { when.1 } else { otherwise })
+}
+
+/// A card its agent withdrew (#407, state 'withdrawn') wins over `decided`,
+/// the outcome its other states give.
+/// How many times a card was changed (#428), from its version.
+fn updates(revision: i64) -> u32 {
+    u32::try_from(revision - 1).unwrap_or(0)
+}
+
+fn withdrawn(row: &rusqlite::Row<'_>, state: usize, decided: Outcome) -> rusqlite::Result<Outcome> {
+    Ok(if row.get::<_, String>(state)? == "withdrawn" { Outcome::Withdrawn } else { decided })
 }
 
 /// The rows of one table: `sql` is bound to ?1 (since), ?2 (before) and ?3
@@ -365,32 +401,38 @@ fn from_factory(
 ) -> rusqlite::Result<()> {
     found.add(rows(
         db,
-        "SELECT id, agent, title, answer, state, created, decided, taint, review, body, replied FROM asks
-         WHERE state IN ('answered', 'dismissed') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
+        "SELECT id, agent, title, answer, state, created, decided, taint, review, body, replied, reason, revision FROM asks
+         WHERE state IN ('answered', 'dismissed', 'withdrawn') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
         window,
         |row| {
             let review: String = row.get(8)?;
             let kind = if review.is_empty() { Kind::Question } else { Kind::Review };
-            let outcome = outcome(row, 4, 10, ("answered", Outcome::Answered), Outcome::Dismissed)?;
+            let outcome = withdrawn(row, 4, outcome(row, 4, 10, ("answered", Outcome::Answered), Outcome::Dismissed)?)?;
             let mut found = Row::new(kind, row.get::<_, i64>(0)?.to_string(), row.get(1)?, outcome, row.get(5)?, row.get(6)?);
             found.title = cut(&row.get::<_, String>(2)?, MAX_TITLE);
             found.reply = cut(&row.get::<_, String>(3)?, MAX_REPLY);
             found.taint = row.get(7)?;
-            Ok(found.searched(&[&row.get::<_, String>(9)?, &row.get::<_, String>(3)?]))
+            let reason: String = row.get(11)?;
+            found.reason = cut(&reason, MAX_REPLY);
+            found.updates = updates(row.get(12)?);
+            Ok(found.searched(&[&row.get::<_, String>(9)?, &row.get::<_, String>(3)?, &reason]))
         },
     )?);
     found.add(rows(
         db,
-        "SELECT id, agent, text, comment, state, created, decided, replied FROM proposals
-         WHERE state IN ('approved', 'dismissed') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
+        "SELECT id, agent, text, comment, state, created, decided, replied, reason, revision FROM proposals
+         WHERE state IN ('approved', 'dismissed', 'withdrawn') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
         window,
         |row| {
             let text: String = row.get(2)?;
-            let outcome = outcome(row, 4, 7, ("approved", Outcome::Approved), Outcome::Dismissed)?;
+            let outcome = withdrawn(row, 4, outcome(row, 4, 7, ("approved", Outcome::Approved), Outcome::Dismissed)?)?;
             let mut found = Row::new(Kind::Proposal, row.get::<_, i64>(0)?.to_string(), row.get(1)?, outcome, row.get(5)?, row.get(6)?);
             found.title = cut(text.lines().find(|line| !line.trim().is_empty()).unwrap_or_default(), MAX_TITLE);
             found.reply = cut(&row.get::<_, String>(3)?, MAX_REPLY);
-            Ok(found.searched(&[&text, &row.get::<_, String>(3)?]))
+            let reason: String = row.get(8)?;
+            found.reason = cut(&reason, MAX_REPLY);
+            found.updates = updates(row.get(9)?);
+            Ok(found.searched(&[&text, &row.get::<_, String>(3)?, &reason]))
         },
     )?);
     found.add(rows(
@@ -428,9 +470,10 @@ fn from_factory(
     found.add(rows(
         db,
         "SELECT d.agent, d.kind, d.allowed, d.asked, d.decided, d.pipe, d.seq, COALESCE(m.text, ''), d.id, COALESCE(n.comment, ''),
-                COALESCE(m.replied, 0)
+                COALESCE(m.replied, 0), COALESCE(w.comment, '')
          FROM pipe_decisions d LEFT JOIN pipe_messages m ON d.seq > 0 AND m.pipe = d.pipe AND m.seq = d.seq
          LEFT JOIN decision_notes n ON d.seq > 0 AND n.kind = 'pipe_message' AND n.ref = d.pipe || ':' || d.seq
+         LEFT JOIN decision_notes w ON d.seq > 0 AND d.kind = 'held' AND w.kind = 'pipe_withdrawn' AND w.ref = d.pipe || ':' || d.seq
          WHERE d.decided >= ?1 AND d.decided < ?2 ORDER BY d.decided DESC LIMIT ?3",
         window,
         |row| {
@@ -441,8 +484,11 @@ fn from_factory(
                 _ => (Kind::PipeLoop, "Your agents and theirs kept replying to each other"),
             };
             // A held message sent back with a reply (#370 Submit) was
-            // neither sent nor simply discarded.
+            // neither sent nor simply discarded; one its writer took back
+            // (pipe_withdraw, friend bug #19) was withdrawn, with its reason.
+            let withdrawn: String = row.get(11)?;
             let outcome = match row.get::<_, bool>(2)? {
+                _ if !withdrawn.is_empty() => Outcome::Withdrawn,
                 _ if row.get::<_, bool>(10)? => Outcome::Replied,
                 true => Outcome::Approved,
                 false => Outcome::Denied,
@@ -454,7 +500,8 @@ fn from_factory(
             found.seq = row.get::<_, i64>(6)?.try_into().unwrap_or_default();
             let text: String = row.get(7)?;
             found.excerpt = cut(&text, MAX_EXCERPT);
-            Ok(found.searched(&[&text]))
+            found.reason = cut(&withdrawn, MAX_REPLY);
+            Ok(found.searched(&[&text, &withdrawn]))
         },
     )?);
     found.add(rows(
@@ -535,6 +582,23 @@ fn from_factory(
     from_app_access(db, window, names, found)?;
     from_model_changes(db, window, names, found)?;
     from_conversation_changes(db, window, names, found)?;
+    from_member_changes(db, window, names, found)?;
+    Ok(())
+}
+
+/// The agents an admin agent let only send to a pipe, or stopped
+/// (`pipes::senders`): Claktory's sentence, the pipe's record.
+fn from_member_changes(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
+    let changes = crate::pipes::senders::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
+    found.changes(changes, |change| {
+        let mut row =
+            Row::new(Kind::PipeMember, format!("member:{}", change.id), change.by.clone(), Outcome::Changed, change.at, change.at);
+        row.title = cut(&change.title(names), MAX_TITLE);
+        row.pipe = change.pipe.clone();
+        row.member = change.agent.clone();
+        let subject = names.get(&change.agent).cloned().unwrap_or_default();
+        row.searched(&[&subject])
+    });
     Ok(())
 }
 
@@ -810,7 +874,7 @@ fn card<'a>(entries: impl DoubleEndedIterator<Item = &'a v1::Entry>, row: &Row) 
 
 /// A pipe's record, which says where it is itself: no card shows it.
 fn piped(kind: Kind) -> bool {
-    matches!(kind, Kind::PipeHeld | Kind::PipeLoop | Kind::PipeForward)
+    matches!(kind, Kind::PipeHeld | Kind::PipeLoop | Kind::PipeForward | Kind::PipeMember)
 }
 
 /// The end of a page of `limit` from `rows` (sorted, newest first): never
@@ -935,6 +999,7 @@ impl Factory {
                     undone: row.app.undone || row.model.undone,
                     app_id: row.app.app,
                     agent_reason: match row.kind {
+                        _ if row.outcome == Outcome::Withdrawn => row.reason,
                         Kind::Model => row.model.reason,
                         Kind::Conversation => row.conversation.reason,
                         _ => row.app.reason,
@@ -947,7 +1012,12 @@ impl Factory {
                             .config
                             .agent(&row.model.subject)
                             .is_none_or(|agent| (agent.model.clone(), agent.effort.clone()) != row.model.after),
-                    subject_agent_id: if row.kind == Kind::Conversation { row.conversation.subject } else { row.model.subject },
+                    subject_agent_id: match row.kind {
+                        Kind::Conversation => row.conversation.subject,
+                        Kind::PipeMember => row.member,
+                        _ => row.model.subject,
+                    },
+                    updates: row.updates,
                 }
             })
             .collect();

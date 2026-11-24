@@ -358,6 +358,25 @@ void main() {
     harness.backend.refuse = null;
   });
 
+  testWidgets(
+    'an answer to a card changed meanwhile says so in the bar (#428), '
+    'which stays',
+    (tester) async {
+      final harness = await phone(tester, layout: beside('text', _plan));
+      _routes(tester).showFile('a1', _plan);
+      await pumpFrames(tester);
+      await tester.enterText(find.byType(EditableText).last, 'Go ahead.');
+      await pumpFrames(tester);
+      harness.backend.refuse = 'This card changed. Look at it again.';
+      await tester.tap(find.text('Submit'));
+      await pumpFrames(tester);
+      expect(find.text('This card changed. Look at it again.'), findsOneWidget);
+      expect(find.text('Go ahead.'), findsOneWidget);
+      expect(find.text('Builder asks you to review this'), findsOneWidget);
+      harness.backend.refuse = null;
+    },
+  );
+
   testWidgets('from Needs you, an answer returns to Needs you', (tester) async {
     final harness = await phone(tester, layout: beside('text', _plan));
     harness.page.value = AppPage.inbox;

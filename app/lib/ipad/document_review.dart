@@ -315,6 +315,8 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
         // reply (#370), the drawings with it; it carries out nothing.
         reply: !dismiss && !ask.ask.wantsText && text.isNotEmpty,
         attachments: attachments,
+        // The card as the person read it (#428).
+        revision: ask.ask.revision,
       );
       _comment.clear();
       // Answered: the file's pane closes and the person is back where
@@ -329,9 +331,15 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
         );
       }
       return true;
-    } on RequestFailure {
+    } on RequestFailure catch (failure) {
       if (mounted) {
-        setState(() => _error = "Couldn't send your answer. Try again.");
+        // Its agent changed it meanwhile: the words and the ink stay, for
+        // the person to look again and send.
+        setState(
+          () => _error = cardChanged(failure)
+              ? failure.message
+              : "Couldn't send your answer. Try again.",
+        );
       }
       return false;
     } on Object {

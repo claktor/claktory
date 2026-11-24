@@ -90,10 +90,10 @@ void main() {
       'piece to about its target on a slow one', () {
     final pace = Pace();
     expect(pace.next, 64 * 1024);
-    // A quick link: 64 KB in 5 ms. It grows, at most four times a step,
-    // up to its most.
+    // A quick link: 64 KB in 5 ms. It grows, twice till the link's speed
+    // can be told, then at most four times a step, up to its most.
     pace.took(64 * 1024, const Duration(milliseconds: 5));
-    expect(pace.next, 256 * 1024);
+    expect(pace.next, 128 * 1024);
     for (var i = 0; i < 6; i++) {
       pace.took(pace.next, const Duration(milliseconds: 20));
     }
@@ -249,6 +249,36 @@ void main() {
     expect(takes.inMilliseconds, inInclusiveRange(1050, 1150));
   });
 
+  test('on a slow link whose pieces stay one size, with nothing tiny, a '
+      'piece that took half the target or more says how long the rest '
+      'takes (Zucchero\'s row 341)', () {
+    // 500 kbit/s, 150 ms away: 64 KB takes about 1.2 s, and the pieces
+    // after stay well under twice that, so the round trip never shows.
+    final pace = Pace();
+    pace.took(65536, const Duration(milliseconds: 1199));
+    final takes = pace.estimate(34000000)!;
+    expect(takes.inSeconds, inInclusiveRange(500, 700));
+    pace.took(pace.next, const Duration(milliseconds: 1600));
+    expect(pace.estimate(34000000), isNotNull);
+    // After a new connection, the same from its first piece.
+    pace.relink();
+    expect(pace.estimate(34000000), isNull);
+    pace.took(65536, const Duration(milliseconds: 1199));
+    expect(pace.estimate(34000000), isNotNull);
+  });
+
+  test('a short first piece on a quick link far away says nothing yet: '
+      'mostly round trip, it would make the link look slow', () {
+    // 300 ms away, 10 MB a second: 64 KB in 306 ms.
+    final pace = Pace();
+    pace.took(65536, const Duration(milliseconds: 306));
+    expect(pace.estimate(34000000), isNull);
+    // The next, bigger piece tells the round trip from the speed.
+    expect(pace.next, 2 * 65536);
+    pace.took(pace.next, const Duration(milliseconds: 313));
+    expect(pace.estimate(34000000), isNotNull);
+  });
+
   test('a long text file stops where one read would: its first 2 MB, '
       'without a hash', () async {
     final disk = _Disk(2100000, 'text/plain');
@@ -288,6 +318,74 @@ void main() {
     // Nothing read twice: the piece that was lost, from its offset.
     final offsets = [for (final (offset, _) in disk.asked) offset];
     expect(offsets.toSet().length, offsets.length);
+  });
+
+  test('lost while the connection still says it is up (its socket closed a '
+      'moment before the app hears so): it waits, and carries on once it '
+      'is back (Sale\'s row 87)', () async {
+    final disk = _Disk(20000, 'video/mp4');
+    final connected = ValueNotifier(true);
+    var lost = 0;
+    disk.before = (read) {
+      if (read == 3 && lost == 0) {
+        lost++;
+        // Says so a moment later, then back.
+        Future<void>.delayed(const Duration(milliseconds: 30), () {
+          connected.value = false;
+          Future<void>.delayed(
+            const Duration(milliseconds: 30),
+            () => connected.value = true,
+          );
+        });
+        throw const RequestFailure('Connection lost.');
+      }
+    };
+    final paced = await pacedRead(
+      range: disk.read,
+      connected: connected,
+      pace: _small(),
+      maxBytes: 8 * 1024 * 1024,
+    );
+    _same(paced, disk.answer(0, 8 * 1024 * 1024, ''));
+    expect(lost, 1);
+  });
+
+  test('lost again and again while it says it is up: it stops at its '
+      'time, saying so', () async {
+    final disk = _Disk(20000, 'video/mp4');
+    disk.before = (read) {
+      if (read >= 2) throw const RequestFailure('Connection lost.');
+    };
+    await expectLater(
+      pacedRead(
+        range: disk.read,
+        connected: ValueNotifier(true),
+        pace: _small(),
+        maxBytes: 8 * 1024 * 1024,
+        reconnectWithin: const Duration(milliseconds: 300),
+      ),
+      throwsA(
+        isA<RequestFailure>().having(
+          (failure) => failure.message,
+          'message',
+          lostWhileReading,
+        ),
+      ),
+    );
+  });
+
+  test('till the link\'s speed can be told, a piece grows at most twice: '
+      'on a slow link that let the first through quickly, the next is no '
+      'long wait', () {
+    // The first 64 KB in a burst, 200 ms; a 4x piece would take 4 s on
+    // the link behind it.
+    final pace = Pace();
+    pace.took(65536, const Duration(milliseconds: 200));
+    expect(pace.estimate(1000000), isNull);
+    expect(pace.next, 2 * 65536);
+    // Twice the size: the round trip shows, and it grows as before.
+    pace.took(pace.next, const Duration(milliseconds: 2200));
+    expect(pace.estimate(1000000), isNotNull);
   });
 
   test(

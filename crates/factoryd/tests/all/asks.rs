@@ -73,6 +73,28 @@ async fn told(client: &mut Client, view: &mut View, count: usize) -> String {
     told(view).pop().expect("an event")
 }
 
+/// How many events from Claktory Builder has run on.
+fn told_count(view: &View) -> usize {
+    view.entries.iter().filter(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.source() == v1::EventSource::Factory)).count()
+}
+
+/// A quiet event from Claktory (friend bug #19): it waits, leaving Builder
+/// idle, until something else wakes it (here the person's message), and
+/// then comes marked quiet; its text, the `count`th event from Claktory.
+async fn told_quietly(client: &mut Client, view: &mut View, count: usize) -> String {
+    view.follow(client, |view| view.agent("builder").quiet_waiting == 1).await;
+    assert!(idle(view, "builder") && told_count(view) == count - 1, "it didn't wake Builder");
+    apply_request(client, view, send_message("builder", "Carry on.")).await;
+    let text = told(client, view, count).await;
+    let quiet = view.entries.iter().rev().find_map(|entry| match &entry.kind {
+        Some(Kind::Event(event)) if event.source() == v1::EventSource::Factory => Some(event.quiet),
+        _ => None,
+    });
+    assert_eq!(quiet, Some(true), "{text}");
+    assert_eq!(view.agent("builder").quiet_waiting, 0);
+    text
+}
+
 #[tokio::test]
 async fn an_ask_waits_for_the_person_who_answers_it() {
     let dir = temp_dir();
@@ -117,15 +139,25 @@ async fn a_dismissed_ask_tells_the_agent_to_use_its_judgment_and_a_yes_needs_no_
     let (seq, _) = first.expect("a card");
     apply_request(&mut client, &mut view, answer(seq, true, "")).await;
     assert_eq!(card(&view, seq).state(), AskPersonState::Dismissed);
-    let text = told(&mut client, &mut view, 1).await;
+    // Dismissed without a word, it's told quietly (friend bug #19): at
+    // Builder's next wake, never waking it.
+    let text = told_quietly(&mut client, &mut view, 1).await;
     assert!(text.starts_with("The person dismissed your question \"Deploy to production tonight?\""), "{text}");
     assert!(text.contains("Use your best judgment"), "{text}");
+
+    // With a comment, the person's words wake it.
+    let (_, commented) = ask(&mut client, &mut view, "Rotate the keys now?", false).await;
+    let (seq, _) = commented.expect("a card");
+    apply_request(&mut client, &mut view, answer(seq, true, "Not before Friday.")).await;
+    let text = told(&mut client, &mut view, 2).await;
+    assert!(text.starts_with("The person dismissed your question \"Rotate the keys now?\""), "{text}");
+    assert!(text.contains("Not before Friday."), "{text}");
 
     let (_, second) = ask(&mut client, &mut view, "Delete the old bucket?", false).await;
     let (seq, _) = second.expect("a card");
     let reply = apply_request(&mut client, &mut view, answer(seq, false, "")).await;
     assert!(matches!(reply, Body::Ack(_)), "{reply:?}");
-    let text = told(&mut client, &mut view, 2).await;
+    let text = told(&mut client, &mut view, 3).await;
     assert!(text.starts_with("The person answered your question \"Delete the old bucket?\": yes, go ahead."), "{text}");
 }
 
@@ -318,12 +350,9 @@ async fn a_review_ask_names_a_file_it_can_read_and_is_told_how_many_comments_the
         ask_with(&mut client, &mut view, serde_json::json!({"title": "Look again", "body": "Anything else?", "review": path})).await;
     let (seq, _) = made.expect("a card");
     apply_request(&mut client, &mut view, answer(seq, true, "")).await;
-    let again = told(&mut client, &mut view, 1).await;
-    let dismissed = view.entries.iter().rev().find_map(|entry| match &entry.kind {
-        Some(Kind::Event(event)) if event.text.contains("dismissed your question \"Look again\"") => Some(event.text.clone()),
-        _ => None,
-    });
-    let dismissed = dismissed.unwrap_or(again);
+    let before = told_count(&view);
+    let dismissed = told_quietly(&mut client, &mut view, before + 1).await;
+    assert!(dismissed.contains("dismissed your question \"Look again\""), "{dismissed}");
     assert!(dismissed.contains(&format!("They left no comments on {path}.")), "{dismissed}");
 }
 

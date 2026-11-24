@@ -142,7 +142,7 @@ impl App {
         if !view.is_empty() && view != "main" {
             return Err(format!("Charts has no view \"{view}\"."));
         }
-        let first = model::ids(host).into_iter().next().unwrap_or_default();
+        let first = model::opening(host);
         self.views.insert(surface.to_owned(), View { dashboard: first, ..View::default() });
         let shown = self.show(host, surface, true, Vec::new());
         if let Err(why) = shown {
@@ -232,13 +232,16 @@ impl App {
     /// `data` (path, value) first, then whatever else changed.
     fn show(&mut self, host: &mut impl Host, surface: &str, rerun: bool, data: Vec<(String, Value)>) -> Result<(), String> {
         let ids = model::ids(host);
-        let boards: Vec<(String, String)> =
-            ids.iter().filter_map(|id| model::load(host, id).map(|dashboard| (id.clone(), dashboard.name))).collect();
+        let prefs = model::prefs(host);
+        let boards: Vec<(String, String)> = model::menu_order(&ids, &prefs)
+            .iter()
+            .filter_map(|id| model::load(host, id).map(|dashboard| (id.clone(), dashboard.name)))
+            .collect();
         let Some(view) = self.views.get_mut(surface) else { return Ok(()) };
         let mut dashboard = model::load(host, &view.dashboard);
         if dashboard.is_none() {
-            // Deleted meanwhile: the first there is.
-            let first = ids.first().cloned().unwrap_or_default();
+            // Deleted meanwhile: the home one, else the first there is.
+            let first = prefs.home.clone().or_else(|| ids.first().cloned()).unwrap_or_default();
             if first != view.dashboard {
                 *view = View {
                     dashboard: first,
@@ -263,7 +266,8 @@ impl App {
             let refresh = dashboard.as_ref().map_or(30, |dashboard| dashboard.refresh_s).max(MIN_REFRESH_S);
             view.due = now + i64::try_from(refresh * 1000).unwrap_or(i64::MAX / 2);
         }
-        let scene = Scene { boards: &boards, dashboard: dashboard.as_ref(), has_previous, sources: &sources, ran: &view.ran };
+        let scene =
+            Scene { boards: &boards, ids: &ids, prefs: &prefs, dashboard: dashboard.as_ref(), has_previous, sources: &sources, ran: &view.ran };
         let components = view::components(view, &scene);
         let panels = match &dashboard {
             Some(dashboard) if !view.ran.nothing_granted => view::panels_data(dashboard, &view.ran),
@@ -337,6 +341,10 @@ impl App {
         let mut rerun = false;
         let mut touched = false;
         let mut data = Vec::new();
+        // Whatever the person does closes a menu open inline.
+        if name != "menu" {
+            view.menu = None;
+        }
         match name {
             "edit_mode" => {
                 view.editing = context["on"].as_bool().unwrap_or(false);
@@ -406,6 +414,21 @@ impl App {
             "cancel_panel" => {
                 view.editor = None;
                 data.push(("/editor".to_owned(), Value::Null));
+            }
+            // Show as: the editor again, with that kind's settings.
+            "set_kind" => {
+                if let Some(editor) = view.editor.as_mut() {
+                    let mut draft = Draft::from_context(context);
+                    let to = text("to");
+                    if model::KINDS.contains(&to.as_str()) {
+                        draft.kind = to;
+                    }
+                    editor.draft = draft;
+                    data.push(("/editor".to_owned(), editor.draft.data()));
+                    if editor.preview.is_some() {
+                        data.push(("/editor/preview".to_owned(), view::preview_data(editor)));
+                    }
+                }
             }
             "run" => {
                 if let Some(dashboard) = &dashboard
@@ -527,6 +550,29 @@ impl App {
                         rerun = true;
                     }
                     Err(why) => view.notice = format!("Couldn't delete it: {why}."),
+                }
+            }
+            // How the person arranges the dashboards, for every view.
+            "star_board" | "home_board" | "move_board" => {
+                let id = view.dashboard.clone();
+                let mut prefs = model::prefs(host);
+                let done = match name {
+                    "star_board" => {
+                        prefs.starred.retain(|starred| *starred != id);
+                        if context["on"].as_bool().unwrap_or(false) {
+                            prefs.starred.push(id);
+                        }
+                        model::save_prefs(host, &prefs)
+                    }
+                    "home_board" => {
+                        prefs.home = Some(id);
+                        model::save_prefs(host, &prefs)
+                    }
+                    _ => model::move_board(host, &id, context["up"].as_bool().unwrap_or(false)),
+                };
+                match done {
+                    Ok(()) => touched = true,
+                    Err(why) => view.notice = format!("Couldn't save that: {why}."),
                 }
             }
             "restore" => match model::restore(host, &view.dashboard, "") {

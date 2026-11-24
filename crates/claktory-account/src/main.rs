@@ -17,7 +17,7 @@ Usage:
   claktory-account service-key-statement --secrets FILE [--service URL]
   claktory-account service-key-statement --secrets FILE --text FILE --signature ID:SIG --out FILE
   claktory-account check-statement URL
-  claktory-account stats --db FILE
+  claktory-account stats --db FILE [--format text|charts-json]
   claktory-account backup --db FILE --to DIR [--keep N]
   claktory-account set-cloudflare-token FILE (the token on standard input)
   claktory-account set-resend-key FILE      (the key on standard input)
@@ -413,12 +413,21 @@ fn check_statement(args: &[String]) -> Result<(), String> {
 
 fn stats(args: &[String]) -> Result<(), String> {
     let options = Options(args.to_vec());
-    options.check(&["--db"], &[])?;
+    options.check(&["--db", "--format"], &[])?;
     let db = PathBuf::from(options.required("--db")?);
+    let charts = match options.value("--format")?.as_deref() {
+        None | Some("text") => false,
+        Some("charts-json") => true,
+        Some(other) => return Err(format!("--format is text or charts-json, not {other}")),
+    };
     let conn = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| format!("can't open {}: {error}", db.display()))?;
     let now = jiff::Timestamp::now().as_second();
-    print!("{}", server::stats::report(&conn, now).map_err(|error| error.to_string())?);
+    if charts {
+        println!("{}", server::stats::export(&conn, now)?);
+    } else {
+        print!("{}", server::stats::report(&conn, now).map_err(|error| error.to_string())?);
+    }
     Ok(())
 }
 

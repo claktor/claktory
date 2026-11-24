@@ -8,6 +8,7 @@
 #   ~/.factory/bin/claktory-apps  the apps host beside it, which runs apps
 #   ~/.factory/bin/claktory-speech  the speech host, which writes what voice
 #                               messages say
+#   ~/.factory/tools/rg         ripgrep, first on agents' PATH
 #   ~/.factory/bin/Claktory Agents.app  the supervisor, which keeps it
 #                               running and undoes updates that don't start; a
 #                               LaunchAgent runs it. An app, so it can be added
@@ -85,6 +86,15 @@ if [[ -f "$RELEASE/claktory-speech" ]]; then
   cp "$RELEASE/claktory-speech" "$HOME_DIR/bin/claktory-speech.new"
   chmod 755 "$HOME_DIR/bin/claktory-speech.new"
   mv -f "$HOME_DIR/bin/claktory-speech.new" "$HOME_DIR/bin/claktory-speech"
+fi
+# Agents' tools (ripgrep), in <home>/tools, which factoryd puts first on
+# agents' PATH (releases before it have none). Its licenses go with it.
+if [[ -f "$RELEASE/tools/rg" ]]; then
+  mkdir -p "$HOME_DIR/tools"
+  cp "$RELEASE/tools/rg" "$HOME_DIR/tools/rg.new"
+  chmod 755 "$HOME_DIR/tools/rg.new"
+  mv -f "$HOME_DIR/tools/rg.new" "$HOME_DIR/tools/rg"
+  if [[ -d "$RELEASE/tools/LICENSES" ]]; then rm -rf "$HOME_DIR/tools/LICENSES"; cp -R "$RELEASE/tools/LICENSES" "$HOME_DIR/tools/LICENSES"; fi
 fi
 # The video preview helper (#379), beside them on a Mac (releases before it have none).
 if [[ -f "$RELEASE/claktory-video-preview" ]]; then

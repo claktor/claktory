@@ -198,6 +198,22 @@ async fn two_claktories_pair_approve_and_their_agents_talk() {
     assert!(matches!(a.request(action(&knocked.id, v1::PipeAction::Resume)).await, Body::Ack(_)));
     b.until(|pipe| pipe.state() == v1::PipeState::Open).await;
 
+    // A's Rivet pauses it at once when asked (#423), and resumes it only
+    // once the person approves its card; B sees each.
+    a.rivet().await;
+    let said = a.call("rivet", "pipes_settings", r#"{"pipe": "Launch", "reason": "Matt is away.", "pause": true}"#).await;
+    assert!(said.starts_with("The pipe \"Launch\" is changed: pause it."), "{said}");
+    b.until(|pipe| pipe.state() == v1::PipeState::Paused).await;
+    let lines = pipes::messages_for_test(&a.factory, &knocked.id);
+    assert!(lines.iter().any(|line| line.text.starts_with("Rivet paused it")), "{lines:?}");
+    let said = a.call("rivet", "pipes_settings", r#"{"pipe": "Launch", "reason": "Matt is back.", "resume": true}"#).await;
+    assert!(said.starts_with("Asked "), "{said}");
+    assert_eq!(a.pipe().expect("the pipe").state(), v1::PipeState::Paused, "not until the person approves");
+    let card = a.view.entries.iter().rev().find(|entry| matches!(entry.kind, Some(Kind::AskPerson(_)))).expect("the card").seq;
+    let approve = v1::AnswerAsk { agent_id: "rivet".into(), seq: card, ..Default::default() };
+    assert!(matches!(a.request(Request::AnswerAsk(approve)).await, Body::Ack(_)));
+    b.until(|pipe| pipe.state() == v1::PipeState::Open).await;
+
     // A's lead waits on a usage limit (#343 U18): B's pipe says it's waiting
     // until a quarter of an hour, in B's own words, and B's lead isn't told;
     // once A's is awake again, B's pipe says so.

@@ -13,6 +13,7 @@ import 'identity.dart';
 import 'ipad/workbench.dart' show WorkbenchScope;
 import 'layout.dart' show layoutOf, open;
 import 'markdown.dart';
+import 'message_time.dart' show clockTime;
 import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
 import 'outbox.dart' show connectionLost, decisionWaiting;
@@ -81,8 +82,11 @@ class _AskPersonCardState extends State<AskPersonCard> {
   @override
   void didUpdateWidget(AskPersonCard old) {
     super.didUpdateWidget(old);
-    // The next step: a clean card for it.
-    if (currentStep(old.ask) != currentStep(widget.ask)) {
+    // The next step: a clean card for it. Not when its agent changed the
+    // card (#428), which can move the step back: what the person typed
+    // stays, under what changed.
+    if (old.ask.revision == widget.ask.revision &&
+        currentStep(old.ask) != currentStep(widget.ask)) {
       _text.clear();
       _cant = false;
       _error = null;
@@ -99,16 +103,21 @@ class _AskPersonCardState extends State<AskPersonCard> {
     super.dispose();
   }
 
+  /// [revision]: the card's version the person answered (#428), kept
+  /// for a send again once the connection is back, so a card changed
+  /// meanwhile is never answered unseen.
   Future<void> _answer({
     required bool dismiss,
     int? step,
     bool again = false,
+    int? revision,
   }) async {
     final text = _text.text.trim();
     if (_busy ||
         (step == null && !dismiss && widget.ask.wantsText && text.isEmpty)) {
       return;
     }
+    final seen = revision ?? widget.ask.revision;
     await _send(
       (backend) => backend.answerAsk(
         widget.agentId,
@@ -117,25 +126,28 @@ class _AskPersonCardState extends State<AskPersonCard> {
         text: text,
         dismiss: dismiss,
         step: step,
+        revision: seen,
       ),
-      () => _answer(dismiss: dismiss, step: step, again: true),
+      () => _answer(dismiss: dismiss, step: step, again: true, revision: seen),
       again: again,
     );
   }
 
   /// Sends what's typed as the person's reply (#370): the agent is told
   /// their words, with no yes or no, and the question counts as answered.
-  Future<void> _reply({bool again = false}) async {
+  Future<void> _reply({bool again = false, int? revision}) async {
     final text = _text.text.trim();
     if (_busy || text.isEmpty) return;
+    final seen = revision ?? widget.ask.revision;
     await _send(
       (backend) => backend.answerAsk(
         widget.agentId,
         widget.seq,
         text: text,
         reply: true,
+        revision: seen,
       ),
-      () => _reply(again: true),
+      () => _reply(again: true, revision: seen),
       again: again,
     );
   }
@@ -252,11 +264,14 @@ class _AskPersonCardState extends State<AskPersonCard> {
               ],
               Flexible(
                 child: Text(
-                  ask.steps.isEmpty
+                  // Taken back, it needs nothing (#407).
+                  ask.withdrawn
+                      ? '$name asked'
+                      : ask.steps.isEmpty
                       ? '$name needs your answer'
                       : '$name needs you to do something',
                   style: type.caption.copyWith(
-                    color: color,
+                    color: ask.withdrawn ? palette.textMuted : color,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -274,7 +289,27 @@ class _AskPersonCardState extends State<AskPersonCard> {
               color: dismissed ? palette.textMuted : palette.text,
             ),
           ),
-          if (ask.body.isNotEmpty) ...[
+          // An admin agent's action card (#423): what Approve does, in
+          // Claktory's own words, then the agent's reason apart and named
+          // as its, so its words never read as part of the action (Fugo).
+          if (ask.actionDescription.isNotEmpty) ...[
+            const SizedBox(height: Space.xs),
+            Text(
+              proseCodes(ask.actionDescription),
+              style: type.body.copyWith(color: palette.text),
+            ),
+            if (ask.actionReason.isNotEmpty) ...[
+              const SizedBox(height: Space.s),
+              Text(
+                "$name's reason",
+                style: type.caption.copyWith(
+                  color: palette.textFaint,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              Markdown(proseCodes(ask.actionReason), color: palette.textMuted),
+            ],
+          ] else if (ask.body.isNotEmpty) ...[
             const SizedBox(height: Space.xs),
             for (final (i, part) in askBodyParts(ask.body).indexed) ...[
               if (i > 0) const SizedBox(height: Space.s),
@@ -288,12 +323,32 @@ class _AskPersonCardState extends State<AskPersonCard> {
             const SizedBox(height: Space.s),
             _ReviewFile(
               path: ask.reviewPath,
-              onReview: () =>
-                  openReview(context, widget.agentId, ask.reviewPath),
+              // Nothing to review once its agent took it back (#407).
+              onReview: ask.withdrawn
+                  ? null
+                  : () => openReview(context, widget.agentId, ask.reviewPath),
+            ),
+          ],
+          // Changed by its agent while it waited (#428): when, and why in
+          // its words, above the answer (what's typed stays).
+          if (ask.updatedMs > 0) ...[
+            const SizedBox(height: Space.s),
+            UpdatedLine(
+              updatedMs: ask.updatedMs.toInt(),
+              reason: ask.updateReason,
             ),
           ],
           const SizedBox(height: Space.m),
-          if (ask.steps.isNotEmpty)
+          // Taken back by its agent (#407): nothing to answer, and never
+          // the person's dismissal.
+          if (ask.withdrawn)
+            WithdrawnLine(
+              agent: agent,
+              name: name,
+              reason: ask.withdrawReason,
+              decidedMs: decided,
+            )
+          else if (ask.steps.isNotEmpty)
             ..._procedure(palette, type, color, name, pending, decided)
           else if (pending)
             ..._pending(palette, type, name)
@@ -319,6 +374,8 @@ class _AskPersonCardState extends State<AskPersonCard> {
     widget.ask.title.isEmpty
         ? 'Your answer to $name'
         : 'Your answer to $name: ${widget.ask.title}',
+    // The bar's name goes back to the conversation the card is in.
+    select: (backend) => backend.selectAgent(widget.agentId),
   );
 
   List<Widget> _pending(Palette palette, TypeScale type, String name) {
@@ -562,7 +619,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
                   if (decided > 0)
                     TextSpan(
                       text:
-                          ' · ${logTime(DateTime.fromMillisecondsSinceEpoch(decided))}',
+                          ' · ${cardTime(context, decided)}',
                       style: TextStyle(color: palette.textFaint),
                     ),
                 ],
@@ -631,7 +688,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
                   if (decided > 0)
                     TextSpan(
                       text:
-                          ' · ${logTime(DateTime.fromMillisecondsSinceEpoch(decided))}',
+                          ' · ${cardTime(context, decided)}',
                       style: TextStyle(color: palette.textFaint),
                     ),
                 ],
@@ -652,6 +709,116 @@ class _AskPersonCardState extends State<AskPersonCard> {
         ),
       ],
     ];
+  }
+}
+
+/// A card its agent took back once it no longer applied (#407): "Withdrawn
+/// by Mike" with when, by the agent's character, and its reason under it
+/// in the agent's own words. In place of the answer, with nothing to press.
+class WithdrawnLine extends StatelessWidget {
+  const WithdrawnLine({
+    super.key,
+    required this.agent,
+    required this.name,
+    required this.reason,
+    required this.decidedMs,
+  });
+
+  /// The agent that withdrew it, when the app knows it, and its name.
+  final Agent? agent;
+  final String name;
+  final String reason;
+  final int decidedMs;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final agent = this.agent;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (agent != null) ...[
+              AgentCharacter(agent: agent, size: 16),
+              const SizedBox(width: Space.xs + 2),
+            ],
+            Flexible(
+              child: Text.rich(
+                TextSpan(
+                  children: [
+                    TextSpan(
+                      text: 'Withdrawn by $name',
+                      style: TextStyle(
+                        color: palette.textMuted,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    if (decidedMs > 0)
+                      TextSpan(
+                        text:
+                            ' · ${cardTime(context, decidedMs)}',
+                        style: TextStyle(color: palette.textFaint),
+                      ),
+                  ],
+                ),
+                style: type.caption,
+              ),
+            ),
+          ],
+        ),
+        if (reason.isNotEmpty) ...[
+          const SizedBox(height: Space.xs),
+          // As the card's body reads: `code` as code.
+          Markdown(proseCodes(reason), color: palette.textMuted),
+        ],
+      ],
+    );
+  }
+}
+
+/// When a card was decided, withdrawn or changed: "14:32" today ("2:32
+/// PM" on a 12-hour device, as its message times read), "3 Nov 14:32"
+/// another day.
+String cardTime(BuildContext context, int ms) {
+  final clock = clockTime(
+    ms,
+    h24: MediaQuery.maybeAlwaysUse24HourFormatOf(context) ?? true,
+  );
+  final logged = logTime(DateTime.fromMillisecondsSinceEpoch(ms));
+  // logTime's date, when it has one, before this device's clock.
+  final space = logged.lastIndexOf(' ');
+  return space < 0 ? clock : '${logged.substring(0, space)} $clock';
+}
+
+/// A card its agent changed while it waited (#428): "Updated · 14:32" in
+/// caption faint, and its reason under it in the agent's own words, muted,
+/// as a card's body reads.
+class UpdatedLine extends StatelessWidget {
+  const UpdatedLine({super.key, required this.updatedMs, required this.reason});
+
+  final int updatedMs;
+  final String reason;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Updated · ${cardTime(context, updatedMs)}',
+          style: type.caption.copyWith(color: palette.textFaint),
+        ),
+        if (reason.isNotEmpty) ...[
+          const SizedBox(height: Space.xs),
+          Markdown(proseCodes(reason), color: palette.textMuted),
+        ],
+      ],
+    );
   }
 }
 
@@ -772,7 +939,9 @@ class _ReviewFile extends StatelessWidget {
   const _ReviewFile({required this.path, required this.onReview});
 
   final String path;
-  final VoidCallback onReview;
+
+  /// Null where there's nothing to review: the file only, no Review.
+  final VoidCallback? onReview;
 
   @override
   Widget build(BuildContext context) {
@@ -781,6 +950,33 @@ class _ReviewFile extends StatelessWidget {
     final slash = path.lastIndexOf('/');
     final name = slash < 0 ? path : path.substring(slash + 1);
     final folder = slash <= 0 ? '' : shortPath(path.substring(0, slash));
+    final onReview = this.onReview;
+    final lead = Row(
+      children: [
+        FileGlyph(color: palette.textMuted),
+        const SizedBox(width: Space.s),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: type.label.copyWith(color: palette.text),
+              ),
+              if (folder.isNotEmpty)
+                Text(
+                  folder,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: type.caption.copyWith(color: palette.textFaint),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
     return Container(
       padding: const EdgeInsets.fromLTRB(Space.m, Space.s, Space.s, Space.s),
       decoration: BoxDecoration(
@@ -788,35 +984,12 @@ class _ReviewFile extends StatelessWidget {
         border: Border.all(color: palette.hairline),
         borderRadius: BorderRadius.circular(Radii.control),
       ),
-      child: ActionLine(
-        lead: Row(
-          children: [
-            FileGlyph(color: palette.textMuted),
-            const SizedBox(width: Space.s),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: type.label.copyWith(color: palette.text),
-                  ),
-                  if (folder.isNotEmpty)
-                    Text(
-                      folder,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: type.caption.copyWith(color: palette.textFaint),
-                    ),
-                ],
-              ),
+      child: onReview == null
+          ? lead
+          : ActionLine(
+              lead: lead,
+              action: Button(label: 'Review', onPressed: onReview),
             ),
-          ],
-        ),
-        action: Button(label: 'Review', onPressed: onReview),
-      ),
     );
   }
 }

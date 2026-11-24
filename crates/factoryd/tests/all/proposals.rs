@@ -80,8 +80,11 @@ async fn an_approved_proposal_reaches_rivet_as_the_persons_message_with_their_co
     give_rivet_a_model(&mut client, &mut view).await;
 
     let (said, proposal) = propose(&mut client, &mut view, NEEDED).await;
-    assert_eq!(said, "Proposed; the person will approve or dismiss it.");
     let proposal = proposal.expect("the proposal shows after the call");
+    assert_eq!(
+        said,
+        format!("Proposed; the person will approve or dismiss it. Its id is {}: if it stops applying before they decide on the card (they settle it in your chat, say), take it back with proposal_withdraw, or change it with proposal_update if what you propose changes.", proposal.id)
+    );
     assert_eq!((proposal.text.as_str(), proposal.state()), (NEEDED, ProposalState::Pending));
     let shown = describe(&view.entries);
     let at = shown.iter().position(|entry| entry.starts_with("tool propose_to_rivet")).expect("the call");
@@ -206,17 +209,22 @@ async fn a_dismissed_proposal_tells_the_agent_and_rivet_gets_nothing() {
     let reply = apply_request(&mut client, &mut view, decide("builder", &proposal.id, false, "")).await;
     assert!(matches!(reply, Body::Ack(_)), "{reply:?}");
     assert_eq!(proposal_entry(&view.entries, &proposal.id).state(), ProposalState::Dismissed);
-    view.follow(&mut client, |view| view.entries.iter().any(|entry| matches!(&entry.kind, Some(Kind::Event(_)))) && idle(view, "builder"))
-        .await;
-    let summaries: Vec<String> = view
-        .entries
-        .iter()
-        .filter_map(|entry| match &entry.kind {
-            Some(Kind::Event(event)) => Some(event.summary.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(summaries, ["The person dismissed your proposal to Rivet."]);
+    // Dismissed without a comment, Builder is told quietly (friend bug #19):
+    // it waits for Builder's next wake rather than waking it.
+    let events = |view: &View| -> Vec<(String, bool)> {
+        view.entries
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                Some(Kind::Event(event)) => Some((event.summary.clone(), event.quiet)),
+                _ => None,
+            })
+            .collect()
+    };
+    view.follow(&mut client, |view| view.agent("builder").quiet_waiting == 1).await;
+    assert!(idle(&view, "builder") && events(&view).is_empty(), "{:?}", events(&view));
+    apply_request(&mut client, &mut view, send_message("builder", "Carry on.")).await;
+    view.follow(&mut client, |view| !events(view).is_empty() && idle(view, "builder")).await;
+    assert_eq!(events(&view), [("The person dismissed your proposal to Rivet.".to_owned(), true)]);
 
     let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("factory.db");
     let to_rivet: i64 = db.query_row("SELECT count(*) FROM messages WHERE agent = 'rivet'", [], |row| row.get(0)).expect("count");
@@ -303,7 +311,7 @@ async fn agents_call_the_user_by_name_once_it_is_given() {
 
     // Without a name, it's "the person", as ever.
     let (said, _) = propose(&mut client, &mut view, NEEDED).await;
-    assert_eq!(said, "Proposed; the person will approve or dismiss it.");
+    assert!(said.starts_with("Proposed; the person will approve or dismiss it. Its id is "), "{said}");
     let prompt = system_prompt.lock().expect("lock").clone();
     assert!(!prompt.contains("\nThe person you work with is") && prompt.contains("where the person approves it"), "{prompt}");
 
@@ -315,7 +323,7 @@ async fn agents_call_the_user_by_name_once_it_is_given() {
         serde_json::from_str(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")).expect("json");
     assert_eq!(saved["user"], serde_json::json!({"name": "Matt"}));
     let (said, proposal) = propose(&mut client, &mut view, NEEDED).await;
-    assert_eq!(said, "Proposed; Matt will approve or dismiss it.");
+    assert!(said.starts_with("Proposed; Matt will approve or dismiss it. Its id is "), "{said}");
     let told = view.entries.iter().rev().find_map(|entry| match &entry.kind {
         Some(Kind::Event(event)) if event.source() == v1::EventSource::Factory => Some(event.text.clone()),
         _ => None,
@@ -323,7 +331,7 @@ async fn agents_call_the_user_by_name_once_it_is_given() {
     assert!(told.as_deref().is_some_and(|text| text.contains("the person you work with is Matt")), "{told:?}");
     assert!(!system_prompt.lock().expect("lock").contains("Matt"), "the frame holds until the next context");
 
-    apply_request(&mut client, &mut view, decide("builder", &proposal.expect("proposed").id, false, "")).await;
+    apply_request(&mut client, &mut view, decide("builder", &proposal.expect("proposed").id, false, "Not now.")).await;
     view.follow(&mut client, |view| {
         view.entries.iter().any(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.summary.starts_with("Matt dismissed")))
     })

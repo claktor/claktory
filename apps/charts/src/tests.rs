@@ -285,13 +285,50 @@ impl Stand {
         self.words(surface).iter().any(|words| words.contains(text))
     }
 
-    /// A button's words: its child's text, or its child's first text's.
+    /// A button's words: its child's text, or its child's first text's
+    /// (past an icon).
     fn button_words(&self, surface: &str, button: &Value) -> Value {
         let child = self.component(surface, button["child"].as_str().unwrap());
-        match child["children"].as_array().and_then(|children| children.first()) {
-            Some(first) => self.resolve(surface, &self.component(surface, first.as_str().unwrap())["text"]),
+        match child["children"].as_array() {
+            Some(children) => children
+                .iter()
+                .map(|id| self.component(surface, id.as_str().unwrap()))
+                .find(|part| part["component"] == "Text")
+                .map_or(Value::Null, |text| self.resolve(surface, &text["text"])),
             None => self.resolve(surface, &child["text"]),
         }
+    }
+
+    /// The words of the options of the menu the button `id` opens.
+    fn options(&self, surface: &str, id: &str) -> Vec<String> {
+        let button = self.component(surface, id);
+        let options = button["menu"]["options"].as_array().unwrap_or_else(|| panic!("{id} has no menu: {button}"));
+        options.iter().map(|option| option["label"].as_str().unwrap().to_owned()).collect()
+    }
+
+    /// The option `label` of the menu the button `id` opens.
+    fn option(&self, surface: &str, id: &str, label: &str) -> Value {
+        let button = self.component(surface, id);
+        button["menu"]["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|option| option["label"] == label)
+            .cloned()
+            .unwrap_or_else(|| panic!("no \"{label}\" in {id}'s menu: {:?}", self.options(surface, id)))
+    }
+
+    /// Sends `event` from the component `source`, as a renderer does.
+    fn send(&mut self, app: &mut App, surface: &str, source: &Value, event: &Value) {
+        let context: serde_json::Map<String, Value> = event["context"]
+            .as_object()
+            .map(|context| context.iter().map(|(key, value)| (key.clone(), self.resolve(surface, value))).collect())
+            .unwrap_or_default();
+        let message = json!({"version": "1.0", "action": {
+            "name": event["name"], "surfaceId": surface, "sourceComponentId": source,
+            "timestamp": "2026-11-22T10:00:00Z", "context": context,
+        }});
+        app.view_action(self, surface, &message.to_string());
     }
 
     /// The button whose words are `label`.
@@ -302,29 +339,23 @@ impl Stand {
             .unwrap_or_else(|| panic!("no button \"{label}\" in {:?}", self.words(surface)))
     }
 
-    /// The person opens the menu `menu` (its button's id) and chooses
-    /// `label` in it.
+    /// The person opens the menu `menu` (its button's id) over the page
+    /// and chooses `label` in it: what the option's action says.
     fn choose(&mut self, app: &mut App, surface: &str, menu: &str, label: &str) {
-        self.press_id(app, surface, menu);
-        assert_eq!(self.component(surface, "menu")["component"], "Card", "{menu} opened");
-        self.press(app, surface, label);
-        assert!(self.tree(surface).iter().all(|component| component["id"] != "menu"), "choosing closes it");
+        let option = self.option(surface, menu, label);
+        self.send(app, surface, &json!(menu), &option["action"]["event"]);
+        assert!(self.tree(surface).iter().all(|component| component["id"] != "menu"), "no menu inline");
     }
 
     /// The person presses the button `label`: its action, its context
     /// resolved against the surface's data, as the renderer sends it.
+    /// Or, with no such button, the option `label` in \u{2022}\u{2022}\u{2022}'s menu.
     fn press(&mut self, app: &mut App, surface: &str, label: &str) {
-        let button = self.button(surface, label);
-        let event = &button["action"]["event"];
-        let context: serde_json::Map<String, Value> = event["context"]
-            .as_object()
-            .map(|context| context.iter().map(|(key, value)| (key.clone(), self.resolve(surface, value))).collect())
-            .unwrap_or_default();
-        let message = json!({"version": "1.0", "action": {
-            "name": event["name"], "surfaceId": surface, "sourceComponentId": button["id"],
-            "timestamp": "2026-11-22T10:00:00Z", "context": context,
-        }});
-        app.view_action(self, surface, &message.to_string());
+        let found = self.tree(surface).into_iter().find(|component| component["component"] == "Button" && self.button_words(surface, component) == label);
+        match found {
+            Some(button) => self.send(app, surface, &button["id"].clone(), &button["action"]["event"].clone()),
+            None => self.choose(app, surface, "more", label),
+        }
     }
 
     /// The person types or picks `value` at `path`, as a field does.
@@ -494,10 +525,19 @@ fn the_default_dashboard_shows_what_the_records_say() {
     assert_eq!(host.kinds(), vec!["createSurface"]);
     let words = host.words("s1");
     for expected in
-        ["Claktory", "Edit", "Last 7 days", "Agent: All", "Runs", "Tokens by agent", "Background tasks running now"]
+        ["Claktory", "7 days", "Agent: All", "Runs", "Tokens by agent", "Background tasks running now"]
     {
         assert!(words.iter().any(|word| word == expected), "{expected} in {words:?}");
     }
+    // One line: the name, the range, the agent and \u{2022}\u{2022}\u{2022} (Edit).
+    assert_eq!(host.component("s1", "bar")["children"], json!(["name", "range", "var0", "more"]));
+    // A Row of buttons, never stacked, the name taking what's left.
+    let bar = host.component("s1", "bar");
+    assert_eq!((&bar["component"], bar.get("stackBelow")), (&json!("Row"), None));
+    assert_eq!((&host.component("s1", "name")["component"], &host.component("s1", "name")["weight"]), (&json!("Button"), &json!(1)));
+    assert_eq!(host.options("s1", "name"), ["Claktory"], "a menu even of one");
+    assert!(host.tree("s1").iter().all(|component| component["id"] != "range_l"), "no clock: the room is the range's");
+    assert_eq!(host.options("s1", "more"), ["Edit", "Star", "Make home dashboard"]);
     let data = &host.surface("s1").data;
     // In the last 7 days: 4 runs and messages (one was 9 days ago), one item
     // done, 5 × 120 tokens (a chat's among them).
@@ -557,10 +597,17 @@ fn the_range_and_variables_are_bound_values() {
     assert_eq!(host.component("s1", "menu_o8")["variant"], "borderless");
     host.press_id(&mut app, "s1", "range");
     assert!(host.tree("s1").iter().all(|component| component["id"] != "menu"));
+    // An app with menus opens the same over the page, titled, the chosen
+    // one selected, and never sends the button's own action.
+    let range = host.component("s1", "range");
+    assert_eq!(range["menu"]["title"], "Time range");
+    assert_eq!(host.options("s1", "range").join(", "), options.join(", "));
+    assert_eq!(host.option("s1", "range", "Last 7 days")["selected"], true);
+    assert!(host.option("s1", "range", "Last 24 hours").get("selected").is_none());
     host.choose(&mut app, "s1", "range", "Last 24 hours");
     let (_, _, params) = host.queries.iter().find(|(_, sql, _)| sql.contains("FROM runs WHERE started")).unwrap().clone();
     assert!(params.as_array().unwrap().contains(&json!(NOW - 24 * HOUR)), "{params}");
-    assert!(host.shows("s1", "Last 24 hours"));
+    assert_eq!(host.button_words("s1", &host.component("s1", "range")), "24 hours");
     // In 24 hours: 2 runs.
     assert_eq!(host.surface("s1").data["panels"][0]["value"], 2);
 
@@ -612,7 +659,7 @@ fn a_fixed_range_shows_as_dates_stays_in_its_menu_and_spans_the_time_axis() {
     assert_eq!(host.component("s1", "menu_o10")["variant"], "borderless", "Last 7 days isn't chosen");
     host.press_id(&mut app, "s1", "range");
     host.choose(&mut app, "s1", "range", "Last 1 hour");
-    assert!(host.shows("s1", "Last 1 hour"));
+    assert!(host.shows("s1", "1 hour"));
     assert_eq!(span(&host), (json!(host.now - HOUR), json!(host.now)));
     host.choose(&mut app, "s1", "range", words);
     assert_eq!(span(&host), (json!(from), json!(to)));
@@ -628,6 +675,22 @@ fn a_fixed_range_shows_as_dates_stays_in_its_menu_and_spans_the_time_axis() {
     assert_eq!(view::short_range(&(from - 365 * day).to_string(), &to.to_string(), NOW), "23 Nov 2025 08:00 \u{2013} 23 Nov 14:00 UTC");
     assert_eq!(view::short_range("now-7d", "now", NOW), "Last 7 days");
     assert_eq!(view::range_label("951782400000"), "2000-02-29 00:00:00");
+}
+
+#[test]
+fn a_variable_with_many_values_offers_every_one() {
+    let (mut app, mut host) = opened(true);
+    let many = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 60) SELECT 'agent' || i FROM n";
+    let variable = model::Variable { name: "agent".into(), label: "Agent".into(), query: Query { source: ACTIVITY.into(), sql: many.into() }, default: String::new() };
+    model::save(&mut host, Dashboard { id: "many".into(), name: "Many".into(), variables: vec![variable], ..every_kind() }, None, "rivet").unwrap();
+    host.now += 30_000;
+    app.on_timer(&mut host, REFRESH);
+    host.choose(&mut app, "s1", "name", "Many");
+    host.press_id(&mut app, "s1", "var0");
+    assert_eq!(host.component("s1", "menu_col")["children"].as_array().unwrap().len(), 61, "All and the 60");
+    host.press_id(&mut app, "s1", "var0");
+    host.choose(&mut app, "s1", "var0", "agent60");
+    assert!(host.shows("s1", "Agent: agent60"));
 }
 
 #[test]
@@ -832,12 +895,10 @@ fn the_person_makes_renames_switches_and_deletes_dashboards() {
 impl Stand {
     /// Presses the button with id `id`.
     fn press_id(&mut self, app: &mut App, surface: &str, id: &str) {
-        let label = self.button_words(surface, &self.component(surface, id)).as_str().unwrap().to_owned();
         let event = self.component(surface, id)["action"]["event"].clone();
         let context: serde_json::Map<String, Value> =
             event["context"].as_object().unwrap().iter().map(|(key, value)| (key.clone(), self.resolve(surface, value))).collect();
         let message = json!({"version": "1.0", "action": {"name": event["name"], "surfaceId": surface, "sourceComponentId": id, "timestamp": "t", "context": context}});
-        assert!(!label.is_empty());
         app.view_action(self, surface, &message.to_string());
     }
 }
@@ -944,6 +1005,168 @@ fn heights_kept_before_0_5_0_move_to_grafanas_rows_once_and_stay_as_tall() {
         {"id": "a", "title": "A", "query": {"source": "activity", "sql": "SELECT COUNT(*) FROM runs"}, "viz": {"kind": "bars"}}]}});
     assert!(!app.call(&mut host, "charts_put", &bare.to_string(), "rivet").is_error);
     assert_eq!(heights(&host.dashboard("new")), [8]);
+}
+
+#[test]
+fn the_person_stars_orders_and_picks_a_home_dashboard_kept_for_every_device() {
+    let (mut app, mut host) = opened(true);
+    for (id, name) in [("bugs", "Bugs"), ("costs", "Costs")] {
+        model::save(&mut host, Dashboard { id: id.into(), name: name.into(), ..every_kind() }, None, "rivet").unwrap();
+    }
+    host.now += 30_000;
+    app.on_timer(&mut host, REFRESH);
+    // The dashboards' menu: each option's words, section and icon.
+    let menu = |host: &Stand| -> Vec<(String, String, String)> {
+        host.component("s1", "name")["menu"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|option| {
+                let part = |key: &str| option[key].as_str().unwrap_or_default().to_owned();
+                (part("label"), part("section"), part("icon"))
+            })
+            .collect()
+    };
+    let row = |words: &str, section: &str, icon: &str| (words.to_owned(), section.to_owned(), icon.to_owned());
+    assert_eq!(host.component("s1", "name")["menu"]["title"], "Dashboards");
+    assert_eq!(menu(&host), [row("Claktory", "All dashboards", ""), row("Bugs", "All dashboards", ""), row("Costs", "All dashboards", "")]);
+
+    // Costs: starred from \u{2022}\u{2022}\u{2022}, first in the menu under Starred.
+    host.choose(&mut app, "s1", "name", "Costs");
+    assert!(host.option("s1", "more", "Star").get("icon").is_none(), "no filled star before starring");
+    host.press(&mut app, "s1", "Star");
+    assert_eq!(host.option("s1", "more", "Unstar")["icon"], view::STAR_ICON);
+    assert_eq!(menu(&host)[0], row("Costs", "Starred", view::STAR_ICON));
+    assert_eq!(menu(&host)[1..], [row("Claktory", "All dashboards", ""), row("Bugs", "All dashboards", "")]);
+
+    // Bugs: home, and moved up past Claktory (not past Costs, starred).
+    host.choose(&mut app, "s1", "name", "Bugs");
+    assert!(!host.options("s1", "more").contains(&"Move down".to_owned()), "last of its group");
+    host.press(&mut app, "s1", "Make home dashboard");
+    host.press(&mut app, "s1", "Move up");
+    assert_eq!(host.options("s1", "more"), ["Edit", "Star", "Move down"], "home, and first of its group");
+    assert_eq!(menu(&host)[1..], [row("Bugs", "All dashboards", view::HOME_ICON), row("Claktory", "All dashboards", "")]);
+
+    // Kept in Charts' storage: another device opens on Bugs, with the same menu.
+    app.view_open(&mut host, "main", "s2").unwrap();
+    assert_eq!(host.button_words("s2", &host.component("s2", "name")), "Bugs");
+    // Deleted, the home one gives way to the first.
+    host.press(&mut app, "s1", "Edit");
+    host.press(&mut app, "s1", "Delete dashboard");
+    host.press(&mut app, "s1", "Delete");
+    assert_eq!(model::prefs(&mut host), model::Prefs { home: None, starred: vec!["costs".into()] });
+    app.view_open(&mut host, "main", "s3").unwrap();
+    assert_eq!(host.button_words("s3", &host.component("s3", "name")), "Claktory");
+}
+
+#[test]
+fn past_one_variable_they_fold_into_filters_and_older_apps_get_menus_inline() {
+    let (mut app, mut host) = opened(true);
+    let variable = |name: &str, sql: &str| model::Variable {
+        name: name.into(),
+        label: String::new(),
+        query: Query { source: ACTIVITY.into(), sql: sql.into() },
+        default: String::new(),
+    };
+    let two = Dashboard {
+        id: "two".into(),
+        name: "Two".into(),
+        variables: vec![variable("agent", "SELECT DISTINCT agent FROM runs"), variable("version", "SELECT DISTINCT version FROM runs")],
+        ..every_kind()
+    };
+    model::save(&mut host, two, None, "rivet").unwrap();
+    host.now += 30_000;
+    app.on_timer(&mut host, REFRESH);
+    host.choose(&mut app, "s1", "name", "Two");
+    assert_eq!(host.component("s1", "bar")["children"], json!(["name", "range", "filters", "more"]));
+    assert_eq!(host.button_words("s1", &host.component("s1", "filters")), "Filters (2)");
+    assert_eq!(host.component("s1", "filters_i")["name"], "chevron-down", "it opens, as the others");
+    assert_eq!(host.component("s1", "more")["menu"]["title"], "Two", "what \u{2022}\u{2022}\u{2022}'s choices apply to");
+    assert!(host.tree("s1").iter().all(|component| component["id"] != "filters_row"));
+    // Filters opens their line: each a menu of its own.
+    host.press_id(&mut app, "s1", "filters");
+    assert_eq!(host.component("s1", "filters_row")["children"], json!(["var0", "var1"]));
+    assert_eq!(host.component("s1", "var1")["menu"]["title"], "version");
+    host.choose(&mut app, "s1", "var0", "rivet");
+    assert!(host.tree("s1").iter().all(|component| component["id"] != "filters_row"), "choosing closes it");
+    host.press_id(&mut app, "s1", "filters");
+    assert!(host.shows("s1", "agent: rivet"));
+
+    // An app without menus sends \u{2022}\u{2022}\u{2022}'s own action: the same choices, inline.
+    host.press_id(&mut app, "s1", "more");
+    let inline: Vec<String> = host.component("s1", "menu_col")["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| host.button_words("s1", &host.component("s1", id.as_str().unwrap())).as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(inline, host.options("s1", "more"));
+    host.press(&mut app, "s1", "Edit");
+    assert!(host.shows("s1", "Add panel"));
+    assert!(host.tree("s1").iter().all(|component| component["id"] != "menu"), "choosing closes it");
+    host.press(&mut app, "s1", "Done");
+    assert!(!host.shows("s1", "Add panel"));
+}
+
+#[test]
+fn what_a_number_shows_is_kept_when_its_panel_is_saved_as_another_kind() {
+    let (mut app, mut host) = opened(true);
+    let mut dashboard = host.dashboard("claktory");
+    dashboard.panels[0].viz.reduce = Some("max".into());
+    model::save(&mut host, dashboard, Some(1), "rivet").unwrap();
+    host.now += 30_000;
+    app.on_timer(&mut host, REFRESH);
+    // Abbacchio's row 1050: Min while it's a number, then saved as a line.
+    host.press(&mut app, "s1", "Edit");
+    host.press_id(&mut app, "s1", "p0_edit");
+    host.enter("s1", "/editor/reduce", json!(["min"]));
+    host.enter("s1", "/editor/color_mode", json!(["background"]));
+    host.choose(&mut app, "s1", "ed_kind", "Line");
+    host.choose(&mut app, "s1", "ed_kind", "Number");
+    assert_eq!(host.surface("s1").data["editor"]["reduce"], json!(["min"]));
+    host.choose(&mut app, "s1", "ed_kind", "Line");
+    host.press(&mut app, "s1", "Save");
+    let viz = host.dashboard("claktory").panels[0].viz.clone();
+    assert_eq!((viz.kind.as_str(), viz.reduce.as_deref(), viz.color_mode.as_deref()), ("timeseries", Some("min"), Some("background")));
+    // A line never made a number keeps none.
+    host.press_id(&mut app, "s1", "p4_edit");
+    host.press(&mut app, "s1", "Save");
+    assert_eq!(host.dashboard("claktory").panels[4].viz.reduce, None);
+}
+
+#[test]
+fn rivet_arranges_the_dashboards_when_the_person_asks() {
+    let (mut app, mut host) = opened(true);
+    for (id, name) in [("cards", "Cards"), ("bugs", "Bugs")] {
+        model::save(&mut host, Dashboard { id: id.into(), name: name.into(), ..every_kind() }, None, "rivet").unwrap();
+    }
+    let put = |app: &mut App, host: &mut Stand, args: Value| app.call(host, "charts_put", &args.to_string(), "rivet");
+    let done = put(&mut app, &mut host, json!({"home": "cards", "starred": ["bugs"], "order": ["cards"]}));
+    assert!(!done.is_error, "{}", done.text);
+    assert_eq!(done.text, "Charts opens on cards; starred: bugs; the dashboards' menu lists bugs, cards, claktory.");
+    assert_eq!(model::ids(&mut host), ["cards", "claktory", "bugs"]);
+    let listed = app.call(&mut host, "charts_list", "{}", "rivet");
+    assert!(listed.text.contains("Charts opens on cards; starred: bugs"), "{}", listed.text);
+    assert_eq!((&listed.data.as_ref().unwrap()["home"], &listed.data.as_ref().unwrap()["starred"]), (&json!("cards"), &json!(["bugs"])));
+    app.view_open(&mut host, "main", "s2").unwrap();
+    assert_eq!(host.button_words("s2", &host.component("s2", "name")), "Cards");
+
+    for (wrong, why) in [
+        (json!({"home": "nope"}), "there's no dashboard \"nope\""),
+        (json!({"starred": "bugs"}), "starred is a list of dashboard ids"),
+        (json!({"order": ["cards", "gone"]}), "there's no dashboard \"gone\""),
+        (json!({"home": 3}), "home is a dashboard's id"),
+    ] {
+        let refused = put(&mut app, &mut host, wrong);
+        assert!(refused.is_error && refused.text.contains(why), "{}", refused.text);
+    }
+    assert_eq!(model::prefs(&mut host).home.as_deref(), Some("cards"), "nothing changed");
+    // With a dashboard: kept, then arranged; "" for no home.
+    let mut new = serde_json::to_value(Dashboard { id: "new".into(), name: "New".into(), ..every_kind() }).unwrap();
+    new.as_object_mut().unwrap().remove("_v");
+    let done = put(&mut app, &mut host, json!({"dashboard": new, "home": "", "order": ["new"]}));
+    assert!(!done.is_error && done.text.contains("Charts opens on new;"), "{}", done.text);
+    assert_eq!(model::prefs(&mut host).home, None);
 }
 
 #[test]
@@ -1337,9 +1560,14 @@ fn an_agents_style_is_checked_kept_by_the_editor_and_drawn() {
     let body = host.component("s1", "p4_body");
     assert_eq!((&body["lineWidth"], &body["fill"], &body["pointSize"], &body["min"]), (&json!(4), &json!(15), &json!(8), &json!(-2.5)));
     host.press_id(&mut app, "s1", "p4_edit");
+    // Stacked bars have no line settings to show; as a line, the agent's
+    // are there, then kept as they were when it's bars again.
+    assert!(host.tree("s1").iter().all(|component| component["id"] != "ed_line"), "bars draw no line");
+    host.choose(&mut app, "s1", "ed_kind", "Line");
     let line = host.component("s1", "ed_line");
     assert_eq!(line["options"].as_array().unwrap().last().unwrap(), &json!({"label": "4", "value": "4"}));
     assert_eq!(host.component("s1", "ed_fill")["options"].as_array().unwrap().last().unwrap(), &json!({"label": "15%", "value": "15"}));
+    host.choose(&mut app, "s1", "ed_kind", "Stacked bars");
     host.enter("s1", "/editor/title", json!("Tokens, by agent"));
     host.press(&mut app, "s1", "Save");
     let viz = host.dashboard("claktory").panels[4].viz.clone();
@@ -1456,12 +1684,21 @@ fn the_person_sets_a_numbers_thresholds_color_mode_and_sparkline() {
 
     host.press(&mut app, "s1", "Edit");
     host.press(&mut app, "s1", "Add panel");
+    assert!(host.tree("s1").iter().all(|component| component["id"] != "ed_color_mode"), "a line has no color mode");
+    host.choose(&mut app, "s1", "ed_kind", "Number");
+    assert_eq!(host.button_words("s1", &host.component("s1", "ed_kind")), "Show as: Number");
+    // A number's settings, and its axis is its decimals alone.
+    for id in ["ed_reduce", "ed_thresholds", "ed_color_mode", "ed_graph", "ed_decimals"] {
+        assert!(host.tree("s1").iter().any(|component| component["id"] == id), "{id}");
+    }
+    for id in ["ed_line", "ed_fill", "ed_points", "ed_legend", "ed_min", "ed_max"] {
+        assert!(host.tree("s1").iter().all(|component| component["id"] != id), "{id}");
+    }
     let modes = host.component("s1", "ed_color_mode");
     let labels: Vec<&str> = modes["options"].as_array().unwrap().iter().map(|option| option["label"].as_str().unwrap()).collect();
     assert_eq!(labels, ["Value", "Background gradient", "Background solid", "None"]);
     assert_eq!(host.surface("s1").data["editor"]["graph"], true);
     host.enter("s1", "/editor/title", json!("Load"));
-    host.enter("s1", "/editor/kind", json!(["stat"]));
     host.enter("s1", "/editor/sql", json!("SELECT 1 AS time, 42.25 AS load"));
     for (written, why) in [
         ("green 80", "Enter a color, then a value and a color for each step, such as \u{201c}green, 80 red\u{201d}."),

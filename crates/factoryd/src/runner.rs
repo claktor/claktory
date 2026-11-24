@@ -924,10 +924,7 @@ impl Factory {
         // Only models whose provider is signed in are listed.
         let listed = job.models.iter().any(|model| model.id == job.agent.model);
         let Some(model) = listed.then(|| self.models.resolve(&job.agent.model)).flatten() else {
-            let problem = format!(
-                "No model available: \"{}\" needs its provider signed in. Sign in under Settings → Providers, or choose another model in this agent's settings.",
-                job.agent.model
-            );
+            let problem = no_model(self, &job.models, &job.agent.model, " in this agent's settings");
             self.unsent(id, &job.prompts, problem, NoticeLevel::Error);
             return;
         };
@@ -1451,9 +1448,12 @@ impl Factory {
         };
         let factory = Arc::downgrade(self);
         let agent = id.to_owned();
+        let mut environment = vec![("FACTORY_AGENT_ID".to_owned(), id.to_owned())];
+        // ripgrep and the other tools Claktory gives every agent, first.
+        environment.push(("PATH".to_owned(), crate::update::agents_path(&self.home)));
         Background {
             dir: self.home.agent_dir(id).join("tasks"),
-            environment: vec![("FACTORY_AGENT_ID".to_owned(), id.to_owned())],
+            environment,
             started,
             finished: Arc::new(move |done: Finished| {
                 if let Some(factory) = factory.upgrade() {
@@ -1608,6 +1608,22 @@ impl Factory {
     pub(crate) fn takes_images(&self, agent: &str) -> bool {
         let model = self.lock().config.agent(agent).map(|agent| agent.model.clone()).unwrap_or_default();
         self.models.resolve(&model).is_some_and(|model| model.input.iter().any(|input| input == "image"))
+    }
+}
+
+/// Why `model` can't run, for the conversation: its provider isn't signed
+/// in, or it is and no longer offers that model (its list dropped it;
+/// Abbacchio's LOW on #185 U4). `models`: what can run now; `choose`: where
+/// to pick another (" in this agent's settings").
+pub(crate) fn no_model(factory: &Factory, models: &[v1::Model], model: &str, choose: &str) -> String {
+    let provider = model.split_once('/').map_or(model, |(provider, _)| provider);
+    let signed_in = models.iter().any(|listed| listed.id.split_once('/').is_some_and(|(id, _)| id == provider));
+    let name = factory.lock().providers.iter().find(|found| found.id == provider).map(|found| found.name.clone());
+    match name {
+        Some(name) if signed_in => format!("No model available: {name} doesn't offer \"{model}\" any more. Choose another model{choose}."),
+        _ => format!(
+            "No model available: \"{model}\" needs its provider signed in. Sign in under Settings → Providers, or choose another model{choose}."
+        ),
     }
 }
 

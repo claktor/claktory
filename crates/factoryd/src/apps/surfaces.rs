@@ -1,7 +1,12 @@
 //! App views as surfaces: one for each view of an app with the same
-//! params, shared by every device showing it. factoryd keeps what each
-//! shows (`a2ui::Content`), sends it whole to a connection that opens it
-//! (AppSurface) and then each change (AppViewUpdate), only to the
+//! params. The app asks for its device's own with `"device"` in them, which
+//! factoryd sets to the device the connection is from (the paired device's
+//! id, or "local"), whatever it said, so each device has its own surface of
+//! a view, shared by the connections it has showing it; the app itself is given
+//! only an opaque stand-in for the device (`opaque_device`), the same for
+//! that device every time, and unlike any other app's. factoryd keeps what
+//! each shows (`a2ui::Content`), sends it whole to a connection that opens
+//! it (AppSurface) and then each change (AppViewUpdate), only to the
 //! connections showing it (`Viewer`). Surfaces live in memory: a restart
 //! of factoryd makes new ones when devices open their views again.
 //!
@@ -26,7 +31,8 @@ use crate::factory::Factory;
 
 /// How long a surface nobody shows waits before it's closed.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
-/// The most surfaces an app has open at once.
+/// The most surfaces an app has open at once on one device (by its
+/// params' "device"), so one device can't crowd out another.
 const MAX_SURFACES: usize = 16;
 /// The most messages an app sends a surface in a second…
 const MAX_RATE: u32 = 50;
@@ -43,11 +49,18 @@ pub(crate) struct Surfaces {
     next_viewer: AtomicU64,
     /// CLOSE_GRACE, or shorter in tests.
     grace: Mutex<Duration>,
+    /// What devices are hashed under for apps (`device_key`).
+    device_key: std::sync::OnceLock<[u8; 32]>,
 }
 
 impl Default for Surfaces {
     fn default() -> Surfaces {
-        Surfaces { registry: Mutex::default(), next_viewer: AtomicU64::new(1), grace: Mutex::new(CLOSE_GRACE) }
+        Surfaces {
+            registry: Mutex::default(),
+            next_viewer: AtomicU64::new(1),
+            grace: Mutex::new(CLOSE_GRACE),
+            device_key: std::sync::OnceLock::new(),
+        }
     }
 }
 
@@ -71,7 +84,12 @@ struct Surface {
     id: String,
     app: String,
     view: String,
+    /// As the device asked, canonical: what devices find it by.
     params: String,
+    /// What the app is given: `params` with its device made opaque.
+    app_params: String,
+    /// Its params' device ("" for none), which its app's limit counts by.
+    device: String,
     title: String,
     state: State,
     error: String,
@@ -151,7 +169,23 @@ impl Surfaces {
     }
 }
 
+/// Tests: a connection's views from `device`, without a connection.
+#[doc(hidden)]
+pub struct ViewerForTest(Viewer);
+
+impl ViewerForTest {
+    pub fn open(&self, factory: &Arc<Factory>, request: &v1::OpenAppView) -> Body {
+        factory.open_app_view(&self.0, request)
+    }
+}
+
 impl Factory {
+    /// Tests: views opened as a connection from `device` would.
+    #[doc(hidden)]
+    pub fn app_viewer_for_test(self: &Arc<Self>, device: &str) -> ViewerForTest {
+        ViewerForTest(Viewer::new(self, device))
+    }
+
     /// How long a view nobody shows waits before the app hears it's
     /// closed: 10 s, shorter in tests.
     pub fn set_app_view_grace(&self, grace: Duration) {
@@ -163,17 +197,21 @@ impl Factory {
 /// it's dropped (the connection ended), it shows nothing any more.
 pub(crate) struct Viewer {
     id: u64,
+    /// The device the connection is from: a paired device's id, or "local".
+    device: String,
     factory: Weak<Factory>,
     receiver: tokio::sync::Mutex<mpsc::Receiver<Body>>,
 }
 
 impl Viewer {
-    pub(crate) fn new(factory: &Arc<Factory>) -> Viewer {
+    /// For a connection from `device` (empty: this computer's, "local").
+    pub(crate) fn new(factory: &Arc<Factory>, device: &str) -> Viewer {
         let surfaces = &factory.apps.surfaces;
         let id = surfaces.next_viewer.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel(VIEWER_QUEUE);
         surfaces.lock().viewers.insert(id, Slot { sender, stale: BTreeSet::new() });
-        Viewer { id, factory: Arc::downgrade(factory), receiver: tokio::sync::Mutex::new(receiver) }
+        let device = if device.is_empty() { crate::remote::LOCAL_DEVICE.to_owned() } else { device.to_owned() };
+        Viewer { id, device, factory: Arc::downgrade(factory), receiver: tokio::sync::Mutex::new(receiver) }
     }
 
     /// The next message for this connection: a change, or a fresh snapshot
@@ -280,7 +318,7 @@ fn open_in_app(factory: &Arc<Factory>, host: Arc<Host>, surface: &Surface) {
     let ask = wire::ViewOpen {
         app_id: surface.app.clone(),
         view: surface.view.clone(),
-        params: surface.params.clone(),
+        params: surface.app_params.clone(),
         surface: surface.id.clone(),
     };
     let (weak, epoch) = (Arc::downgrade(factory), surface.epoch);
@@ -332,6 +370,79 @@ fn sorted(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Canonical `params` whose `"device"` (when they have one) is `device`,
+/// the connection's: what a device says it is never counts, so it can't
+/// take another's surface, or get past its own limit with a new name each
+/// time (Fugo 28393).
+fn as_device(params: &str, device: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(params) {
+        Ok(serde_json::Value::Object(mut fields)) if fields.contains_key("device") => {
+            fields.insert("device".to_owned(), serde_json::Value::String(device.to_owned()));
+            sorted(serde_json::Value::Object(fields)).to_string()
+        }
+        _ => params.to_owned(),
+    }
+}
+
+/// The device canonical `params` name (`"device"`: a paired device's id,
+/// "local", or any other value as its JSON text), and the params as the
+/// app is given them: that device replaced by `opaque_device`'s stand-in.
+/// None named: "", and the params as they are.
+fn device_of(params: &str, key: &[u8; 32], app: &str) -> (String, String) {
+    let Ok(serde_json::Value::Object(mut fields)) = serde_json::from_str::<serde_json::Value>(params) else {
+        return (String::new(), params.to_owned());
+    };
+    let Some(device) = fields.get("device") else { return (String::new(), params.to_owned()) };
+    let device = match device {
+        serde_json::Value::String(device) => device.clone(),
+        other => other.to_string(),
+    };
+    fields.insert("device".to_owned(), serde_json::Value::String(opaque_device(key, app, &device)));
+    (device, serde_json::Value::Object(fields).to_string())
+}
+
+/// How `app` sees `device`: an HMAC of both under this Claktory's key, so
+/// one device is the same to one app every time, while two apps can't
+/// match theirs, and none learns the device's id.
+fn opaque_device(key: &[u8; 32], app: &str, device: &str) -> String {
+    use base64::Engine as _;
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(key).expect("any key length");
+    hmac::Mac::update(&mut mac, format!("claktory app device\0{app}\0{device}").as_bytes());
+    let tag = hmac::Mac::finalize(mac).into_bytes();
+    format!("d-{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&tag[..16]))
+}
+
+/// The key devices are hashed under for apps: 32 random bytes kept in
+/// `apps/device-key` (0600), made the first time. If it can't be kept,
+/// one for this run, so devices still look new to apps after a restart
+/// rather than showing through.
+fn device_key(factory: &Factory) -> [u8; 32] {
+    *factory.apps.surfaces.device_key.get_or_init(|| {
+        let path = factory.home.root().join("apps").join("device-key");
+        if let Ok(kept) = std::fs::read(&path)
+            && let Ok(key) = <[u8; 32]>::try_from(kept.as_slice())
+        {
+            return key;
+        }
+        let mut key = [0u8; 32];
+        getrandom::fill(&mut key).expect("the system's random source");
+        let kept = (|| -> std::io::Result<()> {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            std::fs::create_dir_all(path.parent().expect("in apps"))?;
+            let temporary = path.with_extension("new");
+            let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&temporary)?;
+            file.write_all(&key)?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, &path)
+        })();
+        if let Err(error) = kept {
+            tracing::warn!(%error, "couldn't keep the key apps' device ids are made with; one for this run");
+        }
+        key
+    })
+}
+
 fn error(code: v1::ErrorCode, message: impl Into<String>) -> Body {
     Body::Error(v1::Error { code: code.into(), message: message.into(), ..Default::default() })
 }
@@ -364,7 +475,7 @@ impl Factory {
             return error(v1::ErrorCode::NotFound, why);
         };
         let params = match canonical(&request.params) {
-            Ok(params) => params,
+            Ok(params) => as_device(&params, &viewer.device),
             Err(why) => return error(v1::ErrorCode::InvalidRequest, why),
         };
         if !request.catalogs.iter().any(|catalog| catalog == CATALOG) {
@@ -379,6 +490,7 @@ impl Factory {
                 ..Default::default()
             });
         }
+        let (device, app_params) = device_of(&params, &device_key(self), &manifest.id);
         let host = running(self, &manifest.id);
         let mut registry = self.apps.surfaces.lock();
         let found =
@@ -386,8 +498,11 @@ impl Factory {
         let id = match found {
             Some(surface) => surface.id.clone(),
             None => {
-                if registry.surfaces.values().filter(|surface| surface.app == manifest.id).count() >= MAX_SURFACES {
-                    let why = format!("The {} app has {MAX_SURFACES} views open already. Close one first.", manifest.name);
+                if registry.surfaces.values().filter(|surface| surface.app == manifest.id && surface.device == device).count()
+                    >= MAX_SURFACES
+                {
+                    let on = if device.is_empty() { "" } else { " on this device" };
+                    let why = format!("The {} app has {MAX_SURFACES} views open{on} already. Close one first.", manifest.name);
                     return error(v1::ErrorCode::InvalidRequest, why);
                 }
                 let surface = Surface {
@@ -395,6 +510,8 @@ impl Factory {
                     app: manifest.id.clone(),
                     view: spec.id.clone(),
                     params,
+                    app_params,
+                    device,
                     title: spec.title.clone(),
                     state: if host.is_some() { State::Opening } else { State::Stopped },
                     error: if host.is_some() { String::new() } else { not_running(&manifest.name) },
@@ -595,7 +712,44 @@ pub(crate) fn app_uninstalled(factory: &Factory, app: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::canonical;
+    use super::{as_device, canonical, device_of};
+
+    #[test]
+    fn the_device_in_params_is_always_the_connections() {
+        assert_eq!(as_device(r#"{"device":"someone-else","range":"7d"}"#, "phone"), r#"{"device":"phone","range":"7d"}"#);
+        assert_eq!(as_device(r#"{"device":12}"#, "local"), r#"{"device":"local"}"#);
+        assert_eq!(as_device(r#"{"range":"7d"}"#, "phone"), r#"{"range":"7d"}"#, "only when it asks for its own");
+    }
+
+    /// Bruno 28347: an app never gets a device's id, only a stand-in, the
+    /// same for one device and app every time, different across apps.
+    #[test]
+    fn an_app_sees_a_device_only_as_its_own_opaque_stand_in() {
+        let key = [7u8; 32];
+        let params = canonical(r#"{"range":"7d","device":"dev-0123456789"}"#).unwrap();
+        let (device, given) = device_of(&params, &key, "charts");
+        assert_eq!(device, "dev-0123456789");
+        assert!(!given.contains("dev-0123456789"), "{given}");
+        let value: serde_json::Value = serde_json::from_str(&given).unwrap();
+        let stand_in = value["device"].as_str().expect("a stand-in").to_owned();
+        assert!(stand_in.starts_with("d-") && stand_in.len() == 24, "{stand_in}");
+        assert_eq!(value["range"], "7d");
+        assert_eq!(device_of(&params, &key, "charts").1, given, "the same every time");
+        let (_, other_app) = device_of(&params, &key, "notes");
+        assert_ne!(serde_json::from_str::<serde_json::Value>(&other_app).unwrap()["device"], stand_in.as_str(), "another app's differs");
+        let (_, other_key) = device_of(&params, &[8u8; 32], "charts");
+        assert_ne!(other_key, given, "another Claktory's differs");
+        // "local" too, and a value that isn't text.
+        let stand_in_of = |given: &str| serde_json::from_str::<serde_json::Value>(given).unwrap()["device"].clone();
+        let (local, given) = device_of(r#"{"device":"local"}"#, &key, "charts");
+        assert_eq!(local, "local");
+        assert!(stand_in_of(&given).as_str().is_some_and(|stand_in| stand_in.starts_with("d-")), "{given}");
+        let (number, given) = device_of(r#"{"device":12}"#, &key, "charts");
+        assert_eq!(number, "12");
+        assert!(stand_in_of(&given).as_str().is_some_and(|stand_in| stand_in.starts_with("d-")), "{given}");
+        // None: as they were.
+        assert_eq!(device_of(r#"{"range":"7d"}"#, &key, "charts"), (String::new(), r#"{"range":"7d"}"#.to_owned()));
+    }
 
     #[test]
     fn params_are_one_canonical_object() {

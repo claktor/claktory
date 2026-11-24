@@ -26,6 +26,7 @@ pub(crate) mod database;
 pub(crate) mod devices;
 pub(crate) mod handoff;
 pub(crate) mod highlight;
+pub(crate) mod images;
 pub(crate) mod memory;
 pub(crate) mod models;
 pub(crate) mod monitors;
@@ -34,6 +35,7 @@ pub(crate) mod nudge;
 pub(crate) mod pipes;
 pub(crate) mod resources;
 pub(crate) mod secrets;
+pub(crate) mod settings;
 pub(crate) mod swarm;
 pub(crate) mod tasks;
 pub(crate) mod tree;
@@ -227,7 +229,7 @@ pub(crate) fn view(factory: &Factory, inner: &Inner, agent: &str, key: &str) -> 
 
 /// Every extension, sorted by id, which is also the order of their prompt
 /// sections and tools.
-pub(crate) const ALL: [&dyn Extension; 24] = [
+pub(crate) const ALL: [&dyn Extension; 26] = [
     &agents::Agents,
     &app_grants::AppGrants,
     &ask::Ask,
@@ -240,6 +242,7 @@ pub(crate) const ALL: [&dyn Extension; 24] = [
     &crate::user_apps::dms::Dms,
     &handoff::Handoff,
     &highlight::Highlight,
+    &images::Images,
     &memory::Memory,
     &models::Models,
     &monitors::Monitors,
@@ -247,6 +250,7 @@ pub(crate) const ALL: [&dyn Extension; 24] = [
     &pipes::Pipes,
     &resources::Resources,
     &secrets::Secrets,
+    &settings::Settings,
     &swarm::Swarm,
     &tasks::Tasks,
     &tree::Tree,

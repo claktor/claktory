@@ -453,6 +453,11 @@ struct Ran {
 /// nothing of factoryd's environment but where programs are, killed after
 /// `limit`.
 fn run(command: &mut std::process::Command, limit: std::time::Duration) -> Result<Ran, String> {
+    run_unless(command, limit, &|| false)
+}
+
+/// `run`, killed as soon as `stop` says so ("stopped").
+fn run_unless(command: &mut std::process::Command, limit: std::time::Duration, stop: &dyn Fn() -> bool) -> Result<Ran, String> {
     use std::process::Stdio;
     command.env_clear();
     if let Some(path) = std::env::var_os("PATH") {
@@ -483,6 +488,11 @@ fn run(command: &mut std::process::Command, limit: std::time::Duration) -> Resul
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("it took too long".to_owned());
+            }
+            Ok(None) if stop() => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("stopped".to_owned());
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
             Err(error) => return Err(error.to_string()),

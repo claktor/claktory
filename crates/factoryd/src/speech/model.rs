@@ -81,13 +81,20 @@ struct Inner {
     generation: u64,
 }
 
-/// Where `claktory-speech` is: `FACTORY_SPEECH`, or beside factoryd's own.
-pub(crate) fn program() -> Option<PathBuf> {
+/// Where `claktory-speech` is: `FACTORY_SPEECH`, or beside factoryd's own
+/// program (links resolved: friend bug #24), or else this version's in the
+/// home's releases, then the installed one in its `bin`, for a backend
+/// started from somewhere else.
+pub(crate) fn program(home: &crate::home::Home) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("FACTORY_SPEECH").filter(|path| !path.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    let beside = std::env::current_exe().ok()?.parent()?.join("claktory-speech");
-    beside.is_file().then_some(beside)
+    let name = crate::update::SPEECH_HOST;
+    crate::update::beside_backend(name).or_else(|| {
+        [home.releases().join(crate::update::VERSION).join(name), home.root().join("bin").join(name)]
+            .into_iter()
+            .find(|path| path.is_file())
+    })
 }
 
 /// Why this computer can't, when there's no `claktory-speech` to run it.
@@ -99,7 +106,7 @@ impl Model {
             dir: home.root().join("models").join("speech"),
             inner: Mutex::new(Inner {
                 artifact: Artifact::parakeet(),
-                program: program(),
+                program: program(home),
                 state: ModelState::Absent,
                 download: None,
                 generation: 0,
@@ -429,4 +436,32 @@ fn hash_file(path: &Path) -> std::io::Result<String> {
 /// "huggingface.co", for messages.
 fn host(url: &str) -> &str {
     url.split("://").nth(1).and_then(|rest| rest.split('/').next()).unwrap_or(url)
+}
+
+#[cfg(test)]
+mod program_tests {
+    use super::program;
+
+    /// A backend started from somewhere else (through a link on PATH, say)
+    /// still finds this version's speech host in the home's releases, else
+    /// the installed one in its bin (friend bug #24).
+    #[test]
+    fn a_backend_started_from_elsewhere_finds_the_installed_speech_host() {
+        if std::env::var_os("FACTORY_SPEECH").is_some() || crate::update::beside_backend(crate::update::SPEECH_HOST).is_some() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("factoryd-speech-program-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = crate::home::Home::new(dir.clone());
+        assert_eq!(program(&home), None);
+        let installed = dir.join("bin").join(crate::update::SPEECH_HOST);
+        std::fs::create_dir_all(installed.parent().expect("bin")).expect("bin");
+        std::fs::write(&installed, "#!/bin/sh\n").expect("installed");
+        assert_eq!(program(&home), Some(installed));
+        let released = home.releases().join(crate::update::VERSION).join(crate::update::SPEECH_HOST);
+        std::fs::create_dir_all(released.parent().expect("release")).expect("release");
+        std::fs::write(&released, "#!/bin/sh\n").expect("released");
+        assert_eq!(program(&home), Some(released));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

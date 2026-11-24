@@ -125,12 +125,14 @@ if [[ "$APP_NAME" == "Factory.app" ]]; then
   "$ROOT/scripts/check-secrets.sh" "$SOURCE"
   # Built from an export of that commit in one fixed, private folder, so the
   # binaries name only that folder, never this Mac's home or checkouts; Rust's
-  # registry and toolchain paths come out as ~ (scripts/lib.sh).
+  # toolchain paths come out as ~ (scripts/lib.sh). Nothing an earlier build
+  # left is used (release_inputs).
   SRC_ROOT="$(release_tree "$ROOT" "$SOURCE")"
   trap release_unlock EXIT
   export SRC_ROOT
   release_rustflags
-  release_pub_cache
+  release_inputs
+  release_pub_get "$SRC_ROOT/app"
 else
   SRC_ROOT="$ROOT"
 fi
@@ -166,16 +168,25 @@ fi
 # claktory-video-preview (a Mac helper, #379) is one of them once the source has it.
 VIDEO_PREVIEW=false
 [[ -f "$SRC_ROOT/app/macos/VideoPreview/main.swift" ]] && VIDEO_PREVIEW=true
+# Agents' tools (ripgrep, tools/rg) ship with the backend once the source pins one.
+RG=false
+[[ -f "$SRC_ROOT/scripts/build-rg.sh" ]] && RG=true
 if [[ -n "$PREVIOUS" && -f "$PREVIOUS/factoryd" && -f "$PREVIOUS/claktory-apps" && -f "$PREVIOUS/claktory-speech" && -f "$PREVIOUS/backend-version" && "$(cat "$PREVIOUS/backend-fingerprint" 2>/dev/null)" == "$FINGERPRINT" ]] &&
-   { ! $VIDEO_PREVIEW || [[ -f "$PREVIOUS/claktory-video-preview" ]]; }; then
+   { ! $VIDEO_PREVIEW || [[ -f "$PREVIOUS/claktory-video-preview" ]]; } && { ! $RG || [[ -f "$PREVIOUS/tools/rg" ]]; }; then
   BACKEND="$PREVIOUS"
   BACKEND_VERSION="$(cat "$PREVIOUS/backend-version")"
   echo "backend unchanged since $BACKEND_VERSION; this release only updates the app"
 else
-  cargo build --manifest-path "$SRC_ROOT/Cargo.toml" --release -p factoryd -p claktory-apps -p claktory-speech
+  # In the source folder: cargo reads the configuration of the folder it runs in.
+  (cd "$SRC_ROOT" && cargo build --manifest-path "$SRC_ROOT/Cargo.toml" --release -p factoryd -p claktory-apps -p claktory-speech)
   BACKEND="$SRC_ROOT/target/release"
   rm -f "$BACKEND/claktory-video-preview"
   if $VIDEO_PREVIEW; then build_video_preview "$BACKEND/claktory-video-preview"; fi
+  rm -rf "$BACKEND/tools"
+  if $RG; then
+    "$SRC_ROOT/scripts/build-rg.sh" mac "$BACKEND/tools/rg"
+    "$SRC_ROOT/scripts/build-rg.sh" licenses "$BACKEND/tools/LICENSES/ripgrep"
+  fi
   BACKEND_VERSION="$FACTORY_VERSION"
 fi
 # Finder's version too (Info.plist takes numbers only: v0.1.3 is 0.1.3).
@@ -188,6 +199,7 @@ rm -rf "$partial"
 mkdir -p "$partial"
 cp "$BACKEND/factoryd" "$BACKEND/claktory-apps" "$BACKEND/claktory-speech" "$partial/"
 if $VIDEO_PREVIEW; then cp "$BACKEND/claktory-video-preview" "$partial/"; fi
+if $RG; then cp -R "$BACKEND/tools" "$partial/tools"; fi
 echo "$BACKEND_VERSION" >"$partial/backend-version"
 echo "$FINGERPRINT" >"$partial/backend-fingerprint"
 # What it was built from, for scripts/publish.sh --built: the commit, and the

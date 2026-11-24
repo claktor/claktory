@@ -78,6 +78,16 @@ backend_fingerprint() {
     if [[ -d vendor ]]; then
       find vendor -type f ! -name .DS_Store -print0 | sort -z | xargs -0 shasum -a 256
     fi
+    # ripgrep ships with the backend (tools/rg, scripts/build-rg.sh's pin).
+    # Left out when absent, so older commits fingerprint as they always did.
+    if [[ -f scripts/build-rg.sh ]]; then
+      echo "ripgrep: $(sed -n 's/^RG_VERSION=//p; s/^RG_CRATE_SHA256=//p' scripts/build-rg.sh | tr '\n' ' ')"
+    fi
+    # Built from nothing an earlier build left, with the checked toolchain
+    # (release_inputs): a backend from before that is never reused.
+    if [[ -f scripts/check-toolchain.sh ]]; then
+      echo "build: fresh inputs; rust $(sed -n 's/^RUST_VERSION=//p; s/^RUST_CHANNEL_SHA256=//p' scripts/check-toolchain.sh | tr '\n' ' ')"
+    fi
     # The video preview helper ships with the backend (build_video_preview).
     if [[ -d app/macos/VideoPreview ]]; then
       find app/macos/VideoPreview -type f ! -name .DS_Store -print0 | sort -z | xargs -0 shasum -a 256
@@ -283,6 +293,16 @@ add_helpers() {
   if [[ -f "$release/claktory-apps" ]]; then cp "$release/claktory-apps" "$helpers/claktory-apps"; fi
   if [[ -f "$release/claktory-speech" ]]; then cp "$release/claktory-speech" "$helpers/claktory-speech"; fi
   if [[ -f "$release/claktory-video-preview" ]]; then cp "$release/claktory-video-preview" "$helpers/claktory-video-preview"; fi
+  # Agents' tools (ripgrep): the program in Helpers/tools, signed there by
+  # scripts/sign-release.sh; its licenses in Resources/tools, since codesign
+  # refuses anything unsigned in Helpers.
+  rm -rf "$app/Contents/Resources/tools"
+  if [[ -f "$release/tools/rg" ]]; then
+    mkdir -p "$helpers/tools"
+    cp "$release/tools/rg" "$helpers/tools/rg"
+    mkdir -p "$app/Contents/Resources/tools"
+    cp -R "$release/tools/LICENSES" "$app/Contents/Resources/tools/LICENSES"
+  fi
   # Claktory's own apps are data, not code: in Resources, since codesign
   # refuses anything unsigned in Helpers ("code object is not signed at all").
   rm -rf "$app/Contents/Resources/apps"
@@ -359,8 +379,9 @@ private_dir() {
 
 # The fixed folder release builds run in: COMMIT's files exported from the
 # checkout ORIGIN into /tmp/claktory-release/src (the same path every time,
-# so the binaries name only it), keeping its target/ so cargo builds stay
-# warm. Prints the folder. One build at a time: release_unlock lets go.
+# so the binaries name only it), with an empty target/: a release builds
+# from nothing an earlier build left. Prints the folder. One build at a time:
+# release_unlock lets go.
 RELEASE_BUILD=/tmp/claktory-release
 release_tree() {
   local origin="$1" commit="$2" src="$RELEASE_BUILD/src" holder
@@ -375,23 +396,77 @@ release_tree() {
     (umask 077 && mkdir "$RELEASE_BUILD/lock") || return 1
   fi
   echo "$$" >"$RELEASE_BUILD/lock/pid" || return 1
-  private_dir "$src" || return 1
-  if [[ -e "$src/target" || -L "$src/target" ]]; then private_dir "$src/target" || return 1; fi
   # Run in $(...), where errexit is off: every step says when it failed.
-  find "$src" -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} + || return 1
-  # -m: the files get now as their time, not the commit's, so cargo never
-  # takes a kept target/'s newer output for theirs (building an older
-  # commit, or one made before the last build, would reuse stale code).
+  rm -rf "$src" || return 1
+  private_dir "$src" || return 1
   git -C "$origin" archive --format=tar "$commit" | tar -x -m -C "$src" || return 1
-  if [[ ! -e "$src/target" ]]; then (umask 077 && mkdir -m 700 "$src/target") || return 1; fi
+  (umask 077 && mkdir -m 700 "$src/target") || return 1
   echo "$src"
 }
-# Pub's package cache for a release build, in the same private folder and
-# kept between runs like target/: the plugins' native sources are compiled
-# from it, and their paths end up in the app's debug map.
-release_pub_cache() {
-  private_dir "$RELEASE_BUILD/pub-cache" || return 1
-  export PUB_CACHE="$RELEASE_BUILD/pub-cache"
+# What a release build uses besides its source, all fresh every time, in
+# the same private folder (call it after release_tree, outside $(...)):
+# cargo's home, so every crate is downloaded again and checked against
+# Cargo.lock; pub's package cache (the plugins' native sources are compiled
+# from it, and their paths end up in the app's debug map), filled only as
+# pubspec.lock says (release_pub_get); the Rust toolchain, checked against
+# what Rust publishes (scripts/check-toolchain.sh) and used for every Rust
+# build, the app's included; the Flutter SDK, a clean checkout of the
+# pinned release; no cargo configuration but the source's own
+# (cargo_parents_ok; cargo runs in the source folder); and Linux builds in a
+# container with nothing kept (scripts/build-linux.sh, FACTORY_LINUX_FRESH).
+# Cargo reads a .cargo/config.toml in the folder it runs in and in every
+# folder above it. Above a build folder in /tmp, only the build's own may
+# hold one: a .cargo beside it in a folder anyone can write to (/tmp) is
+# claimed, ours, empty and read-only to others; elsewhere above it one may
+# exist only if it's root's and only root can change it. Refuses otherwise.
+cargo_parents_ok() {
+  local dir mode owner stat_mode stat_owner
+  dir="$(cd "$1" && pwd -P)" || return 1
+  if [[ "$(uname)" == Darwin ]]; then stat_mode=(stat -f %Lp) stat_owner=(stat -f %u); else stat_mode=(stat -c %a) stat_owner=(stat -c %u); fi
+  while [[ "$dir" != / ]]; do
+    dir="$(dirname "$dir")"
+    mode="$("${stat_mode[@]}" "$dir")"
+    if (( 8#$mode & 8#002 )); then
+      [[ -e "$dir/.cargo" || -L "$dir/.cargo" ]] || mkdir -m 755 "$dir/.cargo" 2>/dev/null || true
+      owner="$("${stat_owner[@]}" "$dir/.cargo" 2>/dev/null || true)"
+      if [[ -L "$dir/.cargo" || ! -d "$dir/.cargo" || "$owner" != "$(id -u)" || "$("${stat_mode[@]}" "$dir/.cargo")" != 755 || -n "$(ls -A "$dir/.cargo")" ]]; then
+        echo "$dir/.cargo isn't an empty folder of ours that only we can write to: cargo would read it; not building" >&2
+        return 1
+      fi
+    elif [[ -e "$dir/.cargo" || -L "$dir/.cargo" ]]; then
+      owner="$("${stat_owner[@]}" "$dir/.cargo")" mode="$("${stat_mode[@]}" "$dir/.cargo")"
+      if [[ -L "$dir/.cargo" || "$owner" != 0 ]] || (( 8#$mode & 8#022 )); then
+        echo "$dir/.cargo is there and isn't root's alone: cargo would read it; not building" >&2
+        return 1
+      fi
+    fi
+  done
+}
+FLUTTER_VERSION=3.50.0
+FLUTTER_REVISION=ab2912035e160d9cad6306df307576da6128ebdb
+release_inputs() {
+  local dir tc flutter
+  for dir in cargo-home pub-cache; do
+    rm -rf "${RELEASE_BUILD:?}/$dir" || return 1
+    private_dir "$RELEASE_BUILD/$dir" || return 1
+  done
+  export CARGO_HOME="$RELEASE_BUILD/cargo-home" PUB_CACHE="$RELEASE_BUILD/pub-cache"
+  cargo_parents_ok "$RELEASE_BUILD/src" || return 1
+  tc="$("$(dirname "${BASH_SOURCE[0]}")/check-toolchain.sh")" || return 1
+  export RUSTUP_TOOLCHAIN="$tc"
+  export PATH="${RUSTUP_HOME:-$HOME/.rustup}/toolchains/$tc/bin:$PATH"
+  flutter="$(command -v flutter)" || { echo "no flutter on PATH" >&2; return 1; }
+  flutter="$(cd "$(dirname "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$flutter")")/.." && pwd -P)"
+  [[ "$(git -C "$flutter" rev-parse HEAD 2>/dev/null)" == "$FLUTTER_REVISION" ]] || {
+    echo "Flutter in $flutter isn't $FLUTTER_VERSION ($FLUTTER_REVISION): not building" >&2; return 1; }
+  [[ -z "$(git -C "$flutter" status --porcelain --ignored=no 2>/dev/null)" ]] || {
+    echo "Flutter in $flutter has changes of its own: not building" >&2; return 1; }
+  export FACTORY_LINUX_FRESH=1
+}
+# Pub's packages for the app in DIR, exactly as its pubspec.lock lists them
+# (their hashes checked), before flutter builds it.
+release_pub_get() {
+  (cd "$1" && flutter pub get --enforce-lockfile)
 }
 release_unlock() {
   [[ "$(cat "$RELEASE_BUILD/lock/pid" 2>/dev/null)" == "$$" ]] && rm -rf "$RELEASE_BUILD/lock"

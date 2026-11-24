@@ -4,7 +4,7 @@
 //! code they were given, themselves (`crate::pipes::start`); `pipes_list`
 //! says where the pipes stand. Admin agents such as Rivet have it unless
 //! it's turned off. No tool takes or returns a code, approves a pipe or
-//! chooses its agents.
+//! chooses the agents that read it.
 //!
 //! `pipes_forward` (pipes-automation.md §7.1) sets where a pipe's reports go,
 //! or a project's default, and can make the recipient a report reader: only
@@ -16,6 +16,17 @@
 //! `pipes_group` (#359) arranges a project's pipes into groups in the
 //! sidebar, as the person does from a pipe's menu: only for an admin agent.
 //! Arrangement only, so nothing about a pipe changes.
+//!
+//! `pipes_sender` (#414) lets an agent only send to a pipe the person
+//! approved, or stops it: only for an admin agent, checked on every call,
+//! never while it has read anything from outside, and only for agents that
+//! aren't the pipe's or only send to it, never one that reads it. Each
+//! change is in Needs you's history.
+//!
+//! `pipes_settings` (#423) changes a pipe as the person asks, for an admin
+//! agent that hasn't read anything from outside: what narrows it at once
+//! (the pipe says who), what widens it only through a card the person
+//! approves (`crate::card_actions`).
 //!
 //! `pipes_report_type` (§11.3) defines, edits, deletes or shows report types
 //! from the person's plain description: only for an admin agent, and its
@@ -52,6 +63,8 @@ const ACCEPT: &str = "Connect one of the person's projects with an invite someon
 const FORWARD: &str = "Set where a pipe's finished reports go, when the person asks (\"make Ingrid read the bug reports from Aiko's pipe\"): pipe (its name or id), or project (its name or id) for the default of its new pipes; to: the agent that reads them (name or id; \"\" for no one), which must be in the same project; types: the report types it can forward (pipes_report_type shows them), left out to keep its own. An agent that doesn't read reports yet needs make_reader: it then keeps its database and its folder, and can no longer run commands, use the web or secrets, or message agents; fresh starts its conversation anew (the old one kept). Refused while you've read anything from outside the person's Claktory. The person sees each change in the pipe's settings and in Needs you.";
 const REPORT_TYPE: &str = "Define the types of report a pipe can forward, when the person asks (\"make a report type for recipes: dish, servings, steps\"): action define (name, fields, outcomes), edit (id, and the whole new definition: each field it keeps by its id, new ones without), delete (id), or show (id, or none for every type). A field: id (lowercase letters, digits and _; leave it out for a new one), label, kind (text, text_list, enum with choices, bool, version, attachments, number with min and max (0 to 1,000,000 unless given), date; at most 4 numbers and 2 dates), required, max_bytes and max_items (lower than Claktory's caps, or 0 for them), rule (an optional hint). The other side's words are text, text_list and attachments: they mark whoever reads them; every other kind is a fact. Never a field that says where the report goes. outcomes: what its reader can answer: accepted, done, declined, known, fixed, wont_fix, needs_info. Each edit is a new version; built-in types can be edited, not deleted. Changes are refused while you've read anything from outside the person's Claktory. The person sees each one in Needs you's history. To let a pipe forward a type, use pipes_forward's types.";
 const GROUP: &str = "Arrange a project's pipes into groups in the sidebar, when the person asks (\"put all the feedback pipes in a group\"): action create (project, name, and pipe to move into it at once), rename (group, name), delete (group: its pipes stay, outside any group) or move (pipe, and group, or \"\" to take it out of its group). A group and a pipe are named by their name or id; pipes_list shows each pipe's group. A pipe can only be in a group of its own project. Arrangement only: pipes work the same in a group or out of one.";
+const SENDER: &str = "Let an agent send to one of the person's pipes without reading it, when they ask (\"let Rivet post our release notes to Aiko's pipe\"): pipe (its name or id), agent (name or id; any agent of the person's, you included), send: true to let it, false to stop one that only sends. It gets pipe_send and pipe_status for that pipe, never pipe_read: it isn't told what arrives, what the other side answers, or why they refused a message. Only for a pipe the person approved and that isn't closed, and only for an agent that isn't one of its agents yet; the person changes agents that read it, in the pipe's settings. Refused while you've read anything from outside the person's Claktory. The person sees each change in Needs you's history.";
+const SETTINGS: &str = "Change one of the person's pipes, when they ask: pipe (its name or id) and reason (why, in a sentence they read), then what changes. Narrowing it is made at once, and the pipe says you did: pause (true), lower limits (messages_per_hour, burst, file_mb_per_day; those left out stay), remove (agents that stop being its agents), quarantine (agents that can no longer run commands on this computer), review_outgoing or review_incoming true. Widening it opens a card in your conversation (and their Needs you) for the person to approve, with the whole change, and nothing changes until they do: resume (true), close (true), raised limits, add (agents that become its agents, unable to run commands unless also in commands), commands (agents that can run commands), lead (an agent), liaison (a new liaison agent's name, \"\" for the one Claktory suggests), or a review turned off. Agents by name or id. Refused while you've read anything from outside the person's Claktory. Only the person deletes a pipe, or changes its name, what it's for and its instructions.";
 const LIST: &str = "The person's pipes, or one project's (project, its name or id): each one's name, id and where it stands. Never codes, digits or what the other side says about itself.";
 
 pub(crate) struct Pipes;
@@ -64,7 +77,7 @@ impl Extension for Pipes {
     fn prompt(&self, _factory: &Factory, inner: &Inner, _agent: &AgentConfig) -> Vec<PromptSection> {
         let person = inner.config.person();
         let text = format!(
-            "## Starting pipes\n\nWhen {person} wants one of their projects to talk with someone else's Claktory, start the pipe for them: pipes_invite when they're inviting someone, pipes_accept when someone gave them a code or link. Either opens a card in your conversation, filled in from what they told you, where they make the invite or paste the code themselves. You never see a code (never ask for one, and never pass one on), you don't approve the pipe, and you don't choose its agents: {person} does, in the pipe. pipes_list says where their pipes stand.\n"
+            "## Starting pipes\n\nWhen {person} wants one of their projects to talk with someone else's Claktory, start the pipe for them: pipes_invite when they're inviting someone, pipes_accept when someone gave them a code or link. Either opens a card in your conversation, filled in from what they told you, where they make the invite or paste the code themselves. You never see a code (never ask for one, and never pass one on), you don't approve the pipe, and you don't choose the agents that read it: {person} does, in the pipe. When they ask, pipes_sender lets an agent only send to a pipe they approved, without reading it, and pipes_settings changes a pipe: what narrows it at once, what widens it on a card they approve. pipes_list says where their pipes stand.\n"
         );
         vec![PromptSection::static_text(text)]
     }
@@ -120,7 +133,9 @@ impl Extension for Pipes {
             super::tool("pipes_list", "List pipes", LIST, list, super::typed_handler(factory, agent, list_pipes)),
             super::tool("pipes_forward", "Forward a pipe's reports", FORWARD, forward, forward_handler(factory, agent)),
             super::tool("pipes_group", "Group pipes", GROUP, group, super::typed_handler(factory, agent, group_pipes)),
+            super::tool("pipes_sender", "Send to a pipe", SENDER, sender_parameters(), super::typed_handler(factory, agent, sender)),
             super::tool("pipes_report_type", "Report types", REPORT_TYPE, report_type_parameters(), super::typed_handler(factory, agent, report_type)),
+            super::async_tool(factory, agent, crate::card_actions::PIPE_TOOL, "Change a pipe", SETTINGS, settings_parameters(), settings),
         ]
     }
 
@@ -201,6 +216,183 @@ fn untainted_admin(factory: &Factory, agent: &str, what: &str, where_else: &str)
         ));
     }
     Ok(())
+}
+
+fn settings_parameters() -> serde_json::Value {
+    let agents = json!({"type": "array", "items": {"type": "string"}});
+    let count = json!({"type": "integer", "minimum": 1});
+    json!({
+        "type": "object",
+        "required": ["pipe", "reason"],
+        "properties": {
+            "pipe": {"type": "string", "minLength": 1},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 500},
+            "pause": {"type": "boolean"},
+            "resume": {"type": "boolean"},
+            "close": {"type": "boolean"},
+            "messages_per_hour": count,
+            "burst": count,
+            "file_mb_per_day": count,
+            "add": agents,
+            "remove": agents,
+            "quarantine": agents,
+            "commands": agents,
+            "lead": {"type": "string", "minLength": 1},
+            "liaison": {"type": "string"},
+            "review_outgoing": {"type": "boolean"},
+            "review_incoming": {"type": "boolean"},
+        },
+        "additionalProperties": false,
+    })
+}
+
+#[derive(Deserialize)]
+struct SettingsArgs {
+    pipe: String,
+    reason: String,
+    #[serde(default)]
+    pause: bool,
+    #[serde(default)]
+    resume: bool,
+    #[serde(default)]
+    close: bool,
+    messages_per_hour: Option<u32>,
+    burst: Option<u32>,
+    file_mb_per_day: Option<u32>,
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
+    #[serde(default)]
+    quarantine: Vec<String>,
+    #[serde(default)]
+    commands: Vec<String>,
+    lead: Option<String>,
+    liaison: Option<String>,
+    review_outgoing: Option<bool>,
+    review_incoming: Option<bool>,
+}
+
+/// An agent of the person's by id, or by name (a name two share: the one in
+/// the pipe's project).
+fn find_agent(factory: &Factory, wanted: &str, project: &str) -> Result<String, String> {
+    let wanted = wanted.trim();
+    let inner = factory.lock();
+    let agents = &inner.config.agents;
+    agents
+        .iter()
+        .find(|candidate| candidate.id == wanted)
+        .or_else(|| {
+            let named: Vec<_> = agents.iter().filter(|candidate| candidate.name.eq_ignore_ascii_case(wanted)).collect();
+            named.iter().find(|candidate| candidate.project.as_deref() == Some(project)).or(named.first()).copied()
+        })
+        .map(|found| found.id.clone())
+        .ok_or_else(|| format!("There's no agent \"{wanted}\"."))
+}
+
+/// pipes_settings (#423, Bruno 28259): narrows a pipe at once, or asks the
+/// person on a card to approve a change that widens it.
+async fn settings(factory: Arc<Factory>, agent: String, args: SettingsArgs) -> Result<ToolResult, String> {
+    use crate::card_actions::{Action, PipeChange, PipeLimits, listed};
+    untainted_admin(&factory, &agent, "change a pipe's settings", "in the pipe's settings")?;
+    let record = find_pipe(&factory, args.pipe.trim())?;
+    let pipe_called = format!("the pipe {}", crate::pipes::handoff::label(&record).trim_start_matches("pipe "));
+    if record.state == crate::pipes::State::Closed {
+        return Err("That pipe is closed: only the person can delete it. Nothing was changed.".to_owned());
+    }
+    let reason = args.reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    if reason.is_empty() {
+        return Err("Give reason: why, in a sentence the person reads. Nothing was changed.".to_owned());
+    }
+    let ids = |list: &[String]| list.iter().map(|wanted| find_agent(&factory, wanted, &record.project)).collect::<Result<Vec<_>, _>>();
+    let limits = (args.messages_per_hour.is_some() || args.burst.is_some() || args.file_mb_per_day.is_some()).then(|| PipeLimits {
+        messages_per_hour: args.messages_per_hour.unwrap_or(record.limits.per_hour),
+        burst: args.burst.unwrap_or(record.limits.burst),
+        file_mb_per_day: args.file_mb_per_day.unwrap_or(record.limits.file_mb),
+    });
+    let change = PipeChange {
+        pipe: record.id.clone(),
+        pause: args.pause,
+        resume: args.resume,
+        close: args.close,
+        limits,
+        add: ids(&args.add)?,
+        remove: ids(&args.remove)?,
+        quarantine: ids(&args.quarantine)?,
+        commands: ids(&args.commands)?,
+        lead: args.lead.as_deref().map(|lead| find_agent(&factory, lead, &record.project)).transpose()?,
+        liaison: args.liaison.map(|name| name.trim().to_owned()),
+        review_outgoing: args.review_outgoing,
+        review_incoming: args.review_incoming,
+    };
+    if change.pause && change.resume {
+        return Err("Pause or resume it, not both. Nothing was changed.".to_owned());
+    }
+    if let Some(both) = change.add.iter().find(|id| change.remove.contains(id)) {
+        return Err(format!("{both} is both added and removed. Nothing was changed."));
+    }
+    if let Some(both) = change.commands.iter().find(|id| change.quarantine.contains(id)) {
+        return Err(format!("{both} is both let run commands and stopped. Nothing was changed."));
+    }
+    let named = |id: &str| factory.lock().config.agent(id).map_or_else(|| id.to_owned(), |agent| agent.name.clone());
+    let said = change.describe(&named);
+    if said.is_empty() {
+        return Err("Say what to change. Nothing was changed.".to_owned());
+    }
+    let me = named(&agent);
+    let wider = change.widens(&record, &named);
+    if wider.is_empty() {
+        let done =
+            crate::card_actions::apply_pipe(&factory, &change, Some(&me)).await.map_err(|why| format!("{why} Nothing was changed."))?;
+        return Ok(ToolResult::text(format!("{done} The person sees it in the pipe."), json!({})));
+    }
+    let title = format!("Change {pipe_called}");
+    let description = format!("{me} asks to {} on {pipe_called}.", listed(&said));
+    crate::card_actions::ask(&factory, &agent, &title, &description, &reason, &Action::Pipe(change))
+}
+
+fn sender_parameters() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["pipe", "agent", "send"],
+        "properties": {
+            "pipe": {"type": "string"},
+            "agent": {"type": "string"},
+            "send": {"type": "boolean"},
+        },
+        "additionalProperties": false,
+    })
+}
+
+#[derive(Deserialize)]
+struct SenderArgs {
+    pipe: String,
+    agent: String,
+    send: bool,
+}
+
+/// pipes_sender: the admin agent lets an agent only send to a pipe, or
+/// stops it, as the person asked (`pipes::senders`).
+fn sender(factory: &Arc<Factory>, agent: &str, args: SenderArgs) -> Result<ToolResult, String> {
+    untainted_admin(factory, agent, "let an agent send to a pipe", "in the pipe's settings")?;
+    let pipe = find_pipe(factory, args.pipe.trim())?;
+    let wanted = args.agent.trim();
+    let member = {
+        let inner = factory.lock();
+        let agents = &inner.config.agents;
+        agents
+            .iter()
+            .find(|candidate| candidate.id == wanted)
+            .or_else(|| {
+                let named: Vec<_> = agents.iter().filter(|candidate| candidate.name.eq_ignore_ascii_case(wanted)).collect();
+                // A name two agents share: the one in the pipe's project.
+                named.iter().find(|candidate| candidate.project.as_deref() == Some(pipe.project.as_str())).or(named.first()).copied()
+            })
+            .map(|found| found.id.clone())
+            .ok_or_else(|| format!("There's no agent \"{wanted}\"."))?
+    };
+    let said = crate::pipes::senders::set(factory, agent, &pipe.id, &member, args.send)?;
+    Ok(ToolResult::text(said, json!({})))
 }
 
 #[derive(Deserialize)]

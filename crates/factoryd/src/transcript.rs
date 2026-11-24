@@ -9,6 +9,7 @@
 //! (`log`).
 
 pub(crate) mod log;
+pub(crate) mod resume;
 mod older;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1667,6 +1668,16 @@ fn notice(text: String, level: NoticeLevel) -> Kind {
     Kind::Notice(v1::Notice { text, level: level.into(), ..Default::default() })
 }
 
+/// A voice message sent with typed text (#425): its two parts apart, so
+/// the app shows what was typed, then the recording with the words heard.
+fn voice_parts(message: &UserMessage, text: &str) -> v1::UserText {
+    let Some(voice) = message.voice.as_ref() else { return v1::UserText::default() };
+    match crate::speech::voice::heard_part(text, &voice.typed) {
+        Some(heard) => v1::UserText { typed: voice.typed.clone(), heard: heard.to_owned(), ..Default::default() },
+        None => v1::UserText::default(),
+    }
+}
+
 /// The person's message, or an event shown as one, never as theirs.
 fn user_kind(message: &UserMessage) -> Kind {
     let text = user_text(&message.content);
@@ -1674,7 +1685,7 @@ fn user_kind(message: &UserMessage) -> Kind {
         // Attached images are shown as attachments, not as "[image]".
         let text = if message.attachments.is_empty() { text } else { text_parts(&message.content) };
         return Kind::User(v1::UserText {
-            text,
+            text: text.clone(),
             sent_from: message.sent_from.as_ref().map(sent_from),
             client_id: message.client_id.clone(),
             attachments: message.attachments.iter().map(attachment).collect(),
@@ -1685,6 +1696,7 @@ fn user_kind(message: &UserMessage) -> Kind {
                 ..Default::default()
             }),
             checklist_item: message.checklist_item.as_ref().map(checklist_item),
+            ..voice_parts(message, &text)
         });
     };
     let source = match event.source {

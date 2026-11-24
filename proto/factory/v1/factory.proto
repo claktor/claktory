@@ -380,6 +380,8 @@ message ClientMessage {
     // now, and add a model the list doesn't have by its id.
     RefreshModels refresh_models = 213;
     AddModel add_model = 214;
+    // Claktory's background service back in charge (friend bug #24).
+    RestoreBackendService restore_backend_service = 215;
   }
 }
 
@@ -582,6 +584,13 @@ message ServerMessage {
   // after Welcome). If it isn't the one the app holds, the app drops what
   // it holds and reconnects for a whole Workspace. Empty on a whole one.
   string workspace_base_revision = 76;
+  // Resuming the conversation shown on reconnect (#413, #378's second step).
+  // On a Transcript, and on each EntryUpdate and EntryDelta of the agent it's
+  // for: the revision of that agent's conversation the message brings the
+  // app to, opaque ("<process random>-<counter>"). Keep the latest applied,
+  // with its agent, and send both back in Hello.transcript_agent_id and
+  // transcript_revision. Empty on others (a chat's, a pipe's).
+  string transcript_revision = 77;
 }
 
 // ---- Handshake ----
@@ -631,6 +640,14 @@ message Hello {
   // is a WorkspacePatch against it, even one where nothing changed;
   // otherwise a whole Workspace, as without it. Only with workspace_patches.
   string workspace_revision = 10;
+  // The agent whose conversation the app holds, and the revision of it it
+  // last applied (ServerMessage.transcript_revision), to resume it (#413).
+  // When that agent is still the one shown and the backend can tell what
+  // changed since, the Transcript after Welcome has `resumed` and only the
+  // entries added or changed since; otherwise it's the latest page, as when
+  // they're empty (older apps).
+  string transcript_agent_id = 11;
+  string transcript_revision = 12;
 }
 
 enum DeviceKind {
@@ -1041,11 +1058,15 @@ message SendMessage {
   repeated Attachment attachments = 4;
   // A voice message: attachments[0] is a recording (AAC in .m4a, 16 kHz
   // mono from the apps; WAV, MP3, FLAC, Ogg Vorbis also read), up to 30
-  // minutes, and `text` is empty. It waits in the queue
-  // (QueuedMessage.transcription) while this Claktory transcribes it, then
-  // the agent gets its words as the person's message. Refused while the
-  // speech model is ABSENT or UNSUPPORTED (Workspace.speech_model): the app
-  // asks the person and sends InstallSpeechModel first.
+  // minutes. `text` is empty, or what the person typed or pasted to go with
+  // it (#425), and the attachments after the first are files sent with it,
+  // as in any message. It waits in the queue (QueuedMessage.transcription)
+  // while this Claktory transcribes it, then the agent gets one message:
+  // the typed text first, then the words heard after "Voice note: " (see
+  // UserText.typed). Failed, it keeps the typed text; RetryVoiceMessage and
+  // DiscardVoiceMessage work as for any. Refused while the speech model is
+  // ABSENT or UNSUPPORTED (Workspace.speech_model): the app asks the person
+  // and sends InstallSpeechModel first.
   bool voice = 5;
   // A reply on a checklist item (ChecklistItem.id), from Needs you or the
   // Checklist panel; 0 for none. The agent reads which item it's about, and
@@ -1474,6 +1495,11 @@ message DecideProposal {
   // for context"), and the proposer is told it was answered so. The
   // proposal closes APPROVED with Proposal.replied. `approve` is ignored.
   bool reply = 6;
+  // The proposal's version the person decided (Proposal.revision, #428),
+  // checked as AnswerAsk.revision is: another is refused with "This card
+  // changed. Look at it again."; left out, refused only within 30 seconds
+  // of a change.
+  optional uint32 revision = 7;
 }
 
 enum MonitorAction {
@@ -2410,7 +2436,44 @@ message Workspace {
   // (UsageSwitch.goes_back). Never for a wait on credit, a sign-in or
   // locked secrets. It spends on that provider without asking.
   bool usage_auto_continue = 46;
+  // How this Claktory's backend runs on its Mac (friend bug #24): unset,
+  // or state UNSPECIFIED, shows nothing.
+  BackendService backend_service = 47;
 }
+
+// Claktory's background service on a Mac (friend bug #24): the LaunchAgent
+// whose supervisor starts the backend at login, starts it again if it
+// stops, undoes an update that fails and stops and starts it for a move.
+message BackendService {
+  BackendServiceState state = 1;
+  // BY_HAND: a sentence for the person, as it is: what that means, and
+  // what Restore does or how to repair the service.
+  string reason = 2;
+  // BY_HAND: RestoreBackendService can put the service back in charge.
+  // Show it as a Needs you item with Restore (it asks nothing more; the
+  // backend restarts once), and in Settings → General beside Move.
+  bool can_restore = 3;
+  // Restore was asked for: this backend stops in a moment, and the service
+  // starts it again. Show "Restarting…" until the app reconnects.
+  bool restoring = 4;
+}
+
+enum BackendServiceState {
+  // Nothing to say: not a Mac, the dev Claktory, or one run elsewhere for
+  // tests.
+  BACKEND_SERVICE_STATE_UNSPECIFIED = 0;
+  // Its service runs it, as installed.
+  BACKEND_SERVICE_STATE_RUNNING = 1;
+  // It was started some other way (by hand, in Terminal), so it doesn't
+  // start again by itself if it stops or the Mac restarts, and it can't
+  // stop and start itself to move to another computer.
+  BACKEND_SERVICE_STATE_BY_HAND = 2;
+}
+
+// Puts Claktory's background service back in charge (BackendService
+// can_restore): the backend stops, and the service starts it again. Ack,
+// then the connection closes; refused, saying why, when it can't.
+message RestoreBackendService {}
 
 // Agents and chats waiting on one provider's usage limit or credit
 // (Workspace.provider_waits): what Needs you shows for them, all at once.
@@ -4270,6 +4333,11 @@ message Model {
   // Added by its id (AddModel, or an agent's model set to it), as the
   // provider's list doesn't have it (friend bug #14).
   bool added = 6;
+  // An agent on it can make images (#403: image_generate): on its sign-in
+  // now, as Claktory reads it. Phase 1: a GPT model with image input,
+  // signed in with ChatGPT on a plan that isn't Free. Read again whenever
+  // the models or the plan are.
+  bool image_output = 7;
 }
 
 // The selected agent's whole transcript, oldest entry first.
@@ -4281,6 +4349,12 @@ message Transcript {
   repeated Entry entries = 2;
   // There are entries before the first of `entries`.
   bool has_earlier = 3;
+  // Resumed (#413; only after a Hello with transcript_revision): `entries`
+  // are only those added or changed since the revision the app held, oldest
+  // first, possibly none. Put each in place of the one with its seq, or add
+  // it; keep the others, and `has_earlier` as it was. Otherwise the app
+  // replaces what it held with `entries`.
+  bool resumed = 4;
 }
 
 // Try now: an agent (or a chat, by its id) waiting out its accounts' usage
@@ -4417,14 +4491,18 @@ message QueuedMessage {
   // The person's: the files it carries (see Attachment).
   repeated Attachment attachments = 10;
   // A voice message (SendMessage.voice), while it's transcribed or after it
-  // failed; unset for any other. `text` is empty until it's DONE, and
-  // attachments[0] is the recording.
+  // failed; unset for any other. `text` is empty until it's DONE (or the
+  // typed text sent with it, `typed`), and attachments[0] is the recording.
   Transcription transcription = 11;
   // An agent's message sent quietly: it waits for the agent's next wake
   // and doesn't cause one (see Agent.quiet_waiting).
   bool quiet = 12;
   // The person's reply on a checklist item (see UserText.checklist_item).
   ChecklistItemRef checklist_item = 13;
+  // A voice message sent with typed text (#425): what was typed. `text` is
+  // the same while it's PENDING or FAILED, then the whole message as in
+  // UserText.typed once it's DONE. Empty for any other message.
+  string typed = 14;
 }
 
 // Adds an entry or replaces the one with the same `seq`.
@@ -4588,6 +4666,26 @@ message Proposal {
   // state is APPROVED (Rivet acts on it) and `comment` is the answer.
   // Shown as answered rather than approved.
   bool replied = 7;
+  // The agent took it back (proposal_withdraw, #407) before the person
+  // decided: it no longer applied. state is DISMISSED, decided_at_ms when it
+  // was withdrawn, and `comment` empty. Shown as withdrawn by the agent,
+  // with its reason, never as the person's dismissal; DecideProposal on it
+  // is refused.
+  bool withdrawn = 8;
+  // withdrawn: why, in the agent's words (at most 300 characters); show it
+  // as the agent's, never as Claktory's.
+  string withdraw_reason = 9;
+  // Which version of the proposal this is (#428): 1 as proposed, one more
+  // each time its agent changes the text while it waits (proposal_update;
+  // at most 10 times). As AskPerson.revision: redrawn in place, not counted
+  // again, not notified again; DecideProposal.revision names the version
+  // decided. 0 from a backend before #428: treat it as 1.
+  uint32 revision = 10;
+  // When its agent last changed it, in ms since 1970; 0 if it never did.
+  int64 updated_ms = 11;
+  // Why it changed it last, in the agent's words (at most 300 characters);
+  // empty if it gave no reason.
+  string update_reason = 12;
 }
 
 // A device an agent adds for the person (an admin agent's devices_add tool,
@@ -4927,6 +5025,15 @@ message UserText {
   // A reply on a checklist item (SendMessage.checklist_item); unset for any
   // other message.
   ChecklistItemRef checklist_item = 6;
+  // A voice message sent with typed text (#425): what the person typed or
+  // pasted. `text` is then the whole message as the agent read it: this
+  // text, a blank line, "Voice note: " and the words heard (`heard`), so an
+  // app that doesn't know these fields still shows all of it. Show this
+  // text, then the recording (attachments[0]) with `heard` as its words.
+  // Empty for any other message, a voice message alone included.
+  string typed = 7;
+  // With `typed`: the words heard in the recording, alone.
+  string heard = 8;
 }
 
 // A voice message's transcription.
@@ -7060,6 +7167,12 @@ message Pipe {
   // whose card started the pipe, else the admin agent with Pipes; empty
   // when there's none (a reply is refused then) and in other states.
   string reply_agent_id = 34;
+  // Members that only send to it (#414), among member_ids: pipe_send and
+  // pipe_status, never reading it, never woken by what arrives or told
+  // what the other side says, never its lead. Any agent of this Claktory,
+  // its project's or not (Rivet, say). Never quarantined as well, and not
+  // in can_run_commands_ids.
+  repeated string send_only_ids = 35;
 }
 
 enum PipeState {
@@ -7303,6 +7416,10 @@ message ApprovePipe {
   // is read. The pipe stays waiting for approval, unchanged; the agent whose
   // card started it (else the admin agent with Pipes) is told the reply.
   bool reply = 10;
+  // Members that only send to it (Pipe.send_only_ids), among member_ids;
+  // unset makes none. They may be agents outside the pipe's project; none
+  // is the lead or quarantined.
+  PipeMembers send_only = 11;
 }
 
 // Changes a pipe's settings; unset fields stay as they are.
@@ -7323,6 +7440,11 @@ message UpdatePipe {
   // Pipe.review_incoming. Turning it off lets nothing in: messages already
   // waiting still wait for Let in or Discard.
   optional bool review_incoming = 10;
+  // The members that only send to it (Pipe.send_only_ids), all of them;
+  // ids that aren't members are refused, and so is one that's quarantined
+  // or the lead. A member left out reads the pipe as before. Agents
+  // outside the pipe's project may be members only this way.
+  PipeMembers send_only = 11;
 }
 
 message PipeMembers {
@@ -7551,6 +7673,38 @@ message AskPerson {
   // ANSWERED by a reply (AnswerAsk.reply), not an approval: `answer` is
   // the reply. Shown as replied rather than answered.
   bool replied = 12;
+  // The agent took it back (ask_withdraw, #407) before the person answered:
+  // it no longer applied. state is DISMISSED, so it no longer waits, and
+  // decided_ms is when it was withdrawn; `answer` is empty. Shown as
+  // withdrawn by the agent, with its reason, never as the person's
+  // dismissal; a card the person is answering just closes. AnswerAsk on it
+  // is refused ("This question was withdrawn.").
+  bool withdrawn = 13;
+  // withdrawn: why, in the agent's words (a short line, at most 300
+  // characters); show it as the agent's, never as Claktory's.
+  string withdraw_reason = 14;
+  // Which version of the card this is (#428): 1 as asked, one more each
+  // time its agent changes it while it waits (ask_update: its title, body,
+  // wants_text, review_path or steps; at most 10 times). The card redraws
+  // in place; it doesn't count again in Needs you, and nothing notifies the
+  // person again. AnswerAsk.revision names the version answered. 0 from a
+  // backend before #428: treat it as 1.
+  uint32 revision = 15;
+  // When its agent last changed it, in ms since 1970; 0 if it never did
+  // (revision 1). Show "Updated · <time>" on the card.
+  int64 updated_ms = 16;
+  // Why it changed it last, in the agent's words (at most 300 characters);
+  // empty if it gave no reason. Show it muted, as the agent's.
+  string update_reason = 17;
+  // A card whose Approve makes a change an admin agent asked for (#423:
+  // pipes_settings, apps_uninstall, models_auto_continue): what Approve
+  // does, in Claktory's own words, never the agent's ("Rivet asks to add
+  // Cy … on the pipe "Website"."); and the agent's reason, in its own
+  // words. Show the description as the card's text and the reason apart,
+  // muted, as the agent's ("Rivet's reason: …"), instead of body, which
+  // holds both for older apps. Both empty on every other card.
+  string action_description = 18;
+  string action_reason = 19;
 }
 
 // One step of a procedure (AskPerson.steps).
@@ -7615,6 +7769,12 @@ message AnswerAsk {
   // (`step`) and for an ask that wants a written answer (wants_text),
   // whose cards stay as they are.
   bool reply = 7;
+  // The card's version the person answered (AskPerson.revision, #428).
+  // Another version is refused, "This card changed. Look at it again.",
+  // and nothing is answered: the card already shows the new one. Left
+  // out (an app before #428), it's taken for the card as it is, unless its
+  // agent changed it in the last 30 seconds, when it's refused the same way.
+  optional uint32 revision = 8;
 }
 
 // A chat: a one-off conversation of the person's, beside their agents but
@@ -7683,7 +7843,8 @@ message SendChatMessage {
   // A voice message, as SendMessage.attachments and SendMessage.voice:
   // attachments[0] is the recording, uploaded for the chat (StartUpload
   // with agent_id the chat's id; a chat takes only recordings, an audio type
-  // up to 100 MB), and `text` is empty. It waits in the chat's queue
+  // up to 100 MB), and `text` is empty or typed with it, as in
+  // SendMessage.voice (#425). It waits in the chat's queue
   // (QueuedMessage.transcription) while it's transcribed, then the chat
   // reads its words; a short one with nothing said is dropped. Refused while
   // the speech model is ABSENT or UNSUPPORTED. RetryVoiceMessage and
@@ -8060,8 +8221,10 @@ message SendTestNotification {}
 // ---- Needs you's history ----
 
 // The cards the person decided in the last 30 days (answered, dismissed,
-// approved or denied), newest first, a page at a time. Answered with
-// NeedsYouHistory. Expired, withdrawn and waiting cards aren't listed.
+// approved or denied), newest first, a page at a time, and the questions
+// and proposals their agents withdrew (WITHDRAWN). Answered with
+// NeedsYouHistory. Expired and waiting cards, and withdrawn requests for
+// secrets, aren't listed.
 message ListNeedsYouHistory {
   // Only cards whose agent's name (as it is now), title, text or the
   // person's reply has it, case aside; "" for all. Past 200 characters
@@ -8138,18 +8301,25 @@ message NeedsYouRecord {
   // APP_ACCESS: why, in Rivet's words (apps_set_access's reason): show it
   // as Rivet's, under the title, never as Claktory's; empty for the
   // person's own changes. MODEL: models_set's reason, the same way;
-  // CONVERSATION: conversation_fork's or conversation_switch's.
+  // CONVERSATION: conversation_fork's or conversation_switch's;
+  // WITHDRAWN: why the agent took its question or proposal back.
   string agent_reason = 21;
   // MODEL: the change, for UndoModelChange. `undone` says it was undone.
   string model_change_id = 22;
   // MODEL: the agent whose model or effort changed. CONVERSATION: the
-  // agent whose conversation changed.
+  // agent whose conversation changed. PIPE_MEMBER: the agent let send to
+  // the pipe, or stopped.
   string subject_agent_id = 23;
   // MODEL: the subject agent's model or effort changed again since this
   // change (or the agent was deleted), so UndoModelChange would refuse it
   // ("changed since"): show that instead of Undo. False once undone
   // (`undone` says so) and for every other kind.
   bool superseded = 24;
+  // QUESTION, REVIEW and PROPOSAL: how many times its agent changed the
+  // card before it was decided (#428; ask_update, proposal_update); 0 for
+  // none. title is the card as it was last. Show it quietly ("Updated
+  // twice"), never as a record of its own.
+  uint32 updates = 25;
 }
 
 enum NeedsYouRecordKind {
@@ -8222,6 +8392,13 @@ enum NeedsYouRecordKind {
   // call's entry in the acting agent's conversation. The person's own
   // changes aren't listed.
   NEEDS_YOU_RECORD_KIND_CONVERSATION = 15;
+  // An admin agent (Rivet) let an agent only send to a pipe, or stopped
+  // it, with pipes_sender (#414): outcome CHANGED, agent_id who did it,
+  // subject_agent_id the agent let send or stopped, pipe_id the pipe,
+  // title Claktory's sentence ("Rivet let Mike send to this pipe without
+  // reading it", "Rivet stopped Mike sending to this pipe"). The
+  // person's own changes in the pipe's settings aren't listed.
+  NEEDS_YOU_RECORD_KIND_PIPE_MEMBER = 16;
 }
 
 enum NeedsYouOutcome {
@@ -8238,6 +8415,10 @@ enum NeedsYouOutcome {
   // The person replied with a comment rather than approving or dismissing
   // (#370 Submit): `reply` holds it.
   NEEDS_YOU_OUTCOME_REPLIED = 7;
+  // The agent took the card back before the person decided (#407:
+  // ask_withdraw, proposal_withdraw; QUESTION, REVIEW and PROPOSAL only):
+  // decided_ms is when, agent_reason its reason, and `reply` is empty.
+  NEEDS_YOU_OUTCOME_WITHDRAWN = 8;
 }
 
 // ---- Browser control ----

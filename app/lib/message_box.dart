@@ -17,13 +17,16 @@ import 'mobile/input.dart';
 import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
 import 'mobile/platform_policy.dart';
+import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'mobile/voice_input.dart';
 import 'model_step.dart' show showConnectModel;
 import 'protocol/factory/v1/factory.pb.dart';
-import 'recorder.dart' show MicAccess, RecordingEnd, deviceRecorder;
+import 'recorder.dart' show MicAccess, Recording, RecordingEnd, deviceRecorder;
 import 'scope.dart';
 import 'tell_rivet.dart' show ErrorLine;
 import 'voice.dart';
+import 'voice_keep.dart' show KeptKind, KeptVoice, KeptVoices, VoiceNotes;
+import 'voice_session.dart';
 
 /// What a [MessageBox] writes to: an agent ([AgentMessageTarget]), or
 /// another kind of conversation (a chat) that implements it. The box owns
@@ -56,14 +59,25 @@ abstract class MessageTarget {
   /// Why nothing can be sent now, and what can be done; null when it can.
   MessageBlocked? blocked(BuildContext context) => null;
 
+  /// Whom a voice message goes to, by name ("June"), for the floating
+  /// recording bar while the box is out of sight (#409).
+  String get name => label;
+
+  /// Goes back to this conversation from anywhere in the app, as [context]
+  /// shows it now (the bar's name, tapped); null where there's no way.
+  VoidCallback? reopen(BuildContext context) => null;
+
+  /// What its voice messages are, kept on the device until sent (#401).
+  KeptKind get voiceKind => KeptKind.agent;
+
   /// The color Send is filled with while the box writes to this target,
   /// in place of signal, with white on it: a pipe's, so what goes out to
   /// another Claktory looks it. Null for signal.
   Color? get accent => null;
 
-  /// Sends [text] with [files] (from the box, taken out of it), or a
-  /// voice message ([voice], its length; [text] empty, the recording in
-  /// [files]). It should show at once and say if it fails, as an agent's
+  /// Sends [text] with [files] (from the box, taken out of it); with
+  /// [voice] (its length) it's a voice message, files[0] its recording,
+  /// [text] and any other files going with it as one message (#425). It should show at once and say if it fails, as an agent's
   /// outbox does: the box has already been cleared.
   void send(String text, {List<LocalFile> files = const [], Duration? voice});
 
@@ -107,6 +121,13 @@ class AgentMessageTarget extends MessageTarget {
 
   @override
   String get label => 'Message ${agent.name}';
+
+  @override
+  String get name => agent.name;
+
+  @override
+  VoidCallback? reopen(BuildContext context) =>
+      voiceOpener(context, (backend) => backend.selectAgent(agent.id));
 
   @override
   List<SlashCommand> get commands => agent.commands;
@@ -199,31 +220,85 @@ class _MessageBoxState extends State<MessageBox> {
     // Files dropped on the window come here, for this target.
     _drops = FileDrop.dropped.listen(_attach);
     FileDrop.claim(this, takesFiles: widget.target.takesFiles);
-    _voice
-      ..onEnded = _recordingEnded
-      ..addListener(_voiceChanged);
+    _takeVoice();
   }
+
+  /// The voice message recorded from this box, or one recorded for its
+  /// target from a box that went meanwhile (#409): it goes on when the box
+  /// goes, the floating bar sending it.
+  late _BoxVoice _session;
 
   /// A voice message being recorded, from the mic button.
-  final _voice = VoiceRecording();
+  VoiceRecording get _voice => _session.recording;
 
   /// On a phone, how a finger drives [_voice]: hold, slide, let go.
-  late final _phoneVoice = PhoneVoice(
-    start: _startPhoneVoice,
-    send: _sendPhoneVoice,
-    cancel: _cancelVoice,
-  );
+  PhoneVoice get _phoneVoice => _session.phone;
 
-  /// Sends a phone's recording; one too short to hold words (a tap that
-  /// lingered) is dropped, saying how it's done.
-  Future<void> _sendPhoneVoice() async {
-    if (_voice.elapsed < const Duration(milliseconds: 600)) {
-      await _voice.cancel();
-      if (mounted) setState(() => _error = 'Hold to record, let go to send.');
-      return;
-    }
-    await _sendVoice();
+  /// This box's voice: the one going on for its target, if there is one,
+  /// else its own.
+  void _takeVoice() {
+    final live = activeVoice.value;
+    _session = live is _BoxVoice && live.key == widget.target.key
+        ? live
+        : _BoxVoice(widget.target);
+    _session.box = this;
+    _voice.addListener(_voiceChanged);
+    _wasRecording = _voice.recording || _voice.starting;
   }
+
+  /// The box goes, or writes to another target: a recording going on goes
+  /// on without it (a finger held on the mic can't be followed, so it waits
+  /// with Send and Cancel); one that isn't is done with.
+  void _letVoiceGo() {
+    final session = _session;
+    _voice.removeListener(_voiceChanged);
+    if (session.box == this) session.box = null;
+    if (session.live) {
+      _phoneVoice.holdLost();
+    } else if (session.box == null) {
+      session.dispose();
+    }
+  }
+
+  /// The box's part when its voice message went: the conversation follows
+  /// it, and on a Mac the field has the keys again.
+  void _voiceSent() {
+    widget.onSent();
+    // A phone's keyboard stays down: it wasn't up for a voice message.
+    if (!_phoneVoice.active && !touchFirst(context)) _focus.requestFocus();
+  }
+
+  /// Says [error] under the box.
+  void _voiceError(String error, {bool plain = false}) =>
+      plain ? _hint(error) : setState(() => _error = error);
+
+  /// What was recorded waits in the box as its voice note (#425), to go
+  /// with what's written there: on a Mac the field has the keys again, to
+  /// carry on writing or send it all with Return.
+  void _voiceAttached() {
+    if (!mounted) return;
+    setState(() => _error = null);
+    if (!touchFirst(context)) _focus.requestFocus();
+  }
+
+  /// The voice note waiting in this box, if any (#425).
+  KeptVoice? get _note =>
+      VoiceNotes.of(AppScope.of(context)).note(widget.target.key);
+
+  /// Something written in the box, or files: a recording made now waits
+  /// in it as its voice note, to go with them ([_BoxVoice._finish]).
+  bool get _hasDraft =>
+      _text.text.trim().isNotEmpty ||
+      (widget.target.takesFiles &&
+          AppScope.of(context).attachments.of(widget.target.key).isNotEmpty);
+
+  /// Anything to send: what's written, files, or a voice note.
+  bool get _canSend => _hasDraft || _note != null;
+
+  /// The phone's mic, the same one wherever it sits (Send's place, or
+  /// beside Send while there's text), so a finger holding it carries on
+  /// as the row changes under it.
+  final _micKey = GlobalKey(debugLabel: 'mic');
 
   /// The phone's microphone is turned off for Claktory: its note offers
   /// Settings.
@@ -236,10 +311,14 @@ class _MessageBoxState extends State<MessageBox> {
   /// Starts recording from a phone's mic, as [_record] does, saying how to
   /// give the microphone back when it's off.
   Future<bool> _startPhoneVoice() async {
+    if (voiceBusy(widget.target.key) case final why?) {
+      _hint(why);
+      return false;
+    }
     // A phone with no recorder yet (Android, for now) says so at once,
     // before anything asks to download the speech model.
     if (await deviceRecorder.access() == MicAccess.unavailable) {
-      if (mounted) setState(() => _error = noVoiceHere);
+      if (mounted) _hint(noVoiceHere);
       return false;
     }
     if (!mounted) return false;
@@ -253,6 +332,7 @@ class _MessageBoxState extends State<MessageBox> {
       _error = null;
       _micDenied = false;
     });
+    _session.from(context);
     if (await _voice.start()) return true;
     final access = await deviceRecorder.access();
     if (!mounted) return false;
@@ -283,6 +363,10 @@ class _MessageBoxState extends State<MessageBox> {
   /// (starting it, so the first message waits only for what's left), then
   /// records.
   Future<void> _record() async {
+    if (voiceBusy(widget.target.key) case final why?) {
+      _hint(why);
+      return;
+    }
     final model = AppScope.of(context).workspace.workspace.speechModel;
     if (voiceUnavailable(model) case final why?) {
       setState(() => _error = why);
@@ -290,6 +374,7 @@ class _MessageBoxState extends State<MessageBox> {
     }
     if (!await readyForVoice(context) || !mounted) return;
     setState(() => _error = null);
+    _session.from(context);
     if (!await _voice.start()) {
       if (mounted) setState(() => _error = _voice.error);
       return;
@@ -297,54 +382,14 @@ class _MessageBoxState extends State<MessageBox> {
     _recordingFocus.requestFocus();
   }
 
-  /// Sends what was recorded as a voice message, for the Claktory to
-  /// transcribe; it shows in the conversation at once, as any message.
-  Future<void> _sendVoice() async {
-    final target = widget.target;
-    final recording = await _voice.finish();
-    if (recording == null || !mounted) return;
-    final file = File(recording.path);
-    final size = file.existsSync() ? file.lengthSync() : 0;
-    if (size == 0) {
-      setState(() => _error = 'Nothing was recorded.');
-      return;
-    }
-    widget.onSent();
-    target.send(
-      '',
-      files: [
-        LocalFile(
-          path: recording.path,
-          name: recording.path.split('/').last,
-          size: size,
-        ),
-      ],
-      voice: recording.duration,
-    );
-    // A phone's keyboard stays down: it wasn't up for a voice message.
-    if (!_phoneVoice.active && !touchFirst(context)) _focus.requestFocus();
-  }
+  /// Sends what was recorded as a voice message ([_BoxVoice.send]).
+  Future<void> _sendVoice() => _session.send();
 
-  Future<void> _cancelVoice() async {
-    await _voice.cancel();
-    if (mounted && !touchFirst(context)) _focus.requestFocus();
-  }
+  Future<void> _cancelVoice() => _session.cancel();
 
-  /// The recording stopped by itself: at its time limit (or a call, on an
-  /// iPhone) it's sent as it is; if the microphone failed, it's gone.
-  void _recordingEnded(RecordingEnd end) {
-    final phone = _phoneVoice.active;
-    if (phone) unawaited(_phoneVoice.ended(end));
-    if (end == RecordingEnd.error) {
-      unawaited(_voice.cancel());
-      setState(
-        () => _error = 'The recording stopped because the microphone failed.',
-      );
-      return;
-    }
-    // A phone's own decides: a call pauses it rather than sending.
-    if (phone) return;
-    unawaited(_sendVoice());
+  /// Cancelled: on a Mac the field has the keys again.
+  void _voiceCancelled() {
+    if (!touchFirst(context)) _focus.requestFocus();
   }
 
   KeyEventResult _onRecordingKey(FocusNode node, KeyEvent event) {
@@ -434,7 +479,24 @@ class _MessageBoxState extends State<MessageBox> {
   }
 
   late final _focus = FocusNode(onKeyEvent: _onKey);
-  String? _error;
+
+  /// What's said under the box: why something failed, with Ask Rivet to
+  /// fix, or what to do ([_hint]), without.
+  String? _errorText;
+  var _errorPlain = false;
+  String? get _error => _errorText;
+  set _error(String? text) {
+    _errorText = text;
+    _errorPlain = false;
+  }
+
+  /// Says [text] under the box: something for the person to do (send or
+  /// cancel the recording going on, say), nothing gone wrong, so no Ask
+  /// Rivet to fix (Zucchero's row 346).
+  void _hint(String text) => setState(() {
+    _errorText = text;
+    _errorPlain = true;
+  });
 
   /// The slash-command menu, over the top of the box.
   final _menu = OverlayPortalController();
@@ -521,9 +583,12 @@ class _MessageBoxState extends State<MessageBox> {
         old.target.takesFiles != widget.target.takesFiles) {
       FileDrop.claim(this, takesFiles: widget.target.takesFiles);
     }
+    if (old.target.key == widget.target.key) _session.target = widget.target;
     if (old.target.key != widget.target.key) {
-      // A recording is for the target it was started for.
-      unawaited(_voice.cancel());
+      // A recording is for the target it was started for: it goes on,
+      // the floating bar sending it there.
+      _letVoiceGo();
+      _takeVoice();
       _text.value = _draftValue(widget.target.key);
       _error = null;
       // A touch screen's keyboard stays down: it would cover the
@@ -539,9 +604,8 @@ class _MessageBoxState extends State<MessageBox> {
     _drafts.removeListener(_draftChanged);
     _text.dispose();
     _focus.dispose();
-    _voice.dispose();
+    _letVoiceGo();
     _recordingFocus.dispose();
-    _phoneVoice.dispose();
     super.dispose();
   }
 
@@ -690,17 +754,43 @@ class _MessageBoxState extends State<MessageBox> {
   }
 
   Future<void> _send() async {
+    // A recording going on is sent from its own Send.
+    if (_voice.recording || _voice.starting) return;
     final text = _text.text.trim();
     final key = widget.target.key;
     final backend = AppScope.of(context);
-    // Files can go on their own.
-    if (text.isEmpty && backend.attachments.of(key).isEmpty) return;
+    final notes = VoiceNotes.of(backend);
+    // Files, or a voice note, can go on their own.
+    if (text.isEmpty &&
+        backend.attachments.of(key).isEmpty &&
+        notes.note(key) == null) {
+      return;
+    }
     _text.clear();
     setState(() => _error = null);
     widget.onSent();
+    final files = backend.attachments.take(key);
     // It shows at once, its files uploading; one that isn't sent stays
-    // there, with Retry.
-    widget.target.send(text, files: backend.attachments.take(key));
+    // there, with Retry. A voice note goes with the rest as one message
+    // (#425), its recording first.
+    final note = notes.take(key);
+    if (note == null) {
+      widget.target.send(text, files: files);
+      return;
+    }
+    final recording = File(note.path);
+    widget.target.send(
+      text,
+      files: [
+        LocalFile(
+          path: note.path,
+          name: note.path.split('/').last,
+          size: recording.existsSync() ? recording.lengthSync() : 0,
+        ),
+        ...files,
+      ],
+      voice: note.duration,
+    );
   }
 
   /// The message box on a phone: + for files and photos, the field
@@ -743,46 +833,78 @@ class _MessageBoxState extends State<MessageBox> {
       final workspace = backend.workspace.workspace;
       final voice = target.takesVoice && voiceKnown(workspace);
       row = ListenableBuilder(
-        listenable: Listenable.merge([_text, backend.attachments, _phoneVoice]),
-        builder: (context, _) => PhoneComposerRow(
-          accent: target.accent,
-          onAttach: target.takesFiles ? _pick : null,
-          canSend:
-              !_phoneVoice.active &&
-              (_text.text.trim().isNotEmpty ||
-                  backend.attachments.of(target.key).isNotEmpty),
-          onSend: _send,
-          maxFieldHeight: widget.maxFieldHeight,
-          // The mic while there's nothing to send; Send for a recording
-          // that isn't held.
-          primary: !voice
-              ? null
-              : switch (_phoneVoice.mode) {
-                  PhoneVoiceMode.locked || PhoneVoiceMode.paused =>
-                    PhoneVoiceSend(voice: _phoneVoice, accent: target.accent),
-                  _ => PhoneMicButton(
-                    key: const ValueKey('mic'),
-                    voice: _phoneVoice,
-                    recording: _voice,
-                    unavailable: voiceUnavailable(workspace.speechModel),
-                  ),
-                },
-          recording: _phoneVoice.active
-              ? PhoneRecordingRow(voice: _phoneVoice, recording: _voice)
-              : null,
-          field: TextField(
-            controller: _text,
-            focusNode: _focus,
-            kind: InputKind.message,
-            placeholder: target.placeholder,
-            semanticsLabel: target.label,
-            // The keyboard would cover the conversation at once.
-            autofocus: false,
-            minLines: 1,
-            maxLines: 5,
-            bordered: false,
-          ),
-        ),
+        listenable: Listenable.merge([
+          _text,
+          backend.attachments,
+          _phoneVoice,
+          VoiceNotes.of(backend),
+        ]),
+        builder: (context, _) {
+          final mic = KeyedSubtree(
+            key: _micKey,
+            child: PhoneMicButton(
+              key: const ValueKey('mic'),
+              voice: _phoneVoice,
+              recording: _voice,
+              unavailable: voiceUnavailable(workspace.speechModel),
+            ),
+          );
+          // With something written, what's recorded is added to it as its
+          // voice note (#425), not sent on its own.
+          final adding = _hasDraft;
+          return PhoneComposerRow(
+            accent: target.accent,
+            onAttach: target.takesFiles ? _pick : null,
+            canSend: !_phoneVoice.active && _canSend,
+            onSend: _send,
+            maxFieldHeight: widget.maxFieldHeight,
+            // The mic while there's nothing to send; Send (or Add, to the
+            // text) for a recording that isn't held.
+            primary: !voice
+                ? null
+                : switch (_phoneVoice.mode) {
+                    PhoneVoiceMode.locked || PhoneVoiceMode.paused
+                        when adding =>
+                      _AddVoiceNote(voice: _phoneVoice, accent: target.accent),
+                    PhoneVoiceMode.locked || PhoneVoiceMode.paused =>
+                      PhoneVoiceSend(voice: _phoneVoice, accent: target.accent),
+                    // Held from beside Send: it stays under the finger.
+                    PhoneVoiceMode.holding ||
+                    PhoneVoiceMode.cancelling when adding => Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        mic,
+                        const SizedBox(width: Space.xs),
+                        SizedBox.square(
+                          dimension: PhonePlatformPolicy.of(context)
+                              .touchTarget,
+                        ),
+                      ],
+                    ),
+                    _ => mic,
+                  },
+            // Beside Send while there's something written and no voice note
+            // yet: one to add to it.
+            beside: voice && adding && _note == null && !_phoneVoice.active
+                ? mic
+                : null,
+            recording: _phoneVoice.active
+                ? PhoneRecordingRow(voice: _phoneVoice, recording: _voice)
+                : null,
+            field: TextField(
+              controller: _text,
+              focusNode: _focus,
+              kind: InputKind.message,
+              placeholder: target.placeholder,
+              semanticsLabel: target.label,
+              // The keyboard would cover the conversation at once.
+              autofocus: false,
+              minLines: 1,
+              maxLines: 5,
+              bordered: false,
+            ),
+          );
+        },
       );
     }
     return Padding(
@@ -802,7 +924,14 @@ class _MessageBoxState extends State<MessageBox> {
               child: _micDenied
                   ? Row(
                       children: [
-                        Expanded(child: _Note(_error!, color: palette.danger)),
+                        Expanded(
+                          // Something to do: no Ask Rivet to fix.
+                          child: _Note(
+                            _error!,
+                            color: palette.danger,
+                            plain: true,
+                          ),
+                        ),
                         const SizedBox(width: Space.s),
                         Button(
                           label: 'Open Settings',
@@ -810,7 +939,7 @@ class _MessageBoxState extends State<MessageBox> {
                         ),
                       ],
                     )
-                  : _Note(_error!, color: palette.danger),
+                  : _Note(_error!, color: palette.danger, plain: _errorPlain),
             ),
           Padding(
             padding: EdgeInsets.only(
@@ -835,7 +964,18 @@ class _MessageBoxState extends State<MessageBox> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => VoiceInPlace(
+    // While it's in view, the box shows its recording itself: the floating
+    // bar steps aside.
+    session: _session,
+    // A voice note put in or taken out (#425): the mic and Send follow.
+    child: ListenableBuilder(
+      listenable: VoiceNotes.of(AppScope.of(context)),
+      builder: (context, _) => _build(context),
+    ),
+  );
+
+  Widget _build(BuildContext context) {
     if (isPhoneLayout(context)) {
       // A phone's find bar takes the box's place at the foot while it's
       // open (mobile/page_find.dart): the box steps aside, its draft kept.
@@ -881,7 +1021,8 @@ class _MessageBoxState extends State<MessageBox> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (_error != null) _Note(_error!, color: palette.danger),
+              if (_error != null)
+                _Note(_error!, color: palette.danger, plain: _errorPlain),
               LayoutBuilder(
                 builder: (context, constraints) => CompositedTransformTarget(
                   link: _box,
@@ -1005,11 +1146,18 @@ class _MessageBoxState extends State<MessageBox> {
                                           ),
                                         ),
                                       ],
-                                      if (voice) ...[
+                                      // One voice note to a message: no mic
+                                      // while the box has one (#425).
+                                      if (voice &&
+                                          (recording || _note == null)) ...[
                                         const SizedBox(width: Space.xs),
                                         _voice.recording
                                             ? Button(
-                                                label: 'Send',
+                                                // With something written,
+                                                // it's added to that (#425).
+                                                label: _hasDraft
+                                                    ? 'Add'
+                                                    : 'Send',
                                                 primary: true,
                                                 onPressed: _sendVoice,
                                               )
@@ -1026,7 +1174,9 @@ class _MessageBoxState extends State<MessageBox> {
                                       // keyboard (the on-screen Return
                                       // adds a line), so Send is there
                                       // while it's not.
-                                      if (touch && blocked == null)
+                                      if (touch &&
+                                          blocked == null &&
+                                          !recording)
                                         ListenableBuilder(
                                           listenable: Listenable.merge([
                                             _text,
@@ -1044,16 +1194,9 @@ class _MessageBoxState extends State<MessageBox> {
                                                   child: Button(
                                                     label: 'Send',
                                                     primary: true,
-                                                    onPressed:
-                                                        _text.text
-                                                                .trim()
-                                                                .isEmpty &&
-                                                            AppScope.of(context)
-                                                                .attachments
-                                                                .of(target.key)
-                                                                .isEmpty
-                                                        ? null
-                                                        : _send,
+                                                    onPressed: _canSend
+                                                        ? _send
+                                                        : null,
                                                   ),
                                                 ),
                                         ),
@@ -1084,6 +1227,272 @@ class _MessageBoxState extends State<MessageBox> {
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A voice message recorded from a [MessageBox] for [target] (#409): it
+/// goes on when the box goes (another conversation, Settings, a page over
+/// it), the floating bar ([VoiceBar]) saying so, and [send] and [cancel]
+/// work without it. A box for the same target, built again, shows it.
+class _BoxVoice extends VoiceSession {
+  _BoxVoice(this.target) : super(key: target.key, recording: VoiceRecording()) {
+    recording.onEnded = _recordingEnded;
+  }
+
+  /// Where it goes: the latest box's, while one shows it.
+  MessageTarget target;
+
+  /// The box that has it now, if any.
+  _MessageBoxState? box;
+
+  VoidCallback? _open;
+
+  @override
+  String get title => target.name;
+
+  @override
+  bool get message => true;
+
+  @override
+  VoidCallback? get open => _open;
+
+  @override
+  late final PhoneVoice phone = PhoneVoice(
+    start: _start,
+    send: _sendPhone,
+    cancel: _drop,
+  );
+
+  /// The box's text and files ([Drafts], [Backend.attachments]) and its
+  /// Claktory, as they are wherever the box is.
+  Drafts? _drafts;
+  Backend? _backend;
+
+  /// It's being started from [context]'s box: the bar's name goes back
+  /// there.
+  void from(BuildContext context) {
+    _open = target.reopen(context);
+    _drafts = AppScope.scope(context).drafts;
+    _backend = AppScope.of(context);
+  }
+
+  /// The box has something written (or files) to go with it: in place, it
+  /// becomes the box's voice note rather than going alone (#425).
+  bool get _boxHasDraft {
+    final drafts = _drafts;
+    final backend = _backend;
+    return (drafts?.of(key).trim().isNotEmpty ?? false) ||
+        (target.takesFiles &&
+            (backend?.attachments.of(key).isNotEmpty ?? false));
+  }
+
+  _MessageBoxState? get _here {
+    final box = this.box;
+    return box != null && box.mounted ? box : null;
+  }
+
+  Future<bool> _start() async => await _here?._startPhoneVoice() ?? false;
+
+  /// Says [error] in the box, or in the bar's place when the box isn't
+  /// showing it.
+  void _say(String error, {bool plain = false}) {
+    if (!sayAway(error)) _here?._voiceError(error, plain: plain);
+  }
+
+  /// A phone's recording, sent; one too short to hold words (a tap that
+  /// lingered) is dropped, saying how it's done.
+  Future<void> _sendPhone() async {
+    if (recording.elapsed < const Duration(milliseconds: 600)) {
+      await recording.cancel();
+      _say('Hold to record, let go to send.', plain: true);
+      return;
+    }
+    await _finish();
+  }
+
+  var _went = false;
+
+  @override
+  Future<bool> send() async {
+    _went = false;
+    if (phone.active) {
+      await phone.sendNow();
+    } else {
+      await _finish();
+    }
+    return _went;
+  }
+
+  @override
+  Future<void> cancel() async {
+    if (phone.active) return phone.cancelNow();
+    return _drop();
+  }
+
+  Future<void> _drop() async {
+    await recording.cancel();
+    _here?._voiceCancelled();
+  }
+
+  /// The recording is done: in its box with something written there, it
+  /// waits in the box as its voice note, to go with the rest on Send;
+  /// otherwise it goes now (#425).
+  Future<void> _finish() =>
+      shownInPlace && _boxHasDraft ? _attach() : _deliver();
+
+  /// Stops recording; what was recorded, or null (saying so) if nothing
+  /// was.
+  Future<({Recording made, int size})?> _stop() async {
+    final made = await recording.finish();
+    if (made == null) return null;
+    final file = File(made.path);
+    final size = file.existsSync() ? file.lengthSync() : 0;
+    if (size == 0) {
+      _say('Nothing was recorded.', plain: true);
+      return null;
+    }
+    return (made: made, size: size);
+  }
+
+  /// Puts what was recorded in the box as its voice note (#425), kept on
+  /// the device meanwhile.
+  Future<void> _attach() async {
+    final stopped = await _stop();
+    final backend = _backend;
+    if (stopped == null || backend == null) return;
+    await VoiceNotes.of(backend).put(
+      key,
+      KeptVoice(
+        path: stopped.made.path,
+        duration: stopped.made.duration,
+        claktory: KeptVoices.of(backend).claktory,
+        kind: target.voiceKind,
+        target: key,
+        kept: recording.kept,
+      ),
+    );
+    _went = true;
+    _here?._voiceAttached();
+  }
+
+  /// Sends what was recorded as a voice message, for the Claktory to
+  /// transcribe, through [target]'s outbox, which keeps it until the
+  /// Claktory has it: it shows in the conversation at once, as any
+  /// message. What's written in its box (and its files) goes with it, as
+  /// one message (#425): from the bar, away from the box, that's how it
+  /// takes the text along. Sent from the bar, the bar says so.
+  Future<void> _deliver() async {
+    final stopped = await _stop();
+    if (stopped == null) return;
+    final made = stopped.made;
+    final drafts = _drafts;
+    final backend = _backend;
+    final text = drafts?.of(key).trim() ?? '';
+    final files = target.takesFiles && backend != null
+        ? backend.attachments.take(key)
+        : const <LocalFile>[];
+    if (text.isNotEmpty) drafts?.set(key, '');
+    _here?._voiceSent();
+    target.send(
+      text,
+      files: [
+        LocalFile(
+          path: made.path,
+          name: made.path.split('/').last,
+          size: stopped.size,
+        ),
+        ...files,
+      ],
+      voice: made.duration,
+    );
+    _went = true;
+    sayAway(
+      text.isNotEmpty || files.isNotEmpty
+          ? 'Sent to $title with your message'
+          : 'Sent to $title',
+    );
+  }
+
+  /// The recording stopped by itself: at its time limit (or a call, on a
+  /// Mac) it's sent as it is; on a phone a call pauses it, for Send or
+  /// Cancel; if the microphone failed, it's gone.
+  void _recordingEnded(RecordingEnd end) {
+    final onPhone = phone.active;
+    if (onPhone) unawaited(phone.ended(end));
+    if (end == RecordingEnd.error) {
+      unawaited(recording.cancel());
+      _say('The recording stopped because the microphone failed.');
+      return;
+    }
+    if (onPhone) return;
+    unawaited(_finish());
+  }
+
+  @override
+  void ended() {
+    if (box == null) dispose();
+  }
+
+  @override
+  void dispose() {
+    if (disposed) return;
+    phone.dispose();
+    super.dispose();
+  }
+}
+
+/// On a phone, in Send's place while recording from a tap (or paused) with
+/// something written in the box: the recording is added to it as its
+/// voice note (#425), to go with it on Send. Send's disc, with a check.
+class _AddVoiceNote extends StatelessWidget {
+  const _AddVoiceNote({required this.voice, this.accent});
+
+  final PhoneVoice voice;
+  final Color? accent;
+
+  static const label = 'Add voice note';
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final fill = accent ?? palette.signal;
+    return Semantics(
+      container: true,
+      button: true,
+      label: label,
+      onTap: voice.sendNow,
+      excludeSemantics: true,
+      child: Pressable(
+        onTap: voice.sendNow,
+        builder: (context, pressed) => SizedBox.square(
+          key: const ValueKey('add-voice-note'),
+          dimension: PhonePlatformPolicy.of(context).touchTarget,
+          child: Center(
+            child: AnimatedContainer(
+              duration: Motion.fast,
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: pressed
+                    ? Color.alphaBlend(const Color(0x33000000), fill)
+                    : fill,
+              ),
+              alignment: Alignment.center,
+              child: ExtensionGlyph(
+                icon: 'check',
+                name: label,
+                // As on Send: black on signal, white on an accent.
+                color: accent != null
+                    ? const Color(0xFFFFFFFF)
+                    : const Color(0xFF000000),
+                size: 18,
+              ),
+            ),
           ),
         ),
       ),
@@ -1124,28 +1533,53 @@ class _MicButton extends StatelessWidget {
   }
 }
 
-/// The files in a message box, as chips over its text, each with × to
-/// take it out.
+/// The files in a message box, and its voice note (#425), as chips over
+/// its text, each with × to take it out.
 class _Attachments extends StatelessWidget {
   const _Attachments({required this.boxKey});
 
   /// The box's [MessageTarget.key].
   final String boxKey;
 
+  /// Takes the voice note out of the box, asking first when it's long, as
+  /// Cancel does while recording: it can't be made again.
+  Future<void> _removeNote(BuildContext context, KeptVoice note) async {
+    final notes = VoiceNotes.of(AppScope.of(context));
+    if (note.duration >= cancelAsksOver) {
+      final sure = await showActions<bool>(
+        context,
+        title: 'Delete this voice note?',
+        message: "It hasn't been sent. This can't be undone.",
+        actions: const [SheetAction('Delete', true, destructive: true)],
+      );
+      if (sure != true) return;
+    }
+    await notes.discard(boxKey);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final attachments = AppScope.of(context).attachments;
+    final backend = AppScope.of(context);
+    final attachments = backend.attachments;
+    final notes = VoiceNotes.of(backend);
     return ListenableBuilder(
-      listenable: attachments,
+      listenable: Listenable.merge([attachments, notes]),
       builder: (context, _) {
         final files = attachments.of(boxKey);
-        if (files.isEmpty) return const SizedBox.shrink();
+        final note = notes.note(boxKey);
+        if (files.isEmpty && note == null) return const SizedBox.shrink();
         return Padding(
           padding: const EdgeInsets.only(top: 2, right: Space.xs, bottom: 2),
           child: Wrap(
             spacing: Space.xs,
             runSpacing: Space.xs,
             children: [
+              if (note != null)
+                VoiceNoteChip(
+                  key: const ValueKey('voice-note'),
+                  duration: note.duration,
+                  onRemove: () => unawaited(_removeNote(context, note)),
+                ),
               for (final file in files)
                 AttachmentChip(
                   name: file.name,
@@ -1165,19 +1599,27 @@ class _Attachments extends StatelessWidget {
 const _composerRow = 28.0;
 
 class _Note extends StatelessWidget {
-  const _Note(this.text, {required this.color});
+  const _Note(this.text, {required this.color, this.plain = false});
 
   final String text;
   final Color color;
+
+  /// Something to do rather than a failure: no Ask Rivet to fix.
+  final bool plain;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.only(bottom: Space.s, left: Space.xs),
-      child: ErrorLine(
-        text,
-        style: TypeScale.of(context).caption.copyWith(color: color),
-      ),
+      child: plain
+          ? Text(
+              text,
+              style: TypeScale.of(context).caption.copyWith(color: color),
+            )
+          : ErrorLine(
+              text,
+              style: TypeScale.of(context).caption.copyWith(color: color),
+            ),
     );
   }
 }

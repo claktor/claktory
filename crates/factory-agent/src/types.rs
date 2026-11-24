@@ -199,6 +199,10 @@ pub struct Voice {
     /// The language heard, such as "pl", when the model said.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub language: String,
+    /// What the person typed with it (#425), which the message's text
+    /// starts with, before the words heard; empty for a voice message alone.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub typed: String,
 }
 
 impl Voice {

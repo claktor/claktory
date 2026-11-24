@@ -97,6 +97,15 @@ pub trait Models: Send + Sync {
     ) -> BoxFuture<'a, Result<Option<factory_agent::providers::keys::KeyCredit>, Error>> {
         Box::pin(async { Ok(None) })
     }
+    /// Makes one image on the provider (#403: `crate::extensions::images`),
+    /// on the account its requests go to now.
+    fn make_image<'a>(
+        &'a self,
+        _provider: &'a str,
+        _request: factory_agent::images::ImageRequest,
+    ) -> BoxFuture<'a, Result<factory_agent::images::MadeImage, factory_agent::images::ImageFailure>> {
+        Box::pin(async { Err(factory_agent::images::ImageFailure::NotOffered) })
+    }
     /// Forgets that one of the provider's accounts (empty: all of them) is
     /// at its usage limits or out of credit, so the next request asks the
     /// provider itself again: for when usage may be back without a sign-in
@@ -250,6 +259,7 @@ impl Models for Registry {
                     efforts,
                     image_input: model.image_input,
                     added: model.added,
+                    image_output: model.image_output,
                 });
             }
             models
@@ -394,6 +404,14 @@ impl Models for Registry {
         account: &'a str,
     ) -> BoxFuture<'a, Result<Option<factory_agent::providers::keys::KeyCredit>, Error>> {
         Box::pin(Registry::account_credit(self, provider, account))
+    }
+
+    fn make_image<'a>(
+        &'a self,
+        provider: &'a str,
+        request: factory_agent::images::ImageRequest,
+    ) -> BoxFuture<'a, Result<factory_agent::images::MadeImage, factory_agent::images::ImageFailure>> {
+        Box::pin(Registry::make_image(self, provider, request))
     }
 
     fn usage<'a>(&'a self, provider: &'a str, account: &'a str) -> BoxFuture<'a, Result<Option<v1::ProviderUsage>, Error>> {

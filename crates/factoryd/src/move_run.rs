@@ -259,7 +259,7 @@ pub(crate) fn start_by(factory: &Arc<Factory>, code: &str, agent: &str, skip: Ve
     }
     if std::env::var_os(crate::update::SUPERVISED).is_none() && !HOLD_AT_FREEZE.load(Ordering::Relaxed) {
         return Err(refused(
-            "This Claktory wasn't started by its service, so it can't stop and start itself for the move. Run factoryd move in Terminal instead.",
+            "This Claktory wasn't started by its background service, so it can't stop and start itself for the move. Restore it from Needs you, then try again, or run factoryd move in Terminal instead.",
         ));
     }
     let _ = std::fs::remove_file(failed_path(&factory.home));
@@ -828,6 +828,14 @@ impl Person for Watched<'_> {
     }
 }
 
+/// Whether the freeze leaves a background task running: the receive side of
+/// a move an agent started, run as one of its own tasks (Rivet's recipe, over
+/// ssh), which the move can't do without (friend bug #22). Every other task
+/// stops, so nothing changes what the last round copies.
+fn spared(mover: &str, agent: &str, command: &str) -> bool {
+    !mover.is_empty() && agent == mover && command.contains("receive")
+}
+
 /// The last round, import on the target, the fence and the commit.
 async fn finish_frozen(home: &Home, mut saved: Saved, shown: &watch::Sender<v1::Move>, mut cancel: watch::Receiver<bool>) -> Frozen {
     let machine = saved.target_machine.clone();
@@ -835,7 +843,11 @@ async fn finish_frozen(home: &Home, mut saved: Saved, shown: &watch::Sender<v1::
     let place = place(home);
     {
         let home = home.clone();
-        let _ = tokio::task::spawn_blocking(move || crate::uninstall::stop_leftovers(&home)).await;
+        let mover = saved.started_by_agent_id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::uninstall::stop_leftovers_but(&home, &|agent, command| spared(&mover, agent, command))
+        })
+        .await;
     }
     let mut mover = match Mover::new(home, code).await {
         Ok(mover) => mover,
@@ -846,7 +858,9 @@ async fn finish_frozen(home: &Home, mut saved: Saved, shown: &watch::Sender<v1::
     if saved.stage == Stage::Frozen {
         link = match mover.redial(Duration::from_secs(120)).await {
             Ok(link) => link,
-            Err(problem) => return Frozen::Failed(format!("{} Nothing was moved.", problem.text(&machine))),
+            Err(problem) => {
+                return Frozen::Failed(format!("{} Nothing was moved.", move_source::unanswered(&machine, problem).text(&machine)));
+            }
         };
         let options = options(&saved);
         let finishing = move_source::finish(&place, &options, &mut mover, &mut link, &saved.export_id, saved.round, &mut person);
@@ -1062,5 +1076,19 @@ async fn serve_client(
                 answer(&mut socket, message.id, reply).await?;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spared;
+
+    #[test]
+    fn the_freeze_spares_only_the_moving_agents_receive() {
+        let recipe = "ssh -i \"$KEY\" root@box 'bash -c \"$(curl -fsSL https://claktory.com/install.sh)\" -- --receive --json'";
+        assert!(spared("rivet", "rivet", recipe));
+        assert!(!spared("rivet", "ana", recipe), "another agent's task");
+        assert!(!spared("rivet", "rivet", "cargo build"), "the agent's other tasks");
+        assert!(!spared("", "rivet", recipe), "a move the person started");
     }
 }

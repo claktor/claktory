@@ -298,6 +298,21 @@ void main() {
     expect(tester.widget<EditableText>(_field).controller.text, 'The second');
   });
 
+  testWidgets(
+    'an answer to a card changed meanwhile says so (#428), and keeps the '
+    'text',
+    (tester) async {
+      final harness = await _showing(tester, _text, 'text');
+      await _type(tester, 'The second');
+      harness.backend.refuse = 'This card changed. Look at it again.';
+      await tester.tap(find.text('Submit'));
+      await settle(tester);
+      expect(find.text('This card changed. Look at it again.'), findsOneWidget);
+      expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
+      expect(tester.widget<EditableText>(_field).controller.text, 'The second');
+    },
+  );
+
   testWidgets('on media the field is all there is: no Comment meanwhile', (
     tester,
   ) async {

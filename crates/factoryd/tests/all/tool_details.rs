@@ -137,3 +137,21 @@ async fn extension_tools_say_what_they_did_in_details() {
     let schema = details(client, view, "db_schema", json!({})).await;
     assert_eq!(schema, json!({"instance": "", "tables": 1}));
 }
+
+/// Images (#403): what the app draws an image_generate call from, these
+/// keys and no others (`crate::image_generate` checks their values).
+#[tokio::test]
+async fn image_generate_says_what_it_made_in_details() {
+    use crate::image_generate::{call, create, painter, setup};
+    let (_dir, mut client, mut view) = setup(painter("ChatGPT Plus")).await;
+    apply_request(&mut client, &mut view, create("Painter", crate::common::OTHER_MODEL)).await;
+    let made = call(&mut client, &mut view, "painter", json!({"prompt": "a lighthouse"})).await;
+    assert_eq!(made.state(), v1::ToolCallState::Done, "{}", made.output);
+    let details: Value = serde_json::from_str(&made.details).expect("details are JSON");
+    let mut keys: Vec<&str> = details.as_object().expect("an object").keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["bytes", "height", "mime", "model", "path", "prompt", "quality", "size", "width"]);
+    for number in ["bytes", "height", "width"] {
+        assert!(details[number].is_u64(), "{number}: {details}");
+    }
+}

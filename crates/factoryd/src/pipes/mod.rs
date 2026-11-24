@@ -22,6 +22,7 @@ pub mod handoff;
 pub mod identity;
 pub(crate) mod lead;
 pub(crate) mod quarantine;
+pub(crate) mod senders;
 pub(crate) mod spend;
 pub(crate) mod start;
 pub(crate) mod waiting;
@@ -280,6 +281,12 @@ pub(crate) struct Record {
     pub next_seq: u64,
     /// Members quarantined for it (`quarantine`): the person's choice alone.
     pub quarantined: Vec<String>,
+    /// Members that only send to it (#414): pipe_send and pipe_status, never
+    /// pipe_read, never woken by what arrives nor told the other side's
+    /// words, never its lead. Any agent of this Claktory, its project's or
+    /// not (Rivet in the workspace), as it never reads the pipe. Never
+    /// quarantined as well.
+    pub send_only: Vec<String>,
     /// Quarantine came to this pipe: made since, or its liaisons were
     /// quarantined once at start (a person's release after stays).
     pub quarantine_set: bool,
@@ -321,10 +328,16 @@ impl Record {
         self.peer.as_ref().map_or_else(|| "the other side".to_owned(), PeerRecord::who)
     }
 
-    /// Members that can run commands on this computer: every one not
-    /// quarantined.
+    /// Members that can run commands on this computer and read the pipe:
+    /// every one neither quarantined nor only sending (a misleading message
+    /// never reaches those).
     pub(crate) fn can_run_commands(&self) -> Vec<String> {
-        self.members.iter().filter(|id| !self.quarantined.contains(id)).cloned().collect()
+        self.members.iter().filter(|id| !self.quarantined.contains(id) && !self.send_only.contains(id)).cloned().collect()
+    }
+
+    /// Whether `agent` only sends to it (`send_only`).
+    pub(crate) fn sends_only(&self, agent: &str) -> bool {
+        self.send_only.iter().any(|id| id == agent)
     }
 
     pub(crate) fn peer_claktory(&self) -> String {
@@ -972,6 +985,12 @@ fn for_person(factory: &Factory, pipe: &str, message: &Message) -> v1::PipeMessa
     let mut shown = message.to_proto();
     if message.replied {
         shown.note = crate::needs_you::note_of(factory, "pipe_message", &format!("{pipe}:{}", message.seq));
+    } else if message.state == MessageState::Discarded && message.author == Author::MyAgent {
+        // Taken back by its writer (pipe_withdraw): why, in its words.
+        let reason = crate::needs_you::note_of(factory, WITHDRAWN_NOTE, &format!("{pipe}:{}", message.seq));
+        if !reason.is_empty() {
+            shown.note = format!("{} took it back: {reason}", message.name);
+        }
     }
     shown
 }
@@ -1041,7 +1060,12 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Pipe>, String) 
                 waiting_seqs: waiting(factory, &record.id),
                 unanswered_seqs: lead::unanswered(factory, &inner.config, record),
                 quarantined_ids: record.quarantined.iter().filter(|id| members.contains(id)).cloned().collect(),
-                can_run_commands_ids: members.iter().filter(|id| !record.quarantined.contains(id)).cloned().collect(),
+                can_run_commands_ids: members
+                    .iter()
+                    .filter(|id| !record.quarantined.contains(id) && !record.send_only.contains(id))
+                    .cloned()
+                    .collect(),
+                send_only_ids: record.send_only.iter().filter(|id| members.contains(id)).cloned().collect(),
                 member_ids: members,
                 group_id: grouped.remove(&record.id).unwrap_or_default(),
                 reply_agent_id: if record.state == State::Approval {
@@ -1544,7 +1568,8 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
         }
         return Ok(());
     }
-    let mut members = checked_members(factory, &record, &request.member_ids)?;
+    let send_only_wanted = request.send_only.as_ref().map(|chosen| chosen.agent_ids.clone()).unwrap_or_default();
+    let mut members = checked_members_sending(factory, &record, &request.member_ids, &send_only_wanted)?;
     let mut quarantined = match &request.quarantined {
         Some(chosen) => checked_members(factory, &record, &chosen.agent_ids)?,
         None => Vec::new(),
@@ -1573,10 +1598,13 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
     if lead.is_empty() {
         return Err(RequestError::Pipe("Choose the agent that answers the pipe, or add a liaison agent.".to_owned()));
     }
+    let bound = factory.pipes.get(&record.id).map(|record| record.bound).unwrap_or_default();
+    let send_only = checked_send_only(factory, &send_only_wanted, &members, &quarantined, &lead, &bound)?;
     pipe_link::approve(factory, &record.id).map_err(pipe_error)?;
     let opened = change(factory, &record.id, |record| {
         record.members = members;
         record.lead = lead;
+        record.send_only = send_only;
         if let Some(review) = request.review_incoming {
             record.review_incoming = review;
         }
@@ -1642,11 +1670,17 @@ fn noted(factory: &Arc<Factory>, agent: &str, what: &str, comment: &str) {
 
 /// The agents of the pipe's project among `ids`.
 fn checked_members(factory: &Factory, record: &Record, ids: &[String]) -> Result<Vec<String>, RequestError> {
+    checked_members_sending(factory, record, ids, &[])
+}
+
+/// The same, where those in `send_only` may be agents outside the pipe's
+/// project (#414): they never read it.
+fn checked_members_sending(factory: &Factory, record: &Record, ids: &[String], send_only: &[String]) -> Result<Vec<String>, RequestError> {
     let inner = factory.lock();
     let mut members = Vec::new();
     for id in ids {
         let Some(agent) = inner.config.agent(id) else { return Err(RequestError::UnknownAgent(id.clone())) };
-        if agent.project.as_deref() != Some(record.project.as_str()) {
+        if agent.project.as_deref() != Some(record.project.as_str()) && !send_only.contains(id) {
             return Err(RequestError::Pipe(format!("{} isn't in this pipe's project.", agent.name)));
         }
         // A curator never reaches a pipe (pipes-automation.md §3).
@@ -1658,6 +1692,40 @@ fn checked_members(factory: &Factory, record: &Record, ids: &[String]) -> Result
         }
     }
     Ok(members)
+}
+
+/// The members to only send (#414), checked against the members after the
+/// change (`members`), who's quarantined, the lead and the liaison
+/// (`bound`): refused, saying why, when one isn't a member, is quarantined,
+/// leads or is the liaison.
+fn checked_send_only(
+    factory: &Factory,
+    ids: &[String],
+    members: &[String],
+    quarantined: &[String],
+    lead: &str,
+    bound: &str,
+) -> Result<Vec<String>, RequestError> {
+    let name = |id: &str| factory.lock().config.agent(id).map_or_else(|| id.to_owned(), |agent| agent.name.clone());
+    let mut chosen = Vec::new();
+    for id in ids {
+        if !members.contains(id) {
+            return Err(RequestError::Pipe(format!("{} isn't one of this pipe's agents.", name(id))));
+        }
+        if quarantined.contains(id) {
+            return Err(RequestError::Pipe(format!("{} is limited to the pipe, so it reads it: it can't only send as well.", name(id))));
+        }
+        if id == lead {
+            return Err(RequestError::Pipe(format!("{} leads the pipe, so it reads what arrives: choose another lead first.", name(id))));
+        }
+        if id == bound {
+            return Err(RequestError::Pipe(format!("{} is the pipe's agent, so it reads what arrives.", name(id))));
+        }
+        if !chosen.contains(id) {
+            chosen.push(id.clone());
+        }
+    }
+    Ok(chosen)
 }
 
 fn make_folders(factory: &Factory, record: &Record) {
@@ -1756,8 +1824,12 @@ pub(crate) fn update(factory: &Arc<Factory>, request: &v1::UpdatePipe) -> Result
     {
         return Err(RequestError::Empty("name"));
     }
+    // Who only sends, as chosen, else as it was: agents outside the
+    // project may be members only so.
+    let send_only_wanted = request.send_only.as_ref().map(|chosen| chosen.agent_ids.clone());
+    let sending = send_only_wanted.clone().unwrap_or_else(|| record.send_only.clone());
     let members = match &request.members {
-        Some(members) => Some(checked_members(factory, &record, &members.agent_ids)?),
+        Some(members) => Some(checked_members_sending(factory, &record, &members.agent_ids, &sending)?),
         None => None,
     };
     let lead = request.lead_id.as_ref().map(|lead| lead.trim().to_owned());
@@ -1766,6 +1838,29 @@ pub(crate) fn update(factory: &Arc<Factory>, request: &v1::UpdatePipe) -> Result
         Some(chosen) => Some(checked_members(factory, &record, &chosen.agent_ids)?),
         None => None,
     };
+    let after_quarantined = quarantined.clone().unwrap_or_else(|| record.quarantined.clone());
+    let after_lead = match &lead {
+        Some(lead) => lead.clone(),
+        None if after_members.contains(&record.lead) => record.lead.clone(),
+        None => String::new(),
+    };
+    let send_only = checked_send_only(
+        factory,
+        &sending.into_iter().filter(|id| after_members.contains(id) || send_only_wanted.is_some()).collect::<Vec<_>>(),
+        &after_members,
+        &after_quarantined,
+        &after_lead,
+        &record.bound,
+    )?;
+    // A member from outside the project that would no longer only send.
+    if let Some(stray) = after_members.iter().find(|id| record.send_only.contains(id) && !send_only.contains(id)) {
+        let inner = factory.lock();
+        if let Some(agent) = inner.config.agent(stray)
+            && agent.project.as_deref() != Some(record.project.as_str())
+        {
+            return Err(RequestError::Pipe(format!("{} isn't in this pipe's project, so it can only send to it.", agent.name)));
+        }
+    }
     if let Some(stray) = quarantined.iter().flatten().find(|id| !after_members.contains(id)) {
         return Err(RequestError::Pipe(format!("{stray} isn't one of this pipe's agents.")));
     }
@@ -1815,6 +1910,7 @@ pub(crate) fn update(factory: &Arc<Factory>, request: &v1::UpdatePipe) -> Result
         if let Some(review) = request.review_incoming {
             record.review_incoming = review;
         }
+        record.send_only = send_only;
     });
     if review_off {
         line(factory, &record.id, "Review outgoing is off: agents' messages go out without waiting for you.");
@@ -1870,6 +1966,13 @@ fn review_with_commands(factory: &Factory, pipe: &str, before: &[String]) {
 
 /// SetPipeState: pause, resume, close or delete.
 pub(crate) fn set_pipe_state(factory: &Arc<Factory>, request: &v1::SetPipeState) -> Result<(), RequestError> {
+    set_pipe_state_by(factory, request, None)
+}
+
+/// SetPipeState by the person (`by` None), or by an admin agent, by its
+/// name (#423's pipes_settings): the pipe's line says who.
+pub(crate) fn set_pipe_state_by(factory: &Arc<Factory>, request: &v1::SetPipeState, by: Option<&str>) -> Result<(), RequestError> {
+    let who = by.unwrap_or("You");
     let record = known(factory, &request.pipe_id)?;
     let id = record.id.clone();
     match request.action() {
@@ -1882,7 +1985,7 @@ pub(crate) fn set_pipe_state(factory: &Arc<Factory>, request: &v1::SetPipeState)
                 record.state = State::Paused;
                 record.paused = Pause::Me;
             });
-            line(factory, &id, "You paused it: nothing goes either way until you resume it.");
+            line(factory, &id, format!("{who} paused it: nothing goes either way until you resume it."));
         }
         v1::PipeAction::Resume => {
             if record.state != State::Paused || record.paused == Pause::Peer {
@@ -1904,7 +2007,7 @@ pub(crate) fn set_pipe_state(factory: &Arc<Factory>, request: &v1::SetPipeState)
                 record.quiet = 0;
                 record.recent.clear();
             });
-            line(factory, &id, "You resumed it.");
+            line(factory, &id, format!("{who} resumed it."));
             // What its lead wasn't told of meanwhile (a new lead's catch-up).
             agents::wake(factory, &id);
         }
@@ -1917,7 +2020,7 @@ pub(crate) fn set_pipe_state(factory: &Arc<Factory>, request: &v1::SetPipeState)
             } else {
                 pipe_link::close(factory, &id);
             }
-            close_with(factory, &id, "You closed it.");
+            close_with(factory, &id, &format!("{who} closed it."));
         }
         v1::PipeAction::Delete => {
             if record.state != State::Closed {
@@ -2095,6 +2198,10 @@ pub(crate) fn not_open(record: &Record) -> String {
     }
 }
 
+/// How a message's note starts when the other side refused it; their
+/// words follow, so a member that only sends (#414) is never shown the rest.
+pub(crate) const PEER_REFUSED: &str = "The other side refused it.";
+
 /// Hands a message that passed every check to the transport, once its
 /// files are checked again: each must be what was scanned when it was sent
 /// (a held one may have changed since the person saw it), and nothing in
@@ -2172,7 +2279,7 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
         }
         (MessageState::Held, false) => {
             set_state(factory, &record.id, message.seq, MessageState::Discarded, None);
-            agents::tell_noted(factory, &message.agent, &record, None, "discarded your message; it wasn't sent", &message.text, &note);
+            agents::tell_discarded(factory, &message.agent, &record, &message.text, &note);
         }
         (MessageState::HeldIncoming, true) => {
             // Its files go to the inbox only now.
@@ -2213,6 +2320,44 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
     crate::needs_you::pipe_decided(factory, &record.id, message.seq, kind, agent, request.allow, comment, message.created);
     Ok(())
 }
+
+/// pipe_withdraw (friend bug #19): `agent` takes back its own message held
+/// for the person, once it no longer applies (they settled it in its chat,
+/// say). It's discarded, never sent, and leaves their Needs you at once;
+/// `reason` is kept apart from the pipe tables (decision_notes, kind
+/// 'pipe_withdrawn'), as the person's words are, and shows as its note.
+/// Err: why not, for the agent.
+pub(crate) fn withdraw_held(factory: &Factory, pipe: &str, seq: u64, agent: &str, reason: &str) -> Result<(), String> {
+    let number = i64::try_from(seq).unwrap_or(i64::MAX);
+    let claimed = factory
+        .store
+        .db()
+        .execute(
+            "UPDATE pipe_messages SET state = ?5 WHERE pipe = ?1 AND seq = ?2 AND agent = ?3 AND author = ?4 AND state = ?6",
+            params![pipe, number, agent, Author::MyAgent.as_str(), MessageState::Discarded.as_str(), MessageState::Held.as_str()],
+        )
+        .map_err(|error| format!("Couldn't take it back: {error}"))?;
+    if claimed == 0 {
+        return Err(match message(factory, pipe, seq) {
+            Some(found) if found.agent == agent && found.author == Author::MyAgent => match found.state {
+                MessageState::Discarded => "It isn't waiting any more: it was discarded or sent back to you.".to_owned(),
+                _ => "It isn't waiting any more: it was sent.".to_owned(),
+            },
+            _ => format!("You have no message {seq} in this pipe. Nothing was taken back."),
+        });
+    }
+    crate::needs_you::keep_note(factory, WITHDRAWN_NOTE, &format!("{pipe}:{seq}"), reason);
+    // In the person's History, withdrawn by its writer, with the reason.
+    if let Some(message) = set_state(factory, pipe, seq, MessageState::Discarded, None) {
+        let kind = crate::needs_you::PipeDecision::Held;
+        crate::needs_you::pipe_decided(factory, pipe, seq, kind, agent, false, "", message.created);
+    }
+    Ok(())
+}
+
+/// decision_notes' kind for a held message its writer took back (needs_you's
+/// History reads it by name).
+const WITHDRAWN_NOTE: &str = "pipe_withdrawn";
 
 /// The message's files are as they were scanned, and nothing it carries is
 /// a secret. Otherwise why it can't go, as the app shows it after "Not
@@ -2432,7 +2577,7 @@ impl pipe_link::Store for Link {
         let Some(message) = by_msg_id(factory, pipe, msg_id) else { return };
         // Their words: one line, capped, and quoted as theirs.
         let reason = clean(reason, PURPOSE_CHARS);
-        let note = format!("The other side refused it. They say: \"{reason}\"");
+        let note = format!("{PEER_REFUSED} They say: \"{reason}\"");
         set_state(factory, pipe, message.seq, MessageState::Refused, Some(&note));
         if let Some(record) = factory.pipes.get(pipe) {
             agents::tell_refused(factory, &message.agent, &record, &reason, &message.text);
@@ -2523,6 +2668,17 @@ pub fn open_for_test(factory: &Arc<Factory>, project: &str, name: &str, members:
     record.review = review;
     let id = record.id.clone();
     make_folders(factory, &record);
+    insert(factory, record);
+    id
+}
+
+/// Tests: a pipe both sides joined, waiting for this side's person to
+/// approve it.
+#[doc(hidden)]
+pub fn approval_for_test(factory: &Arc<Factory>, project: &str, name: &str) -> String {
+    let mut record = new_record(factory, project, name, "testing", State::Approval).expect("a pipe");
+    record.peer = Some(PeerRecord { claktory: "Ana's Claktory".to_owned(), ..PeerRecord::default() });
+    let id = record.id.clone();
     insert(factory, record);
     id
 }

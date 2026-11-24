@@ -3,14 +3,19 @@ package com.claktory.app
 import android.app.Activity
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
 /**
  * factory/device's share, as on the iPhone (ios/Runner/AppDelegate.swift,
@@ -27,6 +32,7 @@ import io.flutter.plugin.common.MethodChannel
 class ShareCore(
     private val open: (text: String) -> Boolean,
     private val later: (Long, () -> Unit) -> Unit,
+    private val openFiles: (FileShare.Plan) -> Boolean = { false },
 ) {
     private var waiting: MethodChannel.Result? = null
     private var shown = false
@@ -36,11 +42,21 @@ class ShareCore(
 
     fun share(text: String?, result: MethodChannel.Result) {
         if (text.isNullOrEmpty()) return result.success(false)
+        start(result) { open(text) }
+    }
+
+    /** Files the app wrote to share (#418), answered as text is; null (refused) answers false. */
+    fun shareFiles(plan: FileShare.Plan?, result: MethodChannel.Result) {
+        if (plan == null) return result.success(false)
+        start(result) { openFiles(plan) }
+    }
+
+    private fun start(result: MethodChannel.Result, show: () -> Boolean) {
         finish(false)
         waiting = result
         shown = false
         turn++
-        if (!open(text)) finish(false)
+        if (!show()) finish(false)
     }
 
     /** The person picked where to send it. */
@@ -72,9 +88,12 @@ class ShareCore(
 }
 
 /**
- * [ShareCore] in the app: ACTION_SEND of plain text through the system's
- * chooser, which reports the app picked to a receiver only this app can
- * reach. Text only, as the iPhone's contract is: no files, no permission.
+ * [ShareCore] in the app: ACTION_SEND of plain text, or ACTION_SEND or
+ * ACTION_SEND_MULTIPLE of the files the app wrote to share (#418), through
+ * the system's chooser, which reports the app picked to a receiver only
+ * this app can reach. Files go as [ShareFiles] content addresses, with a
+ * read grant for them alone; no permission. Claktory itself isn't offered:
+ * sharing into itself would only go round.
  */
 class ShareSheet(private val activity: Activity) : HostLifecycle, AutoCloseable {
     private val main = Handler(Looper.getMainLooper())
@@ -88,19 +107,51 @@ class ShareSheet(private val activity: Activity) : HostLifecycle, AutoCloseable 
     }
 
     val core = ShareCore(
-        open = { text -> show(text) },
+        open = { text -> show(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)) },
         later = { ms, run -> main.postDelayed(run, ms) },
+        openFiles = { plan -> runCatching { files(plan) }.getOrNull()?.let(::show) ?: false },
     )
 
-    private fun show(text: String): Boolean {
+    /** The files' own folder, the one [ShareFiles] serves. */
+    val root: File get() = File(activity.cacheDir, FileShare.FOLDER)
+
+    /** factory/device's shareFiles {paths, mimes}: checked, then shown. */
+    fun shareFiles(arguments: Map<*, *>?, result: MethodChannel.Result) {
+        val guess = { extension: String -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) }
+        val plan = FileShare.plan(arguments?.get("paths") as? List<*>, arguments?.get("mimes") as? List<*>, root, guess)
+        // Older shares go now, off the main thread; this one's folder stays.
+        val keep = plan?.items?.map { it.file }?.toSet() ?: emptySet()
+        val now = System.currentTimeMillis()
+        Thread({ runCatching { FileShare.sweep(root, now, keep) } }, "claktory-share-sweep").start()
+        core.shareFiles(plan, result)
+    }
+
+    /** The send for [plan]: one file or several, read-only, nothing else. */
+    internal fun files(plan: FileShare.Plan): Intent {
+        val authority = ShareFiles.authority(activity)
+        val uris = plan.items.map { FileProvider.getUriForFile(activity, authority, it.file) }
+        val send = if (uris.size == 1) {
+            Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_STREAM, uris.single())
+        } else {
+            Intent(Intent.ACTION_SEND_MULTIPLE).putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+        }
+        // The grant goes with ClipData through the chooser to the app picked.
+        val clip = ClipData(null, plan.items.map { it.mime }.distinct().toTypedArray(), ClipData.Item(uris.first()))
+        uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
+        send.clipData = clip
+        return send.setType(plan.type).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+
+    private fun show(send: Intent): Boolean {
         listen()
-        val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
         // Mutable, so the chooser can add which app was picked; explicit, to this app only.
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or
             (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0)
         val report = PendingIntent.getBroadcast(activity, REQUEST, Intent(action).setPackage(activity.packageName), flags)
+        val chooser = Intent.createChooser(send, null, report.intentSender)
+            .putExtra(Intent.EXTRA_EXCLUDE_COMPONENTS, arrayOf(ComponentName(activity, ShareActivity::class.java)))
         return try {
-            activity.startActivity(Intent.createChooser(send, null, report.intentSender))
+            activity.startActivity(chooser)
             true
         } catch (error: Exception) {
             false
@@ -131,5 +182,17 @@ class ShareSheet(private val activity: Activity) : HostLifecycle, AutoCloseable 
 
     companion object {
         const val REQUEST = 0x4177
+    }
+}
+
+/**
+ * The content provider for shared files (#418): read-only, not exported,
+ * reachable only through a grant for one address, and only for files in
+ * cache/claktory-share (res/xml/share_paths.xml). Its own class, so it
+ * can't clash with another FileProvider in the merged manifest.
+ */
+class ShareFiles : FileProvider() {
+    companion object {
+        fun authority(context: Context) = "${context.packageName}.files"
     }
 }

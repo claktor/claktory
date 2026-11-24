@@ -776,6 +776,21 @@ fn restore_previous(home: &Home) -> std::io::Result<()> {
     restore_helpers(home)
 }
 
+/// This backend's program, links resolved: macOS gives the path it was
+/// started by, so `factoryd` run through the installer's link on PATH
+/// (`~/.local/bin/factoryd`) would look for its helpers beside the link
+/// (friend bug #24). The path as given when it can't be resolved.
+pub fn running_exe() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.canonicalize().unwrap_or(exe))
+}
+
+/// `name` (one of `HELPERS`) beside this backend's program, if it's there.
+pub(crate) fn beside_backend(name: &str) -> Option<std::path::PathBuf> {
+    let beside = running_exe()?.parent()?.join(name);
+    beside.is_file().then_some(beside)
+}
+
 /// The host that runs apps, in a release and in `<home>/bin`, beside
 /// factoryd (where the backend looks for it).
 pub const APPS_HOST: &str = "claktory-apps";
@@ -799,38 +814,136 @@ fn previous_helper(home: &Home, name: &str) -> std::path::PathBuf {
     home.root().join("bin").join(format!("{name}.previous"))
 }
 
-/// Before an update's backend goes in: each helper the release carries
-/// (`claktory-apps`, `claktory-speech`, `claktory-video-preview`) replaces
-/// `bin/<name>`, which is kept as `bin/<name>.previous` for a roll-back. A
-/// release without one leaves what's there alone, and forgets an older
-/// `.previous` so a roll-back doesn't put back a helper from before.
+/// The programs a release carries for every agent, in its `tools/`, which
+/// updates put in `<home>/tools` (first on agents' PATH, `tools_dir`) and
+/// roll back with the backend, as they do the helpers.
+pub const TOOLS: [&str; 1] = ["rg"];
+
+/// `<home>/tools`: the programs Claktory gives every agent (`TOOLS`),
+/// first on their PATH. Only these: the backend and its helpers stay in
+/// `bin`, off it.
+pub fn tools_dir(home: &Home) -> std::path::PathBuf {
+    home.root().join("tools")
+}
+
+/// The PATH agents' commands run with: `<home>/tools` first, so its `rg`
+/// is the one they get, then the PATH Claktory runs with. It's there even
+/// before `<home>/tools` is (a test, a Claktory not installed from a
+/// release, one an update is about to heal): a folder that isn't there is
+/// passed over, and an agent's tools are set when its context starts.
+pub fn agents_path(home: &Home) -> String {
+    let tools = tools_dir(home);
+    let inherited = std::env::var_os("PATH");
+    let rest: Vec<std::path::PathBuf> = match &inherited {
+        // An empty entry would mean the current folder.
+        Some(path) => std::env::split_paths(path).filter(|dir| !dir.as_os_str().is_empty() && *dir != tools).collect(),
+        // bash's own default, which setting PATH would otherwise lose.
+        None => ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(std::path::PathBuf::from).to_vec(),
+    };
+    let joined = std::env::join_paths(std::iter::once(tools).chain(rest)).unwrap_or_default();
+    joined.to_string_lossy().into_owned()
+}
+
+/// A program a release carries beside the backend: its name, where it is in
+/// the release, where it goes, and where the one it replaced is kept for a
+/// roll-back (for a tool, in `tools/.previous`, off agents' PATH).
+struct Carried {
+    name: &'static str,
+    new: std::path::PathBuf,
+    current: std::path::PathBuf,
+    previous: std::path::PathBuf,
+}
+
+/// The helpers (`HELPERS`, in `bin`) and the tools (`TOOLS`, in `<home>/tools`).
+fn carried(home: &Home, release: &Path) -> Vec<Carried> {
+    let helpers = HELPERS.into_iter().map(|name| Carried {
+        name,
+        new: release.join(name),
+        current: helper(home, name),
+        previous: previous_helper(home, name),
+    });
+    let tools = TOOLS.into_iter().map(|name| Carried {
+        name,
+        new: release.join("tools").join(name),
+        current: tools_dir(home).join(name),
+        previous: tools_dir(home).join(".previous").join(name),
+    });
+    helpers.chain(tools).collect()
+}
+
+/// Puts the tools' licenses (`LICENSES`, ripgrep's among them) from a
+/// release or the app beside them in `<home>/tools/LICENSES`, as they came,
+/// replacing those there. Text, not programs: nothing to roll back.
+pub fn put_tool_licenses(from: &Path, home: &Home) -> std::io::Result<()> {
+    fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                copy(&entry.path(), &to.join(entry.file_name()))?;
+            } else if kind.is_file() {
+                std::fs::copy(entry.path(), to.join(entry.file_name()))?;
+            }
+        }
+        Ok(())
+    }
+    if !from.is_dir() {
+        return Ok(());
+    }
+    let to = tools_dir(home).join("LICENSES");
+    let staged = tools_dir(home).join(".LICENSES.new");
+    let _ = std::fs::remove_dir_all(&staged);
+    copy(from, &staged)?;
+    let _ = std::fs::remove_dir_all(&to);
+    std::fs::rename(&staged, &to)
+}
+
+/// Writes an executable, making its folder first (`<home>/tools` may not be
+/// there yet).
+fn put_executable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    write_executable(path, bytes)
+}
+
+/// Before an update's backend goes in: each helper and tool the release
+/// carries (`claktory-apps`, `claktory-speech`, `claktory-video-preview`;
+/// `tools/rg`) replaces the installed one, which is kept (`bin/<name>.previous`,
+/// `tools/.previous/<name>`) for a roll-back. A release without one leaves
+/// what's there alone, and forgets an older previous copy so a roll-back
+/// doesn't put back one from before.
 fn stage_helpers(home: &Home, release: &Path) -> std::io::Result<()> {
-    for name in HELPERS {
-        stage_helper(home, name, &release.join(name))?;
+    for carried in carried(home, release) {
+        stage_helper(&carried)?;
+    }
+    if let Err(error) = put_tool_licenses(&release.join("tools/LICENSES"), home) {
+        tracing::warn!(%error, "could not put in the tools' licenses");
     }
     Ok(())
 }
 
-fn stage_helper(home: &Home, name: &str, new: &Path) -> std::io::Result<()> {
-    let (current, previous) = (helper(home, name), previous_helper(home, name));
+fn stage_helper(carried: &Carried) -> std::io::Result<()> {
+    let Carried { new, current, previous, .. } = carried;
     if !new.is_file() {
-        return remove(&previous);
+        return remove(previous);
     }
-    match std::fs::read(&current) {
-        Ok(bytes) => write_executable(&previous, &bytes)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => remove(&previous)?,
+    match std::fs::read(current) {
+        Ok(bytes) => put_executable(previous, &bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => remove(previous)?,
         Err(error) => return Err(error),
     }
-    write_executable(&current, &std::fs::read(new)?)
+    put_executable(current, &std::fs::read(new)?)
 }
 
-/// Puts each `bin/<name>.previous` back, if the update kept one; tries
-/// them all before reporting the first failure.
+/// Puts each previous copy back, if the update kept one; tries them all
+/// before reporting the first failure.
 fn restore_helpers(home: &Home) -> std::io::Result<()> {
     let mut failed = Ok(());
-    for name in HELPERS {
-        let restored = match std::fs::read(previous_helper(home, name)) {
-            Ok(bytes) => write_executable(&helper(home, name), &bytes),
+    for Carried { current, previous, .. } in carried(home, Path::new("")) {
+        let restored = match std::fs::read(&previous) {
+            Ok(bytes) => write_executable(&current, &bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
         };
@@ -842,14 +955,15 @@ fn restore_helpers(home: &Home) -> std::io::Result<()> {
 }
 
 /// At start: each helper the running version's release carries that
-/// `bin` lacks is copied in beside this backend. An update is made by the
-/// backend before it, which puts in only the helpers it knows: v0.1.13,
-/// which knew no speech host, updated to v0.1.14 without one. Only when
+/// `bin` lacks is copied in beside this backend, and each tool `<home>/tools`
+/// lacks into it. An update is made by the backend before it, which puts in
+/// only the helpers it knows: v0.1.13, which knew no speech host, updated to
+/// v0.1.14 without one, and v0.1.20 knew no tools. Only when
 /// this backend runs from `bin`, as installed; one already there is left
 /// alone (the update put it there, with its `.previous` for a roll-back).
 pub fn heal_helpers(home: &Home) {
     let bin = home.root().join("bin");
-    let running = std::env::current_exe().ok().and_then(|exe| exe.parent()?.canonicalize().ok());
+    let running = running_exe().and_then(|exe| exe.parent()?.canonicalize().ok());
     if running.is_none() || running != bin.canonicalize().ok() {
         return;
     }
@@ -858,18 +972,23 @@ pub fn heal_helpers(home: &Home) {
     }
 }
 
-/// The helpers `release` carries that `bin` lacks, copied in; their names.
+/// The helpers and tools `release` carries that aren't installed, copied
+/// in; their names.
 fn heal(home: &Home, release: &Path) -> Vec<&'static str> {
     let mut healed = Vec::new();
-    for name in HELPERS {
-        let (new, current) = (release.join(name), helper(home, name));
+    for Carried { name, new, current, .. } in carried(home, release) {
         if !new.is_file() || current.exists() {
             continue;
         }
-        match std::fs::read(&new).and_then(|bytes| write_executable(&current, &bytes)) {
+        match std::fs::read(&new).and_then(|bytes| put_executable(&current, &bytes)) {
             Ok(()) => healed.push(name),
             Err(error) => tracing::error!(%error, helper = name, "could not put in a helper the update left out"),
         }
+    }
+    if !tools_dir(home).join("LICENSES").exists()
+        && let Err(error) = put_tool_licenses(&release.join("tools/LICENSES"), home)
+    {
+        tracing::warn!(%error, "could not put in the tools' licenses");
     }
     healed
 }
@@ -1094,6 +1213,38 @@ mod helpers_tests {
         restore_previous(&home).expect("restored");
         assert_eq!(read(&helper(&home, APPS_HOST)).as_deref(), Some("host 1"));
         assert_eq!(read(&helper(&home, SPEECH_HOST)).as_deref(), Some("speech 1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ripgrep, for every agent: an update puts the release's tools/rg in
+    /// `<home>/tools` (made if need be), keeping the one it replaced off the
+    /// agents' PATH; a roll-back puts that back; a start after an update
+    /// from a backend that knew no tools heals it in.
+    #[test]
+    fn an_update_puts_the_agents_tools_in_and_a_roll_back_takes_them_back() {
+        let (home, dir) = home("tools");
+        let rg = tools_dir(&home).join("rg");
+        std::fs::write(home.backend(), "backend 2").expect("backend");
+        std::fs::write(home.previous_backend(), "backend 1").expect("previous");
+        std::fs::create_dir_all(dir.join("release/tools")).expect("release tools");
+        std::fs::write(dir.join("release/tools/rg"), "rg 15").expect("release rg");
+        std::fs::create_dir_all(dir.join("release/tools/LICENSES/ripgrep")).expect("licenses");
+        std::fs::write(dir.join("release/tools/LICENSES/ripgrep/LICENSE-MIT"), "MIT").expect("license");
+        assert_eq!(heal(&home, &dir.join("release")), ["rg"], "a start after v0.1.20's update");
+        assert_eq!(read(&tools_dir(&home).join("LICENSES/ripgrep/LICENSE-MIT")).as_deref(), Some("MIT"), "its license beside it");
+        assert_eq!(read(&rg).as_deref(), Some("rg 15"));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&rg).expect("meta").permissions().mode() & 0o777, 0o755);
+
+        std::fs::write(dir.join("release/tools/rg"), "rg 16").expect("newer rg");
+        stage_helpers(&home, &dir.join("release")).expect("staged");
+        assert_eq!(read(&rg).as_deref(), Some("rg 16"));
+        let kept: Vec<String> =
+            std::fs::read_dir(tools_dir(&home)).expect("tools").filter_map(|entry| entry.ok()?.file_name().into_string().ok()).collect();
+        let programs: Vec<&String> = kept.iter().filter(|name| !name.starts_with('.') && *name != "LICENSES").collect();
+        assert_eq!(programs, ["rg"], "only rg is on the PATH: {kept:?}");
+        roll_back(&home, "It stopped.").expect("rolled back");
+        assert_eq!(read(&rg).as_deref(), Some("rg 15"), "the rg that went with the backend");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

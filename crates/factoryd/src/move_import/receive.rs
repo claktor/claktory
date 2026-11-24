@@ -470,9 +470,12 @@ impl Ctx {
         }
         let claim = locked(&self.claimed).clone();
         let resumed = claim.as_deref() == Some(source);
-        if claim.is_some() && !resumed {
-            let why = "Another computer's Claktory is already moving here, so this one can't. To start over here, stop factoryd receive, run factoryd import --abandon, then factoryd receive again.";
-            return self.fail(out, why.to_owned());
+        // Another key while the one that has the code isn't connected: the
+        // same computer starting its move again (a source starts each try
+        // with a new key, #23), let in only by the digits once more.
+        let again = claim.is_some() && !resumed;
+        if again && let Err(why) = self.may_start_again(&machine) {
+            return self.fail(out, why);
         }
         let here = crate::update::VERSION;
         if too_new(&version, here) {
@@ -498,6 +501,11 @@ impl Ctx {
         if resumed {
             self.say(&format!("{machine} is back: carrying on."));
         } else {
+            if again {
+                self.say(&format!(
+                    "{machine} is starting its move again. Confirm only if {machine}'s own screen shows the same digits; it then carries on with what's here."
+                ));
+            }
             let asked = Asked {
                 digits: move_wire::digits(&self.target, source, &self.secret),
                 machine: machine.clone(),
@@ -506,6 +514,11 @@ impl Ctx {
             if let Err(outcome) = self.pair(asked, out, frames).await {
                 self.new_code();
                 return outcome;
+            }
+            // Started again: it sends its plan and rounds afresh, onto
+            // what's staged.
+            if again && let Err(why) = self.start_again() {
+                return self.fail(out, why);
             }
             if let Err(error) = (Claim { source: source.to_owned(), machine: machine.clone() }).save(&self.home) {
                 return self.fail(out, error.to_string());
@@ -530,6 +543,37 @@ impl Ctx {
         self.staging.save();
         self.say(&format!("The connection with {machine} dropped. Waiting for it to come back…"));
         Outcome::Again
+    }
+
+    /// Whether `machine`, saying hello with another key than the one that
+    /// has the code, may start the move again (#23): only the computer that
+    /// had it, by its name, and only while nothing here is switched over (a
+    /// source that got that far commits with the key it had). Its digits are
+    /// confirmed again either way, as for a first try.
+    fn may_start_again(&self, machine: &str) -> Result<(), String> {
+        let refused = "Another computer's Claktory is already moving here, so this one can't. To start over here, stop factoryd receive, run factoryd import --abandon, then factoryd receive again.";
+        let claimed = Claim::load(&self.home).map(|claim| claim.machine).unwrap_or_default();
+        if claimed.is_empty() || claimed != machine {
+            return Err(refused.to_owned());
+        }
+        let state = load_state(&self.home).map_err(|error| error.to_string())?.unwrap_or_default();
+        if !state.switched.is_empty() || state.step > Step::Prepare {
+            return Err(format!(
+                "{machine}'s move here got as far as putting its Claktory in place, so it can't start again. To start over here, stop factoryd receive, run factoryd import --abandon, then factoryd receive again."
+            ));
+        }
+        Ok(())
+    }
+
+    /// The move starts again from its plan: what's staged stays, for the
+    /// rounds to come to compare with.
+    fn start_again(&self) -> Result<(), String> {
+        let mut state = load_state(&self.home).map_err(|error| error.to_string())?.unwrap_or_default();
+        if !state.switched.is_empty() {
+            return Err("This computer is already putting the Claktory in place, so the move can't start again.".to_owned());
+        }
+        state.step = Step::Unpack;
+        save_state(&self.home, &state).map_err(|error| error.to_string())
     }
 
     /// Both people confirm the digits; Err when either doesn't.
@@ -844,12 +888,31 @@ fn open_in(root: &Path, path: &str) -> Result<std::fs::File, String> {
             _ => return Err(format!("{path} would be written through a link, which isn't allowed.")),
         }
     }
+    let file = root.join(path);
+    writable(&file).map_err(|error| format!("Can't write {path} on this computer: {error}"))?;
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(root.join(path))
+        .open(file)
         .map_err(|error| format!("Can't write {path} on this computer: {error}"))
+}
+
+/// A staged file given the source's mode when a round finished, read-only
+/// say, made the owner's to read and write again, for the next round to
+/// write (#21); a round's end gives it the source's mode again. Never
+/// through a link: only a plain file is changed.
+fn writable(file: &Path) -> std::io::Result<()> {
+    let meta = match std::fs::symlink_metadata(file) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mode = meta.permissions().mode() & 0o777;
+    if meta.is_file() && mode & 0o600 != 0o600 {
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(mode | 0o600))?;
+    }
+    Ok(())
 }
 
 /// Whether the link at `path` in `root`, to `target`, resolves inside
@@ -1014,6 +1077,7 @@ impl Staging {
                     remove_any(&target).map_err(|error| self.cant(&entry.path, &error))?;
                     self.index.remove(&entry.path);
                 }
+                writable(&target).map_err(|error| self.cant(&entry.path, &error))?;
                 let file = std::fs::OpenOptions::new()
                     .write(true)
                     .read(true)
@@ -1106,7 +1170,8 @@ impl Staging {
                     let complete = staged.hashes == entry.hashes;
                     if complete {
                         have += entry.size;
-                        let mode = if entry.mode == 0 { 0o600 } else { entry.mode & 0o7777 };
+                        // Never setuid, setgid or sticky: a Claktory moves no such file.
+                        let mode = if entry.mode == 0 { 0o600 } else { entry.mode & 0o777 };
                         let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
                         let at = UNIX_EPOCH + Duration::from_millis(u64::try_from(entry.mtime_ms).unwrap_or(0));
                         let _ = file.set_modified(at.max(UNIX_EPOCH));
@@ -1127,7 +1192,7 @@ impl Staging {
                     }
                 }
                 Kind::Dir => {
-                    let mode = if entry.mode == 0 { 0o700 } else { (entry.mode & 0o7777) | 0o700 };
+                    let mode = if entry.mode == 0 { 0o700 } else { (entry.mode & 0o777) | 0o700 };
                     if std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir()) {
                         let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode));
                     }

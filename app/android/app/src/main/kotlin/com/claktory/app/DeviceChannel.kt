@@ -78,6 +78,7 @@ class DeviceChannel(
             ) ?: result.notImplemented()
             "share" -> share?.core?.share((call.arguments as? Map<*, *>)?.get("text") as? String, result)
                 ?: result.notImplemented()
+            "shareFiles" -> share?.shareFiles(call.arguments as? Map<*, *>, result) ?: result.notImplemented()
             "cancelWebAuth" -> {
                 webAuth?.core?.cancel()
                 result.success(null)

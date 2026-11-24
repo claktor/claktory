@@ -81,6 +81,8 @@ fn list(host: &mut impl Host) -> ToolOutput {
     }
     if dashboards.is_empty() {
         lines.push("(none)".into());
+    } else {
+        lines.push(arrangement(host));
     }
     lines.push("Sources (only granted ones can be read):".into());
     let sources: Vec<Value> = host
@@ -96,7 +98,9 @@ fn list(host: &mut impl Host) -> ToolOutput {
             json!({"id": source.id, "label": source.label, "granted": source.granted})
         })
         .collect();
-    answer(lines.join("\n"), json!({"dashboards": dashboards, "sources": sources}))
+    let prefs = model::prefs(host);
+    let opens = model::opening(host);
+    answer(lines.join("\n"), json!({"dashboards": dashboards, "sources": sources, "home": opens, "starred": prefs.starred}))
 }
 
 /// charts_get: one dashboard's definition, or its previous version.
@@ -122,11 +126,19 @@ fn get(host: &mut impl Host, args: &Value) -> ToolOutput {
 /// charts_put: a whole dashboard, new or changed, checked first. Its
 /// panels' queries run once, so the agent hears which fail.
 fn put(host: &mut impl Host, args: &Value, caller: &str) -> ToolOutput {
-    // {"dashboard": {…}}, or the dashboard itself.
+    let arranging = ARRANGE.iter().any(|key| args.get(*key).is_some());
+    // {"dashboard": {…}}, or the dashboard itself; or only how they're
+    // arranged.
     let given = match args.get("dashboard") {
         Some(dashboard) => dashboard.clone(),
         None if args.get("id").is_some() => args.clone(),
-        None => return refuse("Send the whole dashboard: {\"dashboard\": {\"id\", \"name\", \"panels\", …}}."),
+        None if arranging => {
+            return match arrange(host, args) {
+                Ok(text) => answer(text, json!({"arranged": true})),
+                Err(why) => refuse(format!("Nothing was changed: {why}.")),
+            };
+        }
+        None => return refuse("Send the whole dashboard: {\"dashboard\": {\"id\", \"name\", \"panels\", …}}, or home, starred or order."),
     };
     let base = given.get("_rev").and_then(Value::as_u64);
     let mut fields = given.clone();
@@ -189,7 +201,66 @@ fn put(host: &mut impl Host, args: &Value, caller: &str) -> ToolOutput {
             wait["source"].as_str().unwrap_or_default()
         ));
     }
+    if arranging {
+        match arrange(host, args) {
+            Ok(arranged) => text.push_str(&format!("\n{arranged}")),
+            Err(why) => text.push_str(&format!("\nThe arrangement wasn't changed: {why}.")),
+        }
+    }
     answer(text, json!({"id": saved.id, "_rev": saved.rev, "failed": failed, "not_granted": waiting}))
+}
+
+/// What charts_put takes besides a dashboard: how the person's dashboards
+/// are arranged.
+const ARRANGE: [&str; 3] = ["home", "starred", "order"];
+
+/// Sets the home dashboard ("" for none: the first), the starred ones (all
+/// of them) and the order (those named first), each only when given.
+fn arrange(host: &mut impl Host, args: &Value) -> Result<String, String> {
+    let ids = model::ids(host);
+    let list = |key: &str| -> Result<Option<Vec<String>>, String> {
+        let Some(value) = args.get(key) else { return Ok(None) };
+        let names: Option<Vec<String>> = value.as_array().and_then(|items| items.iter().map(|item| item.as_str().map(str::to_owned)).collect());
+        let names = names.ok_or_else(|| format!("{key} is a list of dashboard ids"))?;
+        match names.iter().find(|id| !ids.contains(id)) {
+            Some(id) => Err(format!("there's no dashboard \"{id}\" (charts_list lists them)")),
+            None => Ok(Some(names)),
+        }
+    };
+    let (starred, order) = (list("starred")?, list("order")?);
+    let home = match args.get("home") {
+        None => None,
+        Some(Value::String(id)) if id.is_empty() => Some(None),
+        Some(Value::String(id)) if ids.contains(id) => Some(Some(id.clone())),
+        Some(Value::String(id)) => return Err(format!("there's no dashboard \"{id}\" (charts_list lists them)")),
+        Some(_) => return Err("home is a dashboard's id, or \"\" for none".into()),
+    };
+    let mut prefs = model::prefs(host);
+    if let Some(home) = home {
+        prefs.home = home;
+    }
+    if let Some(starred) = starred {
+        prefs.starred = Vec::new();
+        for id in starred {
+            if !prefs.starred.contains(&id) {
+                prefs.starred.push(id);
+            }
+        }
+    }
+    model::save_prefs(host, &prefs)?;
+    if let Some(order) = order {
+        model::set_order(host, &order)?;
+    }
+    Ok(arrangement(host))
+}
+
+/// How the dashboards are arranged, in a line.
+fn arrangement(host: &mut impl Host) -> String {
+    let prefs = model::prefs(host);
+    let order = model::menu_order(&model::ids(host), &prefs);
+    let opens = model::opening(host);
+    let starred = if prefs.starred.is_empty() { "none".to_owned() } else { prefs.starred.join(", ") };
+    format!("Charts opens on {opens}; starred: {starred}; the dashboards' menu lists {}.", order.join(", "))
 }
 
 /// charts_delete: a dashboard, its last version kept.

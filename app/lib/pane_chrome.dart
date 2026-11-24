@@ -2,12 +2,13 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
-import 'controls.dart' show ExtensionGlyph;
+import 'controls.dart' show ExtensionGlyph, GlyphButton;
 import 'identity.dart';
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
 import 'mobile/page_find.dart' show phonePageSearch;
 import 'mobile/presentation.dart';
+import 'share_files.dart';
 
 /// Where a pane's header is, filled by what the pane shows: its details
 /// and controls. Above each pane ([Pane] in panes.dart). On a phone, where
@@ -22,9 +23,15 @@ class PaneChrome extends InheritedWidget {
     required super.child,
   });
 
-  /// The pane's header with [details] and [controls]; null when there's no
-  /// header.
-  final Widget Function(String details, List<Widget> controls)? header;
+  /// The pane's header with [details] and [controls], and [pinned] before
+  /// Expand, which a narrow pane never clips as it clips [controls] from
+  /// their end; null when there's no header.
+  final Widget Function(
+    String details,
+    List<Widget> controls, {
+    List<Widget> pinned,
+  })?
+  header;
 
   /// On a phone, the viewer's page: its title, Back, and the pane's own
   /// actions; [PaneScaffold] builds the header from it.
@@ -83,7 +90,13 @@ class PaneScaffold extends StatelessWidget {
     this.comments,
     this.actions = const [],
     this.toolbar,
+    this.share,
   });
+
+  /// The file it shows, which Share… fetches and sends with the system's
+  /// share sheet (#418): in More on a phone, in the header elsewhere.
+  /// Null where there's nothing to share.
+  final String? share;
 
   final Widget body;
   final String details;
@@ -102,6 +115,7 @@ class PaneScaffold extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final chrome = PaneChrome.of(context);
+    final share = canShareFiles ? this.share : null;
     if (chrome?.phone case final phone?) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -111,6 +125,9 @@ class PaneScaffold extends StatelessWidget {
             details: details,
             comments: comments,
             actions: actions,
+            share: share == null
+                ? null
+                : () => unawaited(shareFiles(context, [share])),
           ),
           Expanded(child: body),
           ?toolbar,
@@ -119,10 +136,30 @@ class PaneScaffold extends StatelessWidget {
     }
     final header = chrome?.header;
     if (header == null) return body;
+    final shareButton = share == null
+        ? null
+        : Builder(
+            // The share menu points at the button (an iPad's popover).
+            builder: (context) => GlyphButton(
+              label: shareLabel(),
+              active: false,
+              onTap: () => shareFrom(context, [share]),
+              glyph: (color) =>
+                  ExtensionGlyph(icon: 'share', name: 'Share', color: color),
+            ),
+          );
+    // On an iPad it's how a file is saved or sent on (Bruno 27653): never
+    // clipped, as the viewer's controls are from their end on a narrow
+    // pane beside the conversation. On a Mac, last of them.
+    final touch = touchFirst(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        header(details, controls),
+        header(
+          details,
+          [...controls, if (!touch) ?shareButton],
+          pinned: [if (touch) ?shareButton],
+        ),
         Expanded(child: body),
       ],
     );
@@ -130,7 +167,8 @@ class PaneScaffold extends StatelessWidget {
 }
 
 /// A viewer's header on a phone: Back, the file's name over its details,
-/// then the comments and More.
+/// then the comments (or Share, for a file that has none) and More, whose
+/// sheet starts with Share.
 class PhonePaneHeader extends StatelessWidget {
   const PhonePaneHeader({
     super.key,
@@ -138,12 +176,19 @@ class PhonePaneHeader extends StatelessWidget {
     this.details = '',
     this.comments,
     this.actions = const [],
+    this.share,
   });
 
   final PhonePane pane;
   final String details;
   final Widget? comments;
   final List<PaneAction> actions;
+
+  /// Shares the file shown (#418): Save Video, Save to Files, AirDrop…
+  final VoidCallback? share;
+
+  static Widget _shareGlyph(Color color, double size) =>
+      ExtensionGlyph(icon: 'share', name: 'Share', color: color, size: size);
 
   Future<void> _more(BuildContext context) async {
     final onRemove = pane.onRemove;
@@ -152,6 +197,13 @@ class PhonePaneHeader extends StatelessWidget {
     final chosen = await showActions<int>(
       context,
       actions: [
+        // First: what Matt looked for to save a video (Bruno 27653).
+        if (share != null)
+          SheetAction(
+            shareLabel(),
+            -3,
+            glyph: (color) => _shareGlyph(color, 16),
+          ),
         if (search != null)
           SheetAction(
             'Search',
@@ -182,6 +234,7 @@ class PhonePaneHeader extends StatelessWidget {
     );
     if (chosen == null || !context.mounted) return;
     if (chosen == -2) return search?.call();
+    if (chosen == -3) return share?.call();
     if (chosen >= 0) {
       actions[chosen].onTap();
       return;
@@ -203,8 +256,10 @@ class PhonePaneHeader extends StatelessWidget {
     final type = TypeScale.of(context);
     final more =
         actions.isNotEmpty ||
+        this.share != null ||
         pane.onRemove != null ||
         phonePageSearch(context) != null;
+    final share = this.share;
     return PhoneHeader(
       leading: HeaderButton.back(onTap: pane.onBack),
       title: Column(
@@ -228,6 +283,14 @@ class PhonePaneHeader extends StatelessWidget {
       ),
       trailing: [
         ?comments,
+        // The header holds two at its end: Share beside More where the
+        // comments don't take the place; always first in More.
+        if (comments == null && share != null)
+          HeaderButton(
+            label: shareLabel(),
+            onTap: share,
+            glyph: (color) => _shareGlyph(color, 20),
+          ),
         if (more)
           HeaderButton.more(
             label: 'More',
