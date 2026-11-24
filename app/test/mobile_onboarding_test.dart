@@ -20,6 +20,7 @@ import 'account_test.dart'
 import 'account_test.dart' as account_test show withAccount;
 import 'device_confirm_test.dart' show FakeAccountApi, home;
 import 'harness.dart';
+import 'pair_start.dart';
 
 const _phone = Size(393, 852);
 const _small = Size(320, 568);
@@ -297,9 +298,8 @@ void main() {
       await harness.show(tester, size: size);
       await pumpFrames(tester);
       expect(find.byType(PairScreen), findsOneWidget);
-      await tester.ensureVisible(find.text('Sign in with your email instead'));
-      await pumpFrames(tester);
-      await tester.tap(find.text('Sign in with your email instead'));
+      // The first screen's own way in (#363).
+      await pastPairStart(tester, email: true);
       await pumpFrames(tester);
       return harness;
     }

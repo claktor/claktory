@@ -114,6 +114,7 @@ pub(crate) async fn serve_stream<S: Stream>(
     let device;
     let kind;
     let workspace_patches;
+    let workspace_revision;
     let (platform, app_version);
     let hello_id = loop {
         let frame = socket.next().await;
@@ -131,6 +132,7 @@ pub(crate) async fn serve_stream<S: Stream>(
         }
         kind = hello.device_kind();
         workspace_patches = hello.workspace_patches;
+        workspace_revision = hello.workspace_revision.chars().take(64).collect::<String>();
         (platform, app_version) = (hello.platform.clone(), hello.client_version.clone());
         let knock = crate::remote::Knock {
             token: &hello.token,
@@ -224,10 +226,11 @@ pub(crate) async fn serve_stream<S: Stream>(
         zoom_device: device.device.id.clone(),
         endpoint_id: peer.as_ref().map(|peer| peer.endpoint_id.clone()).unwrap_or_default(),
         workspace_patches,
+        workspace_revision,
         files,
         views: crate::apps::Viewer::new(&factory),
         browser: crate::browser::Port::new(&factory, &device.device.id),
-        presence: factory.notify.connect(&device.device.id),
+        presence: factory.notify.connect(&device.device.id, &platform),
         presentation: crate::presentation::Port::new(&factory, &device.device.id),
         dictations: crate::speech::dictation::Port::new(),
         diagnostics: crate::diagnostics::Source::device(&device.device.id, from, kind as i32, platform, app_version),
@@ -267,6 +270,8 @@ struct Connection {
     endpoint_id: String,
     /// The app applies WorkspacePatch.
     workspace_patches: bool,
+    /// The Workspace it holds (Hello.workspace_revision), to resume from.
+    workspace_revision: String,
     /// The project whose files it shows on their own (WatchFiles).
     files: crate::explorer::Watch,
     /// The app views it shows (OpenAppView); their messages come through it.
@@ -294,7 +299,8 @@ async fn session<S: Stream>(
     unpaired: Arc<tokio::sync::Notify>,
 ) -> Result<(), ConnectionError> {
     let mut vault_session = crate::vault::requests::Session::new(connection.device.clone(), connection.zoom_device.clone());
-    let mut sent = Workspaces::new(connection.workspace_patches);
+    let mut sent =
+        Workspaces::resuming(connection.workspace_patches, factory.resumes.clone(), &connection.binding, &connection.workspace_revision);
     let mut events = sync(socket, &mut sent, factory).await?;
     // Where this device was reading, for it alone, when it kept anything.
     if let Some(presentation) = crate::presentation::welcome(factory, &connection.binding) {
@@ -347,10 +353,17 @@ async fn session<S: Stream>(
 async fn sync<S: Stream>(socket: &mut Socket<S>, sent: &mut Workspaces, factory: &Factory) -> Result<Receiver<Event>, ConnectionError> {
     let snapshot = factory.connect().await;
     sent.reset();
-    let workspace = ServerMessage { reply_to: 0, body: Some(Body::Workspace(snapshot.workspace)) };
+    let pipe = snapshot.workspace.selected_pipe_id.clone();
+    let workspace = ServerMessage { reply_to: 0, body: Some(Body::Workspace(snapshot.workspace)), ..Default::default() };
     forward(socket, sent, workspace.encode_to_vec().into()).await?;
     if let Some(transcript) = snapshot.transcript {
         send(socket, 0, Body::Transcript(transcript)).await?;
+    }
+    // The pipe shown, its liaison's or alone: its messages, as selecting it
+    // sends them. Read after the events were subscribed to, so one that
+    // comes meanwhile is in it or follows (the client keeps each once).
+    if !pipe.is_empty() {
+        send(socket, 0, Body::PipeTranscript(crate::pipes::transcript(factory, &pipe))).await?;
     }
     for explorer in snapshot.explorers {
         send(socket, 0, Body::Explorer(explorer)).await?;
@@ -426,6 +439,13 @@ async fn handle(
                 fallback_model,
                 notify,
             } = request;
+            // A model its provider's list doesn't have is checked with the
+            // provider and added first (friend bug #14).
+            if let Some(model) = model.as_deref().filter(|model| !model.trim().is_empty())
+                && let Err(why) = crate::catalog::ensure(factory, model, crate::catalog::Check::WhenItCan).await
+            {
+                return error(ErrorCode::InvalidRequest, &why);
+            }
             let change = AgentChange {
                 name: name.as_deref(),
                 prompt: prompt.as_deref(),
@@ -467,7 +487,7 @@ async fn handle(
         Some(Request::StopAgent(request)) => factory.stop_agent(&request.agent_id),
         Some(Request::DeleteAgent(request)) => factory.delete_agent(&request.agent_id).await,
         Some(Request::UpdateProject(request)) => {
-            factory.update_project(&request.project_id, request.name.as_deref(), request.archived).await
+            factory.update_project(&request.project_id, request.name.as_deref(), request.archived, request.before_id.as_deref()).await
         }
         Some(Request::DeleteProject(request)) => {
             let deleted = factory.delete_project(&request.project_id).await;
@@ -591,7 +611,7 @@ async fn handle(
             Ok(())
         }
         Some(Request::FetchApp(request)) => {
-            return match factory.fetch_app(&request.version, request.offset).await {
+            return match factory.fetch_app(&request.version, request.offset, request.max_bytes).await {
                 Ok(chunk) => Body::AppChunk(chunk),
                 Err(problem) => error(problem.code(), problem.to_string()),
             };
@@ -624,8 +644,20 @@ async fn handle(
         Some(Request::AppViewAction(request)) => return factory.app_view_action(&request),
         Some(Request::CloseAppView(request)) => return factory.close_app_view(&connection.views, &request.surface_id),
         Some(Request::ListNeedsYouHistory(request)) => {
-            return match factory.needs_you_history(&request) {
+            return match factory.needs_you_history(&request).await {
                 Ok(history) => Body::NeedsYouHistory(history),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::ListMonitors(request)) => {
+            return match factory.list_monitors(&request) {
+                Ok(list) => Body::MonitorList(list),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::ListMonitorHistory(request)) => {
+            return match factory.monitor_history(&request) {
+                Ok(history) => Body::MonitorHistory(history),
                 Err(problem) => error(problem.code(), problem.to_string()),
             };
         }
@@ -705,7 +737,10 @@ async fn handle(
         }
         Some(Request::DecideSecretRequest(request)) => vault::decide_request(factory, &request),
         Some(Request::AccountSignIn(request)) => crate::account::sign_in(factory, &request.email).await,
-        Some(Request::AccountVerify(request)) => crate::account::verify(factory, &request.code).await,
+        Some(Request::AccountVerify(request)) => crate::account::verify(factory, &request.code).await.map(|account_id| {
+            // Signed in on a paired device, it's that device's owner's (#365 R5).
+            factory.confirm_signed_in_device(&connection.zoom_device, &connection.endpoint_id, &account_id);
+        }),
         Some(Request::AccountResend(_)) => crate::account::resend(factory).await,
         Some(Request::AccountSignOut(_)) => crate::account::sign_out(factory).await,
         Some(Request::SkipAccountSignIn(_)) => crate::account::skip(factory),
@@ -717,6 +752,15 @@ async fn handle(
         }
         Some(Request::ApprovePipe(request)) => crate::pipes::approve(factory, &request).await,
         Some(Request::UpdatePipe(request)) => crate::pipes::update(factory, &request),
+        Some(Request::CreatePipeGroup(request)) => {
+            crate::pipes::groups::create(factory, &request.project_id, &request.name, &request.pipe_id).map(drop)
+        }
+        Some(Request::RenamePipeGroup(request)) => crate::pipes::groups::rename(factory, &request.group_id, &request.name).map(drop),
+        Some(Request::DeletePipeGroup(request)) => crate::pipes::groups::delete(factory, &request.group_id).map(drop),
+        Some(Request::SetPipeGroup(request)) => crate::pipes::groups::set(factory, &request.pipe_id, &request.group_id).map(drop),
+        Some(Request::SetPipeGroupCollapsed(request)) => {
+            crate::pipes::groups::set_collapsed(factory, &request.group_id, request.collapsed)
+        }
         Some(Request::SetPipeState(request)) => crate::pipes::set_pipe_state(factory, &request),
         Some(Request::SelectPipe(request)) => {
             crate::pipes::select(factory, &request.pipe_id).await.inspect(|()| crate::chats::leave_for_pipe(factory))
@@ -761,6 +805,17 @@ async fn handle(
             crate::chats::create(factory, &request.text, &request.client_id, Some(connection.sent_from.clone())).await
         }
         Some(Request::SelectChat(request)) => crate::chats::select(factory, &request.chat_id).await,
+        Some(Request::SendChatMessage(request)) if request.voice => crate::chats::send_voice(
+            factory,
+            &request.chat_id,
+            &request.text,
+            &request.client_id,
+            Some(connection.sent_from.clone()),
+            &request.attachments,
+        ),
+        Some(Request::SendChatMessage(request)) if !request.attachments.is_empty() => {
+            Err(RequestError::Upload("A chat takes only voice messages, not files.".to_owned()))
+        }
         Some(Request::SendChatMessage(request)) => {
             crate::chats::send(factory, &request.chat_id, &request.text, &request.client_id, Some(connection.sent_from.clone()))
         }
@@ -771,6 +826,19 @@ async fn handle(
             return answer(crate::find::search(factory, &request).await, Body::ConversationMatches);
         }
         Some(Request::RenameChat(request)) => crate::chats::rename(factory, &request.chat_id, &request.title),
+        Some(Request::SetChatModel(request)) => crate::chats::choose_model(factory, &request.chat_id, &request.model),
+        Some(Request::SetKeepAwake(request)) => crate::keep_awake::set(factory, request.on),
+        // Only this Mac's own app (its own device, either way in) turns it on.
+        Some(Request::SetLidClosed(request)) => {
+            crate::lid_closed::set(factory, !connection.remote, &request)
+        }
+        Some(Request::RefreshModels(request)) => crate::catalog::refresh(factory, request.provider_id.trim())
+            .await
+            .map_err(|why| RequestError::Account(ErrorCode::InvalidRequest, why)),
+        Some(Request::AddModel(request)) => crate::catalog::ensure(factory, &request.model, crate::catalog::Check::Always)
+            .await
+            .map_err(|why| RequestError::Account(ErrorCode::InvalidRequest, why)),
+        Some(Request::SecretRequestDone(request)) => crate::vault::requests::key_in_place(factory, &request),
         // Moving this Claktory (#217): `crate::move_run`.
         Some(Request::StartMove(request)) => crate::move_run::start(factory, &request.code),
         Some(Request::ConfirmMove(_)) => crate::move_run::confirm(factory),
@@ -790,6 +858,7 @@ async fn handle(
         Some(Request::SwitchBack(request)) => {
             crate::usage_switch::switch_back(factory, &request.agent_id, request.all, request.expected_others).await
         }
+        Some(Request::SetUsageAutoContinue(request)) => crate::usage_switch::set_auto_continue(factory, request.on),
         Some(Request::ReportReply(request)) => return answer(crate::account::reports::report(factory, request).await, Body::ReplyReport),
         Some(Request::SetAccountService(request)) => crate::account::set_service(factory, &request.url).await,
         Some(Request::ShowRecoveryKey(_)) => return answer(vault::show_recovery_key(factory, vault_session), Body::RecoveryKey),
@@ -798,15 +867,14 @@ async fn handle(
         Some(Request::DecideProposal(request)) => {
             // A chat's proposal names the chat instead of an agent.
             let from = if request.chat_id.is_empty() { &request.agent_id } else { &request.chat_id };
-            crate::proposals::decide(factory, from, &request.proposal_id, request.approve, &request.comment)
+            crate::proposals::decide(factory, from, &request.proposal_id, request.approve, request.reply, &request.comment)
         }
         Some(Request::ClearBuildCache(request)) => {
             crate::extensions::tree::caches::clear_on_request(factory, &request.path).map(|_| ()).map_err(RequestError::BuildCache)
         }
         Some(Request::ReadFile(request)) => {
-            let content =
-                tokio::task::spawn_blocking(move || crate::extensions::viewer::read_requested(&request))
-                    .await;
+            let data = factory.home.root().to_owned();
+            let content = tokio::task::spawn_blocking(move || crate::previews::read_requested(&data, &request)).await;
             return match content {
                 Ok(content) => Body::FileContent(content),
                 Err(problem) => error(ErrorCode::Internal, problem.to_string()),
@@ -815,12 +883,22 @@ async fn handle(
         Some(Request::SetLayout(request)) => {
             crate::extensions::viewer::set_layout(factory, &request.agent_id, request.root, request.focus.as_deref())
         }
+        Some(Request::PaneOpened(request)) => crate::extensions::viewer::pane_opened(factory, &request.agent_id, &request.pane_id),
+        // Going back in a conversation (friend bug #9): `crate::fork`.
+        Some(Request::ForkConversation(request)) => {
+            crate::fork::fork(factory, &request.agent_id, request.seq, request.timestamp_ms, crate::fork::By::default()).await.map(drop)
+        }
+        Some(Request::ListBranches(request)) => return answer(crate::fork::list(factory, &request.agent_id), Body::Branches),
+        Some(Request::SwitchBranch(request)) => {
+            crate::fork::switch(factory, &request.agent_id, &request.branch_id, crate::fork::By::default()).await.map(drop)
+        }
+        Some(Request::DeleteBranch(request)) => crate::fork::delete(factory, &request.agent_id, &request.branch_id).await,
         Some(Request::AddGoal(request)) => crate::extensions::checklist::person_add_goal(factory, &request),
         Some(Request::UpdateGoal(request)) => crate::extensions::checklist::person_update_goal(factory, &request),
         // Only a Claktory that moved away answers this (move_import::moved).
         Some(Request::DeleteMovedCopy(_)) => return error(ErrorCode::InvalidRequest, "This Claktory hasn't moved to another computer."),
         Some(Request::UnpairDevice(request)) => factory.unpair_device(&request.device_id).await,
-        Some(Request::ApproveDevice(request)) => factory.approve_device(&request.device_id).await,
+        Some(Request::ApproveDevice(request)) => factory.approve_device(&request.device_id, &request.number).await,
         Some(Request::DenyDevice(request)) => factory.deny_device(&request.device_id).await,
         Some(Request::CancelPairing(request)) => factory.cancel_pairing(&request.device_id).await,
         // Remote access is on while devices are paired: only the relays are set here.
@@ -915,7 +993,7 @@ async fn forward<S: Stream>(socket: &mut Socket<S>, sent: &mut Workspaces, event
 }
 
 async fn send<S: Stream>(socket: &mut Socket<S>, reply_to: u64, body: Body) -> Result<(), ConnectionError> {
-    let message = ServerMessage { reply_to, body: Some(body) };
+    let message = ServerMessage { reply_to, body: Some(body), ..Default::default() };
     socket.send(Message::Binary(message.encode_to_vec().into())).await?;
     Ok(())
 }

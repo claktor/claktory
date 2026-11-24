@@ -26,7 +26,7 @@ fn titles(history: &v1::NeedsYouHistory) -> Vec<&str> {
 #[tokio::test]
 async fn the_person_finds_what_they_decided_and_opens_it_at_the_card() {
     let dir = temp_dir();
-    let (addr, _factory) = start(&dir).await;
+    let (addr, factory) = start(&dir).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
     apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
@@ -130,6 +130,23 @@ async fn the_person_finds_what_they_decided_and_opens_it_at_the_card() {
     assert_eq!((first.records.len(), first.more), (4, true));
     let rest = list(&mut client, "", first.records[3].decided_ms, 4).await;
     assert_eq!((titles(&rest), rest.more), (vec!["AWS", "Add an agent for emails"], false));
+
+    // Builder's conversation left memory while idle (as it isn't read
+    // after a restart): its card is still found where it is.
+    apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    factory.set_unload_after(std::time::Duration::from_millis(50));
+    factory.set_idle_check_every(std::time::Duration::from_millis(20));
+    for _ in 0..500 {
+        if !factory.conversation_held("builder") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(!factory.conversation_held("builder"), "it never left memory");
+    factory.set_unload_after(std::time::Duration::from_secs(3600));
+    let again = list(&mut client, "", 0, 0).await;
+    assert_eq!((again.records[0].title.as_str(), again.records[0].seq), ("Which inbox for the emails?", seq));
+    assert_eq!(again.records[5].seq, 0);
 }
 
 #[tokio::test]
@@ -138,7 +155,7 @@ async fn a_pipes_held_messages_and_loop_pauses_are_kept_framed() {
     let held = crate::pipes::call(&mut client, &mut view, "lea", "pipe_send", r#"{"text": "Launch is Friday. MARKER"}"#).await;
     assert!(held.starts_with("Held for"), "{held}");
     let sent = factoryd::pipes::messages_for_test(&factory, &pipe).last().expect("a message").clone();
-    let discard = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq: sent.seq, allow: false, comment: "Not before Friday.".into() };
+    let discard = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq: sent.seq, allow: false, comment: "Not before Friday.".into(), ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(discard)).await;
 
     // A loop pause the person let carry on, as Claktory keeps it.

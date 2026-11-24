@@ -249,12 +249,23 @@ async fn files_and_watches_fire_on_what_they_see() {
 #[tokio::test]
 async fn a_busy_agent_gets_one_fire_with_what_happened_meanwhile() {
     let (_dir, factory, mut client, mut view) = setup().await;
-    let add = r#"{"monitors":[{"name":"tick","prompt":"Tick.","when":{"every":"1m"},"idle_only":false}]}"#;
+    // Hourly, so the real time a loaded machine takes can't bring a fire
+    // of its own: only the clock moved here does.
+    let add = r#"{"monitors":[{"name":"tick","prompt":"Tick.","when":{"every":"1h"},"idle_only":false}]}"#;
     call(&mut client, &mut view, "lead", "monitors_add", add).await;
     apply_request(&mut client, &mut view, send_message("lead", "hang")).await;
+    // Each hour seen by the scheduler before the next: its next time moves.
+    let next = |list: Body| match list {
+        Body::MonitorList(list) => list.monitors[0].monitor.as_ref().expect("its monitor").next_due,
+        other => panic!("expected the list, got {other:?}"),
+    };
+    let list = || client_message::Body::ListMonitors(v1::ListMonitors::default());
     for _ in 0..3 {
-        factory.advance_monitor_clock(Duration::from_secs(60));
-        settle(&mut client, &mut view, 150).await;
+        let before = next(apply_request(&mut client, &mut view, list()).await);
+        factory.advance_monitor_clock(Duration::from_secs(3600));
+        while next(apply_request(&mut client, &mut view, list()).await) == before {
+            settle(&mut client, &mut view, 20).await;
+        }
     }
     // One fire waits for it; the other two are carried.
     assert_eq!(view.agent("lead").queued_messages, 1);
@@ -263,10 +274,10 @@ async fn a_busy_agent_gets_one_fire_with_what_happened_meanwhile() {
     let stop = client_message::Body::StopAgent(v1::StopAgent { agent_id: "lead".into() });
     apply_request(&mut client, &mut view, stop).await;
     view.follow(&mut client, |view| fires(view).len() == 2 && idle(view, "lead")).await;
-    assert_eq!(fires(&view)[0].text, "Monitor m1 \"tick\" fired (every 1m; fire 1).\n\nYour prompt: Tick.");
+    assert_eq!(fires(&view)[0].text, "Monitor m1 \"tick\" fired (every 1h; fire 1).\n\nYour prompt: Tick.");
     assert_eq!(
         fires(&view)[1].text,
-        "Monitor m1 \"tick\" fired (while your last fire waited; fire 2).\nevery 1m\nevery 1m\n\nYour prompt: Tick."
+        "Monitor m1 \"tick\" fired (while your last fire waited; fire 2).\nevery 1h\nevery 1h\n\nYour prompt: Tick."
     );
 }
 
@@ -426,4 +437,101 @@ async fn a_monitor_set_by_a_reader_marks_its_target_with_nothing() {
     view.follow(&mut client, |view| fires(view).len() == 1).await;
     assert_eq!(pipes::taint_of_for_test(&factory, "worker"), "{}");
     assert!(view.agent("worker").tainted_by_pipes.is_empty());
+}
+
+/// The Monitors overview (friend bug #10): every agent's monitors in one
+/// list, filtered by agent, project and state, each named by its agent and
+/// id, what's held marked, each one's history a page at a time, and a
+/// signal when any changed.
+#[tokio::test]
+async fn the_overview_lists_every_agents_monitors_and_their_history() {
+    let (dir, factory, mut client, mut view, addr) = setup_at().await;
+    apply_request(&mut client, &mut view, create_project("Lab", &dir.join("lab"))).await;
+    apply_request(&mut client, &mut view, create_agent("lab", "Scout", "")).await;
+    let lead = r#"{"monitors":[{"name":"hourly","prompt":"Check the queue.","when":{"every":"1h"}},{"name":"logs","prompt":"Look at the logs.","when":{"check":"false","every":"6h"}}]}"#;
+    call(&mut client, &mut view, "lead", "monitors_add", lead).await;
+    let worker = r#"{"monitors":[{"name":"standup","prompt":"Post your status.","when":{"cron":"0 9 * * 1-5"},"agent":"worker"}]}"#;
+    call(&mut client, &mut view, "lead", "monitors_add", worker).await;
+    call(&mut client, &mut view, "scout", "monitors_add", r#"{"monitors":[{"name":"scan","prompt":"Scan.","when":{"every":"2h"}}]}"#).await;
+
+    async fn list(client: &mut Client, view: &mut View, request: v1::ListMonitors) -> Vec<(String, u32, String, v1::MonitorHeld)> {
+        match apply_request(client, view, client_message::Body::ListMonitors(request)).await {
+            Body::MonitorList(list) => list
+                .monitors
+                .iter()
+                .map(|row| {
+                    let monitor = row.monitor.clone().expect("its monitor");
+                    (row.agent_id.clone(), monitor.id, monitor.name, row.held())
+                })
+                .collect(),
+            other => panic!("expected the list, got {other:?}"),
+        }
+    }
+    let row = |agent: &str, id: u32, name: &str| (agent.to_owned(), id, name.to_owned(), v1::MonitorHeld::Unspecified);
+    // Two agents both have an m1: each row says whose.
+    let everyone = list(&mut client, &mut view, v1::ListMonitors::default()).await;
+    assert_eq!(everyone, [row("lead", 1, "hourly"), row("lead", 2, "logs"), row("scout", 1, "scan"), row("worker", 1, "standup")]);
+    let lab = v1::ListMonitors { project_id: "lab".into(), ..Default::default() };
+    assert_eq!(list(&mut client, &mut view, lab).await, [row("scout", 1, "scan")]);
+    let workers = v1::ListMonitors { agent_id: "worker".into(), ..Default::default() };
+    assert_eq!(list(&mut client, &mut view, workers).await, [row("worker", 1, "standup")]);
+
+    // Pausing names the right agent's m1, and the state filter finds it.
+    let pause = v1::ChangeMonitor { agent_id: "worker".into(), monitor_id: 1, action: v1::MonitorAction::Pause.into() };
+    apply_request(&mut client, &mut view, client_message::Body::ChangeMonitor(pause)).await;
+    let paused = v1::ListMonitors { states: vec![v1::MonitorState::Paused.into()], ..Default::default() };
+    assert_eq!(list(&mut client, &mut view, paused).await, [row("worker", 1, "standup")]);
+    let active = v1::ListMonitors { states: vec![v1::MonitorState::Active.into()], ..Default::default() };
+    assert_eq!(list(&mut client, &mut view, active).await.len(), 3);
+
+    // Monitors turned off for an agent: its active ones are held, and every
+    // client hears that monitors changed.
+    let (mut other, _, _) = Client::connect(addr).await;
+    let off = v1::ExtensionChange { id: "monitors".into(), enabled: Some(false), ..Default::default() };
+    let off = client_message::Body::UpdateAgent(v1::UpdateAgent { agent_id: "scout".into(), extension: Some(off), ..Default::default() });
+    apply_request(&mut client, &mut view, off).await;
+    other.wait_for(|body| matches!(body, Body::MonitorsChanged(_)).then_some(())).await;
+    let scouts = v1::ListMonitors { agent_id: "scout".into(), ..Default::default() };
+    assert_eq!(list(&mut client, &mut view, scouts).await[0].3, v1::MonitorHeld::ExtensionOff);
+
+    // A fire and the person's fire by hand, newest first, a page at a time.
+    factory.advance_monitor_clock(Duration::from_secs(3600));
+    view.follow(&mut client, |view| idle(view, "lead")).await;
+    async fn history(client: &mut Client, view: &mut View, agent: &str, id: u32, before_seq: u64, limit: u32) -> Body {
+        let request = v1::ListMonitorHistory { agent_id: agent.into(), monitor_id: id, before_seq, limit };
+        apply_request(client, view, client_message::Body::ListMonitorHistory(request)).await
+    }
+    let events = loop {
+        let Body::MonitorHistory(page) = history(&mut client, &mut view, "lead", 1, 0, 0).await else { panic!("a history") };
+        if page.events.len() >= 2 {
+            break page;
+        }
+        settle(&mut client, &mut view, 50).await;
+    };
+    assert_eq!((events.agent_id.as_str(), events.monitor_id, events.more), ("lead", 1, false));
+    let kinds: Vec<v1::MonitorEventKind> = events.events.iter().map(|event| event.kind()).collect();
+    assert_eq!(kinds, [v1::MonitorEventKind::Fired, v1::MonitorEventKind::Created]);
+    let (fired, created) = (&events.events[0], &events.events[1]);
+    assert!(fired.seq > created.seq && fired.time_ms > created.time_ms, "{events:?}");
+    assert_eq!((created.actor.as_str(), created.detail.as_str()), ("lead", "every 1h"));
+    assert_eq!(fired.actor, "", "on schedule: Claktory's");
+    let Body::MonitorHistory(first) = history(&mut client, &mut view, "lead", 1, 0, 1).await else { panic!("a page") };
+    assert_eq!((first.events.len(), first.more, first.events[0].seq), (1, true, fired.seq));
+    let Body::MonitorHistory(next) = history(&mut client, &mut view, "lead", 1, first.events[0].seq, 1).await else { panic!("a page") };
+    assert_eq!((next.events.len(), next.more, next.events[0].seq), (1, false, created.seq));
+    // Fired by hand, by the agent: its actor says so.
+    call(&mut client, &mut view, "lead", "monitors_change", r#"{"changes":[{"id":"m1","action":"fire"}]}"#).await;
+    let Body::MonitorHistory(latest) = history(&mut client, &mut view, "lead", 1, 0, 1).await else { panic!("a page") };
+    let fire = &latest.events[0];
+    assert_eq!((fire.kind(), fire.actor.as_str(), fire.detail.as_str()), (v1::MonitorEventKind::Fired, "lead", "fired by lead"));
+    view.follow(&mut client, |view| idle(view, "lead")).await;
+    // The worker's m1 is its own: created by lead, paused by the person.
+    let Body::MonitorHistory(workers) = history(&mut client, &mut view, "worker", 1, 0, 0).await else { panic!("a history") };
+    let kinds: Vec<v1::MonitorEventKind> = workers.events.iter().map(|event| event.kind()).collect();
+    assert_eq!(kinds, [v1::MonitorEventKind::Paused, v1::MonitorEventKind::Created]);
+    assert_eq!((workers.events[0].actor.as_str(), workers.events[0].detail.as_str()), ("", "by the person"));
+    match history(&mut client, &mut view, "worker", 9, 0, 0).await {
+        Body::Error(error) => assert_eq!((error.code(), error.message.as_str()), (v1::ErrorCode::NotFound, "worker has no monitor m9.")),
+        other => panic!("expected an error, got {other:?}"),
+    }
 }

@@ -106,14 +106,14 @@ fn a_reply_is_the_runs_last_text_answering_the_persons_message() {
         entry(3, EntryKind::ToolCall(v1::ToolCall::default()), None),
         entry(4, said("Yes, all green."), None),
     ];
-    assert_eq!(reply(&entries, 1), Some((4, "Yes, all green.".to_owned(), true)));
+    assert_eq!(reply(&entries, 0, 1), Some((4, "Yes, all green.".to_owned(), true)));
     // Nothing new answers the person.
-    assert_eq!(reply(&entries, 3), None);
+    assert_eq!(reply(&entries, 0, 3), None);
     let desk = vec![entry(0, person("Hi", v1::DeviceKind::Desktop), None), entry(1, said("Hello."), Some(0))];
-    assert_eq!(reply(&desk, 0), Some((1, "Hello.".to_owned(), false)));
+    assert_eq!(reply(&desk, 0, 0), Some((1, "Hello.".to_owned(), false)));
     // A run an event started answers nobody.
     let event = vec![entry(0, EntryKind::Event(v1::Event::default()), None), entry(1, said("Done."), None)];
-    assert_eq!(reply(&event, 0), None);
+    assert_eq!(reply(&event, 0, 0), None);
 }
 
 #[test]
@@ -221,8 +221,8 @@ fn a_push_is_sealed_padded_and_counted() {
 fn a_push_waits_while_its_device_or_another_is_in_use() {
     let state = State::default();
     let now = now_ms();
-    let mac = state.connect("mac");
-    let phone = state.connect("phone");
+    let mac = state.connect("mac", "macos");
+    let phone = state.connect("phone", "ios");
     assert!(!state.push_waits("phone", now), "connected, but neither in use");
     phone.set_active(true);
     assert!(state.push_waits("phone", now), "the phone's app is in front");

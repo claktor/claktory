@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:url_launcher/url_launcher.dart' show launchUrl;
 
 import 'android/device_identity.dart';
 import 'backend.dart';
@@ -13,11 +14,13 @@ import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
 import 'links.dart' show confirmPairing, pairingFingerprint;
+import 'pairing.dart' show DeviceNumberField, decideDevice, isDeviceNumber;
 import 'pasted_code.dart';
 import 'mobile/device.dart' show deviceCapabilities;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/metrics.dart' show TypeScale;
 import 'mobile/input.dart' show InputKind;
+import 'mobile/lines.dart' show ActionLine, ControlsLine;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'phone.dart' show pairingProblem;
 import 'rail.dart' show ClaktoriesScope;
@@ -25,6 +28,7 @@ import 'scan_code.dart';
 import 'scope.dart';
 import 'tunnel_client.dart';
 import 'settings_view.dart';
+import 'setup.dart' show downloadMacUrl;
 import 'usage.dart';
 import 'tell_rivet.dart';
 import 'visible_codes.dart' show proseCodes;
@@ -313,6 +317,9 @@ class PairDeviceForm extends StatefulWidget {
 class _PairDeviceFormState extends State<PairDeviceForm> {
   final _name = TextEditingController();
 
+  /// The number typed off the device's screen to allow it (#352 P4).
+  final _number = TextEditingController();
+
   /// What the device is, as the person says: a phone or tablet scans its
   /// code, a computer pastes it.
   var _kind = DeviceKind.DEVICE_KIND_PHONE;
@@ -334,6 +341,7 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
   @override
   void dispose() {
     _name.dispose();
+    _number.dispose();
     // A code lasts only while it's shown: closing ends it, unless it let
     // its device in (then this does nothing).
     final code = _code;
@@ -348,25 +356,27 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
       _deciding = true;
       _error = null;
     });
-    try {
-      if (allow) {
-        await _backend.approveDevice(device.deviceId);
-        _allowed = true;
-      } else {
-        await _backend.denyDevice(device.deviceId);
-      }
+    final error = await decideDevice(
+      _backend,
+      device,
+      allow: allow,
+      number: _number.text,
+      // The device the person just named.
+      stoppedWaiting:
+          '${proseCodes(device.name)} stopped waiting. To add it, make a new '
+          'code.',
+    );
+    if (error == null) {
+      if (allow) _allowed = true;
       widget.close();
-    } on RequestFailure catch (failure) {
-      if (mounted) {
-        setState(
-          () => _error = failure.code == ErrorCode.ERROR_CODE_NOT_FOUND
-              ? '${device.name} stopped waiting. To add it, make a new code.'
-              : failure.message,
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _deciding = false);
+      return;
     }
+    if (!mounted) return;
+    setState(() {
+      _deciding = false;
+      _error = error;
+      _number.clear();
+    });
   }
 
   @override
@@ -374,7 +384,7 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
     final code = _code;
     if (code != null) {
       return ListenableBuilder(
-        listenable: _backend.workspace,
+        listenable: Listenable.merge([_backend.workspace, _number]),
         builder: (context, _) {
           final remote = _backend.workspace.workspace.remote;
           final waiting = remote.pendingDevices
@@ -383,19 +393,30 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
           // The device used the code: let it in, or not.
           if (waiting != null || _deciding || _error != null) {
             final device = waiting ?? PendingDevice(name: _name.text.trim());
+            final ready =
+                waiting != null && !_deciding && isDeviceNumber(_number.text);
             return FormFrame(
               // The name the device gave itself: what reorders text shows
               // by its code (proseCodes, Fugo).
               title: 'Allow ${proseCodes(device.name)} to connect?',
-              body: device.number.isEmpty
-                  ? null
-                  : 'Check that its screen shows ${device.number}.',
+              // Typed off its screen, never shown here (#352 P4): only
+              // someone who can see the device lets it in.
+              body: 'To allow it, type the number its screen shows.',
               error: _error,
-              fields: const [],
+              fields: [
+                Field(
+                  label: 'Number on its screen',
+                  child: DeviceNumberField(
+                    controller: _number,
+                    autofocus: true,
+                    onSubmitted: (_) {
+                      if (ready) _decide(waiting, allow: true);
+                    },
+                  ),
+                ),
+              ],
               submitLabel: 'Allow',
-              onSubmit: waiting == null || _deciding
-                  ? null
-                  : () => _decide(waiting, allow: true),
+              onSubmit: ready ? () => _decide(waiting, allow: true) : null,
               cancelLabel: waiting == null ? 'Close' : "Don't allow",
               onCancel: waiting == null || _deciding
                   ? widget.close
@@ -404,6 +425,7 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
           }
           return PairingCodeView(
             code: code.code,
+            link: code.link,
             device: _name.text.trim(),
             way: pairingWayOf(_kind),
             close: widget.close,
@@ -561,19 +583,28 @@ PairingWay pairingWayOf(DeviceKind kind) => switch (kind) {
   _ => PairingWay.either,
 };
 
+/// What a pairing code's QR code holds (#352 P6): its [link]
+/// (PairingCode.link), which a phone's camera opens in Claktory or its
+/// store, when it's exactly [code] as a link; else [code] itself.
+String pairingQrText(String code, String link) =>
+    link.isNotEmpty && pairLinkCode(link) == code ? link : code;
+
 /// What to do with a new device's code, the [way] its device takes it:
 /// what to do on [device], and the QR code where it helps. [code] is null
-/// until it arrives (its room is kept).
+/// until it arrives (its room is kept); its QR code holds [link] when it
+/// has one ([pairingQrText]).
 class PairingInstructions extends StatefulWidget {
   const PairingInstructions({
     super.key,
     required this.code,
+    this.link = '',
     required this.device,
     required this.way,
     required this.qrSize,
   });
 
   final String? code;
+  final String link;
   final String device;
   final PairingWay way;
   final double qrSize;
@@ -598,7 +629,11 @@ class _PairingInstructionsState extends State<PairingInstructions> {
         Center(
           child: code == null
               ? SizedBox.square(dimension: widget.qrSize)
-              : QrCode(key: ValueKey(code), text: code, size: widget.qrSize),
+              : QrCode(
+                  key: ValueKey(code),
+                  text: pairingQrText(code, widget.link),
+                  size: widget.qrSize,
+                ),
         ),
         // What the other device shows before it connects, to compare.
         if (target != null) ...[
@@ -627,11 +662,18 @@ class _PairingInstructionsState extends State<PairingInstructions> {
       'In Claktory on $device, click Add a Claktory and paste this code.',
       style: body,
     );
+    // Where to get the app first (#352 P6): a Camera can't open the code
+    // without it, and the code runs out meanwhile.
+    final getApp = Padding(
+      padding: const EdgeInsets.only(top: Space.s),
+      child: GetTheApp(computer: widget.way == PairingWay.paste),
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: switch (widget.way) {
         PairingWay.scan => [
           Text('Open Claktory on $device and scan this code.', style: body),
+          getApp,
           const SizedBox(height: Space.l),
           qr,
           const SizedBox(height: Space.l),
@@ -639,6 +681,7 @@ class _PairingInstructionsState extends State<PairingInstructions> {
         ],
         PairingWay.paste => [
           paste,
+          getApp,
           if (_qrShown) ...[
             const SizedBox(height: Space.l),
             qr,
@@ -655,6 +698,7 @@ class _PairingInstructionsState extends State<PairingInstructions> {
         ],
         PairingWay.either => [
           paste,
+          getApp,
           const SizedBox(height: Space.l),
           qr,
           const SizedBox(height: Space.l),
@@ -668,6 +712,46 @@ class _PairingInstructionsState extends State<PairingInstructions> {
   }
 }
 
+/// Where the iPhone and iPad app is: TestFlight now, the App Store once
+/// it's there (a redirect Pericolo keeps, so no app release is needed).
+final iosAppUrl = Uri.parse('https://claktory.com/ios');
+
+/// Where the Android app is: its download page now, Google Play later.
+final androidAppUrl = Uri.parse('https://claktory.com/android');
+
+/// Opens an app's page; tests replace it.
+Future<bool> Function(Uri url) openAppPage = launchUrl;
+
+/// "Don't have the app?", with where to get it (#352 P6): for iPhone and
+/// iPad, and Android, or for a Mac when the new device is a [computer].
+class GetTheApp extends StatelessWidget {
+  const GetTheApp({super.key, this.computer = false});
+
+  final bool computer;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    Widget link(String label, Uri url) =>
+        Button(label: label, onPressed: () => unawaited(openAppPage(url)));
+    return ActionLine(
+      lead: Text(
+        "Don't have the app?",
+        style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
+      ),
+      action: ControlsLine(
+        gap: Space.xs,
+        children: computer
+            ? [link('Get it for Mac', downloadMacUrl)]
+            : [
+                link('iPhone and iPad', iosAppUrl),
+                link('Android', androidAppUrl),
+              ],
+      ),
+    );
+  }
+}
+
 /// A new device's pairing code, shown only this once, since it holds the
 /// device's key: what to do with it on the device, the way it takes it
 /// ([PairingInstructions]), and Copy code, first for a computer.
@@ -675,12 +759,17 @@ class PairingCodeView extends StatefulWidget {
   const PairingCodeView({
     super.key,
     required this.code,
+    this.link = '',
     required this.device,
     this.way = PairingWay.scan,
     required this.close,
   });
 
+  /// What Copy code copies.
   final String code;
+
+  /// The same code as a link, for its QR code (PairingCode.link).
+  final String link;
 
   /// The device it's for, e.g. "Laptop".
   final String device;
@@ -735,6 +824,7 @@ class _PairingCodeViewState extends State<PairingCodeView> {
           const SizedBox(height: Space.s),
           PairingInstructions(
             code: widget.code,
+            link: widget.link,
             device: device,
             way: widget.way,
             qrSize: 240,

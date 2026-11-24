@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
+import 'android/layout.dart';
 import 'mobile/device.dart';
 import 'mobile/platform_policy.dart';
 
@@ -224,8 +225,11 @@ bool isPhoneLayout(BuildContext context) {
   return switch (defaultTargetPlatform) {
     TargetPlatform.iOS when deviceCapabilities.idiom == Idiom.pad =>
       _compactPad(size, MediaQuery.viewPaddingOf(context)),
-    TargetPlatform.iOS ||
-    TargetPlatform.android => size.shortestSide < phoneLayoutWidth,
+    TargetPlatform.iOS => size.shortestSide < phoneLayoutWidth,
+    TargetPlatform.android => androidPhoneLayout(
+      size,
+      phoneWidth: phoneLayoutWidth,
+    ),
     _ => size.width < phoneLayoutWidth,
   };
 }

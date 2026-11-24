@@ -82,7 +82,9 @@ void main() {
     final (server, say) = await pendingServer();
     final backend = backendWith(FakeTunnels(FakeTunnel(server.port)))
       ..deviceKey = ((_) => 'k' * 64)
-      ..connectWithin = const Duration(milliseconds: 300);
+      // Long enough that the PairingPending answering Hello comes in
+      // time on a busy machine, which a 300 ms one sometimes missed.
+      ..connectWithin = const Duration(seconds: 1);
     backend.connectTo(parsePairingCode(_code));
     unawaited(backend.run());
     await until(() => backend.pairing.value != null);
@@ -98,7 +100,7 @@ void main() {
 
     // Well past the welcome timeout, it's still waiting on the same
     // connection.
-    await Future<void>.delayed(const Duration(milliseconds: 800));
+    await Future<void>.delayed(const Duration(milliseconds: 2500));
     expect(backend.pairing.value, isNotNull);
 
     await say(ServerMessage(welcome: Welcome(deviceId: 'd9')));
@@ -216,7 +218,10 @@ void main() {
     );
     expect(find.text('0427'), findsOneWidget);
     // A server has no screen: the command that allows it there, checking
-    // the number, to copy.
+    // the number, to copy, folded away until asked for.
+    expect(find.text('factoryd allow d9 --number 0427'), findsNothing);
+    await tester.tap(find.text('No screen on Studio?'));
+    await pumpFrames(tester);
     expect(find.text('No screen on Studio? Run this there:'), findsOneWidget);
     expect(find.text('factoryd allow d9 --number 0427'), findsOneWidget);
     await tester.tap(find.text('Copy'));

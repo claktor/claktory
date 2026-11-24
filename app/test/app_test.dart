@@ -1,3 +1,4 @@
+import 'package:factory_app/model_select.dart' show ModelSelect;
 import 'package:factory_app/claktory_identity.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/provider_picker.dart';
@@ -151,6 +152,11 @@ Future<Harness> showApp(WidgetTester tester, Workspace snapshot) async {
   await harness.show(tester);
   return harness;
 }
+
+/// Settings → Defaults' model field.
+final _defaultModel = find.byWidgetPredicate(
+  (widget) => widget is ModelSelect && widget.title == 'Default model',
+);
 
 void main() {
   testWidgets('the agent view renders every kind of entry', (tester) async {
@@ -338,7 +344,7 @@ void main() {
     await settle(tester);
 
     await tester.scrollUntilVisible(
-      find.text('Opus 5.5'),
+      _defaultModel,
       200,
       scrollable: find
           .descendant(
@@ -348,7 +354,12 @@ void main() {
           .first,
     );
     await settle(tester);
-    await tester.tap(find.text('Opus 5.5'));
+    // The field names the provider after the model (U3).
+    expect(
+      find.text('Opus 5.5  Anthropic', findRichText: true),
+      findsOneWidget,
+    );
+    await tester.tap(_defaultModel);
     await settle(tester);
     await tester.tap(find.text('GPT-6').last);
     await settle(tester);
@@ -377,11 +388,7 @@ void main() {
           matching: find.byType(Scrollable),
         )
         .first;
-    await tester.scrollUntilVisible(
-      find.text('Opus 5.5'),
-      200,
-      scrollable: settings,
-    );
+    await tester.scrollUntilVisible(_defaultModel, 200, scrollable: settings);
     await settle(tester);
     expect(find.text('Install from a file…'), findsNothing);
 
@@ -404,8 +411,8 @@ void main() {
     await settle(tester);
     expect(find.text('Prompt'), findsOneWidget);
 
-    await tester.ensureVisible(find.text('Opus 5.5').last);
-    await tester.tap(find.text('Opus 5.5').last);
+    await tester.ensureVisible(find.byType(ModelSelect).first);
+    await tester.tap(find.byType(ModelSelect).first);
     await settle(tester);
     await tester.tap(find.text('GPT-6').last);
     await settle(tester);
@@ -921,9 +928,10 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    // It shows at once, and stays in the conversation, not sent.
+    // It shows at once, and stays in the conversation, not sent: yet, as
+    // it goes by itself once the connection is back (#401).
     expect(find.text('run the tests'), findsOneWidget);
-    expect(find.text('Not sent'), findsOneWidget);
+    expect(find.text('Not sent yet'), findsOneWidget);
     EditableText editable() =>
         tester.widget<EditableText>(find.byType(EditableText).first);
     expect(editable().controller.text, '');
@@ -931,7 +939,7 @@ void main() {
     await tester.tap(find.text('Edit'));
     await tester.pump();
     expect(editable().controller.text, 'run the tests');
-    expect(find.text('Not sent'), findsNothing);
+    expect(find.text('Not sent yet'), findsNothing);
   });
 
   testWidgets('new agents go in projects, never the workspace', (tester) async {

@@ -192,6 +192,9 @@ class _ScreenOpenerState extends State<ScreenOpener> {
       case 'usage':
         AppScope.openPage(context, AppPage.usage);
         return true;
+      case 'monitors':
+        AppScope.openPage(context, AppPage.monitors);
+        return true;
       case 'marketplace':
         AppScope.openPage(context, AppPage.marketplace);
         // A tab by its id ("apps"); the Marketplace ignores one it lacks.

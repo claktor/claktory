@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
 import '../identity.dart';
@@ -165,12 +166,25 @@ String _clock(DateTime time) =>
     '${time.hour.toString().padLeft(2, '0')}:'
     '${time.minute.toString().padLeft(2, '0')}';
 
-/// A time on an axis spanning [span]: "14:00" within a day and a half,
-/// "22 Nov" past it.
-String axisTime(DateTime time, Duration span) =>
-    span <= const Duration(hours: 36)
-    ? _clock(time)
-    : '${time.day} ${_months[time.month - 1]}';
+String _two(int n) => n.toString().padLeft(2, '0');
+
+/// A time on an axis spanning [span] with labels [step] apart, as Grafana
+/// writes them: "14:00" within a day, "11/22" for days, "11/22 12:00" for
+/// hours across days, "14:05:30" under a minute.
+String axisTime(DateTime time, Duration span, Duration step) {
+  if (step < const Duration(minutes: 1)) {
+    return '${_clock(time)}:${_two(time.second)}';
+  }
+  final day = '${_two(time.month)}/${_two(time.day)}';
+  if (step >= const Duration(days: 1)) return day;
+  if (span <= const Duration(days: 1)) return _clock(time);
+  return '$day ${_clock(time)}';
+}
+
+/// A time in a chart's tooltip: "2026-11-22 14:00:00".
+String tooltipTime(DateTime time) =>
+    '${time.year}-${_two(time.month)}-${_two(time.day)} '
+    '${_clock(time)}:${_two(time.second)}';
 
 /// The step between a time axis's labels for [span]: a round one (5
 /// minutes, an hour, a day, a week…) giving at most about [most] labels.
@@ -181,6 +195,7 @@ Duration timeStep(Duration span, {int most = 5}) {
     Duration(minutes: 15),
     Duration(minutes: 30),
     Duration(hours: 1),
+    Duration(hours: 2),
     Duration(hours: 3),
     Duration(hours: 6),
     Duration(hours: 12),
@@ -208,14 +223,45 @@ String readoutTime(DateTime time) {
 /// The least a pie's legend keeps beside its donut: a few words.
 const _leastLegend = 96.0;
 
-/// The agent palette's colors in order: series take them one by one.
-const _paletteOrder = [
-  'blue', 'violet', 'green', 'pink', 'teal', 'amber', 'red', 'slate', //
+/// Charts' own palette (IDENTITY, Color): Grafana's classic palette, each
+/// name with its dark-theme and light-theme shade. Series take them in
+/// [chartSeriesOrder]; apps name them, never a value.
+const chartColors = <String, (Color, Color)>{
+  'green': (Color(0xFF73BF69), Color(0xFF56A64B)),
+  'semi-dark-yellow': (Color(0xFFF2CC0C), Color(0xFFE0B400)),
+  'blue': (Color(0xFF5794F2), Color(0xFF3274D9)),
+  'orange': (Color(0xFFFF9830), Color(0xFFFF780A)),
+  'red': (Color(0xFFF2495C), Color(0xFFE02F44)),
+  'purple': (Color(0xFFB877D9), Color(0xFFA352CC)),
+  'yellow': (Color(0xFFFADE2A), Color(0xFFF2CC0C)),
+  'dark-green': (Color(0xFF37872D), Color(0xFF19730E)),
+  'dark-yellow': (Color(0xFFE0B400), Color(0xFFCC9D00)),
+  'dark-blue': (Color(0xFF1F60C4), Color(0xFF1250B0)),
+  'dark-orange': (Color(0xFFFA6400), Color(0xFFE55400)),
+  'dark-red': (Color(0xFFC4162A), Color(0xFFAD0317)),
+  'dark-purple': (Color(0xFF8F3BB8), Color(0xFF7C2EA3)),
+};
+
+/// The order series take [chartColors] in: the six hues, then their darker
+/// shades.
+const chartSeriesOrder = [
+  'green', 'semi-dark-yellow', 'blue', 'orange', 'red', 'purple', //
+  'dark-green', 'dark-yellow', 'dark-blue', 'dark-orange', 'dark-red',
+  'dark-purple',
 ];
 
-/// The [index]th series' color from the agent palette.
-Color paletteColor(int index) =>
-    agentColor(_paletteOrder[index % _paletteOrder.length]);
+/// The chart color [name] in this theme; null for a name it doesn't have.
+Color? chartColor(BuildContext context, String name) {
+  final shades = chartColors[name];
+  if (shades == null) return null;
+  return MediaQuery.platformBrightnessOf(context) == Brightness.dark
+      ? shades.$1
+      : shades.$2;
+}
+
+/// The [index]th series' color: the charts' palette in order.
+Color paletteColor(BuildContext context, int index) =>
+    chartColor(context, chartSeriesOrder[index % chartSeriesOrder.length])!;
 
 /// The color of the agent with [id] in this Claktory, or null when there's
 /// no such agent here.
@@ -252,6 +298,238 @@ double niceStep(double range, {int ticks = 4}) {
       ? 5
       : 10;
   return nice * power;
+}
+
+/// The units a chart reads as Grafana does; any other is words after the
+/// number ("tokens"), and none at all is a plain number.
+const chartUnits = {
+  'none',
+  'short',
+  'percent',
+  'percentunit',
+  'bytes',
+  'ms',
+  's',
+};
+
+/// How many decimals [value] reads well with when none are set: enough for
+/// two or three figures, none for a whole number.
+int autoDecimals(double value) {
+  final size = value.abs();
+  if (size == 0 || !size.isFinite || size == size.roundToDouble()) return 0;
+  final power = (math.log(size) / math.ln10).floor();
+  var decimals = 1 - power;
+  if (size * math.pow(10, decimals) > 2.25) decimals++;
+  return decimals.clamp(0, 10);
+}
+
+/// The decimals an axis's labels take at [step] apart: as many as the
+/// step has (0.25 → 2, 50 → 0).
+int stepDecimals(double step) {
+  for (var decimals = 0; decimals < 10; decimals++) {
+    final scaled = step.abs() * math.pow(10, decimals);
+    if ((scaled - scaled.roundToDouble()).abs() < 1e-6 * math.max(1, scaled)) {
+      return decimals;
+    }
+  }
+  return 10;
+}
+
+/// [value] with [decimals], thousands grouped or not.
+String _fixedNumber(double value, int decimals, {bool group = false}) {
+  var text = value.abs().toStringAsFixed(decimals.clamp(0, 10));
+
+  final negative = value < 0 && double.parse(text) != 0;
+  if (group) {
+    final dot = text.indexOf('.');
+    final whole = dot < 0 ? text : text.substring(0, dot);
+    final out = StringBuffer();
+    for (var i = 0; i < whole.length; i++) {
+      if (i > 0 && (whole.length - i) % 3 == 0) out.write(',');
+      out.write(whole[i]);
+    }
+    if (dot >= 0) out.write(text.substring(dot));
+    text = out.toString();
+  }
+  return negative ? '−$text' : text;
+}
+
+/// [value] in [unit], as a chart writes it: Grafana's units scaled as it
+/// scales them ("1.2 K", "3.4 MiB", "1.5 min", "45%"); other words after
+/// the number, grouped ("12,345 tokens"). [decimals] when set, else
+/// automatic; on an axis ([step], the labels' spacing) as many as the step
+/// needs, and without words of its own unit, short ("12K").
+String chartValue(double value, String unit, {int? decimals, double? step}) {
+  final (number, suffix) = chartValueParts(
+    value,
+    unit,
+    decimals: decimals,
+    step: step,
+  );
+  return '$number$suffix';
+}
+
+/// [chartValue] in two parts: the number, and what follows it (" K", "%",
+/// " tokens"), which a Stat draws smaller.
+(String, String) chartValueParts(
+  double value,
+  String unit, {
+  int? decimals,
+  double? step,
+}) {
+  final axis = step != null;
+  String number(double v, double? at) => _fixedNumber(
+    v,
+    decimals ?? (at != null ? stepDecimals(at) : autoDecimals(v)),
+  );
+  (String, String) scaled(double factor, List<String> names) {
+    var i = 0;
+    var size = value.abs();
+    while (size >= factor && i < names.length - 1) {
+      size /= factor;
+      i++;
+    }
+    final by = math.pow(factor, i).toDouble();
+    return (number(value / by, axis ? step / by : null), names[i]);
+  }
+
+  (String, String) timed(List<(double, String)> steps) {
+    var by = steps.first.$1;
+    var name = steps.first.$2;
+    for (final (size, unitName) in steps) {
+      if (value.abs() >= size) {
+        by = size;
+        name = unitName;
+      }
+    }
+    return (number(value / by, axis ? step / by : null), ' $name');
+  }
+
+  switch (unit) {
+    case 'none':
+      return (number(value, step), '');
+    case 'short':
+      return scaled(1000, const ['', ' K', ' Mil', ' Bil', ' Tri']);
+    case 'percent':
+      return (number(value, step), '%');
+    case 'percentunit':
+      final percent = value * 100;
+      return (
+        _fixedNumber(
+          percent,
+          decimals ?? (axis ? stepDecimals(step * 100) : autoDecimals(percent)),
+        ),
+        '%',
+      );
+    case 'bytes':
+      return scaled(1024, const [' B', ' KiB', ' MiB', ' GiB', ' TiB', ' PiB']);
+    case 'ms':
+      return timed(const [
+        (1, 'ms'),
+        (1000, 's'),
+        (60000, 'min'),
+        (3600000, 'hour'),
+        (86400000, 'day'),
+      ]);
+    case 's':
+      if (value != 0 && value.abs() < 1) {
+        return (number(value * 1000, axis ? step * 1000 : null), ' ms');
+      }
+      return timed(const [
+        (1, 's'),
+        (60, 'min'),
+        (3600, 'hour'),
+        (86400, 'day'),
+        (604800, 'week'),
+        (31536000, 'year'),
+      ]);
+  }
+  if (axis) {
+    if (decimals != null) {
+      return (_fixedNumber(value, decimals, group: true), '');
+    }
+    // Short (K, M, B, T), with as many decimals as the step needs there, so
+    // labels a step apart never read the same ("1.025M" by "1.05M").
+    const names = ['', 'K', 'M', 'B', 'T'];
+    var i = 0;
+    for (var size = value.abs(); size >= 1000 && i < names.length - 1; i++) {
+      size /= 1000;
+    }
+    final by = math.pow(1000, i).toDouble();
+    return (
+      '${_fixedNumber(value / by, stepDecimals(step / by))}${names[i]}',
+      '',
+    );
+  }
+  // As many decimals as Grafana's would show, grouped as Claktory's are.
+  final text = _fixedNumber(
+    value,
+    decimals ?? autoDecimals(value),
+    group: true,
+  );
+  return (text, unit.isEmpty ? '' : ' $unit');
+}
+
+/// How long bars and slices take to move to new data: none with Reduce
+/// motion, or while the window's hidden (a muted ticker would hold them
+/// at the old data until it shows again).
+Duration chartMotion(BuildContext context) =>
+    MediaQuery.disableAnimationsOf(context) ||
+        !TickerMode.valuesOf(context).enabled
+    ? Duration.zero
+    : Motion.base;
+
+/// A value axis fitted to [values] as Grafana fits one: 10% of their
+/// spread past each end, rounded out to a tenth of its order of magnitude,
+/// and kept at zero when the padding alone would cross it. [min] and [max]
+/// set either end instead.
+({double min, double max}) fitRange(
+  Iterable<double> values, {
+  double? min,
+  double? max,
+}) {
+  var low = double.infinity;
+  var high = double.negativeInfinity;
+  for (final value in values) {
+    if (!value.isFinite) continue;
+    low = math.min(low, value);
+    high = math.max(high, value);
+  }
+  if (low > high) {
+    final lo = min ?? (max == null ? 0.0 : max - 1);
+    return (min: lo, max: max ?? lo + 1);
+  }
+  final spread = high - low;
+  final size = spread > 0 ? spread : (high == 0 ? 1.0 : high.abs());
+  final pad = spread > 0 ? spread * 0.1 : size * 0.1;
+  final unit =
+      math.pow(10, (math.log(size) / math.ln10).floor()).toDouble() / 10;
+  var lo = ((low - pad) / unit).floor() * unit;
+  var hi = ((high + pad) / unit).ceil() * unit;
+  if (low >= 0 && lo < 0) lo = 0;
+  if (high <= 0 && hi > 0) hi = 0;
+  lo = min ?? lo;
+  hi = max ?? hi;
+  if (hi <= lo) {
+    if (max == null) {
+      hi = lo + size;
+    } else {
+      lo = hi - size;
+    }
+  }
+  return (min: lo, max: hi);
+}
+
+/// The step between an axis's labels: the least of 1, 2, 2.5 or 5 times a
+/// power of ten that keeps them at least [space] apart over [length].
+double axisStep(double range, double length, {double space = 40}) {
+  if (range <= 0 || !range.isFinite || length <= 0) return 1;
+  final least = range * space / length;
+  final power = math.pow(10, (math.log(least) / math.ln10).floor()).toDouble();
+  for (final nice in const [1.0, 2.0, 2.5, 5.0, 10.0]) {
+    if (nice * power >= least * (1 - 1e-9)) return nice * power;
+  }
+  return 10 * power;
 }
 
 /// One series of a chart: its name and its points, (x as the table has
@@ -344,10 +622,38 @@ chartSeries(
   );
 }
 
+/// The words in a chart panel (IDENTITY's chart palette), one color as
+/// Grafana's are: its title, its axes' labels, its legend's names and its
+/// tooltip.
+Color chartText(BuildContext context) =>
+    MediaQuery.platformBrightnessOf(context) == Brightness.dark
+    ? const Color(0xFFCCCCDC)
+    : const Color(0xFF24292E);
+
+/// A chart's gridlines, as Grafana draws them: one device pixel, a faint
+/// tint of the text over the panel.
+FlLine chartGridLine(BuildContext context) => FlLine(
+  color: MediaQuery.platformBrightnessOf(context) == Brightness.dark
+      ? const Color(0x17F0FAFF)
+      : const Color(0x1F24292E),
+  strokeWidth: 1 / MediaQuery.devicePixelRatioOf(context),
+);
+
+/// A Chart's or Stat's label as Grafana's panel title: 14px, weight 500,
+/// in [chartText].
+TextStyle panelTitle(BuildContext context) => TypeScale.of(context).caption
+    .copyWith(
+      fontSize: 14,
+      height: 1.3,
+      fontWeight: FontWeight.w500,
+      color: chartText(context),
+    );
+
 /// A Chart component: [kind] timeseries, bars, stackedBars, pie or
-/// scatter, of [table]'s columns. Over it a line with its [label] that
-/// reads out what the pointer (or a finger) is on; under it a legend when
-/// there's more than one series, and what was left out.
+/// scatter, of [table]'s columns, in Grafana's default look. Over it its
+/// [label]; under it a legend and what was left out. A time series shows
+/// what the pointer (or a finger) is on in a tooltip; the other kinds read
+/// it out in place of the label.
 class AppChart extends StatefulWidget {
   const AppChart({
     super.key,
@@ -360,6 +666,16 @@ class AppChart extends StatefulWidget {
     this.label = '',
     this.unit = '',
     this.height = 200,
+    this.lineWidth = 1,
+    this.fill = 0,
+    this.points = 'auto',
+    this.pointSize = 5,
+    this.min,
+    this.max,
+    this.decimals,
+    this.legend = true,
+    this.timeFrom,
+    this.timeTo,
   });
 
   final String kind;
@@ -373,8 +689,37 @@ class AppChart extends StatefulWidget {
   /// palette, agent, signal or muted.
   final String color;
   final String label;
+
+  /// One of [chartUnits], or words after the number.
   final String unit;
   final double height;
+
+  /// A time series' lines' width (0–10) and the opacity of the area under
+  /// them (0–100).
+  final double lineWidth;
+  final double fill;
+
+  /// auto (where they're far enough apart to see), always or never.
+  final String points;
+
+  /// A point's diameter.
+  final double pointSize;
+
+  /// The value axis's ends; each fitted to the data when null.
+  final double? min;
+  final double? max;
+
+  /// The decimals values take; automatic when null.
+  final int? decimals;
+
+  /// Whether a legend shows under the chart.
+  final bool legend;
+
+  /// A time series' x axis ends, in milliseconds since 1970: the
+  /// dashboard's time range, as Grafana's panels span it. Rows outside
+  /// it aren't drawn; an end left null comes from the data.
+  final double? timeFrom;
+  final double? timeTo;
 
   @override
   State<AppChart> createState() => _AppChartState();
@@ -386,6 +731,74 @@ class _AppChartState extends State<AppChart> {
 
   /// The bar group or pie slice the pointer is on: the others dim.
   int? _touched;
+
+  /// The one series shown, picked in the legend; null shows them all.
+  int? _isolated;
+
+  /// What a time series' tooltip is on: where the pointer is (or the
+  /// finger was) in the chart, and the series and the point nearest it.
+  ({Offset at, int series, int point})? _tip;
+
+  /// A tap on the point the tooltip shows closes it as it lifts.
+  bool _closing = false;
+
+  /// Whether a finger (or a click) put the tooltip where it is, rather than
+  /// a hovering pointer: it stays, with a close button.
+  bool _pinned = false;
+
+  void _unpin() => setState(() {
+    _tip = null;
+    _pinned = false;
+  });
+
+  /// The page this chart scrolls in, when it does.
+  ScrollPosition? _page;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final page = Scrollable.maybeOf(context, axis: Axis.vertical)?.position;
+    if (page == _page) return;
+    _page?.removeListener(_scrolled);
+    _page = page?..addListener(_scrolled);
+  }
+
+  @override
+  void dispose() {
+    _page?.removeListener(_scrolled);
+    super.dispose();
+  }
+
+  /// The page scrolled under a still pointer: what it pointed at is no
+  /// longer under it, so a hovering pointer's tooltip and readout go until
+  /// it moves again. A finger's (pinned) tooltip moves with its chart.
+  void _scrolled() {
+    final hovering = _tip != null && !_pinned;
+    if (!hovering && _readout == null && _touched == null) return;
+    // A scroll corrected in layout waits for the frame's end.
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scrolled();
+      });
+      return;
+    }
+    setState(() {
+      if (hovering) _tip = null;
+      _readout = null;
+      _touched = null;
+    });
+  }
+
+  /// Whether the [index]th series shows (all, or only the one picked).
+  bool _shown(int index) => _isolated == null || _isolated == index;
+
+  /// A tap on a legend entry shows only its series; another on it, all of
+  /// them again.
+  void _isolate(int index) => setState(() {
+    _isolated = _isolated == index ? null : index;
+    _tip = null;
+  });
 
   void _point(FlTouchEvent event, String? readout, int? touched) {
     final on = event.isInterestedForInteractions ? readout : null;
@@ -471,7 +884,18 @@ class _AppChartState extends State<AppChart> {
               ),
             ),
           ),
-          if (widget.kind != 'pie' && series.length > 1)
+          if (widget.legend &&
+              (widget.kind == 'timeseries' || widget.kind == 'scatter'))
+            _Legend(
+              pills: true,
+              entries: [
+                for (var i = 0; i < series.length; i++)
+                  (_seriesName(context, series[i].name), colors[i]),
+              ],
+              shown: [for (var i = 0; i < series.length; i++) _shown(i)],
+              onTap: series.length > 1 ? _isolate : null,
+            )
+          else if (widget.legend && widget.kind != 'pie' && series.length > 1)
             ExcludeSemantics(
               child: _Legend(
                 entries: [
@@ -516,13 +940,17 @@ class _AppChartState extends State<AppChart> {
     );
   }
 
+  /// The label as Grafana's panel title (14px, 500, `text`); what the
+  /// pointer is on in its place in caption `textMuted`.
   TextStyle _headingStyle(BuildContext context, {bool readout = false}) {
     final palette = Palette.of(context);
-    return TypeScale.of(context).caption.copyWith(
-      color: readout ? palette.textMuted : palette.textFaint,
-      fontWeight: readout ? null : FontWeight.w500,
-      fontFeatures: const [FontFeature.tabularFigures()],
-    );
+    final caption = TypeScale.of(context).caption;
+    return readout
+        ? caption.copyWith(
+            color: palette.textMuted,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          )
+        : panelTitle(context);
   }
 
   Widget _heading(
@@ -543,10 +971,10 @@ class _AppChartState extends State<AppChart> {
   /// series are agents.
   Color _colorOf(BuildContext context, String name, int index) =>
       switch (widget.color) {
-        'agent' => agentIdColor(context, name) ?? paletteColor(index),
+        'agent' => agentIdColor(context, name) ?? paletteColor(context, index),
         'signal' => Palette.of(context).signal,
         'muted' => Palette.of(context).textMuted,
-        _ => paletteColor(index),
+        _ => paletteColor(context, index),
       };
 
   /// A series' name as the person reads it: an agent's name when the
@@ -557,24 +985,48 @@ class _AppChartState extends State<AppChart> {
     return scope?.backend.workspace.agent(name)?.name ?? name;
   }
 
-  String _value(double value) => widget.unit.isEmpty
-      ? fullNumber(value)
-      : '${fullNumber(value)} ${widget.unit}';
+  String _value(double value) =>
+      chartValue(value, widget.unit, decimals: widget.decimals);
 
   /// How much bigger than at the standard size the axes' words are drawn
   /// (the text size, up to [maxAxisTextScale]), for the room they're given.
   double _axisScale(BuildContext context) =>
       MediaQuery.textScalerOf(context)
           .clamp(maxScaleFactor: maxAxisTextScale)
-          .scale(11) /
-      11;
+          .scale(12) /
+      12;
 
+  /// Axis labels: Grafana's 12px, in [chartText].
   TextStyle _axis(BuildContext context) =>
       TypeScale.of(context).caption.copyWith(
-        color: Palette.of(context).textFaint,
-        fontSize: 11,
+        color: chartText(context),
+        fontSize: 12,
+        height: 1.2,
         fontFeatures: const [FontFeature.tabularFigures()],
       );
+
+  /// How tall a line of axis words is, at the axes' text size.
+  double _axisLineHeight(BuildContext context) =>
+      (MediaQuery.textScalerOf(context)
+                  .clamp(maxScaleFactor: maxAxisTextScale)
+                  .scale(12) *
+              1.2)
+          .ceilToDouble() +
+      2;
+
+  /// How wide [text] is drawn on an axis, at the axes' text size.
+  double _axisWidth(BuildContext context, String text) {
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: _axis(context)),
+      textScaler: MediaQuery.textScalerOf(context)
+          .clamp(maxScaleFactor: maxAxisTextScale),
+      textDirection: Directionality.of(context),
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width;
+  }
 
   FlGridData _grid(Palette palette, double step) => FlGridData(
     drawVerticalLine: false,
@@ -609,6 +1061,9 @@ class _AppChartState extends State<AppChart> {
 
   static const _none = AxisTitles();
 
+  /// Between a scatter's y axis name and its labels.
+  static const _nameGap = 14.0;
+
   /// The value axis's bounds: from 0 (or below, for negatives) to a step
   /// past the largest.
   ({double min, double max, double step}) _range(Iterable<double> values) {
@@ -632,15 +1087,17 @@ class _AppChartState extends State<AppChart> {
     List<ChartSeries> series,
     List<Color> colors,
   ) {
-    final palette = Palette.of(context);
     final lines = <List<FlSpot>>[];
+    final (start, end) = (widget.timeFrom, widget.timeTo);
     var first = double.infinity;
     var last = double.negativeInfinity;
     for (final one in series) {
       final spots = <FlSpot>[
         for (final (at, value) in one.points)
           if (cellTime(at) case final time?)
-            FlSpot(time.millisecondsSinceEpoch.toDouble(), value),
+            if (time.millisecondsSinceEpoch.toDouble() case final x
+                when x >= (start ?? x) && x <= (end ?? x))
+              FlSpot(x, value),
       ]..sort((a, b) => a.x.compareTo(b.x));
       for (final spot in spots) {
         first = math.min(first, spot.x);
@@ -649,118 +1106,233 @@ class _AppChartState extends State<AppChart> {
       lines.add(spots);
     }
     if (first > last) return null;
+    first = start ?? first;
+    last = end ?? last;
     if (first == last) {
       first -= 3600000;
       last += 3600000;
     }
     final span = Duration(milliseconds: (last - first).round());
-    final range = _range([
-      for (final spots in lines)
-        for (final spot in spots) spot.y,
-    ]);
-    String timeOf(double x) =>
-        readoutTime(DateTime.fromMillisecondsSinceEpoch(x.round()));
-    // Time labels where there's room for them, at their size: about one
-    // per 64px of the standard size, at most five.
+    // The value axis fits the series shown.
+    final range = fitRange(
+      [
+        for (var i = 0; i < lines.length; i++)
+          if (_shown(i))
+            for (final spot in lines[i]) spot.y,
+      ],
+      min: widget.min,
+      max: widget.max,
+    );
+    // Time steps fall on the local clock's hours and days, not UTC's.
+    final local = DateTime.fromMillisecondsSinceEpoch(first.round())
+        .timeZoneOffset
+        .inMilliseconds
+        .toDouble();
+    final scale = _axisScale(context);
+    final timeRoom = 22 * scale;
     final chart = LayoutBuilder(
       builder: (context, constraints) {
-        final room = constraints.maxWidth - 40 * _axisScale(context);
-        final most = (room / (64 * _axisScale(context))).floor().clamp(1, 5);
-        final step = timeStep(span, most: most).inMilliseconds.toDouble();
-        return LineChart(
-          duration: Motion.base,
-          LineChartData(
-            minX: first,
-            maxX: last,
-            minY: range.min,
-            maxY: range.max,
-            gridData: _grid(palette, range.step),
-            borderData: _border(palette),
-            titlesData: FlTitlesData(
-              topTitles: _none,
-              rightTitles: _none,
-              leftTitles: _valueAxis(context, range.step),
-              bottomTitles: AxisTitles(
-                sideTitles: SideTitles(
-                  showTitles: true,
-                  reservedSize: 22 * _axisScale(context),
-                  interval: step,
-                  getTitlesWidget: (value, meta) {
-                    // fl_chart puts labels on the step's multiples, and adds
-                    // both ends: those only when they fall on one too.
-                    final off = value % step;
-                    final onStep = off < step * 0.01 || off > step * 0.99;
-                    if ((value == meta.min || value == meta.max) && !onStep) {
-                      return const SizedBox.shrink();
-                    }
-                    return SideTitleWidget(
-                      meta: meta,
-                      fitInside: SideTitleFitInsideData.fromTitleMeta(meta),
-                      child: Text(
-                        axisTime(
-                          DateTime.fromMillisecondsSinceEpoch(value.round()),
-                          span,
-                        ),
-                        maxLines: 1,
-                        softWrap: false,
-                        style: _axis(context),
-                      ),
-                    );
-                  },
+        final plotHeight = math.max(1.0, widget.height - timeRoom);
+        final step = axisStep(range.max - range.min, plotHeight);
+        String valueLabel(double value) => chartValue(
+          value,
+          widget.unit,
+          decimals: widget.decimals,
+          step: step,
+        );
+        // The value axis as wide as its widest label.
+        var widest = 0.0;
+        for (
+          var value = (range.min / step).ceil() * step;
+          value <= range.max + step * 1e-6;
+          value += step
+        ) {
+          widest = math.max(widest, _axisWidth(context, valueLabel(value)));
+        }
+        final valueRoom = widest.ceilToDouble() + Space.s;
+        final plotWidth = math.max(1.0, constraints.maxWidth - valueRoom);
+        // Time labels as far apart as the widest takes, and some.
+        final sample = axisTime(
+          DateTime(2026, 12, 28, 23, 58, 58),
+          span,
+          timeStep(span),
+        );
+        // About a label's width and a 12pt gap apart, as Grafana's are.
+        final half = _axisWidth(context, sample) / 2;
+        final apart = half * 2 + 12 * scale;
+        final most = (plotWidth / apart).floor().clamp(1, 12);
+        final time = timeStep(span, most: most);
+        final every = time.inMilliseconds.toDouble();
+        // Points where they're far enough apart to see, as Grafana's
+        // "auto": at least two of their own widths between them.
+        bool dotted(List<FlSpot> spots) => switch (widget.points) {
+          'always' => true,
+          'never' => spots.length == 1,
+          _ =>
+            spots.length == 1 ||
+                plotWidth *
+                        (spots.last.x - spots.first.x) /
+                        (last - first) /
+                        (spots.length - 1) >=
+                    widget.pointSize * 2,
+        };
+        final held = _tip;
+        // A tooltip on a point the data no longer has goes.
+        final tip =
+            held != null &&
+                held.series < lines.length &&
+                held.point < lines[held.series].length &&
+                _shown(held.series)
+            ? held
+            : null;
+        bool onStep(double value, double base, double interval) {
+          final off = (value - base) % interval;
+          return off < interval * 0.01 || off > interval * 0.99;
+        }
+
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            // Grafana redraws on new data, with no tween: nor does a
+            // muted ticker (a hidden window) leave the old line drawn.
+            LineChart(
+              duration: Duration.zero,
+              LineChartData(
+                minX: first,
+                maxX: last,
+                minY: range.min,
+                maxY: range.max,
+                baselineX: -local,
+                gridData: FlGridData(
+                  horizontalInterval: step,
+                  verticalInterval: every,
+                  getDrawingHorizontalLine: (_) => chartGridLine(context),
+                  getDrawingVerticalLine: (_) => chartGridLine(context),
                 ),
-              ),
-            ),
-            lineBarsData: [
-              for (var i = 0; i < lines.length; i++)
-                LineChartBarData(
-                  spots: lines[i],
-                  color: colors[i],
-                  barWidth: 1.5,
-                  isStrokeCapRound: true,
-                  dotData: FlDotData(show: lines[i].length == 1),
-                  belowBarData: BarAreaData(
-                    show: lines.length == 1,
-                    color: colors[i].withValues(alpha: 0.08),
-                  ),
-                ),
-            ],
-            lineTouchData: LineTouchData(
-              touchSpotThreshold: double.infinity,
-              touchTooltipData: LineTouchTooltipData(
-                getTooltipItems: (spots) => [for (final _ in spots) null],
-              ),
-              getTouchedSpotIndicator: (bar, indexes) => [
-                for (final _ in indexes)
-                  TouchedSpotIndicatorData(
-                    FlLine(color: palette.textFaint, strokeWidth: 1),
-                    FlDotData(
-                      getDotPainter: (spot, percent, bar, index) =>
-                          FlDotCirclePainter(
-                            radius: 3,
-                            color: bar.color ?? palette.signal,
-                            strokeWidth: 1.5,
-                            strokeColor: palette.canvas,
+                borderData: FlBorderData(show: false),
+                titlesData: FlTitlesData(
+                  topTitles: _none,
+                  rightTitles: _none,
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: valueRoom,
+                      interval: step,
+                      getTitlesWidget: (value, meta) {
+                        if (!onStep(value, 0, step)) {
+                          return const SizedBox.shrink();
+                        }
+                        return SideTitleWidget(
+                          meta: meta,
+                          space: Space.s,
+                          fitInside: SideTitleFitInsideData.fromTitleMeta(meta),
+                          child: Text(
+                            valueLabel(value),
+                            maxLines: 1,
+                            softWrap: false,
+                            style: _axis(context),
                           ),
+                        );
+                      },
                     ),
                   ),
-              ],
-              touchCallback: (event, response) {
-                final spots = response?.lineBarSpots;
-                if (spots == null || spots.isEmpty) {
-                  return _point(event, null, null);
-                }
-                final named = series.length > 1;
-                final readout = [
-                  timeOf(spots.first.x),
-                  for (final spot in spots)
-                    named
-                        ? '${_seriesName(context, series[spot.barIndex].name)} ${_value(spot.y)}'
-                        : _value(spot.y),
-                ].join(' · ');
-                _point(event, readout, null);
-              },
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: timeRoom,
+                      interval: every,
+                      getTitlesWidget: (value, meta) {
+                        // On a step, centred under it (one near the left
+                        // has the value axis's room). One too near the right
+                        // end to be is drawn inside it, as Grafana's last
+                        // is, while that leaves it clear of the one before.
+                        final x = (value - first) / (last - first) * plotWidth;
+                        final shift = half - (plotWidth - x);
+                        final between = every / (last - first) * plotWidth;
+                        if (!onStep(value, -local, every) ||
+                            (shift > 0 && between - shift < half * 2 + 2) ||
+                            x + valueRoom < half) {
+                          return const SizedBox.shrink();
+                        }
+                        return SideTitleWidget(
+                          meta: meta,
+                          fitInside: shift > 0
+                              ? SideTitleFitInsideData.fromTitleMeta(
+                                  meta,
+                                  distanceFromEdge: 0,
+                                )
+                              : SideTitleFitInsideData.disable(),
+                          child: Text(
+                            axisTime(
+                              DateTime.fromMillisecondsSinceEpoch(
+                                value.round(),
+                              ),
+                              span,
+                              time,
+                            ),
+                            maxLines: 1,
+                            softWrap: false,
+                            style: _axis(context),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                lineBarsData: [
+                  for (var i = 0; i < lines.length; i++)
+                    LineChartBarData(
+                      show: _shown(i),
+                      spots: lines[i],
+                      color: colors[i],
+                      barWidth: widget.lineWidth,
+                      isStrokeCapRound: true,
+                      isStrokeJoinRound: true,
+                      dotData: FlDotData(
+                        show: dotted(lines[i]),
+                        getDotPainter: (spot, percent, bar, index) =>
+                            FlDotCirclePainter(
+                              radius: widget.pointSize / 2,
+                              color: colors[i],
+                              strokeWidth: 0,
+                            ),
+                      ),
+                      belowBarData: BarAreaData(
+                        show: widget.fill > 0,
+                        color: colors[i].withValues(alpha: widget.fill / 100),
+                      ),
+                    ),
+                ],
+                lineTouchData: LineTouchData(
+                  handleBuiltInTouches: false,
+                  touchSpotThreshold: double.infinity,
+                  touchCallback: (event, response) =>
+                      _touchLine(event, response, lines),
+                ),
+              ),
             ),
-          ),
+            if (tip != null)
+              ..._tipLayer(
+                plot: Rect.fromLTWH(valueRoom, 0, plotWidth, plotHeight),
+                point: Offset(
+                  (lines[tip.series][tip.point].x - first) / (last - first),
+                  (range.max - lines[tip.series][tip.point].y) /
+                      (range.max - range.min),
+                ),
+                color: colors[tip.series],
+                tooltip: _Tooltip(
+                  time: tooltipTime(
+                    DateTime.fromMillisecondsSinceEpoch(
+                      lines[tip.series][tip.point].x.round(),
+                    ),
+                  ),
+                  name: _seriesName(context, series[tip.series].name),
+                  color: colors[tip.series],
+                  value: _value(lines[tip.series][tip.point].y),
+                  onClose: _pinned ? _unpin : null,
+                ),
+              ),
+          ],
         );
       },
     );
@@ -775,6 +1347,162 @@ class _AppChartState extends State<AppChart> {
           '${_seriesName(context, series[i].name)}: latest ${_value(lines[i].last.y)}.',
     ].join(' ');
     return _Drawn(chart, summary);
+  }
+
+  /// What marks the point a tooltip is on, as Grafana's cursor does: a
+  /// dashed crosshair through it across [plot] (where the chart draws), the
+  /// point larger in its [color] with a halo; then the tooltip beside it.
+  /// [point] is where in [plot], as fractions of its width and height.
+  List<Widget> _tipLayer({
+    required Rect plot,
+    required Offset point,
+    required Color color,
+    required _Tooltip tooltip,
+  }) => [
+    Positioned.fromRect(
+      rect: plot,
+      child: IgnorePointer(
+        child: CustomPaint(
+          painter: _Crosshair(
+            at: point,
+            color: color,
+            line: MediaQuery.platformBrightnessOf(context) == Brightness.dark
+                ? const Color(0xFF607D8B)
+                : const Color(0xFF8E9BA6),
+            width: 1 / MediaQuery.devicePixelRatioOf(context),
+          ),
+        ),
+      ),
+    ),
+    // Beside the point rather than under the finger, so neither the finger
+    // nor the box hides it.
+    Positioned.fill(
+      child: CustomSingleChildLayout(
+        delegate: _TooltipPlace(
+          Offset(
+            plot.left + point.dx * plot.width,
+            plot.top + point.dy * plot.height,
+          ),
+        ),
+        child: tooltip,
+      ),
+    ),
+  ];
+
+  /// A time series' tooltip follows the pointer, on the series nearest it
+  /// (Grafana's single mode). A mouse's goes as it leaves; a finger's stays
+  /// once lifted, so what it was on can be read, until a tap on the same
+  /// point closes it.
+  void _touchLine(
+    FlTouchEvent event,
+    LineTouchResponse? response,
+    List<List<FlSpot>> lines,
+  ) {
+    ({Offset at, int series, int point})? next;
+    final spots = [
+      for (final spot in response?.lineBarSpots ?? const <TouchLineBarSpot>[])
+        if (_shown(spot.barIndex)) spot,
+    ];
+    if (response != null && spots.isNotEmpty) {
+      final (x, y) = (
+        response.touchChartCoordinate.dx,
+        response.touchChartCoordinate.dy,
+      );
+      // The time under the pointer first, as Grafana's: only the series
+      // with a point at the nearest time (a series' lone point far off
+      // in time doesn't win on its value), then the nearest value.
+      var first = double.infinity;
+      var last = double.negativeInfinity;
+      for (final line in lines) {
+        if (line.isEmpty) continue;
+        first = math.min(first, line.first.x);
+        last = math.max(last, line.last.x);
+      }
+      final closest = spots.map((spot) => (spot.x - x).abs()).reduce(math.min);
+      final slack = closest + (last - first) * 0.005;
+      final atTime = [
+        for (final spot in spots)
+          if ((spot.x - x).abs() <= slack) spot,
+      ];
+      var near = atTime.first;
+      for (final spot in atTime) {
+        if ((spot.y - y).abs() < (near.y - y).abs()) near = spot;
+      }
+      next = (
+        at: response.touchLocation,
+        series: near.barIndex,
+        point: near.spotIndex,
+      );
+    }
+    // Between a line chart's points the nearest still shows.
+    _moveTip(event, next, keepOnNothing: true);
+  }
+
+  /// Moves the tooltip to [next] (what the pointer or finger is on), or
+  /// away. A mouse's goes as it leaves; a finger's stays once lifted, until
+  /// a tap on the same point closes it (or, unless [keepOnNothing], a tap
+  /// on nothing).
+  void _moveTip(
+    FlTouchEvent event,
+    ({Offset at, int series, int point})? next, {
+    bool keepOnNothing = false,
+  }) {
+    final tip = _tip;
+    final hover = event is FlPointerHoverEvent || event is FlPointerEnterEvent;
+    void show() {
+      if (next == null ||
+          (tip != null &&
+              tip.series == next.series &&
+              tip.point == next.point &&
+              tip.at == next.at &&
+              _pinned == !hover)) {
+        return;
+      }
+      setState(() {
+        _tip = next;
+        _pinned = !hover;
+      });
+    }
+
+    switch (event) {
+      // A hovering pointer's goes as it leaves; a pinned one stays.
+      case FlPointerExitEvent():
+        if (tip != null && !_pinned) setState(() => _tip = null);
+      // A press shows nothing yet: it may become a scroll of the page,
+      // which must leave no tooltip. It only decides whether its tap, if
+      // it is one, closes the tooltip (on its point, or on nothing).
+      case FlPanDownEvent():
+        _closing =
+            tip != null &&
+            (next == null
+                ? !keepOnNothing
+                : tip.series == next.series && tip.point == next.point);
+      case FlTapUpEvent():
+        if (_closing) {
+          _closing = false;
+          _unpin();
+        } else {
+          show();
+        }
+      // A finger moving on the chart (the chart, not the page, took the
+      // drag) or holding still on it shows what it's on; so does a
+      // hovering pointer, unless a click pinned the tooltip.
+      case FlPanStartEvent() ||
+          FlPanUpdateEvent() ||
+          FlLongPressStart() ||
+          FlLongPressMoveUpdate():
+        _closing = false;
+        show();
+      case FlPointerHoverEvent() || FlPointerEnterEvent():
+        if (_pinned) return;
+        if (next == null) {
+          if (!keepOnNothing && tip != null) setState(() => _tip = null);
+          return;
+        }
+        show();
+      default:
+        return;
+    }
   }
 
   _Drawn? _bars(
@@ -839,7 +1567,7 @@ class _AppChartState extends State<AppChart> {
           // Labels where there's room for them: every one, or every few.
           final every = math.max(1, (56 * scale / room).ceil());
           return BarChart(
-            duration: Motion.base,
+            duration: chartMotion(context),
             BarChartData(
               minY: range.min,
               maxY: range.max,
@@ -1045,7 +1773,7 @@ class _AppChartState extends State<AppChart> {
             SizedBox.square(
               dimension: donut,
               child: PieChart(
-                duration: Motion.base,
+                duration: chartMotion(context),
                 PieChartData(
                   startDegreeOffset: -90,
                   sectionsSpace: 1,
@@ -1115,86 +1843,262 @@ class _AppChartState extends State<AppChart> {
     List<ChartSeries> series,
     List<Color> colors,
   ) {
-    final palette = Palette.of(context);
-    final spots = <ScatterSpot>[];
-    final whose = <int>[];
-    for (var s = 0; s < series.length; s++) {
-      for (final (at, value) in series[s].points) {
-        final x = cellNumber(at);
-        if (x == null) continue;
-        spots.add(
-          ScatterSpot(
-            x,
-            value,
-            dotPainter: FlDotCirclePainter(
-              radius: 3,
-              color: colors[s],
-              strokeWidth: 0,
-            ),
-          ),
+    // Each series' points, as numbers.
+    final points = [
+      for (final one in series)
+        <(double, double)>[
+          for (final (at, value) in one.points)
+            if (cellNumber(at) case final x?) (x, value),
+        ],
+    ];
+    if (points.every((one) => one.isEmpty)) return null;
+    final shown = [
+      for (var s = 0; s < points.length; s++)
+        if (_shown(s)) ...points[s],
+    ];
+    final ys = fitRange(
+      [for (final (_, y) in shown) y],
+      min: widget.min,
+      max: widget.max,
+    );
+    final xs = fitRange([for (final (x, _) in shown) x]);
+    final table = widget.table!;
+    final xName = widget.x ?? table.columns.first;
+    // The y axis's column: the one named, the only series' own, or (long)
+    // the first number column that's neither x nor the series'.
+    final seriesBy = widget.seriesBy;
+    final yName = widget.y.length == 1
+        ? widget.y.single
+        : seriesBy == null
+        ? (series.length == 1 ? series.single.name : '')
+        : [
+                for (var i = 0; i < table.columns.length; i++)
+                  if (table.columns[i] != xName &&
+                      table.columns[i] != seriesBy &&
+                      table.numeric(i))
+                    table.columns[i],
+              ].firstOrNull ??
+              '';
+    // Each axis named in its column's name, as Grafana's XY chart does.
+    final nameRoom = _axisLineHeight(context);
+    Widget axisName(String name) => Text(
+      name,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: _axis(context),
+    );
+    final scale = _axisScale(context);
+    final xRoom = 22 * scale;
+    final chart = LayoutBuilder(
+      builder: (context, constraints) {
+        final plotHeight = math.max(1.0, widget.height - xRoom - nameRoom);
+        final yStep = axisStep(ys.max - ys.min, plotHeight);
+        String yLabel(double value) => chartValue(
+          value,
+          widget.unit,
+          decimals: widget.decimals,
+          step: yStep,
         );
-        whose.add(s);
-      }
-    }
-    if (spots.isEmpty) return null;
-    final ys = _range([for (final spot in spots) spot.y]);
-    final xs = _range([for (final spot in spots) spot.x]);
-    final chart = ScatterChart(
-      duration: Motion.base,
-      ScatterChartData(
-        scatterSpots: spots,
-        minX: xs.min,
-        maxX: xs.max,
-        minY: ys.min,
-        maxY: ys.max,
-        gridData: _grid(palette, ys.step),
-        borderData: _border(palette),
-        titlesData: FlTitlesData(
-          topTitles: _none,
-          rightTitles: _none,
-          leftTitles: _valueAxis(context, ys.step),
-          bottomTitles: AxisTitles(
-            sideTitles: SideTitles(
-              showTitles: true,
-              reservedSize: 22 * _axisScale(context),
-              interval: xs.step,
-              getTitlesWidget: (value, meta) => SideTitleWidget(
-                meta: meta,
-                child: Text(
-                  shortNumber(value),
-                  maxLines: 1,
-                  softWrap: false,
-                  style: _axis(context),
+        var widest = 0.0;
+        for (
+          var value = (ys.min / yStep).ceil() * yStep;
+          value <= ys.max + yStep * 1e-6;
+          value += yStep
+        ) {
+          widest = math.max(widest, _axisWidth(context, yLabel(value)));
+        }
+        final valueRoom = widest.ceilToDouble() + Space.s;
+        final plotWidth = math.max(
+          1.0,
+          constraints.maxWidth -
+              valueRoom -
+              (yName.isEmpty ? 0 : nameRoom + _nameGap),
+        );
+        // x labels as far apart as the widest takes, and some.
+        final guess = axisStep(xs.max - xs.min, plotWidth, space: 64 * scale);
+        String xLabel(double value, double step) =>
+            chartValue(value, '', step: step);
+        var xWidest = 0.0;
+        for (final value in [xs.min, xs.max, xs.min + guess]) {
+          xWidest = math.max(
+            xWidest,
+            _axisWidth(context, xLabel(value, guess)),
+          );
+        }
+        final xStep = axisStep(
+          xs.max - xs.min,
+          plotWidth,
+          space: xWidest + 24 * scale,
+        );
+        final half = xWidest / 2;
+        bool onStep(double value, double step) {
+          final off = value % step;
+          return off.abs() < step * 0.01 || (step - off).abs() < step * 0.01;
+        }
+
+        final held = _tip;
+        final tip =
+            held != null &&
+                held.series < points.length &&
+                held.point < points[held.series].length &&
+                _shown(held.series)
+            ? held
+            : null;
+        // The drawn spots, and whose each is.
+        final spots = <ScatterSpot>[];
+        final whose = <(int, int)>[];
+        for (var s = 0; s < points.length; s++) {
+          if (!_shown(s)) continue;
+          for (final (k, (x, y)) in points[s].indexed) {
+            spots.add(
+              ScatterSpot(
+                x,
+                y,
+                // pointSize across, its 1px ring inside it.
+                dotPainter: FlDotCirclePainter(
+                  radius: math.max(0.5, widget.pointSize / 2 - 1),
+                  color: colors[s].withValues(alpha: 0.5),
+                  strokeWidth: 1,
+                  strokeColor: colors[s],
+                ),
+              ),
+            );
+            whose.add((s, k));
+          }
+        }
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            ScatterChart(
+              duration: Duration.zero,
+              ScatterChartData(
+                scatterSpots: spots,
+                minX: xs.min,
+                maxX: xs.max,
+                minY: ys.min,
+                maxY: ys.max,
+                gridData: FlGridData(
+                  horizontalInterval: yStep,
+                  verticalInterval: xStep,
+                  getDrawingHorizontalLine: (_) => chartGridLine(context),
+                  getDrawingVerticalLine: (_) => chartGridLine(context),
+                ),
+                borderData: FlBorderData(show: false),
+                titlesData: FlTitlesData(
+                  topTitles: _none,
+                  rightTitles: _none,
+                  leftTitles: AxisTitles(
+                    // Turned up the left, its foot (the bottom, turned)
+                    // well clear of the labels, as Grafana's sits by the
+                    // panel's edge.
+                    axisNameWidget: yName.isEmpty
+                        ? null
+                        : Padding(
+                            padding: const EdgeInsets.only(bottom: _nameGap),
+                            child: axisName(yName),
+                          ),
+                    axisNameSize: yName.isEmpty ? 16 : nameRoom + _nameGap,
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: valueRoom,
+                      interval: yStep,
+                      getTitlesWidget: (value, meta) {
+                        if (!onStep(value, yStep)) {
+                          return const SizedBox.shrink();
+                        }
+                        return SideTitleWidget(
+                          meta: meta,
+                          space: Space.s,
+                          fitInside: SideTitleFitInsideData.fromTitleMeta(meta),
+                          child: Text(
+                            yLabel(value),
+                            maxLines: 1,
+                            softWrap: false,
+                            style: _axis(context),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  bottomTitles: AxisTitles(
+                    axisNameWidget: axisName(xName),
+                    axisNameSize: nameRoom,
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: xRoom,
+                      interval: xStep,
+                      getTitlesWidget: (value, meta) {
+                        final x =
+                            (value - xs.min) / (xs.max - xs.min) * plotWidth;
+                        if (!onStep(value, xStep) ||
+                            plotWidth - x < half ||
+                            x + valueRoom < half) {
+                          return const SizedBox.shrink();
+                        }
+                        return SideTitleWidget(
+                          meta: meta,
+                          child: Text(
+                            xLabel(value, xStep),
+                            maxLines: 1,
+                            softWrap: false,
+                            style: _axis(context),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                scatterTouchData: ScatterTouchData(
+                  handleBuiltInTouches: false,
+                  touchSpotThreshold: math.max(12, widget.pointSize),
+                  touchCallback: (event, response) {
+                    final i = response?.touchedSpot?.spotIndex;
+                    _moveTip(
+                      event,
+                      i == null || i < 0 || i >= whose.length
+                          ? null
+                          : (
+                              at: response!.touchLocation,
+                              series: whose[i].$1,
+                              point: whose[i].$2,
+                            ),
+                    );
+                  },
                 ),
               ),
             ),
-          ),
-        ),
-        scatterTouchData: ScatterTouchData(
-          touchTooltipData: ScatterTouchTooltipData(
-            getTooltipItems: (_) => null,
-          ),
-          touchCallback: (event, response) {
-            final i = response?.touchedSpot?.spotIndex;
-            if (i == null || i < 0 || i >= spots.length) {
-              return _point(event, null, null);
-            }
-            final spot = spots[i];
-            final name = series.length > 1
-                ? '${_seriesName(context, series[whose[i]].name)} · '
-                : '';
-            _point(
-              event,
-              '$name${fullNumber(spot.x)}, ${_value(spot.y)}',
-              null,
-            );
-          },
-        ),
-      ),
+            if (tip != null)
+              ..._tipLayer(
+                plot: Rect.fromLTWH(
+                  valueRoom + (yName.isEmpty ? 0 : nameRoom + _nameGap),
+                  0,
+                  plotWidth,
+                  plotHeight,
+                ),
+                point: Offset(
+                  (points[tip.series][tip.point].$1 - xs.min) /
+                      (xs.max - xs.min),
+                  (ys.max - points[tip.series][tip.point].$2) /
+                      (ys.max - ys.min),
+                ),
+                color: colors[tip.series],
+                tooltip: _Tooltip(
+                  time:
+                      '$xName ${chartValue(points[tip.series][tip.point].$1, '')}',
+                  name: _seriesName(context, series[tip.series].name),
+                  color: colors[tip.series],
+                  value: _value(points[tip.series][tip.point].$2),
+                  onClose: _pinned ? _unpin : null,
+                ),
+              ),
+          ],
+        );
+      },
     );
+    final count = points.fold(0, (sum, one) => sum + one.length);
     return _Drawn(
       chart,
-      'Scatter chart, ${spots.length} points'
+      'Scatter chart, $count points'
       '${series.length > 1 ? ' in ${series.length} series' : ''}.',
     );
   }
@@ -1210,41 +2114,85 @@ class _Drawn {
   final List<String> left;
 }
 
-/// A legend: each series' 8px dot in its color and its name in caption
-/// `textMuted`, in a wrapping row (or a column, beside a pie).
+/// A legend: each series' marker in its color and its name in caption
+/// `textMuted`, in a wrapping row (or a column, beside a pie). The marker
+/// is an 8px dot, or with [pills] Grafana's 14×4px pill. With [onTap] an
+/// entry is a button picking its series; a series not [shown] is faint.
 class _Legend extends StatelessWidget {
-  const _Legend({required this.entries, this.vertical = false});
+  const _Legend({
+    required this.entries,
+    this.vertical = false,
+    this.pills = false,
+    this.shown,
+    this.onTap,
+  });
 
   final List<(String, Color)> entries;
   final bool vertical;
+  final bool pills;
+  final List<bool>? shown;
+  final void Function(int index)? onTap;
 
   @override
   Widget build(BuildContext context) {
+    final palette = Palette.of(context);
     final style = TypeScale.of(context).caption.copyWith(
-      color: Palette.of(context).textMuted,
+      color: pills ? chartText(context) : palette.textMuted,
       fontFeatures: const [FontFeature.tabularFigures()],
     );
-    final items = [
-      for (final (name, color) in entries)
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          spacing: Space.xs + 2,
-          children: [
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+    final tap = onTap;
+    final items = <Widget>[
+      for (final (i, (name, color)) in entries.indexed)
+        () {
+          final on = shown == null || shown![i];
+          Widget item = Opacity(
+            opacity: on ? 1 : 0.4,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              spacing: Space.xs + 2,
+              children: [
+                Container(
+                  width: pills ? 14 : 8,
+                  height: pills ? 4 : 8,
+                  decoration: BoxDecoration(
+                    color: color,
+                    borderRadius: pills ? BorderRadius.circular(2) : null,
+                    shape: pills ? BoxShape.rectangle : BoxShape.circle,
+                  ),
+                ),
+                Flexible(
+                  child: Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: style,
+                  ),
+                ),
+              ],
             ),
-            Flexible(
-              child: Text(
-                name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: style,
+          );
+          if (tap != null) {
+            item = Semantics(
+              button: true,
+              selected:
+                  on && shown != null && shown!.where((s) => s).length == 1,
+              child: MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => tap(i),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: Space.xs),
+                    child: item,
+                  ),
+                ),
               ),
-            ),
-          ],
-        ),
+            );
+          } else if (pills) {
+            item = ExcludeSemantics(child: item);
+          }
+          return item;
+        }(),
     ];
     return vertical
         ? Column(
@@ -1253,13 +2201,321 @@ class _Legend extends StatelessWidget {
             spacing: Space.xs,
             children: items,
           )
-        : Wrap(spacing: Space.m, runSpacing: Space.xs, children: items);
+        : Wrap(
+            spacing: Space.l,
+            runSpacing: tap == null ? Space.xs : 0,
+            children: items,
+          );
   }
 }
 
-/// A Stat component: its [label] in caption `textMuted`, the [value] in
-/// title `text` with its [unit] in body `textMuted` (the Usage total's
-/// look), and under them a 32px spark line of [spark] in [color].
+/// A chart's tooltip, as Grafana's: the time (or a scatter's x) in
+/// [chartText], a divider, then the series' pill, its name at 65% and its
+/// value right-aligned, all 12px, in a box of Grafana's tooltip tones (with
+/// a close button when it stays put).
+class _Tooltip extends StatelessWidget {
+  const _Tooltip({
+    required this.time,
+    required this.name,
+    required this.color,
+    required this.value,
+    this.onClose,
+  });
+
+  final String time;
+  final String name;
+  final Color color;
+  final String value;
+
+  /// Closes it; null when it goes by itself (a hovering pointer's).
+  final VoidCallback? onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = MediaQuery.platformBrightnessOf(context) == Brightness.dark;
+    final text = chartText(context);
+    final fill = dark ? const Color(0xFF22252B) : const Color(0xFFFFFFFF);
+    final edge = dark ? const Color(0xFF373941) : const Color(0x1F24292E);
+    final style = TypeScale.of(context).caption.copyWith(
+      fontSize: 12,
+      height: 1.3,
+      color: text,
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
+    final close = onClose;
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 280),
+      decoration: BoxDecoration(
+        color: fill,
+        border: Border.all(color: edge),
+        borderRadius: BorderRadius.circular(Radii.control),
+        boxShadow: floatingShadow,
+      ),
+      // As wide as its widest row, the value at the box's right.
+      child: IntrinsicWidth(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                Space.s,
+                Space.xs + 2,
+                close == null ? Space.s : Space.xs,
+                Space.xs + 2,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                spacing: Space.s,
+                children: [
+                  Expanded(
+                    child: IgnorePointer(
+                      child: Text(time, maxLines: 1, style: style),
+                    ),
+                  ),
+                  // (The chart's left out of what assistive technology reads,
+                  // which hears its summary instead.)
+                  if (close != null)
+                    MouseRegion(
+                      cursor: SystemMouseCursors.click,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: close,
+                        child: Padding(
+                          padding: const EdgeInsets.all(2),
+                          child: CustomPaint(
+                            size: const Size.square(12),
+                            painter: _Cross(text.withValues(alpha: 0.65)),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            SizedBox(height: 1, child: ColoredBox(color: edge)),
+            IgnorePointer(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Space.s,
+                  vertical: Space.xs + 2,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 14,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: color,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    const SizedBox(width: Space.s),
+                    Expanded(
+                      child: Text(
+                        name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: style.copyWith(
+                          color: text.withValues(alpha: 0.65),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: Space.l),
+                    Text(
+                      value,
+                      maxLines: 1,
+                      textAlign: TextAlign.end,
+                      style: style.copyWith(fontWeight: FontWeight.w500),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A small ×, for a tooltip's close button.
+class _Cross extends CustomPainter {
+  const _Cross(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1.5
+      ..strokeCap = StrokeCap.round;
+    const inset = 2.5;
+    canvas
+      ..drawLine(
+        const Offset(inset, inset),
+        Offset(size.width - inset, size.height - inset),
+        paint,
+      )
+      ..drawLine(
+        Offset(size.width - inset, inset),
+        Offset(inset, size.height - inset),
+        paint,
+      );
+  }
+
+  @override
+  bool shouldRepaint(_Cross old) => old.color != color;
+}
+
+/// Grafana's cursor on a point: dashed lines through it, across and down
+/// the plot, in [line] and [width], and the point a 10px dot in its
+/// [color]: a solid centre and a see-through halo. [at] is where, as
+/// fractions of the plot's width and height.
+class _Crosshair extends CustomPainter {
+  const _Crosshair({
+    required this.at,
+    required this.color,
+    required this.line,
+    required this.width,
+  });
+
+  final Offset at;
+  final Color color;
+  final Color line;
+  final double width;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final point = Offset(at.dx * size.width, at.dy * size.height);
+    final paint = Paint()
+      ..color = line
+      ..strokeWidth = width;
+    const dash = 4.0;
+    for (var x = 0.0; x < size.width; x += dash * 2) {
+      canvas.drawLine(
+        Offset(x, point.dy),
+        Offset(math.min(x + dash, size.width), point.dy),
+        paint,
+      );
+    }
+    for (var y = 0.0; y < size.height; y += dash * 2) {
+      canvas.drawLine(
+        Offset(point.dx, y),
+        Offset(point.dx, math.min(y + dash, size.height)),
+        paint,
+      );
+    }
+    canvas
+      ..drawCircle(point, 5, Paint()..color = color.withValues(alpha: 0.3))
+      ..drawCircle(point, 3, Paint()..color = color);
+  }
+
+  @override
+  bool shouldRepaint(_Crosshair old) =>
+      old.at != at ||
+      old.color != color ||
+      old.line != line ||
+      old.width != width;
+}
+
+/// Puts a tooltip beside the point [at]: below and right of it, or left
+/// and above where it would go past the chart's edges.
+class _TooltipPlace extends SingleChildLayoutDelegate {
+  const _TooltipPlace(this.at);
+
+  final Offset at;
+
+  static const _gap = 12.0;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      constraints.loosen();
+
+  @override
+  Offset getPositionForChild(Size size, Size child) {
+    var x = at.dx + _gap;
+    if (x + child.width > size.width) x = at.dx - _gap - child.width;
+    var y = at.dy + _gap;
+    if (y + child.height > size.height) y = at.dy - _gap - child.height;
+    return Offset(
+      x.clamp(0, math.max(0, size.width - child.width)),
+      y.clamp(-child.height, math.max(0, size.height - child.height)),
+    );
+  }
+
+  @override
+  bool shouldRelayout(_TooltipPlace old) => old.at != at;
+}
+
+/// One of a Stat's thresholds: from [value] up (none: the base, below
+/// every other) its value takes [color], a chart palette name or "text".
+typedef StatStep = ({double? value, String color});
+
+/// Grafana's thresholds when a Stat sets none: green, red from 80.
+const defaultStatSteps = <StatStep>[
+  (value: null, color: 'green'),
+  (value: 80, color: 'red'),
+];
+
+/// A color a Stat names: a chart palette name, "text", or a role (signal,
+/// muted, agent:`id`); null for one this app doesn't know.
+Color? statColor(BuildContext context, String name) => name == 'text'
+    ? Palette.of(context).text
+    : chartColor(context, name) ?? roleColor(context, name);
+
+/// Inside a Card, a Stat reaches the card's edges: [AppStatCard] gives it
+/// the whole card, and this tells it to keep its words in from them itself.
+class _InCard extends InheritedWidget {
+  const _InCard({required super.child});
+
+  @override
+  bool updateShouldNotify(_InCard old) => false;
+}
+
+/// A Card holding a Stat: the card's look (the sidebar's color, a hairline,
+/// [Radii.panel]) with no padding, its child clipped inside the hairline,
+/// so the Stat's background and spark line reach the card's edges as a
+/// Grafana panel's do.
+class AppStatCard extends StatelessWidget {
+  const AppStatCard({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: palette.sidebar,
+        borderRadius: BorderRadius.circular(Radii.panel),
+      ),
+      position: DecorationPosition.background,
+      child: DecoratedBox(
+        // The hairline over what the Stat paints, never under it.
+        position: DecorationPosition.foreground,
+        decoration: BoxDecoration(
+          border: Border.all(color: palette.hairline),
+          borderRadius: BorderRadius.circular(Radii.panel),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(Radii.panel),
+          child: _InCard(child: child),
+        ),
+      ),
+    );
+  }
+}
+
+/// A Stat component in Grafana's look: its [label] at the top, the [value]
+/// in the color its [thresholds] give it (or its one [color]), as large as
+/// the panel lets it, its [unit] smaller after it, and under it a spark
+/// line of [spark] along the panel's bottom edge, 1px over a 20% fill.
+/// [colorMode] value colors the value; background (a gradient) or solid
+/// fill the panel with the color instead; none leaves the value in `text`.
+/// No value says "No data".
 class AppStat extends StatelessWidget {
   const AppStat({
     super.key,
@@ -1268,17 +2524,41 @@ class AppStat extends StatelessWidget {
     this.unit = '',
     this.spark = const [],
     this.color,
+    this.thresholds,
+    this.colorMode = 'value',
+    this.graph = 'area',
+    this.decimals,
+    this.height,
   });
 
   final String label;
 
-  /// A number, or words as they are.
+  /// A number, or words as they are; null for no data.
   final Object? value;
+
+  /// One of [chartUnits], or words after the number.
   final String unit;
   final List<double> spark;
 
-  /// The spark line's; `textMuted` without one.
-  final Color? color;
+  /// The one color it takes when it has no [thresholds]: a chart palette
+  /// name, "text" or a role.
+  final String? color;
+
+  /// Its thresholds, base first; Grafana's [defaultStatSteps] when null
+  /// and it has no [color].
+  final List<StatStep>? thresholds;
+
+  /// value, background, solid or none.
+  final String colorMode;
+
+  /// area (the spark line) or none.
+  final String graph;
+
+  /// The decimals its value takes; automatic when null.
+  final int? decimals;
+
+  /// The panel's height; its own when null.
+  final double? height;
 
   /// The value as it reads: a number grouped ("12,345") up to a million,
   /// short past it ("1.2M").
@@ -1290,91 +2570,315 @@ class AppStat extends StatelessWidget {
     _ => '$value',
   };
 
+  /// The value's number and what follows it.
+  (String, String) _parts() {
+    final v = value;
+    if (v is num && v.isFinite) {
+      if (chartUnits.contains(unit) || decimals != null) {
+        return chartValueParts(v.toDouble(), unit, decimals: decimals);
+      }
+      // Grafana's automatic decimals (32.21 → 32.2), grouped; short past
+      // a million.
+      final number = v.abs() >= 1e6
+          ? words(v)
+          : _fixedNumber(v.toDouble(), autoDecimals(v.toDouble()), group: true);
+      return (number, unit.isEmpty ? '' : ' $unit');
+    }
+    return (words(v), unit.isEmpty || v == null ? '' : ' $unit');
+  }
+
+  /// The color the value takes: its threshold's, or its one color.
+  Color _color(BuildContext context) {
+    final fixed = color;
+    final steps = thresholds ?? (fixed == null ? defaultStatSteps : null);
+    if (steps == null || steps.isEmpty) {
+      return statColor(context, fixed ?? 'green') ?? Palette.of(context).text;
+    }
+    var name = steps.first.color;
+    final v = value;
+    if (v is num) {
+      for (final step in steps.skip(1)) {
+        final from = step.value;
+        if (from != null && v >= from) name = step.color;
+      }
+    }
+    return statColor(context, name) ?? Palette.of(context).text;
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final shown = words(value);
+    final inCard = context.getInheritedWidgetOfExactType<_InCard>() != null;
+    // A plain Card's inset: its padding inside its hairline.
+    final inset = inCard ? Space.m + 1 : 0.0;
+    final (number, suffix) = _parts();
+    final noData = value == null;
     final points = spark.take(maxSparkPoints).toList();
-    final line = color ?? palette.textMuted;
+    final shade = _color(context);
+    final filled = colorMode == 'background' || colorMode == 'solid';
+    // On a filled panel, words in black or white, whichever reads.
+    final onFill = shade.computeLuminance() > 0.5
+        ? const Color(0xFF111217)
+        : const Color(0xFFFFFFFF);
+    final valueColor = noData
+        ? palette.textMuted
+        : filled
+        ? onFill
+        : colorMode == 'none'
+        ? palette.text
+        : shade;
+    final line = filled ? onFill.withValues(alpha: 0.7) : shade;
+    final area = filled
+        ? onFill.withValues(alpha: 0.4)
+        : shade.withValues(alpha: 0.2);
+    final scaler = MediaQuery.textScalerOf(context);
+    // The title stays in the panel's own colors, filled or not, as
+    // Grafana's header does.
+    final labelStyle = panelTitle(context);
+    final labelHeight = label.isEmpty
+        ? 0.0
+        : scaler.scale(labelStyle.fontSize!) * labelStyle.height!;
+    // What larger text adds to the title: a panel of a set height grows
+    // by it, so the value keeps the room it has at the default size.
+    final grown = label.isEmpty
+        ? 0.0
+        : math.max(
+            0.0,
+            labelHeight - labelStyle.fontSize! * labelStyle.height!,
+          );
+    // The title's row, as Grafana's panel header: the value, its spark
+    // line and a fill take what's under it.
+    final head = label.isEmpty ? inset : inset + labelHeight + Space.s;
+    final drawsGraph = graph != 'none' && points.length >= 2 && !noData;
+    // With no height of its own: room for a value about a title's size
+    // over its spark line.
+    final own = head + scaler.scale(95);
+    final total = math.max(height == null ? own : height! + grown, head + 24);
+    final semantics = noData ? 'No data' : '$number$suffix';
+    return Semantics(
+      container: true,
+      label: label,
+      value: semantics,
+      child: ExcludeSemantics(
+        child: SizedBox(
+          height: total,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final width = constraints.maxWidth.isFinite
+                  ? constraints.maxWidth
+                  : 200.0;
+              final room = math.max(1.0, total - head);
+              // The spark line takes the bottom half, as Grafana's does,
+              // shown only where there's room for it.
+              final graphHeight = drawsGraph && room >= 40 ? room * 0.5 : 0.0;
+              // The value as Grafana sizes it for the room under the
+              // title (measured against it from 100 to 300 points), less
+              // where the width is short of it; centred in that room, over
+              // the spark line.
+              final size = noData
+                  ? type.body.fontSize!
+                  : _fitted(
+                      context,
+                      number,
+                      suffix,
+                      width - inset * 2,
+                      math.min(room / 1.15, math.max(12, room * 0.55 - 20)),
+                    );
+              final valueStyle = TextStyle(
+                fontFamily: TextStyles.sans,
+                fontSize: size,
+                height: 1.15,
+                fontWeight: FontWeight.w500,
+                color: valueColor,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              );
+              final text = noData
+                  ? Text(
+                      'No data',
+                      textScaler: TextScaler.noScaling,
+                      style: type.body.copyWith(color: palette.textMuted),
+                    )
+                  : Text.rich(
+                      TextSpan(
+                        children: [
+                          TextSpan(text: number, style: valueStyle),
+                          if (suffix.isNotEmpty)
+                            TextSpan(
+                              text: suffix,
+                              style: valueStyle.copyWith(
+                                fontSize: size * _suffixScale,
+                              ),
+                            ),
+                        ],
+                      ),
+                      maxLines: 1,
+                      softWrap: false,
+                      // Sized to its room already, at any text size.
+                      textScaler: TextScaler.noScaling,
+                    );
+              return Stack(
+                children: [
+                  if (filled)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      top: label.isEmpty ? 0 : head,
+                      bottom: 0,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: colorMode == 'solid' ? shade : null,
+                          gradient: colorMode == 'background'
+                              ? LinearGradient(colors: _gradient(shade))
+                              : null,
+                          borderRadius: inCard
+                              ? null
+                              : BorderRadius.circular(Radii.control),
+                        ),
+                      ),
+                    ),
+                  if (graphHeight > 0)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      height: graphHeight,
+                      child: _Spark(points: points, line: line, area: area),
+                    ),
+                  if (label.isNotEmpty)
+                    Positioned(
+                      left: inset,
+                      right: inset,
+                      top: inset,
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: labelStyle,
+                      ),
+                    ),
+                  Positioned(
+                    left: inset,
+                    right: inset,
+                    top: head,
+                    bottom: 0,
+                    child: Center(
+                      child: FittedBox(fit: BoxFit.scaleDown, child: text),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// A unit after the value is this much of its size, as Grafana's is.
+  static const _suffixScale = 0.6;
+
+  /// The value's size (in pixels): [most], or less where [width] is short
+  /// of it.
+  static double _fitted(
+    BuildContext context,
+    String number,
+    String suffix,
+    double width,
+    double most,
+  ) {
+    const probe = 100.0;
+    final style = TextStyle(
+      fontFamily: TextStyles.sans,
+      fontSize: probe,
+      height: 1.15,
+      fontWeight: FontWeight.w500,
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
+    final painter = TextPainter(
+      text: TextSpan(
+        children: [
+          TextSpan(text: number, style: style),
+          if (suffix.isNotEmpty)
+            TextSpan(
+              text: suffix,
+              style: style.copyWith(fontSize: probe * _suffixScale),
+            ),
+        ],
+      ),
+      textDirection: Directionality.of(context),
+      maxLines: 1,
+    )..layout();
+    final byWidth = probe * math.max(1.0, width) / math.max(1.0, painter.width);
+    painter.dispose();
+    return math.max(10, math.min(byWidth, most)).floorToDouble();
+  }
+
+  /// A background gradient, left to right as Grafana's runs (measured
+  /// against it): from the color warmer and darker, through it darker, to it
+  /// cooler and a little darker.
+  static List<Color> _gradient(Color color) {
+    final hsl = HSLColor.fromColor(color);
+    HSLColor shade(double spin, double darker) => hsl
+        .withHue((hsl.hue + spin + 360) % 360)
+        .withLightness((hsl.lightness - darker).clamp(0, 1));
+    return [
+      shade(8, 0.15).toColor(),
+      shade(0, 0.105).toColor(),
+      shade(-7, 0.06).toColor(),
+    ];
+  }
+}
+
+/// A Stat's spark line: [points] evenly across, from a little under the
+/// lowest to the highest, a 1px [line] over an [area] fill down to the
+/// bottom.
+class _Spark extends StatelessWidget {
+  const _Spark({required this.points, required this.line, required this.area});
+
+  final List<double> points;
+  final Color line;
+  final Color area;
+
+  @override
+  Widget build(BuildContext context) {
     var low = double.infinity;
     var high = double.negativeInfinity;
     for (final point in points) {
       low = math.min(low, point);
       high = math.max(high, point);
     }
-    if (low == high) {
-      low -= 1;
-      high += 1;
-    }
-    return Semantics(
-      container: true,
-      label: label,
-      value: unit.isEmpty ? shown : '$shown $unit',
-      child: ExcludeSemantics(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          spacing: Space.xs,
-          children: [
-            if (label.isNotEmpty)
-              Text(
-                label,
-                style: type.caption.copyWith(color: palette.textMuted),
-              ),
-            Text.rich(
-              TextSpan(
-                children: [
-                  TextSpan(
-                    text: shown,
-                    style: type.title.copyWith(
-                      color: palette.text,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                  if (unit.isNotEmpty)
-                    TextSpan(
-                      text: ' $unit',
-                      style: type.body.copyWith(color: palette.textMuted),
-                    ),
-                ],
-              ),
-            ),
-            if (points.length >= 2)
-              SizedBox(
-                height: 32,
-                child: LineChart(
-                  duration: Motion.base,
-                  LineChartData(
-                    minX: 0,
-                    maxX: points.length - 1,
-                    minY: low,
-                    maxY: high,
-                    gridData: const FlGridData(show: false),
-                    borderData: FlBorderData(show: false),
-                    titlesData: const FlTitlesData(show: false),
-                    lineTouchData: const LineTouchData(enabled: false),
-                    lineBarsData: [
-                      LineChartBarData(
-                        spots: [
-                          for (var i = 0; i < points.length; i++)
-                            FlSpot(i.toDouble(), points[i]),
-                        ],
-                        color: line,
-                        barWidth: 1.5,
-                        isStrokeCapRound: true,
-                        dotData: const FlDotData(show: false),
-                        belowBarData: BarAreaData(
-                          show: true,
-                          color: line.withValues(alpha: 0.08),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-          ],
-        ),
+    // A tenth of the spread under the lowest point; an all-equal series
+    // lies flat along the bottom edge, as Grafana's does, with no fill to
+    // see.
+    final (bottom, top) = low == high
+        ? (low, low + 1)
+        : (low - (high - low) * 0.1, high);
+    return LineChart(
+      duration: Duration.zero,
+      LineChartData(
+        minX: 0,
+        maxX: points.length - 1,
+        minY: bottom,
+        maxY: top,
+        gridData: const FlGridData(show: false),
+        borderData: FlBorderData(show: false),
+        titlesData: const FlTitlesData(show: false),
+        lineTouchData: const LineTouchData(enabled: false),
+        clipData: const FlClipData.all(),
+        lineBarsData: [
+          LineChartBarData(
+            spots: [
+              for (var i = 0; i < points.length; i++)
+                FlSpot(i.toDouble(), points[i]),
+            ],
+            color: line,
+            barWidth: 1,
+            isStrokeJoinRound: true,
+            dotData: const FlDotData(show: false),
+            belowBarData: BarAreaData(show: true, color: area),
+          ),
+        ],
       ),
     );
   }

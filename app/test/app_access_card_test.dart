@@ -7,6 +7,7 @@ import 'package:factory_app/app_access_card.dart';
 import 'package:factory_app/inbox.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -253,29 +254,62 @@ void main() {
     expect(find.textContaining('would read messages'), findsNothing);
   });
 
-  testWidgets('Approve sends the decision with the digest shown and the '
-      'comment', (tester) async {
+  testWidgets('Approve sends the decision with the digest shown', (
+    tester,
+  ) async {
     final harness = await _card(tester, _access());
-    await _tap(tester, 'Add a comment');
-    await tester.enterText(_comment, ' Only Activity, please. ');
     await _tap(tester, 'Approve');
     expect(harness.last.hasDecideAppAccess(), isTrue);
     final decide = harness.last.decideAppAccess;
     expect(decide.agentId, 'rivet');
     expect(decide.seq, Int64(12));
     expect(decide.approve, isTrue);
+    expect(decide.reply, isFalse);
     expect(decide.digest, 'd-1');
-    expect(decide.comment, 'Only Activity, please.');
   });
 
-  testWidgets('Decline sends the comment for Rivet', (tester) async {
+  testWidgets('Decline declines', (tester) async {
     final harness = await _card(tester, _access());
-    await _tap(tester, 'Add a comment');
-    await tester.enterText(_comment, '  Not yet.  ');
     await _tap(tester, 'Decline');
     final decide = harness.last.decideAppAccess;
     expect(decide.approve, isFalse);
-    expect(decide.comment, 'Not yet.');
+    expect(decide.reply, isFalse);
+  });
+
+  testWidgets('a typed comment: one Submit, a reply that allows nothing '
+      '(#370)', (tester) async {
+    final harness = await _card(tester, _access());
+    await _tap(tester, 'Add a comment');
+    await tester.enterText(_comment, ' Only Activity, please. ');
+    await settle(tester);
+    expect(find.text('Approve'), findsNothing);
+    expect(find.text('Decline'), findsNothing);
+    expect(
+      find.text(
+        'Nothing is allowed. Rivet gets your comment and can suggest it '
+        'again.',
+      ),
+      findsOneWidget,
+    );
+    await _tap(tester, 'Submit');
+    final decide = harness.last.decideAppAccess;
+    expect(decide.reply, isTrue);
+    // An older backend that ignores reply declines it.
+    expect(decide.approve, isFalse);
+    expect(decide.digest, isEmpty);
+    expect(decide.comment, 'Only Activity, please.');
+  });
+
+  testWidgets('Return in the comment is Submit, never Approve', (tester) async {
+    final harness = await _card(tester, _access());
+    await _tap(tester, 'Add a comment');
+    await tester.enterText(_comment, 'Not the conversations.');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await settle(tester);
+    final decide = harness.last.decideAppAccess;
+    expect(decide.reply, isTrue);
+    expect(decide.approve, isFalse);
+    expect(decide.comment, 'Not the conversations.');
   });
 
   testWidgets('a refusal (it changed since) shows, and it can be approved '
@@ -310,6 +344,19 @@ void main() {
       ),
     );
     expect(find.textContaining('Declined'), findsOneWidget);
+    expect(find.text('Not yet.'), findsOneWidget);
+  });
+
+  testWidgets('decided: replied, with the reply', (tester) async {
+    await _card(
+      tester,
+      _access(
+        state: AppGrantState.APP_GRANT_STATE_DECLINED,
+        comment: 'Not yet.',
+      )..replied = true,
+    );
+    expect(find.textContaining('Replied'), findsOneWidget);
+    expect(find.textContaining('Declined'), findsNothing);
     expect(find.text('Not yet.'), findsOneWidget);
   });
 

@@ -928,7 +928,8 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
 
   void _connect(ConnectRun run) {
     final fields = _fields;
-    if (fields == null || run.busy) return;
+    // A typed comment is a reply (#370): Submit, never Connect.
+    if (fields == null || run.busy || commentTyped(_comment)) return;
     final missing = fields.missing;
     setState(() => _error = missing);
     if (missing != null) return;
@@ -943,15 +944,21 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
     );
   }
 
-  Future<void> _dismiss() async {
+  /// [reply]: Submit (#370), the comment going to the agent as the
+  /// person's reply, and nothing connected; it can ask again. A
+  /// backend that doesn't know replies dismisses it with the comment.
+  Future<void> _dismiss({bool reply = false}) async {
     if (_dismissing) return;
     setState(() {
       _dismissing = true;
       _error = null;
     });
     try {
-      await AppScope.of(context)
-          .dismissConnectProposal(proposal.id, comment: _comment.text.trim());
+      await AppScope.of(context).dismissConnectProposal(
+        proposal.id,
+        comment: _comment.text.trim(),
+        reply: reply,
+      );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
     } finally {
@@ -1102,35 +1109,55 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
         onChanged: () => setState(() {}),
         onSubmit: () => _connect(run),
       ),
-      ActionLine(
-        lead: Text(
-          _error ??
-              'Connecting gives $agent nothing yet. You or Rivet then '
-                  'give it only the access it needs.',
-          style: TypeScale.of(context).caption.copyWith(
-            color: _error == null ? palette.textFaint : palette.danger,
-          ),
-        ),
-        action: Button(
-          label: phone ? 'Connect' : 'Connect $service',
-          primary: true,
-          onPressed: _dismissing ? null : () => _connect(run),
-        ),
+      // Once a comment is typed, Submit (below) replies instead: this
+      // says what that does.
+      CommentTyped(
+        controller: _comment,
+        builder: (context, typed) {
+          final line = Text(
+            _error ??
+                (typed
+                    ? 'Nothing is connected. $agent gets your comment and '
+                          'can ask again.'
+                    : 'Connecting gives $agent nothing yet. You or Rivet '
+                          'then give it only the access it needs.'),
+            style: TypeScale.of(context).caption.copyWith(
+              color: _error == null ? palette.textFaint : palette.danger,
+            ),
+          );
+          if (typed) return line;
+          return ActionLine(
+            lead: line,
+            action: Button(
+              label: phone ? 'Connect' : 'Connect $service',
+              primary: true,
+              onPressed: _dismissing ? null : () => _connect(run),
+            ),
+          );
+        },
       ),
       const SizedBox(height: Space.m),
       _dismissRow(agent),
     ];
   }
 
-  /// Dismiss, and a comment for the agent that goes with it or with
-  /// Connect.
-  Widget _dismissRow(String agent) => ActionLine(
-    lead: DecisionComment(
-      controller: _comment,
-      agent: agent,
-      enabled: !_dismissing,
+  /// A comment for the agent, and Dismiss; once something is typed, Submit
+  /// in its place (Return too), the comment going as a reply (#370).
+  Widget _dismissRow(String agent) => CommentTyped(
+    controller: _comment,
+    builder: (context, typed) => ActionLine(
+      lead: DecisionComment(
+        controller: _comment,
+        agent: agent,
+        enabled: !_dismissing,
+        onSubmit: () => _dismiss(reply: true),
+      ),
+      action: typed
+          ? SubmitButton(
+              onPressed: _dismissing ? null : () => _dismiss(reply: true),
+            )
+          : Button(label: 'Dismiss', onPressed: _dismissing ? null : _dismiss),
     ),
-    action: Button(label: 'Dismiss', onPressed: _dismissing ? null : _dismiss),
   );
 
   List<Widget> _decided(Palette palette, Color color, String service) {
@@ -1151,7 +1178,10 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
               TextSpan(
                 children: [
                   TextSpan(
-                    text: dismissed
+                    text: dismissed && proposal.replied
+                        // Answered with a comment (#370).
+                        ? 'Replied'
+                        : dismissed
                         ? 'Dismissed'
                         : proposal.secretName.isEmpty
                         ? 'Connected $service'

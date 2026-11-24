@@ -49,6 +49,116 @@ pub(crate) struct Wanted {
     /// The agent had read a pipe, a direct message or a page when it asked.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_pipes: bool,
+    /// Where the person makes it (#360, K3): an https link to a public
+    /// site, its host in punycode (`check_link`), and that host.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub link: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub link_host: String,
+    /// At most a line of how, in the agent's words (`clean_steps`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub steps: String,
+    /// Where a generated key goes (K6): an owner/repo or a host
+    /// (`check_place`); empty when none was given.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub place: String,
+    /// When the person said the generated key is in place (K6).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub done_ms: i64,
+    /// The person answered with a new secret, added from the card.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub added: bool,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
+}
+
+/// The longest link an agent may give.
+const MAX_LINK: usize = 2000;
+/// The longest line of steps.
+const MAX_STEPS: usize = 200;
+
+/// An agent's link for making the secret, checked (Fugo's K3 rules): https,
+/// a public site's name (no IP address, localhost, single label, .local or
+/// .internal), no user name, password or port, at most 2,000 characters.
+/// Returns the link with its host in punycode, and that host; both empty
+/// for no link.
+pub(crate) fn check_link(raw: &str) -> Result<(String, String), VaultError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok((String::new(), String::new()));
+    }
+    let refuse = |why: &str| {
+        VaultError::Invalid(format!("link: {why}. Give the https:// address of the service's own page for making it, or leave link out."))
+    };
+    if raw.len() > MAX_LINK {
+        return Err(refuse("it's longer than 2,000 characters"));
+    }
+    let url = url::Url::parse(raw).map_err(|_| refuse("it isn't a web address"))?;
+    if url.scheme() != "https" {
+        return Err(refuse("only https:// links"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(refuse("no user name or password in it"));
+    }
+    if url.port().is_some() {
+        return Err(refuse("no port in it"));
+    }
+    let host = match url.host() {
+        Some(url::Host::Domain(host)) => host.trim_end_matches('.').to_ascii_lowercase(),
+        Some(_) => return Err(refuse("a site's name, not an IP address")),
+        None => return Err(refuse("it names no site")),
+    };
+    let local =
+        ["localhost", ".localhost", ".local", ".internal"].iter().any(|end| host == end.trim_start_matches('.') || host.ends_with(end));
+    if local || !host.contains('.') {
+        return Err(refuse("a public site, not this computer or a local network's"));
+    }
+    let link = url.to_string();
+    if link.len() > MAX_LINK {
+        return Err(refuse("it's longer than 2,000 characters"));
+    }
+    Ok((link, host))
+}
+
+/// Characters that never show in an agent's line of steps: controls, and
+/// those that hide or reorder text.
+fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+}
+
+/// An agent's steps as one plain line of at most 200 characters.
+pub(crate) fn clean_steps(raw: &str) -> String {
+    let spaced: String = raw.chars().map(|c| if c.is_whitespace() { ' ' } else { c }).filter(|c| !hidden(*c)).collect();
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_STEPS).collect()
+}
+
+/// Where a generated key goes, as Claktory's own sentence names it: an
+/// owner/repo or a host, letters, digits and . _ - (up to 50 each side,
+/// never only dots); empty when none is given, refused otherwise.
+pub(crate) fn check_place(raw: &str) -> Result<String, VaultError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(String::new());
+    }
+    let part = |part: &str| {
+        (1..=50).contains(&part.len())
+            && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            && !part.bytes().all(|byte| byte == b'.')
+    };
+    let fits = match raw.split_once('/') {
+        Some((owner, repo)) => part(owner) && part(repo),
+        None => part(raw),
+    };
+    if fits {
+        Ok(raw.to_owned())
+    } else {
+        Err(VaultError::Invalid(
+            "place: an owner/repo (claktor/claktory) or a server's name (deploy.example.com), letters, digits and . _ - only, or leave place out.".to_owned(),
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -72,7 +182,7 @@ fn state_of(state: &str) -> SecretRequestState {
 }
 
 const COLUMNS: &str =
-    "id, agent, secret, secret_name, new_secret, reason, state, decided, comment, given, given_name, updated, approved, admin, collecting";
+    "id, agent, secret, secret_name, new_secret, reason, state, decided, comment, given, given_name, updated, approved, admin, collecting, replied";
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
     let new_secret: String = row.get(4)?;
@@ -84,6 +194,12 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
     let pending = state == "pending";
     let imports = wanted.as_ref().map(|wanted| imports(&wanted.imports, pending)).unwrap_or_default();
     let asker_read_pipes = wanted.as_ref().is_some_and(|wanted| wanted.read_pipes);
+    let (link, link_host, steps, place, done_ms, added) = wanted
+        .as_ref()
+        .map(|wanted| {
+            (wanted.link.clone(), wanted.link_host.clone(), wanted.steps.clone(), wanted.place.clone(), wanted.done_ms, wanted.added)
+        })
+        .unwrap_or_default();
     let new_secret = wanted.map(|wanted| v1::NewSecret {
         name: wanted.name,
         description: wanted.description,
@@ -100,6 +216,12 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
         password,
         imports,
         asker_read_pipes,
+        link,
+        link_host,
+        steps,
+        place,
+        done_ms,
+        added,
         id: row.get(0)?,
         agent_id: row.get(1)?,
         secret_id: row.get(2)?,
@@ -115,6 +237,8 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
         approved_ms: row.get(12)?,
         admin_agent_id: row.get(13)?,
         collecting: row.get(14)?,
+        replied: row.get(15)?,
+        ..v1::SecretRequest::default()
     })
 }
 
@@ -174,6 +298,10 @@ pub(crate) fn details(request: &v1::SecretRequest) -> serde_json::Value {
             "sensitive": file.sensitive,
         })).collect::<Vec<_>>(),
         "read_pipes": request.asker_read_pipes,
+        "link": request.link,
+        "link_host": request.link_host,
+        "steps": request.steps,
+        "place": request.place,
     })
 }
 
@@ -274,6 +402,10 @@ fn parsed(details: &serde_json::Value) -> Option<v1::SecretRequest> {
             })
             .unwrap_or_default(),
         asker_read_pipes: details.get("read_pipes").and_then(serde_json::Value::as_bool).unwrap_or_default(),
+        link: text("link"),
+        link_host: text("link_host"),
+        steps: text("steps"),
+        place: text("place"),
         ..v1::SecretRequest::default()
     })
 }
@@ -283,9 +415,11 @@ fn parsed(details: &serde_json::Value) -> Option<v1::SecretRequest> {
 fn pending(db: &Connection) -> Result<Vec<(v1::SecretRequest, i64)>, VaultError> {
     Ok(crate::store::query(
         db,
-        &format!("SELECT {COLUMNS}, MAX(created, updated) FROM requests WHERE state = 'pending' ORDER BY created, id"),
+        &format!("SELECT {COLUMNS}, MAX(created, updated) AS since FROM requests WHERE state = 'pending' ORDER BY created, id"),
         [],
-        |found| Ok((row(found)?, found.get(15)?)),
+        // By name: COLUMNS grows (`replied`, #370), and an index here once
+        // read a new column as `since`, expiring every request in a minute.
+        |found| Ok((row(found)?, found.get("since")?)),
     )?)
 }
 
@@ -400,6 +534,9 @@ impl Vault {
             imports.iter().map(|file| WantedVariable { name: file.variable.clone(), file: true }).collect()
         };
         let generate = wanted.generate.trim().to_owned();
+        let (link, link_host) = check_link(&wanted.link)?;
+        let steps = clean_steps(&wanted.steps);
+        let place = check_place(&wanted.place)?;
         // A password is checked against the bounds now, and kept as checked
         // (its length filled in): anything weaker is refused here, not at
         // approval.
@@ -423,6 +560,12 @@ impl Vault {
             password,
             imports,
             read_pipes: wanted.read_pipes,
+            link,
+            link_host,
+            steps,
+            place,
+            done_ms: 0,
+            added: false,
         };
         let json = serde_json::to_string(&wanted).map_err(|error| VaultError::Invalid(error.to_string()))?;
         let mut inner = self.lock();
@@ -556,22 +699,24 @@ impl Vault {
     }
 
     /// Marks the request given (the secret `given`: its id and name) or
-    /// dismissed (None); returns it as it is now.
+    /// dismissed (None), `replied` when dismissed by the person's reply
+    /// (#370); returns it as it is now.
     pub(crate) fn decide_request(
         &self,
         agent: &str,
         id: &str,
         given: Option<(&str, &str)>,
         comment: &str,
+        replied: bool,
     ) -> Result<v1::SecretRequest, VaultError> {
         let mut inner = self.lock();
         let db = Self::db(&inner)?;
         let state = if given.is_some() { "granted" } else { "dismissed" };
         let (given, given_name) = given.unwrap_or_default();
         let changed = db.execute(
-            "UPDATE requests SET state = ?3, decided = ?4, comment = ?5, given = ?6, given_name = ?7, collecting = 0
+            "UPDATE requests SET state = ?3, decided = ?4, comment = ?5, given = ?6, given_name = ?7, collecting = 0, replied = ?8
              WHERE id = ?1 AND agent = ?2 AND state IN ('pending', 'approved')",
-            params![id, agent, state, now_ms(), comment.trim(), given, given_name],
+            params![id, agent, state, now_ms(), comment.trim(), given, given_name, replied && given.is_empty()],
         )?;
         if changed == 0 {
             return Err(VaultError::Invalid("This request was decided already.".to_owned()));
@@ -639,14 +784,19 @@ impl Vault {
     /// Changes `agent`'s waiting request `id`; returns it as it is now.
     pub(crate) fn update_request(&self, agent: &str, id: &str, change: Change) -> Result<v1::SecretRequest, VaultError> {
         let current = self.own_waiting(agent, id)?;
+        let kept = self.wanted(&current.id)?;
         let mut wanted: Wanted = Wanted {
             name: current.secret_name.clone(),
             generate: current.generate.clone(),
             nobody: current.grant_to_nobody,
             password: current.password.as_ref().map(super::generate::password_ask),
             // What was read of the files stays as it was.
-            imports: self.wanted(&current.id)?.imports,
+            imports: kept.imports,
             read_pipes: current.asker_read_pipes,
+            link: kept.link,
+            link_host: kept.link_host,
+            steps: kept.steps,
+            place: kept.place,
             ..current.new_secret.as_ref().map_or_else(Wanted::default, |wanted| Wanted {
                 name: wanted.name.clone(),
                 description: wanted.description.clone(),
@@ -719,6 +869,45 @@ impl Vault {
         let inner = self.lock();
         let json: String = Self::db(&inner)?.query_row("SELECT new_secret FROM requests WHERE id = ?1", [id], |row| row.get(0))?;
         Ok(serde_json::from_str(&json).unwrap_or_default())
+    }
+
+    /// Changes what's kept of request `id`'s description (`Wanted`), in place;
+    /// returns it as it is now.
+    fn change_wanted(&self, id: &str, change: impl FnOnce(&mut Wanted)) -> Result<v1::SecretRequest, VaultError> {
+        let mut inner = self.lock();
+        let db = Self::db(&inner)?;
+        let json: String = db.query_row("SELECT new_secret FROM requests WHERE id = ?1", [id], |row| row.get(0))?;
+        let mut wanted: Wanted = serde_json::from_str(&json).unwrap_or_default();
+        change(&mut wanted);
+        let json = serde_json::to_string(&wanted).map_err(|error| VaultError::Invalid(error.to_string()))?;
+        db.execute("UPDATE requests SET new_secret = ?2 WHERE id = ?1", params![id, json])?;
+        Self::changed_request(&mut inner, id)
+    }
+
+    /// Request `id` was answered with a secret the person added from the
+    /// card (SecretRequest.added); returns it as it is now.
+    pub(crate) fn mark_added(&self, id: &str) -> Result<v1::SecretRequest, VaultError> {
+        self.change_wanted(id, |wanted| wanted.added = true)
+    }
+
+    /// The person put `agent`'s generated key in place (K6,
+    /// SecretRequestDone): None when they had already said so.
+    pub(crate) fn mark_done(&self, agent: &str, id: &str) -> Result<Option<v1::SecretRequest>, VaultError> {
+        let request = {
+            let inner = self.lock();
+            Self::db(&inner)?
+                .query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1 AND agent = ?2"), [id.trim(), agent], row)
+                .optional()?
+        };
+        let Some(request) = request else { return Err(VaultError::NoRequest(id.to_owned())) };
+        let made = matches!(request.state(), SecretRequestState::Generated | SecretRequestState::Granted);
+        if request.generate != super::generate::SSH_ED25519 || !made {
+            return Err(VaultError::Invalid("Only a generated key can be put in place.".to_owned()));
+        }
+        if request.done_ms != 0 {
+            return Ok(None);
+        }
+        self.change_wanted(&request.id, |wanted| wanted.done_ms = now_ms()).map(Some)
     }
 
     /// `agent`'s own request `id`, if it's still open (waiting, or approved

@@ -342,7 +342,94 @@ message ClientMessage {
     // The files an app that reads files could be given, for "Add a file…".
     // Answered with AppFiles.
     ListAppFiles list_app_files = 195;
+    // Puts a chat on another model (SetChatModel). Answered with Ack.
+    SetChatModel set_chat_model = 196;
+    // Keeps this Mac awake while agents work, or not (SetKeepAwake).
+    // Answered with Ack.
+    SetKeepAwake set_keep_awake = 197;
+    // A generated key is in place (SecretRequestDone). Answered with Ack.
+    SecretRequestDone secret_request_done = 198;
+    // The Monitors overview: every agent's monitors, answered with
+    // MonitorList; one monitor's history, answered with MonitorHistory.
+    ListMonitors list_monitors = 199;
+    ListMonitorHistory list_monitor_history = 200;
+    // Pipe groups (#359), arrangement only: a pipe in a group works as one
+    // outside any. Each answered with Ack, or an Error whose message reads
+    // as it is: an empty name, a name another group of the project has, a
+    // group or pipe that's gone (ERROR_CODE_NOT_FOUND), a group of another
+    // project.
+    CreatePipeGroup create_pipe_group = 201;
+    RenamePipeGroup rename_pipe_group = 202;
+    DeletePipeGroup delete_pipe_group = 203;
+    SetPipeGroup set_pipe_group = 204;
+    SetPipeGroupCollapsed set_pipe_group_collapsed = 205;
+    // The person opened one of an agent's panes (PaneOpened): it counts as
+    // opened now. Answered with Ack.
+    PaneOpened pane_opened = 206;
+    // Going back in a conversation (friend bug #9): see ForkConversation.
+    // Each answered with Ack, ListBranches with Branches.
+    ForkConversation fork_conversation = 207;
+    ListBranches list_branches = 208;
+    SwitchBranch switch_branch = 209;
+    DeleteBranch delete_branch = 210;
+    // Turns Workspace.usage_auto_continue on or off. Answered with Ack.
+    SetUsageAutoContinue set_usage_auto_continue = 211;
+    // Keeping a laptop's agents working with its lid closed (#371).
+    SetLidClosed set_lid_closed = 212;
+    // Model lists from the providers themselves (friend bug #14): read one
+    // now, and add a model the list doesn't have by its id.
+    RefreshModels refresh_models = 213;
+    AddModel add_model = 214;
   }
+}
+
+// A new group at the end of the project's (Workspace.pipe_groups).
+message CreatePipeGroup {
+  string project_id = 1;
+  // One line, at most 80 characters; unique among the project's groups,
+  // whatever the case.
+  string name = 2;
+  // A pipe of the project to move into it at once (New group… from a
+  // pipe's menu); empty for none.
+  string pipe_id = 3;
+}
+
+message RenamePipeGroup {
+  string group_id = 1;
+  string name = 2;
+}
+
+// Deletes a group: its pipes stay, outside any group.
+message DeletePipeGroup {
+  string group_id = 1;
+}
+
+// Moves a pipe into a group of its own project, or out of any (group_id
+// empty).
+message SetPipeGroup {
+  string pipe_id = 1;
+  string group_id = 2;
+}
+
+// Folds a group away or opens it, the same on every device.
+message SetPipeGroupCollapsed {
+  string group_id = 1;
+  bool collapsed = 2;
+}
+
+// A named row in the sidebar gathering some of a project's pipes (#359,
+// Workspace.pipe_groups; Pipe.group_id says which). Arrangement only.
+message PipeGroup {
+  string id = 1;
+  string project_id = 2;
+  string name = 3;
+  // Folded away, on every device.
+  bool collapsed = 4;
+  // Its place among the project's groups, 0 first: the order they were
+  // made.
+  uint32 position = 5;
+  // ms since 1970.
+  int64 created_ms = 6;
 }
 
 message ServerMessage {
@@ -473,7 +560,28 @@ message ServerMessage {
     AppAccessUndone app_access_undone = 69;
     // The answer to ListAppFiles, to the asker only.
     AppFiles app_files = 70;
+    // The answer to ListMonitors, to the asker only.
+    MonitorList monitor_list = 71;
+    // The answer to ListMonitorHistory, to the asker only.
+    MonitorHistory monitor_history = 72;
+    // To every client: some agent's monitors changed (one was added,
+    // fired, checked, paused, ended, or its agent's Monitors were turned on
+    // or off). A client showing the overview or a history asks again.
+    MonitorsChanged monitors_changed = 73;
+    // The answer to ListBranches, to the asker only.
+    Branches branches = 74;
   }
+  // Resuming the Workspace on reconnect (#378), only to an app whose Hello
+  // has workspace_patches. On a message carrying a Workspace or a
+  // WorkspacePatch: the revision it brings the app to, opaque
+  // ("<process random>-<counter>"): send it back in Hello.workspace_revision
+  // to resume from it.
+  string workspace_revision = 75;
+  // On a WorkspacePatch: the revision it applies to (the previous
+  // workspace_revision on this connection, or Hello's for the first one
+  // after Welcome). If it isn't the one the app holds, the app drops what
+  // it holds and reconnects for a whole Workspace. Empty on a whole one.
+  string workspace_base_revision = 76;
 }
 
 // ---- Handshake ----
@@ -516,6 +624,13 @@ message Hello {
   // "windows". Kept with the paired device and counted, never named, in
   // the account's check-in (#119). Empty from apps before it.
   string platform = 9;
+  // The revision of the Workspace the app holds from this Claktory, exactly
+  // as it applied it (ServerMessage.workspace_revision; #378), or empty.
+  // While the backend still has it for this device (the last few it was
+  // sent, for 6 hours, in this process), the first Workspace after Welcome
+  // is a WorkspacePatch against it, even one where nothing changed;
+  // otherwise a whole Workspace, as without it. Only with workspace_patches.
+  string workspace_revision = 10;
 }
 
 enum DeviceKind {
@@ -580,6 +695,14 @@ message PairingCode {
   string code = 1;
   // The new device's id in RemoteAccess.devices.
   string device_id = 2;
+  // The same code as a link, for its QR code:
+  // https://claktory.com/pair#t=<token>&name=…, `code`'s query after the
+  // `#`. A phone's camera opens it in Claktory (a Universal Link or App
+  // Link), or without the app on Claktory's page, which offers it in the
+  // store; the fragment never reaches the page's server. The app reads the
+  // fragment and checks it exactly as it does `code`. Empty until Claktory's
+  // page is ready for it, and from a backend before it: show `code`.
+  string link = 3;
 }
 
 // Unpairs a device: it can't connect any more, and its open connections
@@ -594,6 +717,13 @@ message UnpairDevice {
 // expired or was cancelled meanwhile).
 message ApproveDevice {
   string device_id = 1;
+  // The four digits the person typed, read off the new device
+  // (PendingDevice.number), so only someone who can see that device allows
+  // it (#352 P4). A wrong number is refused with ERROR_CODE_INVALID_REQUEST
+  // saying how many tries are left; the third wrong one turns the device
+  // away, as DenyDevice does. Empty is refused as a wrong number isn't:
+  // it asks for the digits.
+  string number = 2;
 }
 
 // Turns away a device that's waiting: its code stops working, the device is
@@ -777,6 +907,20 @@ message PairedDevice {
   // It gets notifications pushed to it while it isn't connected: it
   // registered with the push relay (RegisterNotifications).
   bool notifications = 11;
+  // Its system as its app last said (Hello.platform): "ios", "ipados",
+  // "android", "macos", "linux" or "windows". Empty when it never sent one
+  // (an app from before, or one that hasn't connected yet).
+  string platform = 12;
+  // Its app's version as it last said (Hello.client_version), e.g.
+  // "v0.1.19"; empty when it never sent one.
+  string app_version = 13;
+  // The update on offer would leave it behind: its app_version and the
+  // backend in it (Workspace.latest_backend, newer than this one) are both
+  // numbered and on different lines (their first two numbers, as the app's
+  // own compatibility check reads them), so its app can't connect until
+  // it's updated too. False when no new backend is on offer, or either
+  // version isn't numbered.
+  bool update_leaves_behind = 14;
 }
 
 // ---- Requests (client → server). Each is answered with `ack` or `error`. ----
@@ -884,6 +1028,12 @@ message SendMessage {
   // Made up by the app for this send, so it can show the message at once and
   // match it to the queued message and transcript entry it becomes, which
   // carry it (QueuedMessage.client_id, UserText.client_id). Optional.
+  // Sent again with the same client_id for the same agent (#401: its answer
+  // was lost on a weak connection), it's answered with Ack and delivered
+  // only once, whatever became of the first (queued, read, a voice message
+  // transcribed or failed), even after a restart. The same holds for
+  // SendChatMessage, and for CreateChat with text (the chat it made is
+  // selected again; no second chat). Use a new client_id for each message.
   string client_id = 3;
   // Files uploaded for this agent (UploadedFile.attachment, as answered),
   // which the message carries; with any, `text` may be empty. Each must be in
@@ -942,12 +1092,17 @@ message Attachment {
 // Then UploadChunk from that offset, each answered with UploadProgress, and
 // FinishUpload, answered with UploadedFile. A connection that drops can
 // resume with the same `upload_id` and file while the backend runs; after a
-// restart of the backend it starts again from 0. Refused (with an error
+// restart of the backend it starts again from 0. One that finished within
+// the hour (#401: its UploadedFile lost on a weak connection) answers with
+// all of it received; its FinishUpload then answers as it did, storing
+// nothing twice. Refused (with an error
 // saying why) for a file over 2 GB, an agent that doesn't exist, or a disk
 // without room for it and 1 GB to spare.
 message StartUpload {
   // Made up by the app, unique for the file being uploaded.
   string upload_id = 1;
+  // The agent it's for; or a chat's id (Chat.id) for a voice message's
+  // recording, an audio type up to 100 MB (SendChatMessage.voice).
   string agent_id = 2;
   // The file's name; only its last part is kept.
   string name = 3;
@@ -989,13 +1144,15 @@ message UploadChunk {
 
 // The whole file is sent: the backend checks its SHA-256 (hex; optional),
 // stores it and answers with UploadedFile. Refused if any of it is missing
-// or the hash differs, and the upload is gone.
+// or the hash differs, and the upload is gone. Sent again for an upload that
+// finished within the hour, it answers with the same UploadedFile.
 message FinishUpload {
   string upload_id = 1;
   string sha256 = 2;
 }
 
-// Abandons an upload; what the backend had of it is deleted.
+// Abandons an upload; what the backend had of it is deleted (one that
+// finished stays where it was stored, and is no longer answered again).
 message CancelUpload {
   string upload_id = 1;
 }
@@ -1053,6 +1210,13 @@ message UpdateProject {
   // Archives the project (true) or brings it back (false); see
   // Project.archived.
   optional bool archived = 3;
+  // Moves the project in the projects list (Workspace.projects, the
+  // sidebar's order, the same on every device): before the project with
+  // this id, or last with "". Unset leaves the order as it is; its own id
+  // changes nothing. Archived projects keep their place. INVALID_REQUEST
+  // when `before_id` names no project ("The list changed while you were
+  // dragging. Try again.").
+  optional string before_id = 4;
 }
 
 // Changes Factory-wide settings. Unset fields stay as they are. An empty
@@ -1136,6 +1300,10 @@ message FetchApp {
   string version = 1;
   // Where the chunk starts, in bytes: 0 first, then the end of the last.
   uint64 offset = 2;
+  // The most the chunk may hold, in bytes (#408): smaller pieces for a slow
+  // link, so each answer comes well within the connection's ping. 0 (older
+  // apps): 1 MiB. Never more than 1 MiB, whatever is asked.
+  uint64 max_bytes = 3;
 }
 
 // A chunk of a release's app archive: a gzipped tar with the app bundle at
@@ -1144,7 +1312,8 @@ message FetchApp {
 message AppChunk {
   string version = 1;
   uint64 offset = 2;
-  // min(1 MiB, size - offset) bytes of the archive from `offset`.
+  // min(FetchApp.max_bytes, 1 MiB, size - offset) bytes of the archive from
+  // `offset` (1 MiB when max_bytes is 0).
   bytes data = 3;
   // The whole archive's size in bytes, and its SHA-256 (hex).
   uint64 size = 4;
@@ -1299,6 +1468,12 @@ message DecideProposal {
   string comment = 4;
   // Set instead of agent_id for a chat's proposal (Chat.id).
   string chat_id = 5;
+  // Submit (#370): `comment` is the person's answer, neither an approval
+  // nor a dismissal; needed. Rivet gets the proposal with it as what to do
+  // ("Matt answered X's proposal: …. Do what Matt says; the proposal is
+  // for context"), and the proposer is told it was answered so. The
+  // proposal closes APPROVED with Proposal.replied. `approve` is ignored.
+  bool reply = 6;
 }
 
 enum MonitorAction {
@@ -1347,6 +1522,18 @@ message ReadFile {
   // now different, the answer has `error` "changed" and no data, and the app
   // reads it again from offset 0. Empty: read whatever is there.
   string expected_sha256 = 4;
+  // A preview, sized for this screen (#379): its physical pixels, portrait
+  // (width <= height). A preview fits it either way round, its long side
+  // within preview_height and its short side within preview_width, only
+  // ever scaled down. FileContent.preview says whether one came, and
+  // expected_sha256, offset and max_bytes then mean the original's version
+  // and the preview's bytes. Both 0 (older apps): the original, as before.
+  uint32 preview_width = 5;
+  uint32 preview_height = 6;
+  // With preview_width/height, a PDF over 5 MB: this page (1 is the first)
+  // as an image sized for the screen (#379), to show while the PDF itself
+  // loads. FileContent.page_count says how many it has. 0: no page.
+  uint32 preview_page = 7;
 }
 
 message FileContent {
@@ -1378,6 +1565,43 @@ message FileContent {
   string sha256 = 8;
   // Where `data` starts in the file: ReadFile.offset.
   uint64 offset = 9;
+  // A preview asked with ReadFile.preview_width/height (#379): whether this
+  // is one. With FILE_PREVIEW_MADE, mime, size, data, truncated and offset
+  // are the preview's (an image as WebP), while sha256 and modified_ms stay
+  // the original's: the version comments and ink key on, and that
+  // expected_sha256 names.
+  FilePreview preview = 10;
+  // FILE_PREVIEW_MADE: the preview's size in pixels.
+  uint32 pixel_width = 11;
+  uint32 pixel_height = 12;
+  // FILE_PREVIEW_MADE: the original's size in bytes, for "Original (3.3 MB)".
+  uint64 original_size = 13;
+  // FILE_PREVIEW_MADE, an image: the original's size in pixels as it shows
+  // (turned as its EXIF orientation says), the box the preview is laid out
+  // in. 0 when unknown.
+  uint32 original_pixel_width = 14;
+  uint32 original_pixel_height = 15;
+  // A PDF page's preview (ReadFile.preview_page): how many pages the PDF
+  // has. original_pixel_width/height are then the page's size in PDF
+  // points, turned as it shows.
+  uint32 page_count = 16;
+}
+
+// Whether a FileContent is a preview (#379).
+enum FilePreview {
+  // The original: no preview was asked, or none was needed (small enough,
+  // it fits the screen already, a preview wouldn't be smaller, a GIF, or a
+  // PDF of 5 MB or less, which comes as its first range as before).
+  FILE_PREVIEW_NONE = 0;
+  // A preview, smaller than the original: the app says so and offers the
+  // original. Saving and sharing read the original.
+  FILE_PREVIEW_MADE = 1;
+  // A preview was asked and would have been made, but this Claktory can't
+  // make one (a video on Linux without ffmpeg, a PDF's page off a Mac): the
+  // original came, and the app says "No preview on this Claktory". For a
+  // PDF's page (ReadFile.preview_page), none of the PDF's bytes come, only
+  // its size and version: the app loads the PDF by its own requests.
+  FILE_PREVIEW_UNAVAILABLE = 2;
 }
 
 // Sets an agent's layout (`Agent.layout`) for every device, answered with
@@ -1385,6 +1609,82 @@ message FileContent {
 // unique non-empty ids, and splits of two or more children with as many
 // positive weights (or none). An unset root, or a lone chat leaf, goes back
 // to just the conversation.
+// The person opened the pane `pane_id` of the agent's layout (on the phone,
+// from its list of open files): its ViewLeaf.opened_ms becomes now, on every
+// device, as when an agent shows its file again. NOT_FOUND for an unknown
+// agent; INVALID_REQUEST for a pane the layout doesn't have.
+message PaneOpened {
+  string agent_id = 1;
+  string pane_id = 2;
+}
+
+// Takes the agent's conversation back to right before the entry `seq`,
+// which must still have `timestamp_ms` (friend bug #9): right before it
+// for a message the agent was given (the person's or an event); for one of
+// the agent's replies (assistant text or thinking), right before the next
+// message it was given, so the whole run stays. What came after is set
+// aside as another version (Branch). A working agent stops first; what's
+// queued for it stays. Cards from the part set aside close, and the agent
+// gets a quiet note from Claktory (an ordinary quiet Factory event) with
+// what that part did. The agent's Transcript is sent again, and
+// Agent.branches counts the new version. Ack carries nothing: going back
+// to one of the person's own messages, the app puts its text and
+// attachments back in the box itself. INVALID_REQUEST, with a message to
+// show as it is: not a point it can go back to (a tool call, the very
+// first message, a reply nothing came after), or the entry changed;
+// NOT_FOUND: an unknown agent.
+message ForkConversation {
+  string agent_id = 1;
+  uint64 seq = 2;
+  int64 timestamp_ms = 3;
+}
+
+// The agent's other versions, answered with Branches to the asker only.
+message ListBranches {
+  string agent_id = 1;
+}
+
+// Makes `branch_id` the agent's conversation; the one it's in now is set
+// aside as another version, from where the two part. Stops, closes cards,
+// notes and resends as ForkConversation does. Answered with Ack;
+// NOT_FOUND for an unknown agent or a version that isn't there any more.
+message SwitchBranch {
+  string agent_id = 1;
+  string branch_id = 2;
+}
+
+// Deletes the version `branch_id` of the agent's conversation. Answered
+// with Ack; NOT_FOUND as SwitchBranch.
+message DeleteBranch {
+  string agent_id = 1;
+  string branch_id = 2;
+}
+
+// An agent's other versions of its conversation, the latest set aside first.
+message Branches {
+  string agent_id = 1;
+  repeated Branch branches = 2;
+}
+
+// Another version of an agent's conversation.
+message Branch {
+  // What SwitchBranch and DeleteBranch take.
+  string id = 1;
+  // The first words of the first message the person wrote in it ("Look at
+  // the scheduler again…"), or "From 14:02" when they wrote none.
+  string label = 2;
+  // When it was set aside.
+  int64 set_aside_ms = 3;
+  // When it parts from the conversation it was set aside from: the time of
+  // the message it went back to.
+  int64 forked_at_ms = 4;
+  // How many messages it has past that point (the agent's replies and what
+  // it was given; not tools' results).
+  uint32 messages = 5;
+  // Who set it aside: empty for the person, else an agent's id.
+  string made_by = 6;
+}
+
 message SetLayout {
   string agent_id = 1;
   ViewNode root = 2;
@@ -1439,6 +1739,11 @@ message ViewLeaf {
   string app_id = 4;
   string view = 5;
   string params = 6;
+  // When it was opened, ms since the epoch: when the person or an agent
+  // added it, or an agent showed its file again (show doesn't open a file
+  // twice). 0 for panes from before it was kept. The backend sets it; it's
+  // ignored in SetLayout.
+  int64 opened_ms = 7;
 }
 
 // Opens an extension's panel beside an agent (`Agent.open_panel`); an empty id
@@ -1770,6 +2075,10 @@ message DecideSuggestion {
   // that suggested it, or, for the person's own suggestion, to the agent
   // the thread is for. May be empty; 2,000 characters at most.
   string comment = 3;
+  // Submit (#370): `comment` is the person's reply, needed; `accept` is
+  // ignored. It's sent at once as their reply on the thread (as ReplyThread
+  // with send_now), and the suggestion stays open, undecided.
+  bool reply = 4;
 }
 
 // ---- Sign-in ----
@@ -2082,6 +2391,61 @@ message Workspace {
   // The ceilings a report type must stay within (SaveReportType), so the
   // editor clamps to them.
   ReportTypeRules report_type_rules = 42;
+  // The providers agents and chats wait on, for a usage limit or for
+  // credit (#343 U6): one Needs you item each, in the order their first
+  // waiter is listed. Each notifies once when it appears (NOTIFY_KIND_NEEDS_YOU),
+  // and counts once in the badge.
+  repeated ProviderWait provider_waits = 43;
+  // Keeping this Mac awake while agents work (KeepAwake).
+  KeepAwake keep_awake = 44;
+  // The projects' pipe groups (#359), each project's in their order
+  // (PipeGroup.position). A project's pipe rows: its groups, each with its
+  // pipes under it, then the pipes in none.
+  repeated PipeGroup pipe_groups = 45;
+  // Continue automatically (friend bug #8 A2; off unless the person turns
+  // it on, in Settings → Providers): an agent or chat whose wait on a usage
+  // limit starts, or goes on, while another provider can run its model is
+  // switched there by itself, as ContinueOnAlternative would (that one
+  // only, to its UsageWaitAlternative), and goes back as any switch does
+  // (UsageSwitch.goes_back). Never for a wait on credit, a sign-in or
+  // locked secrets. It spends on that provider without asking.
+  bool usage_auto_continue = 46;
+}
+
+// Agents and chats waiting on one provider's usage limit or credit
+// (Workspace.provider_waits): what Needs you shows for them, all at once.
+// Only waits another provider could carry (Agent.usage_wait with a usage
+// limit or credit): never a wait to sign in, or for the secrets to unlock,
+// which has its own item (VaultState.agents_waiting). The ways forward are
+// on the waiters themselves: Try now is TryAgainNow with any of them (it
+// wakes everyone waiting on the provider); a usage reset is UseUsageReset
+// with one the provider's accounts list (Account.usage.resets); Continue on
+// another provider is ContinueOnAlternative with the first waiter and
+// all_waiting, from its usage_wait_alternative; when that's unset and its
+// usage_wait_no_other_provider is true, signing in to another provider
+// would let them carry on.
+message ProviderWait {
+  // The provider's id, as Provider.id: "anthropic", "openrouter".
+  string provider_id = 1;
+  // As the waits name it: "Claude", "ChatGPT", "OpenRouter".
+  string provider_name = 2;
+  // They wait for credit (an API key ran out of it), not for a limit to
+  // reset: nothing ends it by itself.
+  bool credit = 3;
+  // The soonest any of them asks again by itself, in ms since 1970; 0 when
+  // they wait for credit.
+  int64 until_ms = 4;
+  // Who waits: agents in Workspace.agents' order, then chats in
+  // Workspace.chats' order. At least one of the two is never empty.
+  repeated string agent_ids = 5;
+  repeated string chat_ids = 6;
+  // Claktory's words for the item: a title ("Claude usage limit reached",
+  // "OpenRouter is out of credit") and a sentence saying who waits and
+  // until when ("Rivet, Mike and 2 more wait until it resets at Fri
+  // 18:00.", "Rivet waits until you add credit or another OpenRouter
+  // account.").
+  string title = 7;
+  string text = 8;
 }
 
 // An app Claktory ships with this release (Workspace.bundled_apps).
@@ -2224,6 +2588,138 @@ enum UpdateCheckState {
   UPDATE_CHECK_STATE_READY = 4;
   // The check couldn't finish; `error` says why, for the person.
   UPDATE_CHECK_STATE_FAILED = 5;
+}
+
+// Keeping the Mac Claktory runs on awake while agents work, so they carry
+// on while the person is away. Never on by default: on a laptop it uses
+// battery, and the person may not know. Only idle sleep is held off, and
+// only while an agent works (or waits on usage to carry on); closing a
+// laptop's lid still puts it to sleep.
+message KeepAwake {
+  // Claktory runs on a Mac and can keep it awake: show the setting.
+  bool available = 1;
+  // The Mac has a battery (a laptop).
+  bool laptop = 2;
+  // On: the person said yes, or it's a desktop Mac they haven't answered
+  // for (a desktop is on by default, a laptop off until they say yes).
+  bool on = 3;
+  // The person answered, in the question or in Settings.
+  bool answered = 4;
+  // Ask now, as an item in Needs you: agents have worked on this laptop
+  // and the person hasn't answered. Say agents keep working while the Mac
+  // is plugged in with its lid open, and that Settings can change it; yes
+  // and no are SetKeepAwake, and dismissing it is a no. Never on a desktop.
+  bool ask = 5;
+  // Held now: it's on, an agent works and the Mac is plugged in.
+  bool holding = 6;
+  // The Mac is plugged in now (always on a desktop; a laptop's power is
+  // looked at every 30 seconds while it's on and agents work). It's never
+  // held awake on battery.
+  bool plugged_in = 7;
+  // Keeping agents working with the lid closed (#371) can be offered: a
+  // laptop on macOS 14 or later. The Mac app also leaves it out when its
+  // own bundle carries no helper (dev and ad hoc builds). Never on a desktop.
+  bool lid_closed_available = 8;
+  // Where it stands (LidClosedState): off unless the person turned it on,
+  // from its own question, in the Mac app on that Mac.
+  LidClosedState lid_closed = 9;
+  // LID_CLOSED_FAILED: why, as macOS said it, for the person.
+  string lid_closed_error = 10;
+  // The helper holds the Mac awake now (LID_CLOSED_ON, agents work and it's
+  // plugged in), so it doesn't sleep when the lid closes. Never on battery.
+  bool lid_closed_holding = 11;
+}
+
+// Keeping a laptop's agents working with its lid closed: a helper the Mac
+// app installs (SMAppService, approved with an administrator password in
+// System Settings → Login Items) stops the Mac from sleeping while agents
+// work and it's plugged in, and lets go by itself on low battery, heat or
+// the lid closed on battery.
+enum LidClosedState {
+  // The person hasn't turned it on, or turned it off.
+  LID_CLOSED_OFF = 0;
+  // Turned on, and the helper waits for the person's approval in System
+  // Settings → Login Items (the app opens it).
+  LID_CLOSED_NEEDS_APPROVAL = 1;
+  // Turned on and the helper answers: it holds the Mac awake while agents
+  // work on power (lid_closed_holding).
+  LID_CLOSED_ON = 2;
+  // On, and the helper let go: the battery is at 20% or less (it holds again
+  // at 30% or on power).
+  LID_CLOSED_PAUSED_BATTERY = 3;
+  // On, and the helper let go: the Mac is too hot (it holds again 10 minutes
+  // after it cools down).
+  LID_CLOSED_PAUSED_HEAT = 4;
+  // On, and the helper let go: the lid is closed on battery, as in a bag.
+  // It holds again once plugged in.
+  LID_CLOSED_PAUSED_LID_ON_BATTERY = 5;
+  // On, but no helper answers: it isn't installed, it was turned off in
+  // System Settings, or macOS refused to start it (then Login Items shows it
+  // switched off until the person switches it on again, even after it's
+  // installed again). The Mac app registers it again and offers Login Items;
+  // it never assumes an earlier approval still holds.
+  LID_CLOSED_MISSING = 6;
+  // On, but the helper is from another version of Claktory: the Mac app
+  // installs it again. factoryd asks it to hold nothing meanwhile.
+  LID_CLOSED_OUTDATED = 7;
+  // On, but installing or removing the helper failed: lid_closed_error says
+  // why.
+  LID_CLOSED_FAILED = 8;
+}
+
+// What macOS answered the Mac app about the helper (SMAppService's status,
+// or the failure of register or unregister), for what the setting shows.
+// Holding comes only from the helper's own answer, never from this.
+enum LidClosedRegistration {
+  LID_CLOSED_REGISTRATION_UNKNOWN = 0;
+  LID_CLOSED_REGISTRATION_ENABLED = 1;
+  LID_CLOSED_REGISTRATION_REQUIRES_APPROVAL = 2;
+  LID_CLOSED_REGISTRATION_NOT_REGISTERED = 3;
+  LID_CLOSED_REGISTRATION_NOT_FOUND = 4;
+  LID_CLOSED_REGISTRATION_FAILED = 5;
+}
+
+// The person turns keeping agents working with the lid closed on or off,
+// in the Mac app on the Mac Claktory runs on, after its own question; the
+// app sends it after register() or unregister(), and again whenever what
+// macOS says of the helper changes while it's open. Ack. Turning it on is
+// refused from any other device ("Turn it on from the Mac."), and on a Mac
+// that can't (KeepAwake.lid_closed_available); turning it off is taken
+// from anywhere, and the helper lets go at once.
+message SetLidClosed {
+  bool on = 1;
+  LidClosedRegistration registration = 2;
+  // LID_CLOSED_REGISTRATION_FAILED: what macOS said.
+  string error = 3;
+}
+
+// Reads a provider's model list from the provider now (friend bug #14), as
+// Claktory does by itself every 12 hours while it's signed in. Answered
+// with Ack once it's read and Workspace has the new list, or an Error with
+// why it failed, the same sentence as Provider.models_fetch_error.
+message RefreshModels {
+  // The provider's id; empty for every provider whose list can be read
+  // (Provider.models_fetchable).
+  string provider_id = 1;
+}
+
+// Adds a model its provider's list doesn't have, by its id, once the
+// provider says this sign-in has it and an agent can run on it (friend bug
+// #14). Kept across restarts, and listed with Model.added. Answered with Ack
+// once it's in Workspace.models (Ack too when it was already), or an Error
+// with a sentence to show ("Anthropic has no model “claude-x” for this
+// sign-in.", "Sign in to Anthropic first, in Settings → Providers."). An
+// agent's model set to a model the list doesn't have (UpdateAgent,
+// models_set) is checked and added the same way first.
+message AddModel {
+  // "<provider>/<model id>", such as "openrouter/google/gemini-4-neon".
+  string model = 1;
+}
+
+// The person's answer to KeepAwake: keep the Mac awake while agents work,
+// or not. Ack; KeepAwake.answered turns true.
+message SetKeepAwake {
+  bool on = 1;
 }
 
 message UpdateCheck {
@@ -2393,7 +2889,8 @@ message OpenScreen {
   // What to open, by kind and id. "settings": id a section ("profile",
   // "general", "account", "providers", "secrets", "apps", "defaults",
   // "devices", "resources", "display"), or empty for the top. "map",
-  // "usage", "marketplace", "changelog" (What's new): no id. "agent": an
+  // "usage", "monitors" (every agent's monitors), "marketplace",
+  // "changelog" (What's new): no id. "agent": an
   // agent's id, its conversation. "agent_settings": an agent's id, its
   // settings.
   HighlightTarget target = 2;
@@ -2885,6 +3382,97 @@ message Monitor {
   int64 created = 15;
 }
 
+// ---- The Monitors overview ----
+
+// Every agent's monitors, for the Monitors overview, by agent and then id.
+// Answered with MonitorList. The filters combine; each left empty doesn't
+// filter.
+message ListMonitors {
+  // Only this agent's.
+  string agent_id = 1;
+  // Only those of agents in this project.
+  string project_id = 2;
+  // Only monitors in these states. Empty: all but those that ended (done or
+  // cancelled) more than a week ago, which are never listed.
+  repeated MonitorState states = 3;
+}
+
+message MonitorList {
+  repeated AgentMonitor monitors = 1;
+}
+
+// A monitor with the agent it wakes: monitors are numbered per agent, so
+// agent_id and monitor.id together name one.
+message AgentMonitor {
+  string agent_id = 1;
+  Monitor monitor = 2;
+  // Why an active monitor doesn't run now, though it stays active and runs
+  // again once that changes; UNSPECIFIED when it runs, or isn't active.
+  MonitorHeld held = 3;
+}
+
+enum MonitorHeld {
+  MONITOR_HELD_UNSPECIFIED = 0;
+  // Its agent has the Monitors extension turned off.
+  MONITOR_HELD_EXTENSION_OFF = 1;
+  // Its agent's project is archived.
+  MONITOR_HELD_PROJECT_ARCHIVED = 2;
+}
+
+// What happened to one monitor, newest first, a page at a time. Answered
+// with MonitorHistory; an error (NOT_FOUND) when the agent has no such
+// monitor.
+message ListMonitorHistory {
+  string agent_id = 1;
+  // Its number: 3 for m3.
+  uint32 monitor_id = 2;
+  // Only events before this one (the last page's oldest seq); 0 for the
+  // newest.
+  uint64 before_seq = 3;
+  // How many; 0 for 50, at most 200.
+  uint32 limit = 4;
+}
+
+message MonitorHistory {
+  string agent_id = 1;
+  uint32 monitor_id = 2;
+  repeated MonitorEvent events = 3;
+  // There are older ones.
+  bool more = 4;
+}
+
+// One thing that happened to a monitor. A fire is the monitor waking its
+// agent with its prompt, not the agent's work on it being done.
+message MonitorEvent {
+  // Its place in the history, increasing; for paging.
+  uint64 seq = 1;
+  // ms since 1970.
+  int64 time_ms = 2;
+  MonitorEventKind kind = 3;
+  // Who did it: an agent's id; empty for the person, or for Claktory (a
+  // fire on schedule, an end on its own).
+  string actor = 4;
+  // In words: CREATED what it waits for ("every 6h"); FIRED what fired it
+  // ("check matched \"ERROR\"", "fired by hand"); PAUSED, CANCELLED, DONE
+  // and ERROR why ("by Matt", "its until passed", "its command kept
+  // failing"). May be empty.
+  string detail = 5;
+}
+
+enum MonitorEventKind {
+  MONITOR_EVENT_KIND_UNSPECIFIED = 0;
+  MONITOR_EVENT_KIND_CREATED = 1;
+  MONITOR_EVENT_KIND_FIRED = 2;
+  MONITOR_EVENT_KIND_PAUSED = 3;
+  MONITOR_EVENT_KIND_RESUMED = 4;
+  MONITOR_EVENT_KIND_CANCELLED = 5;
+  MONITOR_EVENT_KIND_DONE = 6;
+  MONITOR_EVENT_KIND_ERROR = 7;
+}
+
+// Some agent's monitors changed: see ServerMessage.monitors_changed.
+message MonitorsChanged {}
+
 enum MonitorState {
   MONITOR_STATE_UNSPECIFIED = 0;
   MONITOR_STATE_ACTIVE = 1;
@@ -3075,6 +3663,23 @@ message Provider {
   // its default first, such as "5m" and "1h". Empty when there's no choice:
   // the app then shows cache_lifetime, if any, as it is.
   repeated string cache_ttl_choices = 11;
+  // How many agents and chats have a model on this provider now (a
+  // switched one where it runs now), idle or working.
+  uint32 agents = 12;
+  // When Claktory last read this provider's model list from the provider
+  // itself, in ms since 1970 (friend bug #14). 0 when it never has: its
+  // list is the one Claktory came with.
+  uint64 models_fetched_ms = 13;
+  // Why the last read of its model list failed, a sentence to show as it
+  // is ("Anthropic couldn't be reached."). Empty when it worked or none was
+  // tried. The list there was stays.
+  string models_fetch_error = 14;
+  // Its model list is being read now (RefreshModels, or the read every 12
+  // hours).
+  bool models_fetching = 15;
+  // Its model list can be read from the provider now: it's signed in, at
+  // the provider's own address. Refresh models is offered only then.
+  bool models_fetchable = 16;
 }
 
 // One account signed in to a provider, such as one of two Claude
@@ -3096,7 +3701,9 @@ message Account {
   // Factory stored it and `SignOut` removes it (false for an API key from the
   // environment).
   bool can_sign_out = 5;
-  // Requests go to it now.
+  // Requests go to it now: the first with room, while an agent or chat has
+  // a model on this provider that draws on its normal pool (on Anthropic,
+  // any but Fable's; see fable_in_use).
   bool in_use = 6;
   // It reached a usage limit: requests skip it until then, in ms since 1970;
   // 0 when it has capacity.
@@ -3112,6 +3719,53 @@ message Account {
   // the person signs in to it again (StartLogin with its provider, method
   // "oauth" and add_account, which replaces it in place and clears this).
   bool sign_in_again = 10;
+  // What this key has to spend, as its provider says (OpenRouter, #343 U8):
+  // read at sign-in, then every few minutes while agents work on it and
+  // every half hour otherwise. Unset for a provider that doesn't say
+  // (subscriptions, Anthropic and OpenAI keys) or before the first read.
+  AccountCredit credit = 11;
+  // Fable's own weekly pool (Anthropic) reached its limit on it: Fable
+  // models' requests skip it until then, in ms since 1970; 0 when Fable has
+  // room on it, and always on providers without that pool.
+  int64 fable_exhausted_until = 12;
+  // Fable models' requests go to it now: the first with room in Fable's
+  // pool, while an agent or chat has a Fable model. As in_use, for that pool.
+  bool fable_in_use = 13;
+}
+
+// An API key's spending, as its provider says (Account.credit). Amounts
+// are in US dollars. OpenRouter tells a key only about the key: its own
+// spending limit and what it spent, never the account's balance (that
+// takes a management key), so a key with no limit shows today's spend
+// alone.
+message AccountCredit {
+  // The key has a spending limit on the provider: `limit` and `left` hold
+  // it. False: no limit is set on the key.
+  bool limited = 1;
+  // The limit, and what's left of it (zero or less: used up); both 0
+  // without one.
+  double limit = 2;
+  double left = 3;
+  // When the limit refills: "daily", "weekly" or "monthly" (UTC); empty
+  // when it never does, or with no limit.
+  string limit_reset = 4;
+  // Spent with this key today, since 00:00 UTC.
+  double spent_today = 5;
+  // The provider's account never bought credit, so only free models run
+  // on it (OpenRouter's is_free_tier).
+  bool never_paid = 6;
+  // Claktory's sentence when the key can't run paid models, for the
+  // sign-in step and Settings → Providers: "This key has no credit yet.
+  // Add credit at OpenRouter.", "This key's spending limit is used up.
+  // Raise it at OpenRouter, or wait until it refills on Monday."; empty
+  // when it can.
+  string warning = 7;
+  // When it was last read, in ms since 1970.
+  int64 read_ms = 8;
+  // Why the latest read failed, a sentence ("OpenRouter couldn't be
+  // reached."); empty when it worked. The other fields then still hold the
+  // last good read, if there was one (read_ms 0 if never).
+  string error = 9;
 }
 
 message ProviderUsage {
@@ -3444,6 +4098,11 @@ message Agent {
   // it came from, and whether that has room again (SwitchBack). Cleared
   // when it goes back, or when the person changes its model themselves.
   UsageSwitch usage_switch = 50;
+  // How many other versions of its conversation it has (ListBranches):
+  // the person took it back to an earlier message, or switched versions.
+  // When it changes, or a fresh Transcript comes, a list on screen asks
+  // again.
+  uint32 branches = 51;
 }
 
 // What an agent (or a chat) waiting on its provider's usage could continue
@@ -3483,6 +4142,16 @@ message UsageSwitch {
   // How many other agents and chats switched from it are ready too
   // (SwitchBack.all).
   uint32 others_ready = 5;
+  // It goes back by itself once that provider has room (friend bug #8 A1):
+  // at its next step after an account has room and its last usage read has
+  // no window at 100%. False when it went back by itself and reached the
+  // limit again within 10 minutes: then it stays until that limit resets,
+  // and only SwitchBack moves it sooner.
+  bool goes_back = 6;
+  // When that provider should have room again, in ms since 1970: the
+  // earliest account's limit reset, or the reset of its last full window;
+  // 0 when unknown or it has room now.
+  int64 goes_back_at_ms = 7;
 }
 
 // Continue on another provider: an agent (or a chat, by its id) waiting on
@@ -3512,6 +4181,11 @@ message SwitchBack {
   // With `all`: how many others the person saw ready to go back
   // (UsageSwitch.others_ready); as ContinueOnAlternative.expected_others.
   uint32 expected_others = 3;
+}
+
+// Workspace.usage_auto_continue, kept in factory.db.
+message SetUsageAutoContinue {
+  bool on = 1;
 }
 
 // A checklist item that waits on the person (Agent.waiting_items).
@@ -3593,6 +4267,9 @@ message Model {
   // (read_image). From the provider catalog's input list, the same source
   // as the tool's gate.
   bool image_input = 5;
+  // Added by its id (AddModel, or an agent's model set to it), as the
+  // provider's list doesn't have it (friend bug #14).
+  bool added = 6;
 }
 
 // The selected agent's whole transcript, oldest entry first.
@@ -3897,7 +4574,8 @@ message Proposal {
   // What the agent proposes, written to stand alone for Rivet.
   string text = 2;
   ProposalState state = 3;
-  // The person's comment on approving; empty otherwise.
+  // The person's comment on approving, or their answer (replied); empty
+  // otherwise.
   string comment = 4;
   // When it was approved or dismissed, in ms since 1970; 0 while pending.
   int64 decided_at_ms = 5;
@@ -3906,6 +4584,10 @@ message Proposal {
   // (PipeTaint.kind "browser"); pipes on older proposals. Empty when it had
   // read none.
   repeated PipeTaint taint = 6;
+  // Answered with a comment (DecideProposal.reply) rather than approved:
+  // state is APPROVED (Rivet acts on it) and `comment` is the answer.
+  // Shown as answered rather than approved.
+  bool replied = 7;
 }
 
 // A device an agent adds for the person (an admin agent's devices_add tool,
@@ -4019,6 +4701,9 @@ message AppGrantProposal {
   // page; a pipe on older cards). Set when proposed and again when decided.
   // The card says so, loudest for dm.send.
   bool grantee_read_pipes = 15;
+  // DECLINED by a reply (DecideAppGrant.reply): nothing was given, and
+  // `comment` is what the person said instead. Shown as replied.
+  bool replied = 16;
 }
 
 // Something a grant lets an agent do in an app.
@@ -4064,6 +4749,11 @@ message DecideAppGrant {
   // The person's comment, told to Rivet as theirs ("Matt's note: …"),
   // with either answer; may be empty. 2,000 characters at most.
   string comment = 4;
+  // Submit (#370): `comment` is the person's reply, needed; `approve` is
+  // ignored. Nothing is given: the card
+  // closes DECLINED with AppGrantProposal.replied, and Rivet gets the
+  // comment to propose again with it in mind.
+  bool reply = 5;
 }
 
 // Rivet's proposal of what an installed app may read and which agents may
@@ -4128,6 +4818,9 @@ message AppAccessProposal {
   // (private data, the internet, then each agent). Empty on cards from
   // before (apps_propose_access).
   repeated string card_rules = 19;
+  // DECLINED by a reply (DecideAppAccess.reply): nothing was given, and
+  // `comment` is what the person said instead. Shown as replied.
+  bool replied = 20;
 }
 
 // The person's decision on an AppAccessProposal in Rivet's conversation.
@@ -4145,6 +4838,11 @@ message DecideAppAccess {
   string comment = 4;
   // With `approve`: AppAccessProposal.digest, as the card showed it.
   string digest = 5;
+  // Submit (#370): `comment` is the person's reply, needed; `approve` is
+  // ignored. Nothing is given: the card
+  // closes DECLINED with AppAccessProposal.replied, and Rivet gets the
+  // comment to propose again with it in mind.
+  bool reply = 6;
 }
 
 message DevicePairing {
@@ -4303,14 +5001,16 @@ message RemoveSpeechModel {}
 
 // Transcribes a FAILED voice message again.
 message RetryVoiceMessage {
+  // The agent's id, or a chat's (Chat.id).
   string agent_id = 1;
   // QueuedMessage.id.
   int64 message_id = 2;
 }
 
 // Drops a PENDING or FAILED voice message from the queue, undelivered; its
-// recording stays in the agent's uploads.
+// recording stays in an agent's uploads, and is deleted from a chat's.
 message DiscardVoiceMessage {
+  // The agent's id, or a chat's (Chat.id).
   string agent_id = 1;
   // QueuedMessage.id.
   int64 message_id = 2;
@@ -4330,10 +5030,15 @@ message TranscribeAudio {
   // transcribed or refused.
   string upload_id = 2;
 }
+// Asked again with the same request_id and upload_id (#401: from the next
+// connection, after one dropped before its answer), it waits with the first
+// for the words, or gets them at once once they're there, for an hour,
+// without the upload being needed again. Kept in memory: after a restart,
+// or an hour, the answer is no_recording.
 
-// What a TranscribeAudio heard, sent only to the connection that asked. A
-// connection that dropped meanwhile never gets it (the recording is gone:
-// upload it again).
+// What a TranscribeAudio heard, sent to the connections that asked (the
+// same request asked again from another connection is answered there too).
+// A connection that dropped meanwhile gets it by asking again.
 message AudioTranscribed {
   string request_id = 1;
   // The words heard; empty when `error` is set (and possibly when it isn't).
@@ -4345,8 +5050,12 @@ message AudioTranscribed {
   //   too_long: the recording is over 10 minutes;
   //   no_speech: no speech was heard in it (silence); an app that doesn't
   //     know this code shows it as failed;
-  //   failed: anything else (an upload that isn't there or expired, a
-  //     recording that can't be read, recognition failing).
+  //   no_recording: the upload isn't here (never finished, over an hour
+  //     old, or from before a restart) and nothing was heard for this
+  //     request: upload it again, with a new upload_id and request_id. An
+  //     app that doesn't know this code shows it as failed;
+  //   failed: anything else (a recording that can't be read, recognition
+  //     failing, too many dictations waiting).
   string error = 3;
   // How long the recording is, once it was read; 0 otherwise.
   uint64 duration_ms = 4;
@@ -4794,6 +5503,11 @@ message DecideSecretRequest {
   // An import: give the new secret to the agent that asked. Off (the
   // default) gives it to no one.
   bool grant_to_asker = 16;
+  // Submit (#370): `comment` is the person's reply, needed; nothing is
+  // given and `approve` is ignored. The request closes DISMISSED with
+  // SecretRequest.replied; the agent is told the reply, and an item it's
+  // about counts as answered (no asking again).
+  bool reply = 17;
 }
 
 // Who used a secret and when, newest first; `id` empty for every secret.
@@ -4953,6 +5667,48 @@ message SecretRequest {
   // message, before #346; as AppGrantProposal.grantee_read_pipes): what it
   // asks for may come from someone else.
   bool asker_read_pipes = 21;
+  // Where the person makes it, as the agent gave it (#360, K3): an https
+  // link to a public site (never an IP address, localhost or a local
+  // name), with no user name, password or port, at most 2,000 characters,
+  // its host in punycode; secrets_request refuses any other. Empty when the
+  // agent gave none. Open it only on the person's tap.
+  string link = 22;
+  // The link's host, in ASCII (punycode): the only label for the link's
+  // button ("Get it on github.com"), never words of the agent's.
+  string link_host = 23;
+  // At most one line (200 characters) of how to make it, in the agent's
+  // words, with controls and hidden or reordering characters taken out:
+  // show it as the agent's, quoted.
+  string steps = 24;
+  // The vault's secret that fits this request (K4): the one it named, else
+  // one whose name is what it asks for (ignoring case), else one that sets
+  // every variable it asks for; failing those, a connected service
+  // (SecretInfo.connection) whose connector it names, which the admin
+  // agent makes one from. Kept current as the vault changes while it
+  // waits. Empty when nothing fits: the card is the prefilled form.
+  string fitting_secret_id = 25;
+  string fitting_secret_name = 26;
+  // Where a generated key goes (K6): an owner/repo ("claktory/factory") or
+  // a host, as the agent gave it; empty when it gave none or anything
+  // else.
+  string place = 27;
+  // When the person said the generated key is in place
+  // (SecretRequestDone), in ms since 1970; 0 until then.
+  int64 done_ms = 28;
+  // GRANTED: the secret given was added from the card, new, rather than
+  // one the vault had.
+  bool added = 29;
+  // DISMISSED by a reply (DecideSecretRequest.reply): nothing was given,
+  // and `comment` is what the person said instead. Shown as replied.
+  bool replied = 30;
+}
+
+// The person put a generated key where it goes (K6's Done): the agent is
+// told it's in place, and SecretRequest.done_ms is set. Only for a
+// generated ssh key's request; Ack, and again (changing nothing) once done.
+message SecretRequestDone {
+  string agent_id = 1;
+  string request_id = 2;
 }
 
 // A file an agent asks the vault to import (SecretRequest.imports). Holds
@@ -4972,7 +5728,8 @@ message SecretImport {
   // it can't be used to guess them): "3f9a 21c0 7d44".
   string fingerprint = 5;
   // Where it is, when that's somewhere sensitive: "ssh", "gnupg", "aws",
-  // "gcloud", "kube", "docker", "keychains", "browser"; empty otherwise.
+  // "gcloud", "kube", "docker", "keychains", "browser", "netrc"; empty
+  // otherwise.
   string sensitive = 6;
   // Why it can't be imported now (gone, or changed since it was asked
   // for), in Claktory's words; empty when it can.
@@ -5407,6 +6164,10 @@ message ConnectProposal {
   repeated PolicyStatement statements = 14;
   // AWS: the region it's for ("eu-central-1"); empty for the others.
   string region = 15;
+  // DISMISSED by a reply (DismissConnectProposal.reply): nothing was
+  // connected, and `comment` is what the person said instead. Shown as
+  // replied.
+  bool replied = 16;
 }
 
 // One Allow statement of a permissions policy (AWS IAM): the actions, on the
@@ -5519,6 +6280,10 @@ enum ConnectFlowState {
 message DismissConnectProposal {
   string proposal_id = 1;
   string comment = 2;
+  // Submit (#370): `comment` is the person's reply, needed. Nothing is
+  // connected: the proposal closes DISMISSED with ConnectProposal.replied,
+  // and the agent is told the reply.
+  bool reply = 3;
 }
 
 // A connected service's account, as the service said it was granted.
@@ -6279,6 +7044,22 @@ message Pipe {
   // always has one, lead_id). They're the person's to read and answer,
   // counted in Needs you until an agent leads the pipe and is told of them.
   repeated uint64 unanswered_seqs = 30;
+  // The other side says its liaison is waiting (#343 U18): it answers
+  // later. Only while OPEN. Show it in this side's own words with this
+  // side's `name`, never anything the other side wrote: "{name} is waiting
+  // until Fri 18:00", or "{name} is waiting" when peer_waiting_until_ms is 0.
+  // This side's own liaison's wait is its lead's Agent.usage_wait.
+  bool peer_waiting = 31;
+  // Until when, in ms since 1970: checked here, in the future and at most
+  // 8 days ahead, rounded up to a quarter of an hour by the other side.
+  // 0 when there's no known end (out of credit, say) or none that holds.
+  int64 peer_waiting_until_ms = 32;
+  // The group it's in (Workspace.pipe_groups); empty for none.
+  string group_id = 33;
+  // APPROVAL: the agent a reply goes to (ApprovePipe.reply, #370): the one
+  // whose card started the pipe, else the admin agent with Pipes; empty
+  // when there's none (a reply is refused then) and in other states.
+  string reply_agent_id = 34;
 }
 
 enum PipeState {
@@ -6385,8 +7166,12 @@ message PipeMessage {
   repeated PipeFile files = 5;
   PipeMessageState state = 6;
   // REFUSED: why, for the person ("It contains your secret AWS."); HELD
-  // with files from outside the outbox: which; HELD_INCOMING: why it's held.
+  // with files from outside the outbox: which; HELD_INCOMING: why it's held;
+  // DISCARDED with `replied`: the person's reply.
   string note = 7;
+  // DISCARDED by a reply (DecidePipeMessage.reply): never sent; the person
+  // sent it back to its writer with `note`. Shown as sent back.
+  bool replied = 8;
 }
 
 message PipeAuthor {
@@ -6514,6 +7299,10 @@ message ApprovePipe {
   // pipe (else the admin agent with Pipes); never to the other side. May
   // be empty; 2,000 characters at most.
   string comment = 9;
+  // Submit (#370): `comment` is the person's reply, needed; nothing else
+  // is read. The pipe stays waiting for approval, unchanged; the agent whose
+  // card started it (else the admin agent with Pipes) is told the reply.
+  bool reply = 10;
 }
 
 // Changes a pipe's settings; unset fields stay as they are.
@@ -6578,6 +7367,12 @@ message DecidePipeMessage {
   // incoming one; never to the other side. May be empty; 2,000 characters
   // at most.
   string comment = 4;
+  // Submit (#370), on a held outgoing message only: `comment` is the
+  // person's reply, needed; `allow` is ignored. The message isn't sent: it
+  // closes DISCARDED with PipeMessage.replied and the comment as its
+  // `note`, and its writer is told to write it again. Refused for a held
+  // incoming message.
+  bool reply = 5;
 }
 
 // A pipe's latest messages, sent when it's selected: at most 200.
@@ -6651,6 +7446,11 @@ message SecretApproval {
   // or with &, nohup, setsid or disown): it has the secrets for as long as
   // it runs ("keeps running after it starts, with AWS").
   bool keeps_running = 10;
+  // DENIED by a reply (DecideSecretApproval.reply): nothing ran, and
+  // `comment` is what the person said. Shown as replied.
+  bool replied = 11;
+  // The person's reply, when `replied`.
+  string comment = 12;
 }
 
 // What an agent has read that may hold someone else's instructions: since
@@ -6690,6 +7490,10 @@ message DecideSecretApproval {
   // The person's comment, told to the agent that asked as
   // theirs ("Matt's note: …"); may be empty. 2,000 characters at most.
   string comment = 4;
+  // Submit (#370): `comment` is the person's reply, needed; `allow` is
+  // ignored. Nothing runs: it closes DENIED with SecretApproval.replied, and
+  // the agent is told the reply.
+  bool reply = 5;
 }
 
 // An agent's question for the person (its ask_person tool, the Ask
@@ -6744,6 +7548,9 @@ message AskPerson {
   // after it stay PENDING (not reached). Pending, it counts once toward
   // the agent's questions waiting.
   repeated AskStep steps = 11;
+  // ANSWERED by a reply (AnswerAsk.reply), not an approval: `answer` is
+  // the reply. Shown as replied rather than answered.
+  bool replied = 12;
 }
 
 // One step of a procedure (AskPerson.steps).
@@ -6800,6 +7607,14 @@ message AnswerAsk {
   // `text` is the person's optional comment. Needed for an ask with steps,
   // refused for one without.
   optional uint32 step = 6;
+  // Submit (#370): `text` is the person's reply, neither a yes nor a no.
+  // The agent is told "Matt replied to your question …" with the reply,
+  // and the ask closes ANSWERED with AskPerson.replied; a checklist item
+  // it's about counts as answered (no asking again). `text` is needed;
+  // `dismiss` is ignored; `attachments` go with it. Refused for a procedure
+  // (`step`) and for an ask that wants a written answer (wants_text),
+  // whose cards stay as they are.
+  bool reply = 7;
 }
 
 // A chat: a one-off conversation of the person's, beside their agents but
@@ -6821,7 +7636,7 @@ message Chat {
   // A reply finished since the person last had it open.
   bool unseen = 6;
   // "<provider>/<model id>": the Claktory's default model when it was made,
-  // at medium effort.
+  // at medium effort, until the person changes it (SetChatModel).
   string model = 7;
   // Entries waiting for the person (a proposal to Rivet), as
   // Agent.waiting_seqs.
@@ -6865,6 +7680,18 @@ message SendChatMessage {
   string text = 2;
   // As SendMessage.client_id.
   string client_id = 3;
+  // A voice message, as SendMessage.attachments and SendMessage.voice:
+  // attachments[0] is the recording, uploaded for the chat (StartUpload
+  // with agent_id the chat's id; a chat takes only recordings, an audio type
+  // up to 100 MB), and `text` is empty. It waits in the chat's queue
+  // (QueuedMessage.transcription) while it's transcribed, then the chat
+  // reads its words; a short one with nothing said is dropped. Refused while
+  // the speech model is ABSENT or UNSUPPORTED. RetryVoiceMessage and
+  // DiscardVoiceMessage take the chat's id as agent_id. A chat takes no
+  // other attachments. For a new chat's first one, CreateChat with no text,
+  // then upload and send it.
+  repeated Attachment attachments = 4;
+  bool voice = 5;
 }
 
 // Stops the chat's reply, or its wait for usage; what's queued stays.
@@ -6885,6 +7712,17 @@ message LoadChatEntries {
   uint64 before_seq = 2;
   uint32 limit = 3;
   optional uint64 from_seq = 4;
+}
+
+// Puts a chat on `model` ("<provider>/<model id>", one of
+// Workspace.models) from its next model call, while it replies too. It keeps
+// its effort when the model has it, else takes the model's default. A chat
+// waiting on usage asks again at once, and a switch to another provider
+// (Chat.usage_switch) is over. Answered with Ack, or an Error saying why not
+// ("No chat \"<id>\".", "That model isn't available.").
+message SetChatModel {
+  string chat_id = 1;
+  string model = 2;
 }
 
 // Names a chat; an empty title goes back to the automatic one.
@@ -7101,6 +7939,10 @@ message Notify {
   string thread = 11;
   // When it was sent, in ms since 1970.
   int64 sent_ms = 12;
+  // A device waiting to be allowed (RemoteAccess.pending_devices'
+  // device_id): a tap opens its Needs you item. The notification itself
+  // never allows it, and says nothing the device chose (#352 P4).
+  string device_id = 13;
 }
 
 enum NotifyKind {
@@ -7295,12 +8137,19 @@ message NeedsYouRecord {
   string app_id = 20;
   // APP_ACCESS: why, in Rivet's words (apps_set_access's reason): show it
   // as Rivet's, under the title, never as Claktory's; empty for the
-  // person's own changes. MODEL: models_set's reason, the same way.
+  // person's own changes. MODEL: models_set's reason, the same way;
+  // CONVERSATION: conversation_fork's or conversation_switch's.
   string agent_reason = 21;
   // MODEL: the change, for UndoModelChange. `undone` says it was undone.
   string model_change_id = 22;
-  // MODEL: the agent whose model or effort changed.
+  // MODEL: the agent whose model or effort changed. CONVERSATION: the
+  // agent whose conversation changed.
   string subject_agent_id = 23;
+  // MODEL: the subject agent's model or effort changed again since this
+  // change (or the agent was deleted), so UndoModelChange would refuse it
+  // ("changed since"): show that instead of Undo. False once undone
+  // (`undone` says so) and for every other kind.
+  bool superseded = 24;
 }
 
 enum NeedsYouRecordKind {
@@ -7357,12 +8206,22 @@ enum NeedsYouRecordKind {
   // An agent (Rivet) put an agent on another model or effort with
   // models_set, which changes what the person spends: outcome CHANGED,
   // agent_id who did it, subject_agent_id whose model it was, title
-  // Claktory's sentence ("Rivet put Ingrid on Claude Opus 5, high", "Rivet
+  // Claktory's sentence ("Rivet put Ingrid on Claude Opus 5 at high effort", "Rivet
   // changed Ingrid's effort to high"), agent_reason its why (models_set's
   // reason; may be empty), model_change_id to undo it (UndoModelChange),
   // undone once undone. seq is the models_set call's entry in its
   // conversation.
   NEEDS_YOU_RECORD_KIND_MODEL = 14;
+  // An agent (Rivet) took another agent's conversation back to an earlier
+  // message, or switched it to another version, with the Conversations
+  // extension (friend bug #9): outcome CHANGED, agent_id who did it,
+  // subject_agent_id whose conversation it was, title Claktory's sentence
+  // ("Rivet took Mike's conversation back to 14:02", "Rivet switched Mike
+  // to another version"), agent_reason its why (may be empty). No Undo:
+  // what was set aside is in the subject's other versions. seq is the tool
+  // call's entry in the acting agent's conversation. The person's own
+  // changes aren't listed.
+  NEEDS_YOU_RECORD_KIND_CONVERSATION = 15;
 }
 
 enum NeedsYouOutcome {
@@ -7376,6 +8235,9 @@ enum NeedsYouOutcome {
   NEEDS_YOU_OUTCOME_FAILED = 5;
   // A setting changed, rather than a card answered (PIPE_FORWARD).
   NEEDS_YOU_OUTCOME_CHANGED = 6;
+  // The person replied with a comment rather than approving or dismissing
+  // (#370 Submit): `reply` holds it.
+  NEEDS_YOU_OUTCOME_REPLIED = 7;
 }
 
 // ---- Browser control ----

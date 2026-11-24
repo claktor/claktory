@@ -1,7 +1,9 @@
 import 'package:factory_app/controls.dart' show ExtensionGlyph;
 import 'package:factory_app/mobile/device.dart'
     show WindowControls, windowControls;
+import 'package:factory_app/mobile/back.dart';
 import 'package:factory_app/panes.dart';
+import 'package:factory_app/shell.dart' show Shell;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -217,4 +219,42 @@ void main() {
       expect(arrow.dx, greaterThanOrEqualTo(78), reason: 'at $zoom');
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
   }
+
+  // #366 A3: Android's Back (the window's registry) collapses an expanded
+  // pane, as its Back chip does, and then closes the pane beside.
+  testWidgets("the window's Back collapses an expanded pane, below a dialog "
+      'still open over it', (tester) async {
+    final back = PhoneBack.root();
+    addTearDown(back.dispose);
+    final workspace = snapshot(layout: beside());
+    workspace.agents.last.layoutFocus = 'v1';
+    final harness = Harness(workspace)..backend.appliesLayouts = true;
+    harness.backend.files[_main] = text(_main, _body);
+    await harness.show(
+      tester,
+      home: PhoneBackScope(back: back, child: const Shell()),
+    );
+    await settle(tester);
+    expect(_expanded, findsOneWidget);
+    expect(back.target, isNotNull);
+
+    // A dialog opened over it closes first.
+    var dialog = 0;
+    final modal = back.register(CallbackBackToken(onBack: () => dialog++));
+    expect(back.commit(back.target!), isTrue);
+    expect(dialog, 1);
+    expect(_expanded, findsOneWidget);
+    modal.release();
+
+    expect(back.commit(back.target!), isTrue);
+    await settle(tester);
+    expect(_lastLayout(harness).focus, '');
+    expect(_expanded, findsNothing);
+    // On Android the pane beside is the next target (Sale's A3): Back
+    // closes it, and the conversation alone is the root.
+    expect(back.commit(back.target!), isTrue);
+    await settle(tester);
+    expect(_lastLayout(harness).hasRoot(), isFalse);
+    expect(back.target, isNull);
+  });
 }

@@ -103,7 +103,10 @@ interface host {
   /// `deleteSurface` to close it. Claktory checks every message against
   /// its catalog ("https://claktory.com/a2ui/catalog/v1") before anyone
   /// sees it; Err says why not. An invalid message also fails the view
-  /// (the person sees why), and `view-closed` follows.
+  /// (the person sees why), and `view-closed` follows. Chart, Stat and Row
+  /// leave out a property this Claktory doesn't know (one not starting
+  /// with @) instead of refusing the message; devices never see it. Every
+  /// other component refuses one.
   push-view: func(surface: string, message: string) -> result<_, string>;
 
   /// Since 1.1. The data sources the manifest asks for, as the person

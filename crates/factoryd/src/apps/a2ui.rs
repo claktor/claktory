@@ -14,6 +14,9 @@ use std::fmt;
 
 use serde_json::{Map, Value, json};
 
+#[path = "a2ui_charts.rs"]
+mod charts;
+
 /// Claktory's catalog: the only one surfaces use.
 pub(crate) const CATALOG: &str = "https://claktory.com/a2ui/catalog/v1";
 /// The largest message an app sends.
@@ -137,8 +140,14 @@ impl Content {
             "updateComponents" => {
                 only(body, &at, &["surfaceId", "components"])?;
                 let components = body.get("components").ok_or_else(|| invalid(format!("{at}/components"), "components is required"))?;
-                next.put_components(components, &format!("{at}/components"))?;
-                Applied::Changed(message.to_string())
+                let kept = next.put_components(components, &format!("{at}/components"))?;
+                // Devices get the components as kept: never a key left out.
+                match kept {
+                    None => Applied::Changed(message.to_string()),
+                    Some(kept) => Applied::Changed(
+                        json!({"version": message["version"], "updateComponents": {"surfaceId": surface, "components": kept}}).to_string(),
+                    ),
+                }
             }
             "updateDataModel" => {
                 only(body, &at, &["surfaceId", "path", "value"])?;
@@ -167,19 +176,32 @@ impl Content {
         Ok(applied)
     }
 
-    fn put_components(&mut self, components: &Value, at: &str) -> Result<(), Invalid> {
+    /// Checks and keeps `components`; when a key was left out of one
+    /// (`charts::lenient`), all of them as kept.
+    fn put_components(&mut self, components: &Value, at: &str) -> Result<Option<Vec<Value>>, Invalid> {
         let Value::Array(components) = components else { return Err(invalid(at, "components is a list")) };
         let mut checked = Vec::with_capacity(components.len());
         for (index, component) in components.iter().enumerate() {
             checked.push(component_id(component, &format!("{at}/{index}"))?);
         }
-        for (id, component) in checked.into_iter().zip(components) {
-            self.components.insert(id, component.clone());
+        let dropped = checked.iter().any(|(_, left_out)| !left_out.is_empty());
+        let mut kept = Vec::with_capacity(components.len());
+        for ((id, left_out), component) in checked.into_iter().zip(components) {
+            let mut component = component.clone();
+            if let Value::Object(fields) = &mut component {
+                for key in &left_out {
+                    fields.remove(key);
+                }
+            }
+            if dropped {
+                kept.push(component.clone());
+            }
+            self.components.insert(id, component);
         }
         if self.components.len() > MAX_COMPONENTS {
             return Err(invalid(at, format!("a surface has at most {MAX_COMPONENTS} components")));
         }
-        Ok(())
+        Ok(dropped.then_some(kept))
     }
 
     /// All it shows, as one createSurface message.
@@ -317,27 +339,9 @@ enum Kind {
     Text,
     Options,
     Tabs,
-    /// A query's answer, `{columns, rows, more?}`, or a binding to one.
-    Table,
-    /// A plain list of 1 to 12 column names.
-    Series,
-    /// A string or a number, or a binding.
-    DynScalar,
-    /// A list of at most `MAX_SPARK` numbers, or a binding.
-    Spark,
-    /// A number in a range.
-    Range(f64, f64),
-    /// "signal", "muted" or "agent:<id>".
-    StatColor,
-    /// A Table's columns: [{name, title?, format?}].
-    Columns,
+    /// The chart family's own kinds (a2ui_charts.rs).
+    Chart(charts::Kind),
 }
-
-/// A Table value's most columns, a Chart's most series and a Stat's most
-/// spark points.
-const MAX_COLUMNS: usize = 64;
-const MAX_SERIES: usize = 12;
-const MAX_SPARK: usize = 200;
 
 const JUSTIFY: Kind = Kind::Choice(&["start", "center", "end", "spaceBetween", "spaceAround", "spaceEvenly", "stretch"]);
 const ALIGN: Kind = Kind::Choice(&["start", "center", "end", "stretch"]);
@@ -349,7 +353,15 @@ fn catalog(component: &str) -> Option<Props> {
     use Kind::*;
     Some(match component {
         "Text" => &[("text", DynString, true), ("variant", Choice(&["heading", "body", "caption"]), false)],
-        "Row" | "Column" => &[("children", Children, true), ("justify", JUSTIFY, false), ("align", ALIGN, false)],
+        // A Row stacks its children one under another below stackBelow
+        // points wide (#380), as a phone's dashboard does.
+        "Row" => &[
+            ("children", Children, true),
+            ("justify", JUSTIFY, false),
+            ("align", ALIGN, false),
+            ("stackBelow", Kind::Chart(charts::Kind::Range(320.0, 1200.0)), false),
+        ],
+        "Column" => &[("children", Children, true), ("justify", JUSTIFY, false), ("align", ALIGN, false)],
         "List" => &[("children", Children, true), ("direction", Choice(&["vertical", "horizontal"]), false), ("align", ALIGN, false)],
         "Card" => &[("child", Id, true)],
         "Divider" => &[("axis", Choice(&["horizontal", "vertical"]), false)],
@@ -375,31 +387,15 @@ fn catalog(component: &str) -> Option<Props> {
         "Tabs" => &[("tabs", Tabs, true)],
         "ProgressBar" => &[("value", DynNumber, true), ("label", DynString, false)],
         "EmptyState" => &[("title", DynString, true), ("body", DynString, false), ("icon", Text, false)],
-        "Chart" => &[
-            ("kind", Choice(&["timeseries", "bars", "stackedBars", "pie", "scatter"]), true),
-            ("data", Table, true),
-            ("x", Text, false),
-            ("y", Series, false),
-            ("seriesBy", Text, false),
-            ("color", Choice(&["palette", "agent", "signal", "muted"]), false),
-            ("label", DynString, false),
-            ("unit", DynString, false),
-            ("height", Range(120.0, 480.0), false),
-        ],
-        "Stat" => &[
-            ("label", DynString, true),
-            ("value", DynScalar, true),
-            ("unit", DynString, false),
-            ("spark", Spark, false),
-            ("color", StatColor, false),
-        ],
-        "Table" => &[("data", Table, true), ("columns", Columns, false)],
-        _ => return None,
+        _ => return charts::catalog(component),
     })
 }
 
-/// Checks a component; its id.
-fn component_id(component: &Value, at: &str) -> Result<String, Invalid> {
+/// Checks a component; its id, and the keys to leave out of it: a plain key
+/// (not "@…") that isn't in the catalog, on a component `charts::lenient`
+/// names, so an app made for a newer catalog still shows here (#380). Every
+/// other unknown key is refused.
+fn component_id(component: &Value, at: &str) -> Result<(String, Vec<String>), Invalid> {
     let Value::Object(fields) = component else { return Err(invalid(at, "a component is an object")) };
     let id = match fields.get("id") {
         Some(Value::String(id)) if identifier(id) => id.clone(),
@@ -415,6 +411,7 @@ fn component_id(component: &Value, at: &str) -> Result<String, Invalid> {
     let Some(props) = catalog(name) else {
         return Err(invalid(format!("{at}/component"), format!("\"{name}\" isn't in Claktory's catalog")));
     };
+    let mut left_out = Vec::new();
     for (key, value) in fields {
         let here = format!("{at}/{}", escape(key));
         match key.as_str() {
@@ -427,6 +424,7 @@ fn component_id(component: &Value, at: &str) -> Result<String, Invalid> {
             "@accessibility" => accessibility(value, &here)?,
             _ => match props.iter().find(|(prop, _, _)| prop == key) {
                 Some((_, kind, _)) => check(*kind, value, &here)?,
+                None if charts::lenient(name) && !key.starts_with('@') => left_out.push(key.clone()),
                 None => return Err(invalid(here, format!("{name} has no property \"{key}\""))),
             },
         }
@@ -434,10 +432,8 @@ fn component_id(component: &Value, at: &str) -> Result<String, Invalid> {
     if let Some((missing, _, _)) = props.iter().find(|(prop, _, required)| *required && !fields.contains_key(*prop)) {
         return Err(invalid(format!("{at}/{missing}"), format!("{name} needs {missing}")));
     }
-    if name == "Chart" && fields.contains_key("seriesBy") && fields.get("y").and_then(Value::as_array).is_some_and(|y| y.len() > 1) {
-        return Err(invalid(format!("{at}/y"), "with seriesBy, y names one column at most"));
-    }
-    Ok(id)
+    charts::component(name, fields, at)?;
+    Ok((id, left_out))
 }
 
 fn accessibility(value: &Value, at: &str) -> Result<(), Invalid> {
@@ -454,6 +450,11 @@ fn accessibility(value: &Value, at: &str) -> Result<(), Invalid> {
     Ok(())
 }
 
+/// A literal of the right kind, or else what it should be.
+fn literal(ok: bool, what: &str, at: &str) -> Result<(), Invalid> {
+    if ok { Ok(()) } else { Err(invalid(at, format!("this is {what}, or a {{\"@path\": …}} binding"))) }
+}
+
 /// A `{"@path": …}` binding, when `value` is one.
 fn binding(value: &Value, at: &str) -> Option<Result<(), Invalid>> {
     let Value::Object(fields) = value else { return None };
@@ -466,8 +467,7 @@ fn binding(value: &Value, at: &str) -> Option<Result<(), Invalid>> {
 }
 
 fn check(kind: Kind, value: &Value, at: &str) -> Result<(), Invalid> {
-    let literal =
-        |ok: bool, what: &str| if ok { Ok(()) } else { Err(invalid(at, format!("this is {what}, or a {{\"@path\": …}} binding"))) };
+    let literal = |ok: bool, what: &str| literal(ok, what, at);
     match kind {
         Kind::DynString => binding(value, at).unwrap_or_else(|| literal(value.is_string(), "a string")),
         Kind::DynNumber => binding(value, at).unwrap_or_else(|| literal(value.is_number(), "a number")),
@@ -552,76 +552,7 @@ fn check(kind: Kind, value: &Value, at: &str) -> Result<(), Invalid> {
             }),
             _ => Err(invalid(at, format!("tabs are a list of 1 to {MAX_TABS}"))),
         },
-        Kind::Table => match value.as_object() {
-            // A literal table is an object too: a binding only when it says so.
-            Some(fields) if fields.keys().any(|key| key.starts_with('@')) => binding(value, at).expect("an object"),
-            _ => table(value, at),
-        },
-        Kind::Series => match value {
-            Value::Array(names) if !names.is_empty() && names.len() <= MAX_SERIES && names.iter().all(Value::is_string) => Ok(()),
-            _ => Err(invalid(at, format!("this is a list of 1 to {MAX_SERIES} column names"))),
-        },
-        Kind::DynScalar => binding(value, at).unwrap_or_else(|| literal(value.is_string() || value.is_number(), "a string or a number")),
-        Kind::Spark => binding(value, at).unwrap_or_else(|| {
-            let numbers = value.as_array().is_some_and(|items| items.len() <= MAX_SPARK && items.iter().all(Value::is_number));
-            literal(numbers, &format!("a list of at most {MAX_SPARK} numbers"))
-        }),
-        Kind::Range(low, high) => match value.as_f64() {
-            Some(number) if (low..=high).contains(&number) => Ok(()),
-            _ => Err(invalid(at, format!("this is a number from {low} to {high}"))),
-        },
-        Kind::StatColor => match value.as_str() {
-            Some("signal" | "muted") => Ok(()),
-            Some(color) if color.strip_prefix("agent:").is_some_and(agent_id) => Ok(()),
-            _ => Err(invalid(at, "this is signal, muted or agent:<an agent's id>")),
-        },
-        Kind::Columns => match value {
-            Value::Array(columns) if !columns.is_empty() && columns.len() <= MAX_COLUMNS => {
-                columns.iter().enumerate().try_for_each(|(index, column)| {
-                    let here = format!("{at}/{index}");
-                    let Value::Object(column) = column else { return Err(invalid(&here, "a column is {name, title?, format?}")) };
-                    only(column, &here, &["name", "title", "format"])?;
-                    check(Kind::Text, column.get("name").unwrap_or(&Value::Null), &format!("{here}/name"))?;
-                    if let Some(title) = column.get("title") {
-                        check(Kind::DynString, title, &format!("{here}/title"))?;
-                    }
-                    match column.get("format") {
-                        Some(format) => check(Kind::Choice(&["text", "number", "time"]), format, &format!("{here}/format")),
-                        None => Ok(()),
-                    }
-                })
-            }
-            _ => Err(invalid(at, format!("columns are a list of 1 to {MAX_COLUMNS}"))),
-        },
-    }
-}
-
-/// An agent's id as a color names it: lowercase letters, digits, - and _.
-fn agent_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-}
-
-/// A literal Table value: {columns: [name…], rows: [[cell…]…], more?}, each
-/// row as long as columns, each cell a string, number, true/false or null.
-fn table(value: &Value, at: &str) -> Result<(), Invalid> {
-    let Value::Object(table) = value else { return Err(invalid(at, "a table is {columns, rows, more?}, or a {\"@path\": …} binding")) };
-    only(table, at, &["columns", "rows", "more"])?;
-    let width = match table.get("columns") {
-        Some(Value::Array(columns)) if !columns.is_empty() && columns.len() <= MAX_COLUMNS && columns.iter().all(Value::is_string) => {
-            columns.len()
-        }
-        _ => return Err(invalid(format!("{at}/columns"), format!("columns are a list of 1 to {MAX_COLUMNS} names"))),
-    };
-    let Some(Value::Array(rows)) = table.get("rows") else { return Err(invalid(format!("{at}/rows"), "rows are a list of rows")) };
-    for (index, row) in rows.iter().enumerate() {
-        let scalar = |cell: &Value| !matches!(cell, Value::Array(_) | Value::Object(_));
-        if !row.as_array().is_some_and(|cells| cells.len() == width && cells.iter().all(scalar)) {
-            return Err(invalid(format!("{at}/rows/{index}"), format!("a row is a list of {width} strings, numbers, true/false or null")));
-        }
-    }
-    match table.get("more") {
-        None | Some(Value::Bool(_)) => Ok(()),
-        Some(_) => Err(invalid(format!("{at}/more"), "more is true or false")),
+        Kind::Chart(kind) => charts::check(kind, value, at),
     }
 }
 
@@ -711,9 +642,9 @@ fn index(token: &str, len: usize, append: bool) -> Result<usize, String> {
 mod tests {
     use super::*;
 
-    const S: &str = "charts-1";
+    pub(super) const S: &str = "charts-1";
 
-    fn created() -> Content {
+    pub(super) fn created() -> Content {
         let mut content = Content::default();
         let create = json!({"version": "1.0", "createSurface": {"surfaceId": S, "catalogId": CATALOG,
             "components": [
@@ -727,7 +658,7 @@ mod tests {
         content
     }
 
-    fn apply(content: &mut Content, message: Value) -> Result<Applied, String> {
+    pub(super) fn apply(content: &mut Content, message: Value) -> Result<Applied, String> {
         content.apply(S, &message.to_string()).map_err(|invalid| invalid.to_string())
     }
 
@@ -861,50 +792,5 @@ mod tests {
         let call = json!({"version": "1.0", "callAgentFunction": {}});
         assert!(content.check_renderer(S, &call.to_string()).is_err());
         assert!(content.check_renderer(S, &"x".repeat(MAX_RENDERER_MESSAGE + 1)).is_err());
-    }
-
-    #[test]
-    fn charts_stats_and_tables_take_a_querys_answer() {
-        let mut content = created();
-        let rows = json!({"columns": ["day", "agent", "tokens"], "rows": [["2026-11-22", "lea", 120], ["2026-11-22", "rivet", null]], "more": false});
-        let good = json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [
-            {"id": "chart", "component": "Chart", "kind": "timeseries", "data": {"@path": "/usage"}, "x": "day", "y": ["tokens"],
-             "seriesBy": "agent", "color": "agent", "label": "Tokens a day", "unit": "tokens", "height": 240},
-            {"id": "bars", "component": "Chart", "kind": "bars", "data": rows},
-            {"id": "stat", "component": "Stat", "label": "Today", "value": 1200, "unit": "tokens", "spark": [1, 2, 3], "color": "agent:lea"},
-            {"id": "named", "component": "Stat", "label": {"@path": "/l"}, "value": "n/a", "spark": {"@path": "/s"}},
-            {"id": "table", "component": "Table", "data": {"@path": "/usage"},
-             "columns": [{"name": "day", "format": "time"}, {"name": "tokens", "title": "Tokens", "format": "number"}]},
-        ]}});
-        apply(&mut content, good).unwrap();
-        let component = |component: Value| json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [component]}});
-        for (wrong, why) in [
-            (json!({"id": "c", "component": "Chart", "data": rows}), "Chart needs kind"),
-            (json!({"id": "c", "component": "Chart", "kind": "radar", "data": rows}), "one of timeseries"),
-            (json!({"id": "c", "component": "Chart", "kind": {"@path": "/k"}, "data": rows}), "one of timeseries"),
-            (json!({"id": "c", "component": "Chart", "kind": "bars", "data": rows, "height": 900}), "from 120 to 480"),
-            (
-                json!({"id": "c", "component": "Chart", "kind": "bars", "data": rows, "y": ["a", "b"], "seriesBy": "c"}),
-                "y names one column",
-            ),
-            (json!({"id": "c", "component": "Chart", "kind": "bars", "data": rows, "y": []}), "1 to 12 column names"),
-            (json!({"id": "c", "component": "Chart", "kind": "bars", "data": rows, "theme": "x"}), "has no property \"theme\""),
-            (json!({"id": "c", "component": "Chart", "kind": "bars", "data": {"columns": ["a"], "rows": [[1, 2]]}}), "a list of 1 strings"),
-            (json!({"id": "c", "component": "Chart", "kind": "bars", "data": {"columns": ["a"], "rows": [[{"x": 1}]]}}), "rows/0"),
-            (json!({"id": "c", "component": "Chart", "kind": "bars", "data": {"columns": [], "rows": []}}), "1 to 64 names"),
-            (
-                json!({"id": "c", "component": "Chart", "kind": "bars", "data": {"columns": ["a"], "rows": [], "x": 1}}),
-                "isn't allowed here",
-            ),
-            (json!({"id": "s", "component": "Stat", "label": "x", "value": true}), "a string or a number"),
-            (json!({"id": "s", "component": "Stat", "label": "x", "value": 1, "color": "#ff0000"}), "signal, muted or agent"),
-            (json!({"id": "s", "component": "Stat", "label": "x", "value": 1, "color": "agent:Lea Smith"}), "signal, muted or agent"),
-            (json!({"id": "s", "component": "Stat", "label": "x", "value": 1, "spark": ["a"]}), "at most 200 numbers"),
-            (json!({"id": "t", "component": "Table", "data": rows, "columns": [{"name": "day", "format": "date"}]}), "one of text"),
-            (json!({"id": "t", "component": "Table", "data": rows, "columns": [{"title": "Day"}]}), "this is a string"),
-        ] {
-            let error = apply(&mut content, component(wrong.clone())).unwrap_err();
-            assert!(error.contains(why), "{wrong}: {error}");
-        }
     }
 }

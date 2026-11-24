@@ -188,6 +188,13 @@ pub(crate) fn incarnation(home: &Home, agent: &str) -> std::io::Result<String> {
     result
 }
 
+/// The migration that added replies (#370 Submit): 1 when the person
+/// answered the card with a comment instead (state 'declined': nothing was
+/// given).
+pub(crate) const REPLIED: &str = "
+ALTER TABLE app_grant_proposals ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
+";
+
 /// A proposal, as kept.
 struct Row {
     id: String,
@@ -206,9 +213,12 @@ struct Row {
     error: String,
     grant_id: String,
     read_pipes: bool,
+    /// Declined by a reply (#370): the comment is what to do instead.
+    replied: bool,
 }
 
-const COLUMNS: &str = "id, agent, grantee, incarnation, app, scopes, resources, expires, reason, state, created, decided, comment, error, grant_id, read_pipes";
+const COLUMNS: &str =
+    "id, agent, grantee, incarnation, app, scopes, resources, expires, reason, state, created, decided, comment, error, grant_id, read_pipes, replied";
 
 fn state_of(word: &str) -> State {
     match word {
@@ -241,6 +251,7 @@ impl Row {
             error: row.get(13)?,
             grant_id: row.get(14)?,
             read_pipes: row.get(15)?,
+            replied: row.get(16)?,
         })
     }
 
@@ -262,6 +273,7 @@ impl Row {
             comment: self.comment.clone(),
             error: self.error.clone(),
             grant_id: self.grant_id.clone(),
+            replied: self.replied,
             ..card
         })
         .unwrap_or_default()
@@ -341,7 +353,7 @@ pub(crate) fn open(store: &Store, agent: &str, incarnation: &str, shown: &Card) 
     }
     db.execute(
         &format!(
-            "INSERT INTO app_grant_proposals ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, NULL, '', '', '', ?11)"
+            "INSERT INTO app_grant_proposals ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, NULL, '', '', '', ?11, 0)"
         ),
         params![
             shown.id,
@@ -395,6 +407,16 @@ pub(crate) fn cleared(store: &Store, agent: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Rivet's conversation went back to before `since` (`crate::fork`): its
+/// proposals made since then close as /clear's do.
+pub(crate) fn cleared_since(store: &Store, agent: &str, since: i64) -> rusqlite::Result<()> {
+    store.db().execute(
+        "UPDATE app_grant_proposals SET state = 'cleared', decided = ?3 WHERE agent = ?1 AND state = 'pending' AND created >= ?2",
+        params![agent, since, now_ms()],
+    )?;
+    Ok(())
+}
+
 /// The agent's grants, as the mirror has them: (app, scopes, resources).
 pub(crate) fn held(store: &Store, agent: &str) -> Vec<(String, Vec<String>, Vec<Resource>)> {
     let db = store.db();
@@ -438,6 +460,9 @@ static BUSY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppGrant) -> Result<(), RequestError> {
     let agent = request.agent_id.as_str();
     let comment = crate::decisions::comment(&request.comment)?;
+    if request.reply && comment.is_empty() {
+        return Err(RequestError::Proposal("Write a reply, or approve or decline it.".to_owned()));
+    }
     factory.known_agent(agent)?;
     factory.ensure_loaded(agent).await?;
     let id = {
@@ -446,7 +471,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppGrant)
             .agents
             .get(agent)
             .and_then(|runtime| runtime.transcript.as_ref())
-            .and_then(|transcript| transcript.entries().iter().find(|entry| entry.seq == request.seq).cloned());
+            .and_then(|transcript| transcript.entry(request.seq).cloned());
         match entry.and_then(|entry| entry.kind) {
             Some(v1::entry::Kind::AppGrant(proposal)) => proposal.id,
             _ => return Err(RequestError::Proposal("There's no such proposal in this conversation.".to_owned())),
@@ -459,8 +484,9 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppGrant)
     if row.state != State::Pending {
         return Ok(());
     }
-    if !request.approve {
-        if let Some(row) = end(factory, &row.id, State::Declined, comment, "", "") {
+    // A reply (#370 Submit) gives nothing: Rivet gets the comment.
+    if !request.approve || request.reply {
+        if let Some(row) = end(factory, &row.id, State::Declined, comment, "", "", request.reply) {
             tell(factory, &row);
         }
         return Ok(());
@@ -475,7 +501,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppGrant)
     let name = agent_name(factory, &row.grantee);
     if !same {
         let error = format!("{name} was deleted since Rivet suggested this, so nothing was given.");
-        if let Some(row) = end(factory, &row.id, State::Failed, comment, &error, "") {
+        if let Some(row) = end(factory, &row.id, State::Failed, comment, &error, "", false) {
             tell(factory, &row);
         }
         return Ok(());
@@ -484,7 +510,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppGrant)
     // person's app (Fugo's review).
     if factory.pipes.quarantined(&row.grantee) {
         let error = format!("{name} is limited to a pipe now, so it can't be given access to your apps. Nothing was given.");
-        if let Some(row) = end(factory, &row.id, State::Failed, comment, &error, "") {
+        if let Some(row) = end(factory, &row.id, State::Failed, comment, &error, "", false) {
             tell(factory, &row);
         }
         return Ok(());
@@ -501,7 +527,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppGrant)
     }
     if row.expires != 0 && row.expires <= now_ms() {
         let error = "The access would already have ended, so nothing was given.";
-        if let Some(row) = end(factory, &row.id, State::Failed, comment, error, "") {
+        if let Some(row) = end(factory, &row.id, State::Failed, comment, error, "", false) {
             tell(factory, &row);
         }
         return Ok(());
@@ -526,7 +552,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppGrant)
             }
             // Its tools first, so the agent told of it next has them.
             dms::granted(factory, &grant.agent.id, &grant.app).await;
-            if let Some(row) = end(factory, &row.id, State::Granted, comment, "", &grant.id) {
+            if let Some(row) = end(factory, &row.id, State::Granted, comment, "", &grant.id, false) {
                 tell(factory, &row);
             }
             Ok(())
@@ -545,7 +571,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppGrant)
         Err(Problem::Refused(status, words)) => {
             tracing::warn!(status, %words, "the account service refused an app grant");
             let error = format!("{service} refused to give it: {words}");
-            if let Some(row) = end(factory, &row.id, State::Failed, comment, &error, "") {
+            if let Some(row) = end(factory, &row.id, State::Failed, comment, &error, "", false) {
                 tell(factory, &row);
             }
             Ok(())
@@ -559,7 +585,7 @@ fn agent_name(factory: &Factory, id: &str) -> String {
 
 /// Ends a waiting proposal, shows it as it is now, and returns it; None if
 /// it wasn't waiting.
-fn end(factory: &Factory, id: &str, state: State, comment: &str, error: &str, grant: &str) -> Option<Row> {
+fn end(factory: &Factory, id: &str, state: State, comment: &str, error: &str, grant: &str, replied: bool) -> Option<Row> {
     let word = match state {
         State::Granted => "granted",
         State::Declined => "declined",
@@ -569,9 +595,9 @@ fn end(factory: &Factory, id: &str, state: State, comment: &str, error: &str, gr
         .store
         .db()
         .execute(
-            "UPDATE app_grant_proposals SET state = ?2, decided = ?3, comment = ?4, error = ?5, grant_id = ?6
+            "UPDATE app_grant_proposals SET state = ?2, decided = ?3, comment = ?4, error = ?5, grant_id = ?6, replied = ?7
              WHERE id = ?1 AND state = 'pending'",
-            params![id, word, now_ms(), comment, error, grant],
+            params![id, word, now_ms(), comment, error, grant, replied],
         )
         .unwrap_or(0);
     if changed == 0 {
@@ -618,6 +644,14 @@ fn tell(factory: &Arc<Factory>, row: &Row) {
             let summary = format!("{person} gave {name} access to {app}");
             let text = format!("{summary} ({}), {until}.{}", row.scopes.join(", "), crate::decisions::note(&person, &row.comment));
             told_grantee(factory, row, &person, app, &until);
+            (summary, text)
+        }
+        State::Declined if row.replied => {
+            let summary = format!("{person} replied about giving {name} access to {app}");
+            let text = format!(
+                "{summary}; nothing was given yet. They say:\n\n{}\n\nIf it still fits, propose it again with that in mind.",
+                row.comment
+            );
             (summary, text)
         }
         State::Declined => {

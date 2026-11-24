@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -9,11 +10,15 @@ import 'package:flutter/widgets.dart';
 import '../annotations.dart';
 import '../controls.dart';
 import '../identity.dart';
+import '../ink_preview.dart';
+import '../ipad/pencil_hint.dart';
 import '../mobile/metrics.dart';
 import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
 import '../review_answer.dart' show ReviewAnswering;
+import '../paced.dart' show FilePreviews;
+import 'preview_badge.dart';
 import 'registry.dart';
 
 /// An image: fitted to the pane (never enlarged past its pixels), over a
@@ -36,6 +41,12 @@ class _ImageViewerState extends State<ImageViewer>
     with FileLoading<ImageViewer> {
   @override
   String get path => widget.path;
+
+  @override
+  String get loadingLabel => 'Loading image…';
+
+  @override
+  bool get previews => true;
 
   final _zoom = TransformationController();
 
@@ -74,7 +85,7 @@ class _ImageViewerState extends State<ImageViewer>
 
   /// [local] (in the pane) as a fraction of the image, kept inside it.
   Offset _fraction(Offset local) {
-    final image = _image!;
+    final image = _box!;
     final inverse = Matrix4.inverted(_zoom.value);
     final at = MatrixUtils.transformPoint(inverse, local);
     return Offset(
@@ -85,7 +96,7 @@ class _ImageViewerState extends State<ImageViewer>
 
   /// [region] (fractions of the image) where it shows in the pane.
   Rect _onScreen(Rect region) {
-    final image = _image!;
+    final image = _box!;
     return MatrixUtils.transformRect(
       _zoom.value,
       Rect.fromLTWH(
@@ -304,6 +315,7 @@ class _ImageViewerState extends State<ImageViewer>
     void follow() {
       _shownScale.value = _scale;
       comments?.relayout();
+      _sharpEnough();
     }
 
     if (phase == SchedulerPhase.idle ||
@@ -318,6 +330,15 @@ class _ImageViewerState extends State<ImageViewer>
 
   ui.Image? _image;
   String? _undecodable;
+
+  /// The image's box, in its own pixels: the original's, also while a
+  /// preview of it shows (#379), so zoom, comments' regions and ink are
+  /// where they'd be on the original, and nothing moves when it comes.
+  Size? _box;
+
+  /// The version last decoded: the original replacing its preview keeps
+  /// the zoom.
+  String _decoded = '';
 
   /// The scale that fits the image in the pane (at most 1), and the pane's
   /// size, from the last layout.
@@ -343,18 +364,30 @@ class _ImageViewerState extends State<ImageViewer>
           'This image is too big to open here (${formatBytes(file.size)}).';
       return;
     }
-    _decode(Uint8List.fromList(file.data));
+    _decode(file, Uint8List.fromList(file.data));
   }
 
-  Future<void> _decode(Uint8List bytes) async {
+  Future<void> _decode(FileContent file, Uint8List bytes) async {
     try {
       final codec = await ui.instantiateImageCodec(bytes);
       final frame = await codec.getNextFrame();
       if (!mounted) return;
+      final image = frame.image;
       setState(() {
         _image?.dispose();
-        _image = frame.image;
-        _fitted = true;
+        _image = image;
+        _box =
+            file.isPreview &&
+                file.originalPixelWidth > 0 &&
+                file.originalPixelHeight > 0
+            ? Size(
+                file.originalPixelWidth.toDouble(),
+                file.originalPixelHeight.toDouble(),
+              )
+            : Size(image.width.toDouble(), image.height.toDouble());
+        // The same version again (its original, say): as it was shown.
+        if (file.sha256.isEmpty || file.sha256 != _decoded) _fitted = true;
+        _decoded = file.sha256;
       });
       _showComments();
     } on Exception {
@@ -393,6 +426,23 @@ class _ImageViewerState extends State<ImageViewer>
   }
 
   double get _scale => _zoom.value.getMaxScaleOnAxis();
+
+  /// Each of the bitmap's pixels on screen, in the screen's pixels: past 1
+  /// it's enlarged.
+  double get _pixelScale {
+    final image = _image, box = _box;
+    if (image == null || box == null || image.width == 0) return _scale;
+    return _scale * box.width / image.width;
+  }
+
+  /// Zoomed in past a preview's sharpness: the original, by itself.
+  void _sharpEnough() {
+    final file = this.file;
+    if (file == null || !file.isPreview || !mounted) return;
+    if (originalLoad is! OriginalNotLoaded) return;
+    final ratio = MediaQuery.maybeDevicePixelRatioOf(context) ?? 1;
+    if (_pixelScale * ratio > 1.25) unawaited(loadOriginal());
+  }
 
   /// Zooms to [scale] (of the image's own size) keeping the point [at] in
   /// the pane where it is: the pane's middle unless given.
@@ -435,6 +485,7 @@ class _ImageViewerState extends State<ImageViewer>
     final palette = Palette.of(context);
     final file = this.file;
     final image = _image;
+    final box = _box;
     final problem =
         waiting() ??
         (_undecodable == null
@@ -442,8 +493,9 @@ class _ImageViewerState extends State<ImageViewer>
             : ViewerProblem(_undecodable!, path: path));
     final details = this.details(
       [
-        if (image != null) '${image.width} × ${image.height}',
-        if (file != null && file.error.isEmpty) formatBytes(file.size),
+        if (box != null) '${box.width.round()} × ${box.height.round()}',
+        if (file != null && file.error.isEmpty)
+          formatBytes(file.isPreview ? file.originalSize : file.size),
       ].join(' · '),
     );
     // Answering a review, nothing but the answer: no comments meanwhile.
@@ -451,6 +503,13 @@ class _ImageViewerState extends State<ImageViewer>
         ? this.comments
         : null;
     final phone = isPhoneLayout(context);
+    // On an iPad pane that can draw on it: Draw, on a whole image Claktory
+    // read (a cut one has no version for its ink to belong to).
+    final draw = _commentable ? InkDraw.maybeOf(context)?.onDraw : null;
+    // The ink saved on this version, over it, read-only (#362 I2).
+    final inked = file != null && file.error.isEmpty && !file.truncated
+        ? file.sha256
+        : '';
     Widget glyphButton(String label, String icon, VoidCallback onTap) =>
         GlyphButton(
           label: label,
@@ -460,6 +519,8 @@ class _ImageViewerState extends State<ImageViewer>
               ExtensionGlyph(icon: icon, name: label, color: color),
         );
     final controls = <Widget>[
+      if (draw != null)
+        HeaderTextButton('Draw', draw, key: const ValueKey('image-draw')),
       if (comments != null) ...[
         CommentsButton(controller: comments),
         HeaderTextButton('Comment', _toggleMarking, active: _marking),
@@ -486,7 +547,7 @@ class _ImageViewerState extends State<ImageViewer>
       reloadButton(),
     ];
     final Widget body;
-    if (problem != null || image == null) {
+    if (problem != null || image == null || box == null) {
       body = problem ?? const SizedBox.shrink();
     } else {
       body = LayoutBuilder(
@@ -495,15 +556,15 @@ class _ImageViewerState extends State<ImageViewer>
           _pane = constraints.biggest;
           final fit = [
             1.0,
-            (_pane.width - 2 * Space.l) / image.width,
-            (_pane.height - 2 * Space.l) / image.height,
+            (_pane.width - 2 * Space.l) / box.width,
+            (_pane.height - 2 * Space.l) / box.height,
           ].reduce((a, b) => a < b ? a : b).clamp(0.01, 1.0);
           _fit = fit;
           // Scaled on every axis, as InteractiveViewer scales: its zoom
           // limits read the largest.
           if (_fitted) {
-            final width = image.width * fit;
-            final height = image.height * fit;
+            final width = box.width * fit;
+            final height = box.height * fit;
             _zoom.value = Matrix4.identity()
               ..translateByDouble(
                 (_pane.width - width) / 2,
@@ -577,19 +638,31 @@ class _ImageViewerState extends State<ImageViewer>
                               ),
                               onInteractionStart: (_) => _fitted = false,
                               child: SizedBox(
-                                width: image.width.toDouble(),
-                                height: image.height.toDouble(),
-                                child: CustomPaint(
-                                  painter: _Checkerboard(
-                                    palette.hairline,
-                                    zoom: _zoom,
-                                  ),
-                                  child: RawImage(
-                                    image: image,
-                                    filterQuality: _scale > 2
-                                        ? FilterQuality.none
-                                        : FilterQuality.medium,
-                                  ),
+                                width: box.width,
+                                height: box.height,
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    CustomPaint(
+                                      painter: _Checkerboard(
+                                        palette.hairline,
+                                        zoom: _zoom,
+                                      ),
+                                      child: RawImage(
+                                        image: image,
+                                        width: box.width,
+                                        height: box.height,
+                                        fit: BoxFit.fill,
+                                        filterQuality: _pixelScale > 2
+                                            ? FilterQuality.none
+                                            : FilterQuality.medium,
+                                      ),
+                                    ),
+                                    // In the image's own box, so it zooms
+                                    // with it; it takes no touches.
+                                    if (inked.isNotEmpty)
+                                      InkPreview(path: path, sha256: inked),
+                                  ],
                                 ),
                               ),
                             ),
@@ -691,23 +764,55 @@ class _ImageViewerState extends State<ImageViewer>
                     onExit: (_) => setState(() => _hovered = false),
                   ),
                 ),
+              // A preview says so, in the corner clear of the header's
+              // buttons, Comment's and the bar under the image (#379).
+              if (previewBadge() case final badge?)
+                Positioned(
+                  left: Space.m,
+                  right: Space.m,
+                  bottom: Space.m,
+                  child: Align(alignment: Alignment.bottomLeft, child: badge),
+                ),
             ],
           );
         },
       );
     }
+    // Apple Pencil touching an image says how to draw on it, or, where
+    // it can't be drawn on, how to comment instead (#362 I2). A touch
+    // never starts drawing by itself: Draw is a deliberate tap.
+    Widget pencil(Widget body) => image == null
+        ? body
+        : PencilHint(
+            text: draw != null
+                ? 'To draw on this image, tap Draw.'
+                : comments == null
+                ? 'You can draw only on PDFs.'
+                : 'You can draw only on PDFs. To comment on this image, tap '
+                      'Comment, then drag across it.',
+            child: body,
+          );
     return PaneScaffold(
       details: details,
       controls: controls,
       comments: comments == null ? null : CommentsButton(controller: comments),
       actions: [
+        if (draw != null) PaneAction('Draw', draw),
         if (image != null) ...[
           PaneAction('Fit', _fitNow),
           PaneAction('Actual size', () => _zoomTo(1)),
         ],
         PaneAction('Reload', reload),
       ],
-      toolbar: comments == null || image == null
+      // A narrow iPad window: Draw beside Comment, until Comment is tapped.
+      toolbar: image == null
+          ? null
+          : draw != null && !_marking
+          ? DrawBar(
+              onDraw: draw,
+              onComment: comments == null ? null : _toggleMarking,
+            )
+          : comments == null
           ? null
           : CommentModeBar(
               marking: _marking,
@@ -720,8 +825,8 @@ class _ImageViewerState extends State<ImageViewer>
         child: ColoredBox(
           color: palette.canvas,
           child: comments == null
-              ? body
-              : Commented(controller: comments, child: body),
+              ? pencil(body)
+              : Commented(controller: comments, child: pencil(body)),
         ),
       ),
     );

@@ -51,8 +51,9 @@ sure each commit's binaries really are its own. It builds one commit at a time
 and checks that every crate of the commit was compiled in that build. A commit's
 binaries are reused only with the `bin/<commit>/commit` file the check writes.
 A build that reused another commit's work fails with `stale_build` and keeps
-nothing. The QA root is `CLAKTORY_QA_ROOT`, or `claktory-qa` in the
-temporary folder. It holds the build (about 4 GB) and each commit's binaries
+nothing. The QA root is `CLAKTORY_QA_ROOT`, or `~/Library/Caches/claktory-qa` on
+macOS (`~/.cache/claktory-qa` on Linux), never the temporary folder, which
+macOS clears of files it thinks are unused. It holds the build (about 4 GB) and each commit's binaries
 in `bin/<commit>`. Delete old ones there, or the whole root, when you're done.
 
 Every command prints one JSON line, `{"ok":true,…}` or

@@ -339,7 +339,7 @@ fn error(code: v1::ErrorCode, message: impl Into<String>) -> Body {
 fn new_id(app: &str) -> String {
     let mut bytes = [0u8; 8];
     getrandom::fill(&mut bytes).expect("the system's random source");
-    format!("{app}-{}", bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+    format!("{app}-{}", crate::encoding::hex(&bytes))
 }
 
 // ---- The person's requests ----

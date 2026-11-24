@@ -8,7 +8,7 @@ use factory_protocol::v1::{self, ErrorCode, client_message, server_message::Body
 use sha2::{Digest, Sha256};
 
 fn fetch(version: &str, offset: u64) -> client_message::Body {
-    client_message::Body::FetchApp(v1::FetchApp { version: version.into(), offset })
+    client_message::Body::FetchApp(v1::FetchApp { version: version.into(), offset, ..Default::default() })
 }
 
 /// An app bundle with a file that doesn't compress, so it takes chunks.
@@ -122,6 +122,27 @@ async fn an_app_on_another_machine_fetches_its_release_in_chunks() {
     let top: Vec<String> =
         std::fs::read_dir(&unpacked).expect("ls").map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned()).collect();
     assert_eq!(top, ["Factory.app"]);
+
+    // Smaller pieces for a slow link (#408): as asked, never over 1 MiB,
+    // and the same bytes.
+    let piece = |offset: u64, max_bytes: u64| {
+        client_message::Body::FetchApp(v1::FetchApp { version: "2026.11.20-1012".into(), offset, max_bytes })
+    };
+    for (offset, max_bytes, expected) in [
+        (0, 64 * 1024, 64 * 1024),
+        (1000, 1, 1),
+        (0, 4 << 20, 1 << 20),
+        (archive.len() as u64 - 10, 64 * 1024, 10),
+    ] {
+        match apply_request(&mut client, &mut view, piece(offset, max_bytes)).await {
+            Body::AppChunk(chunk) => {
+                let at = usize::try_from(offset).expect("offset");
+                assert_eq!((chunk.offset, chunk.data.len()), (offset, expected), "{max_bytes} from {offset}");
+                assert_eq!(chunk.data, archive[at..at + expected]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     // The end, and past it.
     let end = apply_request(&mut client, &mut view, fetch("2026.11.20-1012", archive.len() as u64)).await;

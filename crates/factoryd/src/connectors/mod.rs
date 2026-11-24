@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-use crate::encoding::same as equal_in_constant_time;
+use crate::encoding::{hex, same as equal_in_constant_time};
 use crate::factory::{Factory, RequestError};
 use crate::locking::lock as guard;
 use crate::transcript::now_ms;
@@ -1387,10 +1387,6 @@ pub(crate) fn describe(service: &str, access: &[String]) -> String {
 /// A random id, 16 hex digits.
 pub(crate) fn random_id() -> String {
     hex(&random_bytes::<8>())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]

@@ -21,11 +21,13 @@ use factory_protocol::v1;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{Extension, Manifest, PromptKind, PromptSection, async_tool};
+use super::{Extension, Manifest, OptionKind, OptionSpec, PromptSection, async_tool};
 use crate::config::{AgentConfig, Config};
 use crate::factory::{AgentChange, Factory, Inner};
 
 pub(crate) const ID: &str = "models";
+/// The option that gives it models_set; off, it only lists (friend bug #8).
+pub(crate) const CAN_SET: &str = "can_set";
 
 static MANIFEST: Manifest = Manifest {
     id: ID,
@@ -33,10 +35,17 @@ static MANIFEST: Manifest = Manifest {
     icon: "sparkles",
     description: "Lets the agent see which models your signed-in providers can run now, and put an agent on one of them, with its effort.",
     default_enabled: false,
-    options: &[],
+    options: &[OptionSpec {
+        id: CAN_SET,
+        label: "Can change models",
+        description: "It can put agents, itself included, on another model or effort. Off, it only sees the models and how much of your subscriptions' limits is used.",
+        kind: OptionKind::Switch,
+        default_on: true,
+        includes_project: false,
+    }],
 };
 
-const LIST: &str = "The models agents can run on now, by provider, each with its exact id (what an agent's model setting takes), its name, its efforts and its context size, and each provider's state: signed in or not, and whether it can take requests now (an account at its usage limit, out of credit or needing a new sign-in can't). query: words that must all be in the id or the name, such as \"opus\" or \"sonnet 4.6\" (\"-\", \".\" and \"_\" alike). provider: one provider, by id or name, such as \"openrouter\".";
+const LIST: &str = "The models agents can run on now, by provider, each with its exact id (what an agent's model setting takes), its name, its efforts and its context size, and each provider's state: signed in or not, and whether it can take requests now (an account at its usage limit, out of credit or needing a new sign-in can't), and each subscription's limits: how much of each is used and when it resets. query: words that must all be in the id or the name, such as \"opus\" or \"sonnet 4.6\" (\"-\", \".\" and \"_\" alike). provider: one provider, by id or name, such as \"openrouter\".";
 const SET: &str = "Put an agent on a model, an effort, or both, from its next step; Claktory tells it. agent: its id or name (you included). model: an id exactly as models_list gives it. effort: one the model lists; left out, the agent keeps its effort if the model takes it, else gets \"high\" or the model's strongest. reason: why, in a sentence for the person, who sees every change in their History and can undo it. Refused for a model that isn't available now, saying which are close.";
 /// The longest reason kept.
 const MOST_REASON: usize = 500;
@@ -51,12 +60,18 @@ impl Extension for Models {
         &MANIFEST
     }
 
-    fn prompt(&self, _factory: &Factory, inner: &Inner, _agent: &AgentConfig) -> Vec<PromptSection> {
+    fn prompt(&self, _factory: &Factory, inner: &Inner, agent: &AgentConfig) -> Vec<PromptSection> {
         let person = inner.config.person();
+        if !super::switch(agent, ID, CAN_SET) {
+            let text = format!(
+                "## Models\n\nmodels_list shows the models agents can run on now, by provider, and how much of each of {person}'s subscriptions' limits is used, with when each resets. You can't change an agent's model: {person} does that in the agent's settings.\n"
+            );
+            return vec![PromptSection::static_text(text)];
+        }
         let text = format!(
             "## Models\n\nTo put an agent on a model, find its exact id with models_list (a few words of its name in query, such as \"opus\", and the provider if {person} named one), then set it with models_set; don't edit the settings file for it, or guess an id. An id is \"<provider>/<the provider's own id>\", so one model reads differently on each provider: anthropic/claude-opus-4-8 on Anthropic, openrouter/anthropic/claude-opus-4.8 on OpenRouter. Only {person} signs in to a provider, in Settings → Providers. Changing a model costs a full write of the agent's prompt cache on its next step, so change models only when asked.\n"
         );
-        vec![PromptSection { kind: PromptKind::Static, text }]
+        vec![PromptSection::static_text(text)]
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
@@ -79,10 +94,11 @@ impl Extension for Models {
             },
             "additionalProperties": false,
         });
-        vec![
-            super::tool("models_list", "List models", LIST, list_parameters, super::typed_handler(factory, agent, list)),
-            async_tool(factory, agent, "models_set", "Change an agent's model", SET, set_parameters, set),
-        ]
+        let list = super::tool("models_list", "List models", LIST, list_parameters, super::typed_handler(factory, agent, list));
+        if !can_set(factory, agent) {
+            return vec![list];
+        }
+        vec![list, async_tool(factory, agent, "models_set", "Change an agent's model", SET, set_parameters, set)]
     }
 
     fn admin_default(&self) -> bool {
@@ -99,6 +115,9 @@ struct ListArgs {
 }
 
 fn list(factory: &Arc<Factory>, agent: &str, args: ListArgs) -> Result<ToolResult, String> {
+    // An agent that has read a web page doesn't see whose accounts these
+    // are or their usage: a stranger's page could ask for them (Fugo).
+    let hidden = (!factory.pipes.tainted(agent).is_empty()).then(|| crate::pipes::agents::what_was_read(factory, agent));
     let inner = factory.lock();
     super::caller(&inner.config, agent)?;
     let person = inner.config.person();
@@ -108,9 +127,24 @@ fn list(factory: &Arc<Factory>, agent: &str, args: ListArgs) -> Result<ToolResul
     let mut text = String::new();
     let mut shown = 0;
     for provider in providers {
-        let _ = writeln!(text, "{} ({}): {}", provider.name, provider.id, state(provider, person, now));
+        let _ = writeln!(text, "{} ({}): {}", provider.name, provider.id, state(provider, person, now, hidden.is_some()));
         if !signed_in(provider) {
             continue;
+        }
+        let mut usage_lines = Vec::new();
+        for account in &provider.accounts {
+            let key = (provider.id.clone(), account.id.clone());
+            let usage = inner.usage.get(&key).or(account.usage.as_ref());
+            let plan = inner.plans.get(&key).unwrap_or(&account.plan);
+            usage_lines.extend(usage.and_then(|usage| limits(account, plan, usage)));
+        }
+        match &hidden {
+            Some(read) if !usage_lines.is_empty() => {
+                let _ = writeln!(text, "- Usage hidden: you've read {read}.");
+            }
+            _ => usage_lines.iter().for_each(|line| {
+                let _ = writeln!(text, "- {line}");
+            }),
         }
         let mut models: Vec<&v1::Model> =
             inner.models.iter().filter(|model| provider_of(&model.id) == provider.id && matches(&words, model)).collect();
@@ -145,7 +179,12 @@ struct SetArgs {
 }
 
 async fn set(factory: Arc<Factory>, caller: String, args: SetArgs) -> Result<ToolResult, String> {
-    untainted(&factory, &caller)?;
+    super::untainted(
+        &factory,
+        &caller,
+        "change an agent's model or effort",
+        "change it in the agent's settings. Nothing was changed.",
+    )?;
     let (model, effort) = (args.model.trim(), args.effort.trim());
     if model.is_empty() && effort.is_empty() {
         return Err("Give a model, an effort or both. Nothing was changed.".to_owned());
@@ -154,11 +193,22 @@ async fn set(factory: Arc<Factory>, caller: String, args: SetArgs) -> Result<Too
     if reason.chars().count() > MOST_REASON {
         return Err(format!("Say why in {MOST_REASON} characters at most. Nothing was changed."));
     }
+    // A model its provider's list doesn't have is checked with the provider
+    // and added first (friend bug #14); refused, the provider's word comes
+    // before the ids that come close.
+    let listed = model.is_empty() || factory.lock().models.iter().any(|known| known.id == model);
+    let provider_said = match listed {
+        true => None,
+        false => {
+            crate::catalog::ensure(&factory, model, crate::catalog::Check::WhenItCan).await.err().filter(|why| !why.starts_with("Sign in"))
+        }
+    };
     let (id, name, before, model, effort, warning) = {
         let inner = factory.lock();
         super::caller(&inner.config, &caller)?;
         let agent = agent(&inner.config, &args.agent)?;
-        let model = available(&inner, if model.is_empty() { &agent.model } else { model })?;
+        let model = available(&inner, if model.is_empty() { &agent.model } else { model })
+            .map_err(|why| provider_said.as_ref().map_or_else(|| why.clone(), |said| format!("{said} {why}")))?;
         let effort = if !effort.is_empty() {
             if !model.efforts.iter().any(|known| known == effort) {
                 return Err(match model.efforts.is_empty() {
@@ -174,7 +224,7 @@ async fn set(factory: Arc<Factory>, caller: String, args: SetArgs) -> Result<Too
         };
         let provider = inner.providers.iter().find(|provider| provider.id == provider_of(&model.id));
         let now = factory_agent::clock::now_ms();
-        let warning = provider.and_then(|provider| busy(provider, now).map(|why| format!("{} {why}", provider.name)));
+        let warning = provider.and_then(|provider| busy(provider, now, false).map(|why| format!("{} {why}", provider.name)));
         let before = (agent.model.clone(), agent.effort.clone());
         (agent.id.clone(), agent.name.clone(), before, model.clone(), effort, warning)
     };
@@ -302,7 +352,7 @@ impl ModelChange {
     }
 
     /// Claktory's sentence for it, with each agent's name now (`names`):
-    /// "Rivet put Ingrid on Claude Opus 5, high", "Rivet changed Ingrid's
+    /// "Rivet put Ingrid on Claude Opus 5 at high effort", "Rivet changed Ingrid's
     /// effort to high".
     pub(crate) fn title(&self, names: &std::collections::HashMap<String, String>) -> String {
         let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_owned());
@@ -313,7 +363,7 @@ impl ModelChange {
         }
         match self.effort_after.as_str() {
             "" => format!("{by} put {agent} on {model}"),
-            effort => format!("{by} put {agent} on {model}, {effort}"),
+            effort => format!("{by} put {agent} on {model} at {effort} effort"),
         }
     }
 }
@@ -369,21 +419,13 @@ pub(crate) async fn undo(factory: &Arc<Factory>, request: &v1::UndoModelChange) 
     Ok(())
 }
 
-/// An agent that has read a web page through browser control doesn't
-/// change models.
-fn untainted(factory: &Factory, agent: &str) -> Result<(), String> {
-    if factory.pipes.tainted(agent).is_empty() {
-        return Ok(());
-    }
-    let person = factory.person_capitalized();
-    let read = crate::pipes::agents::what_was_read(factory, agent);
-    Err(format!(
-        "You've read {read}, so you can't change an agent's model or effort: what you read there may be someone else's instructions. {person} can change it in the agent's settings. Nothing was changed."
-    ))
+/// The agent may change models (Can change models, on unless turned off).
+fn can_set(factory: &Factory, agent: &str) -> bool {
+    factory.lock().config.agent(agent).is_some_and(|config| super::switch(config, ID, CAN_SET))
 }
 
 /// The agent named by id, or by a name only one agent has.
-fn agent<'a>(config: &'a Config, named: &str) -> Result<&'a AgentConfig, String> {
+pub(super) fn agent<'a>(config: &'a Config, named: &str) -> Result<&'a AgentConfig, String> {
     let named = named.trim();
     if let Some(agent) = config.agent(named) {
         return Ok(agent);
@@ -455,15 +497,19 @@ fn signed_in(provider: &v1::Provider) -> bool {
 }
 
 /// A provider's state, as models_list says it.
-fn state(provider: &v1::Provider, person: &str, now: u64) -> String {
+/// `hide`: accounts named only as "an account".
+fn state(provider: &v1::Provider, person: &str, now: u64, hide: bool) -> String {
     if !signed_in(provider) {
         return format!("not signed in; only {person} can sign in, in Settings → Providers.");
     }
-    match busy(provider, now) {
+    match busy(provider, now, hide) {
         Some(why) => format!("signed in, but {why}; agents on its models wait until it can."),
         None => {
-            let held: Vec<String> =
-                provider.accounts.iter().filter_map(|account| held(account, now).map(|why| format!("{} {why}", label(account)))).collect();
+            let held: Vec<String> = provider
+                .accounts
+                .iter()
+                .filter_map(|account| held(account, now).map(|why| format!("{} {why}", label(account, hide))))
+                .collect();
             if held.is_empty() {
                 "signed in, and can take requests now.".to_owned()
             } else {
@@ -475,13 +521,13 @@ fn state(provider: &v1::Provider, person: &str, now: u64) -> String {
 
 /// Why none of a signed-in provider's accounts can take requests now; None
 /// when one can.
-fn busy(provider: &v1::Provider, now: u64) -> Option<String> {
+fn busy(provider: &v1::Provider, now: u64, hide: bool) -> Option<String> {
     if provider.accounts.is_empty() {
         return None;
     }
     let mut why = Vec::new();
     for account in &provider.accounts {
-        why.push(format!("{} {}", label(account), held(account, now)?));
+        why.push(format!("{} {}", label(account, hide), held(account, now)?));
     }
     Some(format!("can't take requests now: {}", why.join("; ")))
 }
@@ -500,8 +546,53 @@ fn held(account: &v1::Account, now: u64) -> Option<String> {
     }
 }
 
-fn label(account: &v1::Account) -> &str {
-    if account.label.is_empty() { "an account" } else { &account.label }
+/// A subscription account's limits, as models_list says them: "Usage of
+/// ana@example.com (Claude Max 20x): 5-hour 82% (resets Tue 18:00), Weekly
+/// 40% (resets Mon 09:00)." None for an account with none to read.
+fn limits(account: &v1::Account, plan: &str, usage: &v1::ProviderUsage) -> Option<String> {
+    let mut line = format!("Usage of {}", label(account, false));
+    if !plan.is_empty() && plan != account.label {
+        let _ = write!(line, " ({plan})");
+    }
+    if usage.windows.is_empty() {
+        return (!usage.error.is_empty()).then(|| format!("{line} couldn't be read: {}", usage.error.trim_end_matches('.')));
+    }
+    let windows: Vec<String> = usage
+        .windows
+        .iter()
+        .map(|window| {
+            let name = if window.label.is_empty() { &window.id } else { &window.label };
+            let mut said = format!("{name} {}%", window.used_percent.clamp(0.0, 100.0).round());
+            if let Ok(at) = u64::try_from(window.resets_at)
+                && at > 0
+            {
+                let _ = write!(said, " (resets {})", reset_time(at));
+            }
+            said
+        })
+        .collect();
+    let _ = write!(line, ": {}", windows.join(", "));
+    if let Ok(read) = u64::try_from(usage.updated)
+        && read > 0
+    {
+        let _ = write!(line, "; read {}", factory_agent::accounts::when(read));
+    }
+    Some(line)
+}
+
+/// When a limit resets: "Tue 18:00", with the date when that's six days
+/// or more away, so a weekly reset doesn't read as today ("Mon 30 Nov 14:50").
+fn reset_time(at: u64) -> String {
+    let soon = at.saturating_sub(factory_agent::clock::now_ms()) < 6 * 24 * 3_600_000;
+    match i64::try_from(at) {
+        Ok(ms) if !soon => crate::transcript::local_time(ms, "%a %-d %b %H:%M"),
+        _ => factory_agent::accounts::when(at),
+    }
+}
+
+/// How an account is named; `hide`: as "an account" whatever its label.
+fn label(account: &v1::Account, hide: bool) -> &str {
+    if account.label.is_empty() || hide { "an account" } else { &account.label }
 }
 
 /// "anthropic" of "anthropic/claude-opus-4-8".
@@ -576,6 +667,15 @@ mod tests {
             assert!(!matches(&words, &sonnet), "{query}");
         }
         assert!(matches(&words(""), &sonnet), "no query matches every model");
+    }
+
+    #[test]
+    fn a_reset_a_week_away_says_its_date() {
+        let now = factory_agent::clock::now_ms();
+        let week = reset_time(now + 7 * 24 * 3_600_000);
+        assert_eq!(week.split(' ').count(), 4, "Mon 30 Nov 14:50: {week}");
+        let soon = reset_time(now + 3_600_000);
+        assert_eq!(soon.split(' ').count(), 2, "Tue 18:00: {soon}");
     }
 
     #[test]

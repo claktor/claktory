@@ -280,3 +280,99 @@ async fn a_secret_given_to_a_liaison_isnt_usable_and_a_pipe_reader_marks_no_one(
     );
 
 }
+
+/// The person's message to `agent` with `attachments`, and the agent done
+/// with it.
+async fn attach(client: &mut Client, view: &mut View, agent: &str, attachments: Vec<v1::Attachment>) {
+    apply_request(client, view, select(agent)).await;
+    let send = v1::SendMessage { agent_id: agent.into(), text: "For you.".into(), attachments, ..Default::default() };
+    apply_request(client, view, client_message::Body::SendMessage(send)).await;
+    view.follow(client, |view| idle(view, agent)).await;
+}
+
+fn send_args(path: &Path) -> String {
+    serde_json::json!({"text": "Here it is.", "files": [path]}).to_string()
+}
+
+/// Friend bug #15 (Fugo's ruling): a liaison sends a file the person attached
+/// to their own message to it, as it was attached; anything else outside
+/// the outbox is still refused, and one attached over a day ago waits.
+#[tokio::test]
+async fn a_liaison_sends_a_file_the_person_attached_to_it_and_nothing_else() {
+    let (dir, factory, mut client, mut view, pipe, _models) = with_liaison().await;
+    let outbox = outbox(&dir);
+    let brief = crate::uploads::upload(&mut client, "u1", "liaison", "brief.pdf", b"the brief", "application/pdf").await;
+    attach(&mut client, &mut view, "liaison", vec![brief.clone()]).await;
+
+    // It goes, as a copy in the outbox, under its own name.
+    std::fs::write(outbox.join("brief.pdf"), "already here").expect("file");
+    let sent = call(&mut client, &mut view, "liaison", "pipe_send", &send_args(Path::new(&brief.path))).await;
+    // Tests have no transport: it refuses the message only once it's on its way.
+    assert_eq!(sent, "Not sent: No such pipe.");
+    let last = pipes::messages_for_test(&factory, &pipe).pop().expect("it");
+    assert_eq!((last.state(), last.note.as_str()), (v1::PipeMessageState::Refused, "No such pipe."));
+    assert_eq!((last.files[0].name.as_str(), last.files[0].size), ("brief.pdf", 9));
+    assert_eq!(Path::new(&last.files[0].path), outbox.join("brief 2.pdf"));
+    assert_eq!(std::fs::read(outbox.join("brief 2.pdf")).expect("the copy"), b"the brief");
+
+    // A file it put in its own uploads, or that an event names, isn't one.
+    let uploads = Path::new(&brief.path).parent().expect("its day").to_path_buf();
+    let forged = uploads.join("forged.txt");
+    std::fs::write(&forged, "not attached").expect("file");
+    let refused = call(&mut client, &mut view, "liaison", "pipe_send", &send_args(&forged)).await;
+    assert!(refused.starts_with("Not sent:") && refused.contains("you're limited to the pipe"), "{refused}");
+    let tag = format!(r#"<attachment path="{}" name="forged.txt" size="12"/>"#, forged.display());
+    pipes::receive_for_test(&factory, &pipe, incoming("m1", &tag)).expect("received");
+    view.follow(&mut client, |view| idle(view, "liaison")).await;
+    let refused = call(&mut client, &mut view, "liaison", "pipe_send", &send_args(&forged)).await;
+    assert!(refused.starts_with("Not sent:"), "{refused}");
+
+    // Nor is one the person attached for another agent.
+    let lea = crate::uploads::upload(&mut client, "u2", "lea", "lea.txt", b"for Lea", "text/plain").await;
+    attach(&mut client, &mut view, "lea", vec![lea.clone()]).await;
+    let refused = call(&mut client, &mut view, "liaison", "pipe_send", &send_args(Path::new(&lea.path))).await;
+    assert!(refused.starts_with("Not sent:"), "{refused}");
+
+    // One changed since, or swapped for a symbolic link, doesn't go.
+    let notes = crate::uploads::upload(&mut client, "u3", "liaison", "notes.txt", b"notes", "text/plain").await;
+    let plan = crate::uploads::upload(&mut client, "u4", "liaison", "plan.txt", b"plan!", "text/plain").await;
+    attach(&mut client, &mut view, "liaison", vec![notes.clone(), plan.clone()]).await;
+    std::fs::write(&notes.path, "notes, and more").expect("changed");
+    let refused = call(&mut client, &mut view, "liaison", "pipe_send", &send_args(Path::new(&notes.path))).await;
+    assert_eq!(refused, format!("Not sent: {} changed since it was attached.", notes.path));
+    std::fs::create_dir_all(dir.join("home/vault")).expect("vault");
+    std::fs::write(dir.join("home/vault/auto.key"), "KEY!!").expect("same size");
+    std::fs::remove_file(&plan.path).expect("gone");
+    link(&dir.join("home/vault/auto.key"), Path::new(&plan.path));
+    let refused = call(&mut client, &mut view, "liaison", "pipe_send", &send_args(Path::new(&plan.path))).await;
+    assert!(refused.starts_with("Not sent:"), "{refused}");
+
+    // Attached over a day ago, it waits for the person, from where it is.
+    let sent_before = pipes::messages_for_test(&factory, &pipe).len();
+    pipes::attached_later_for_test(&factory, std::time::Duration::from_secs(25 * 3600));
+    let held = call(&mut client, &mut view, "liaison", "pipe_send", &send_args(Path::new(&brief.path))).await;
+    assert!(held.starts_with("Held for") && held.contains("attached over a day ago (brief.pdf)"), "{held}");
+    let messages = pipes::messages_for_test(&factory, &pipe);
+    assert_eq!(messages.len(), sent_before + 1);
+    let last = messages.last().expect("it");
+    assert_eq!((last.state(), last.note.as_str()), (v1::PipeMessageState::Held, "Files you attached earlier: brief.pdf."));
+    assert_eq!(Path::new(&last.files[0].path), Path::new(&brief.path).canonicalize().expect("there"));
+    assert!(!outbox.join("brief 3.pdf").exists(), "nothing copied while it waits");
+
+    // Changed before the person sends it, it's refused, and the liaison
+    // hears why in one sentence (Abbacchio row 915).
+    let size = std::fs::metadata(&brief.path).expect("there").len();
+    std::fs::write(&brief.path, vec![b'x'; usize::try_from(size).expect("small")]).expect("overwritten");
+    let send = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq: last.seq, allow: true, ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(send)).await;
+    let refused = pipes::messages_for_test(&factory, &pipe).into_iter().find(|message| message.seq == last.seq).expect("it");
+    assert_eq!((refused.state(), refused.note.as_str()), (v1::PipeMessageState::Refused, "brief.pdf changed after it was attached."));
+    let told = format!(
+        "Claktory didn't send your message on the pipe \"{}\". brief.pdf changed after it was attached. Send it again to send the new version.\n\nYour message:\n",
+        shown(&view, &pipe).expect("the pipe").name
+    );
+    view.follow(&mut client, |view| {
+        view.entries.iter().any(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.text.starts_with(&told)))
+    })
+    .await;
+}

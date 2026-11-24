@@ -280,7 +280,9 @@ class _QuietTimes extends StatelessWidget {
 /// it isn't this device's own now ([now]'s offset), since the times are
 /// that zone's.
 String quietHoursNote(NotificationSettings settings, DateTime now) {
-  const plain = 'Nothing notifies between these times';
+  // What comes meanwhile waits: once they end, one notification says how
+  // much needs the person (#364 O3).
+  const plain = 'Notifications wait until these hours end';
   if (settings.timeZone.isEmpty) {
     return '$plain, in the time zone of the computer Claktory runs on.';
   }
@@ -358,6 +360,34 @@ class NotificationSwitch extends StatelessWidget {
       ),
     );
   }
+}
+
+/// What Send a test notification says once it's sent: the devices it
+/// reached (#352 P2), [here] first ("this Mac", when this device shows
+/// notifications; null when it doesn't), then the paired devices that show
+/// it: an iPhone or iPad registered for pushes, a Mac connected now. An
+/// Android device shows none yet, and one whose system isn't known (an
+/// older app or backend) isn't claimed.
+String testSentTo({
+  required Iterable<PairedDevice> devices,
+  required String thisDevice,
+  String? here,
+}) {
+  final names = [
+    ?here,
+    for (final device in devices)
+      if (device.id != thisDevice &&
+          (device.notifications ||
+              (device.connected && device.platform == 'macos')))
+        device.name,
+  ];
+  return switch (names) {
+    [] =>
+      'No device gets notifications yet. Turn them on in Claktory on an '
+          'iPhone, iPad or Mac.',
+    [final one] => 'Sent to $one.',
+    [...final rest, final last] => 'Sent to ${rest.join(', ')} and $last.',
+  };
 }
 
 /// Whether the system lets Claktory notify on this device: a Mac's
@@ -511,8 +541,8 @@ class _ThisDeviceNotificationsState extends State<ThisDeviceNotifications>
   /// The system's answer, once read.
   String? _permission;
 
-  /// The test was sent, since the last press.
-  var _sent = false;
+  /// Where the test went, said once it was sent, since the last press.
+  String? _sent;
 
   @override
   void initState() {
@@ -556,9 +586,20 @@ class _ThisDeviceNotificationsState extends State<ThisDeviceNotifications>
   }
 
   Future<void> _test() async {
-    setState(() => _sent = false);
-    await run(() => AppScope.of(context).sendTestNotification());
-    if (mounted && failure == null) setState(() => _sent = true);
+    setState(() => _sent = null);
+    final backend = AppScope.of(context);
+    await run(backend.sendTestNotification);
+    if (!mounted || failure != null) return;
+    setState(
+      () => _sent = testSentTo(
+        devices: backend.workspace.workspace.remote.devices,
+        thisDevice: backend.deviceId,
+        // "This Mac" → "this Mac", in the middle of a sentence.
+        here: _permission == 'allowed'
+            ? _device?.name.replaceFirst('This ', 'this ')
+            : null,
+      ),
+    );
   }
 
   @override
@@ -632,9 +673,13 @@ class _ThisDeviceNotificationsState extends State<ThisDeviceNotifications>
         color: permission == 'denied' ? palette.textMuted : palette.text,
       ),
     );
+    // Android shows no notifications yet (no pushes, nothing while it's
+    // open either), so it says so rather than look set up (#352 P2).
+    final none =
+        device == null && defaultTargetPlatform == TargetPlatform.android;
     final test = Button(label: 'Send a test notification', onPressed: _test);
     return SettingRow(
-      label: device?.name ?? 'Test',
+      label: none ? 'This $thisDeviceKind' : device?.name ?? 'Test',
       top: true,
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -646,14 +691,20 @@ class _ThisDeviceNotificationsState extends State<ThisDeviceNotifications>
             else
               ActionLine(lead: statusText, action: action),
             const SizedBox(height: Space.m),
+          ] else if (none) ...[
+            Text(
+              "This $thisDeviceKind doesn't get notifications yet. Open "
+              "Claktory to see what's new.",
+              style: type.body.copyWith(color: palette.text),
+            ),
+            const SizedBox(height: Space.m),
           ],
           Align(alignment: AlignmentDirectional.centerStart, child: test),
           const SizedBox(height: Space.xs),
           Text(
-            _sent
-                ? 'Sent.'
-                : 'It goes to every device that gets notifications, even '
-                      'in quiet hours.',
+            _sent ??
+                'It goes to every device that gets notifications, even in '
+                    'quiet hours.',
             style: type.caption.copyWith(color: palette.textFaint),
           ),
           failureLine(palette),

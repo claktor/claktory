@@ -34,13 +34,20 @@
 #   scripts/qa.sh --container pull /qa/sandboxes/qa1/factoryd.log
 #   scripts/qa.sh --container down --all
 #
-# Everything lives under CLAKTORY_QA_ROOT (default: claktory-qa in the
-# temporary folder): never among the real Claktories' own files in
-# ~/.factory or ~/.factory-dev (agents' folders there are fine).
+# Everything lives under CLAKTORY_QA_ROOT (default: ~/Library/Caches/
+# claktory-qa on macOS, $XDG_CACHE_HOME/claktory-qa or ~/.cache/claktory-qa
+# elsewhere): never among the real Claktories' own files in ~/.factory or
+# ~/.factory-dev (agents' folders there are fine). Not the temporary folder:
+# macOS deletes files there it thinks are unused, a generated file in the
+# middle of the build cache included, and every build then fails.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-ROOT="${CLAKTORY_QA_ROOT:-${TMPDIR:-/tmp}/claktory-qa}"
+if [[ "$(uname -s)" == Darwin ]]; then
+  ROOT="${CLAKTORY_QA_ROOT:-$HOME/Library/Caches/claktory-qa}"
+else
+  ROOT="${CLAKTORY_QA_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/claktory-qa}"
+fi
 REV=HEAD
 CONTAINER=""
 while [[ "${1:-}" == "--rev" || "${1:-}" == "--container" ]]; do

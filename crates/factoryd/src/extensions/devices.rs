@@ -24,7 +24,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Extension, Manifest, PromptKind, PromptSection, async_tool};
+use super::{Extension, Manifest, PromptSection, async_tool};
 use crate::config::AgentConfig;
 use crate::factory::{Factory, Inner, RequestError, host_event};
 use crate::remote::{self, Device};
@@ -84,7 +84,7 @@ impl Extension for Devices {
         let text = format!(
             "## Devices\n\nYou can add {person}'s devices to Claktory for them, so they can use it there too: devices_add shows {person} a pairing code in your conversation to scan or paste on the device, and {person} allows the device themselves. You never see the code. devices_list lists their devices; devices_remove removes one, only when {person} asks.\n"
         );
-        vec![PromptSection { kind: PromptKind::Static, text }]
+        vec![PromptSection::static_text(text)]
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
@@ -406,7 +406,7 @@ pub(crate) async fn code(factory: &Arc<Factory>, pairing: &str) -> Result<v1::Pa
         factory.store.db().query_row(&format!("SELECT {COLUMNS} FROM device_pairings WHERE id = ?1"), [number], Row::read).optional()?;
     let Some(row) = row.filter(|row| row.state == State::Waiting) else { return Err(gone()) };
     let code = factory.agent_pairing_code(&row.id.to_string(), &row.device, row.created).await?;
-    Ok(v1::PairingCode { code, device_id: row.device })
+    Ok(v1::PairingCode { link: remote::pairing_link(&code), code, device_id: row.device })
 }
 
 /// Brings pairings still waiting up to date with devices.json: each card

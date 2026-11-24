@@ -17,7 +17,7 @@ use factory_agent::{Tool, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{Extension, Manifest, OptionKind, OptionSpec, PromptKind, PromptSection};
+use super::{Extension, Manifest, OptionKind, OptionSpec, PromptSection};
 use crate::config::AgentConfig;
 use crate::factory::{Factory, Inner};
 use crate::proposals::is_admin;
@@ -46,7 +46,7 @@ static CONNECTING: Manifest = Manifest {
 
 const ASK: &str = "## Asking for secrets
 
-You can use only the secrets listed in your Secrets section, if any. The person may keep others in the vault that could help with your work; you can't see them. When you need a key, token or password you weren't given, ask with `secrets_request`, never in a message: describe the kind of secret (a short name; which service, what the secret must be able to do and roughly how much, such as \"an Anthropic API key that can run Claude models a few times\"; and the environment variables you expect, never values) and say why. The person approves the need or dismisses it; approved, you're given one that fits, theirs or a new one, and you're told what you got. `secrets_requests` lists your requests; while one waits, change it with `secrets_request_update` rather than asking again, and withdraw it with `secrets_request_cancel` once you no longer need it. For a new ssh key or password, have the vault generate it (`generate`): no one, you included, ever sees its private half or the password, and you're told a key's public half. For a file already on this computer (a keystore, a credentials file), ask to import it (`import`); never ask the person to copy a file's contents into the vault by hand.
+You can use only the secrets listed in your Secrets section, if any. The person may keep others in the vault that could help with your work; you can't see them. When you need a key, token or password you weren't given, ask with `secrets_request`, never in a message: describe the kind of secret (a short name; which service, what the secret must be able to do and roughly how much, such as \"an Anthropic API key that can run Claude models a few times\"; and the environment variables you expect, never values) and say why. Ask for the least access that works. Give `link`, the https address of the service's own page for making it, with the name and permissions filled in where the service takes them in the address (GitHub's `https://github.com/settings/tokens/new?scopes=repo&description=Alex`), and `steps`, at most one line of what to do there: the person sees them on the card, so they make it in one go. The person approves the need or dismisses it; approved, you're given one that fits, theirs or a new one, and you're told what you got. `secrets_requests` lists your requests; while one waits, change it with `secrets_request_update` rather than asking again, and withdraw it with `secrets_request_cancel` once you no longer need it. For a new ssh key or password, have the vault generate it (`generate`): no one, you included, ever sees its private half or the password, and you're told a key's public half. For a file already on this computer (a keystore, a credentials file), ask to import it (`import`); never ask the person to copy a file's contents into the vault by hand.
 ";
 
 const CONNECT: &str = "## Connecting services
@@ -68,7 +68,7 @@ const CONNECTED: &str = "## Connected services
 A connected service (Cloudflare, AWS) is given to no one. When the person connects one for an agent's suggestion, compare what it asked for with what the connection reaches (`secrets_inspect`), see what a secret can be made of (`secrets_choices`), make one with only the access that work needs (`secrets_derive`), give that to the agent with `secrets_grant`, and tell it what it got.
 ";
 
-const REQUEST: &str = "Ask the person for a secret you need: name, a short name for it (\"Cloudflare token\"); description, which service, what the secret must be able to do and roughly how much (\"an Anthropic API key that can run Claude models a few times\"); variables, the environment variables you expect ([{name, file}], file: true for a key file given to commands as its path; never values); reason, why you need it. You're told what you got when it's decided. For a new key no one has ever seen (an ssh deploy key), pass generate: \"ssh-ed25519\": the vault makes it when the person approves, its private half in one file variable (SSH_KEY unless you name one), name also the key's comment, and you're told only its public half. For a new password, pass generate: \"password\" and password: {length (at least 16, 256 at most; the shortest strong one if left out), lowercase, uppercase, digits, symbols (true for each kind wanted; all four if none), or allowed (the exact characters a fussy service accepts), avoid_similar (no 0 O o 1 l I |), require_each (at least one of each kind), max_length (the most the service takes, if under 16)}: the vault makes it when the person approves, in one variable (PASSWORD unless you name one), and refuses anything weaker than 80 bits (72 when the service caps the length). grant: \"nobody\" gives it to no one, you included (for a key or password the person gives elsewhere); \"me\", the default, gives it to you. For a file already on this computer (a keystore, a credentials file), pass import: [{variable, path}] (each file's full path, and the variable that gives it to commands as a file) with name and reason: the person sees exactly which files, never their contents, and when they approve, Claktory reads them into the vault itself, binary files too; they choose whether you get it. Never ask the person to copy a file's contents into the vault by hand; ask to import it. item: the checklist item it's for (12 for #12, or Ana#12), whenever it unblocks one: the request shows as that item in their Needs you, so don't also ask them about it.";
+const REQUEST: &str = "Ask the person for a secret you need: name, a short name for it (\"Cloudflare token\"); description, which service, what the secret must be able to do and roughly how much (\"an Anthropic API key that can run Claude models a few times\"); variables, the environment variables you expect ([{name, file}], file: true for a key file given to commands as its path; never values); reason, why you need it. link: the https address of the service's own page where the person makes it, with the name and permissions filled in where the service allows (public sites only); steps: at most one line of what to do there. Ask for the least access that works. You're told what you got when it's decided. For a new key no one has ever seen (an ssh deploy key), pass generate: \"ssh-ed25519\": the vault makes it when the person approves, its private half in one file variable (SSH_KEY unless you name one), name also the key's comment, and you're told only its public half; place: where it goes, owner/repo (\"claktory/factory\") or a host, with link to its deploy keys page. For a new password, pass generate: \"password\" and password: {length (at least 16, 256 at most; the shortest strong one if left out), lowercase, uppercase, digits, symbols (true for each kind wanted; all four if none), or allowed (the exact characters a fussy service accepts), avoid_similar (no 0 O o 1 l I |), require_each (at least one of each kind), max_length (the most the service takes, if under 16)}: the vault makes it when the person approves, in one variable (PASSWORD unless you name one), and refuses anything weaker than 80 bits (72 when the service caps the length). grant: \"nobody\" gives it to no one, you included (for a key or password the person gives elsewhere); \"me\", the default, gives it to you. For a file already on this computer (a keystore, a credentials file), pass import: [{variable, path}] (each file's full path, and the variable that gives it to commands as a file) with name and reason: the person sees exactly which files, never their contents, and when they approve, Claktory reads them into the vault itself, binary files too; they choose whether you get it. Never ask the person to copy a file's contents into the vault by hand; ask to import it. item: the checklist item it's for (12 for #12, or Ana#12), whenever it unblocks one: the request shows as that item in their Needs you, so don't also ask them about it.";
 const REQUESTS: &str = "Your requests for secrets: the ones waiting for the person, and your latest decided ones, each with its id, name, state, variables and reason.";
 const UPDATE: &str = "Change a request of yours that's still waiting, rather than asking again: id from secrets_requests; give only what changes: description, variables ([{name, file}], all of them) or reason. The person sees it changed.";
 const CANCEL: &str = "Withdraw a request of yours that's still waiting, once you no longer need it: id from secrets_requests; reason, optional, why. The person sees it withdrawn.";
@@ -88,14 +88,14 @@ impl Extension for Secrets {
     }
 
     fn prompt(&self, _factory: &Factory, _inner: &Inner, agent: &AgentConfig) -> Vec<PromptSection> {
-        let mut sections = vec![PromptSection { kind: PromptKind::Static, text: ASK.to_owned() }];
+        let mut sections = vec![PromptSection::static_text(ASK)];
         if crate::connectors::offered() && super::switch(agent, ID, crate::connectors::proposals::OPTION) {
-            sections.push(PromptSection { kind: PromptKind::Static, text: CONNECT.to_owned() });
+            sections.push(PromptSection::static_text(CONNECT));
         }
         if is_admin(agent) {
-            sections.push(PromptSection { kind: PromptKind::Static, text: PROMPT.to_owned() });
+            sections.push(PromptSection::static_text(PROMPT));
             if crate::connectors::offered() {
-                sections.push(PromptSection { kind: PromptKind::Static, text: CONNECTED.to_owned() });
+                sections.push(PromptSection::static_text(CONNECTED));
             }
         }
         sections
@@ -119,6 +119,9 @@ impl Extension for Secrets {
                 }},
                 "reason": {"type": "string"},
                 "item": {"type": "string"},
+                "link": {"type": "string"},
+                "steps": {"type": "string"},
+                "place": {"type": "string"},
                 "generate": {"type": "string", "enum": crate::vault::generate::KINDS},
                 "grant": {"type": "string", "enum": ["me", "nobody"]},
                 "import": {"type": "array", "items": {
@@ -324,6 +327,14 @@ struct AskArgs {
     /// The checklist item it's for (12, or Ana#12).
     #[serde(default)]
     item: Option<String>,
+    /// Where the person makes it (#360, K3), and a line of how.
+    #[serde(default)]
+    link: String,
+    #[serde(default)]
+    steps: String,
+    /// Where a generated key goes: owner/repo or a host (K6).
+    #[serde(default)]
+    place: String,
 }
 
 #[derive(Deserialize)]
@@ -393,8 +404,10 @@ fn ask(factory: &Arc<Factory>, asker: &str, args: AskArgs) -> Result<ToolResult,
             password: args.password,
             imports,
             read_pipes: false,
+            ..crate::vault::asks::Wanted::default()
         },
     };
+    let wanted = crate::vault::asks::Wanted { link: args.link, steps: args.steps, place: args.place, ..wanted };
     let wanted = crate::vault::asks::Wanted { read_pipes: !factory.pipes.tainted(asker).is_empty(), ..wanted };
     // The checklist item it's for: it shows as that item in Needs you.
     let (item, linked) = super::checklist::item_for(factory, asker, args.item.as_deref())

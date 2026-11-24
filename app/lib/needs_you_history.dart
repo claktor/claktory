@@ -308,6 +308,12 @@ bool _ofApp(NeedsYouRecord record) =>
 bool _ofModel(NeedsYouRecord record) =>
     record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_MODEL;
 
+/// Whether [record] is an agent (Rivet's Conversations tools) taking
+/// another agent's conversation back or switching it (friend bug #9):
+/// like a model change, with no Undo.
+bool _ofConversation(NeedsYouRecord record) =>
+    record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_CONVERSATION;
+
 /// The change Undo undoes: an app access change's or a model change's; ""
 /// for none (a declined card, another kind).
 String _changeOf(NeedsYouRecord record) => _ofApp(record)
@@ -347,6 +353,8 @@ String historyOutcome(NeedsYouRecord record) => switch (record.outcome) {
       when record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_LOOP =>
     'Continued',
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_ANSWERED => 'Answered',
+  // A comment sent back with Submit, rather than a yes or a no.
+  NeedsYouOutcome.NEEDS_YOU_OUTCOME_REPLIED => 'Replied',
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED => 'Approved',
   // A secret's use as its card says it, the rest Declined (never Denied).
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_DENIED
@@ -441,14 +449,21 @@ class HistoryRow extends StatelessWidget {
     final outcome = [
       historyOutcome(record),
       if ((_ofApp(record) || _ofModel(record)) && record.undone) 'Undone',
+      // Changed again since, so Undo would be refused (row 684).
+      if (_ofModel(record) && record.superseded && !record.undone)
+        'Changed since',
     ].where((part) => part.isNotEmpty).join(' · ');
     // Rivet's reason, as Rivet's own words, never as Claktory's.
     final reason =
-        (_ofApp(record) || _ofModel(record)) && record.agentReason.isNotEmpty
+        (_ofApp(record) || _ofModel(record) || _ofConversation(record)) &&
+            record.agentReason.isNotEmpty
         ? '${agentName ?? 'An agent'}: “${proseCodes(_shortened(record.agentReason, 300))}”'
         : '';
     final undo =
-        _changeOf(record).isNotEmpty && !record.undone && onUndo != null
+        _changeOf(record).isNotEmpty &&
+            !record.undone &&
+            !record.superseded &&
+            onUndo != null
         ? () => onUndo!(record)
         : null;
     final decided = record.decidedMs.toInt();
@@ -632,6 +647,8 @@ class HistoryRow extends StatelessWidget {
 /// still there (seq 0: at its end), or the chat.
 void openHistoryRecord(BuildContext context, NeedsYouRecord record) {
   final backend = AppScope.of(context);
+  // Needs you comes back on History, where this was opened from.
+  backend.needsYouHistoryNext = true;
   final workspace = backend.workspace.workspace;
   // The person's own app access change: the app, in Marketplace → Apps.
   if (_opensApp(record)) {
@@ -679,6 +696,16 @@ void openHistoryRecord(BuildContext context, NeedsYouRecord record) {
   final agent = workspace.agents
       .where((agent) => agent.id == record.agentId)
       .firstOrNull;
+  // Another agent's conversation taken back or switched, with no call to
+  // show (its agent gone): that conversation, as it is now.
+  if (_ofConversation(record) && (agent == null || record.seq == 0)) {
+    final subject = record.subjectAgentId;
+    if (!workspace.agents.any((agent) => agent.id == subject)) return;
+    AppScope.closePage(context);
+    fireAndLog(backend.selectAgent(subject));
+    PhoneNavigation.of(context)?.value = true;
+    return;
+  }
   // A model change with no entry to show (Rivet gone, or no call): the
   // agent whose model it was, in its settings.
   if (_ofModel(record) && (agent == null || record.seq == 0)) {
@@ -759,6 +786,12 @@ class NeedsYouTabs extends StatelessWidget {
                               minHeight: Touch.target - inset * 2,
                             ),
                             alignment: Alignment.center,
+                            // Room at its ends, so the largest text's word
+                            // shrinks inside the segment rather than
+                            // touching its edges (Zucchero's SE at AX5).
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: Space.s,
+                            ),
                             decoration: BoxDecoration(
                               color: chosen
                                   ? palette.canvas

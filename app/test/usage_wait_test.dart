@@ -4,6 +4,7 @@ import 'package:factory_app/controls.dart';
 import 'package:factory_app/mobile/drawer.dart' show largeText;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/sidebar.dart' show Sidebar;
+import 'package:factory_app/usage.dart' show formatUntil;
 import 'package:factory_app/usage_wait.dart';
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/widgets.dart';
@@ -423,6 +424,87 @@ void main() {
       expect(harness.last.switchBack.expectedOthers, 1);
     });
 
+    testWidgets('going back by itself (friend bug #8): when, with Back '
+        'now; held until the reset, Back now still', (tester) async {
+      final at = DateTime.now().add(const Duration(hours: 3));
+      UsageSwitch switched({bool goesBack = true, int atMs = 0}) => UsageSwitch(
+        providerName: 'Claude',
+        model: 'anthropic/claude-opus-4-8',
+        modelName: 'Claude Opus 4.8',
+        goesBack: goesBack,
+        goesBackAtMs: Int64(atMs),
+      );
+      final harness = await showApp(
+        tester,
+        workspace(
+          agents: [
+            builder()..usageSwitch = switched(atMs: at.millisecondsSinceEpoch),
+          ],
+        ),
+      );
+      await settle(tester);
+      expect(
+        find.text(
+          'Goes back to Claude at '
+          '${formatUntil(at.millisecondsSinceEpoch, DateTime.now())}',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Back to Claude'), findsNothing);
+      await tester.tap(find.text('Back now'));
+      await tester.pump();
+      expect(harness.last.switchBack.agentId, 'a1');
+      expect(harness.last.switchBack.all, isFalse);
+
+      // No time known.
+      await harness.apply(
+        tester,
+        workspace(agents: [builder()..usageSwitch = switched()]),
+      );
+      await settle(tester);
+      expect(
+        find.text('Goes back to Claude once your usage has room'),
+        findsOneWidget,
+      );
+
+      // It came back by itself and hit the limit again soon after: it
+      // stays until the reset, and Back now is the way back sooner.
+      await harness.apply(
+        tester,
+        workspace(agents: [builder()..usageSwitch = switched(goesBack: false)]),
+      );
+      await settle(tester);
+      expect(
+        find.text('Goes back to Claude once your usage has room'),
+        findsOneWidget,
+      );
+      await harness.apply(
+        tester,
+        workspace(
+          agents: [
+            builder()
+              ..usageSwitch = switched(
+                goesBack: false,
+                atMs: at.millisecondsSinceEpoch,
+              ),
+          ],
+        ),
+      );
+      await settle(tester);
+      expect(
+        find.text(
+          'Goes back to Claude at '
+          '${formatUntil(at.millisecondsSinceEpoch, DateTime.now())}',
+        ),
+        findsOneWidget,
+      );
+      final before = harness.backend.sent.length;
+      await tester.tap(find.text('Back now'));
+      await tester.pump();
+      expect(harness.backend.sent.length, before + 1);
+      expect(harness.last.switchBack.agentId, 'a1');
+    });
+
     for (final width in [320.0, 375.0]) {
       testWidgets('on a $width-point phone at the largest text, every '
           'control fits under the wait', (tester) async {
@@ -452,5 +534,149 @@ void main() {
         }
       });
     }
+
+    // Zucchero's row 228: on a 320-point iPhone SE at accessibility sizes
+    // the controls under the conversation scroll (at most 60% of the
+    // height), kept at the message box, which left the wait above out of
+    // view: it's brought into view, and so is a refusal (first: both don't
+    // fit there).
+    testWidgets('on a 320-point SE at the largest text, the wait and a '
+        'refusal show, not only the buttons', (tester) async {
+      await tester.runAsync(loadGeist);
+      tester.platformDispatcher.textScaleFactorTestValue = TextFactor.ax5;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final harness = Harness(
+        workspace(
+          agents: [_held()..usageWaitAlternative = alternative(others: 1)],
+        ),
+      );
+      await harness.show(tester, size: const Size(320, 568));
+      await pumpFrames(tester);
+      expect(tester.takeException(), isNull);
+      Rect viewport() => tester.getRect(
+        find
+            .ancestor(
+              of: find.byType(WorkingLine),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      void shows(Finder finder) {
+        final rect = tester.getRect(finder);
+        expect(rect.top, greaterThanOrEqualTo(viewport().top - 0.5));
+        expect(rect.bottom, lessThanOrEqualTo(viewport().bottom + 0.5));
+      }
+
+      shows(_inLine(_wait));
+      harness.backend.refuse = '3 are waiting now, not 2. Choose again.';
+      await tester.ensureVisible(_inLine('Continue on OpenRouter'));
+      await pumpFrames(tester);
+      await tester.tap(_inLine('Continue on OpenRouter'));
+      await pumpFrames(tester);
+      await tester.ensureVisible(find.text('Both'));
+      await pumpFrames(tester);
+      await tester.tap(find.text('Both'));
+      await pumpFrames(tester);
+      shows(_inLine('3 are waiting now, not 2. Choose again.'));
+    });
+
+    // Sale's row 66: the text size (or the display's) changed while the
+    // wait showed left its first line shaved off at the top, for good.
+    testWidgets('the text size changing while it shows keeps the wait in '
+        'view', (tester) async {
+      await tester.runAsync(loadGeist);
+      tester.platformDispatcher.textScaleFactorTestValue = 1;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final harness = Harness(
+        workspace(
+          agents: [_held()..usageWaitAlternative = alternative(others: 1)],
+        ),
+      );
+      await harness.show(tester, size: const Size(320, 568));
+      await pumpFrames(tester);
+      // The text size, then the display size (Android's: a higher density
+      // on the same screen, so fewer points).
+      for (final (scale, density) in [
+        (TextFactor.ax5, 1.0),
+        (2.0, 1.0),
+        (2.0, 1.3),
+        (TextFactor.ax5, 1.3),
+        // Sale's row 73: the text size alone, at the larger display size.
+        (1.0, 1.3),
+        (2.0, 1.3),
+      ]) {
+        tester.platformDispatcher.textScaleFactorTestValue = scale;
+        tester.view.devicePixelRatio = density;
+        await pumpFrames(tester);
+        expect(tester.takeException(), isNull);
+        final viewport = tester.getRect(
+          find
+              .ancestor(
+                of: find.byType(WorkingLine),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        );
+        final wait = tester.getRect(_inLine(_wait));
+        expect(
+          wait.top,
+          greaterThanOrEqualTo(viewport.top - 0.5),
+          reason: '$scale',
+        );
+        // Taller than the room it has (the biggest text on the smallest
+        // display), its start shows, and the rest scrolls.
+        if (wait.height > viewport.height) continue;
+        expect(
+          wait.bottom,
+          lessThanOrEqualTo(viewport.bottom + 0.5),
+          reason: '$scale, $density: $wait in $viewport',
+        );
+      }
+    });
+
+    testWidgets('for all only (Needs you), it asks only whether all go, '
+        'or just Continue for one', (tester) async {
+      final harness = Harness(
+        workspace(
+          agents: [_held()..usageWaitAlternative = alternative(others: 2)],
+        ),
+      );
+      await harness.show(tester);
+      await settle(tester);
+      final context = tester.element(find.byType(WorkingLine));
+      final options = usageWaitOptions(context, 'a1')!;
+      final sent = continueOnAlternative(
+        context,
+        waiting: 'a1',
+        options: options,
+        allOnly: true,
+      );
+      await settle(tester);
+      expect(find.text('Only Builder'), findsNothing);
+      await tester.tap(find.text('All 3'));
+      await settle(tester);
+      expect(await sent, isNull);
+      expect(harness.last.continueOnAlternative.allWaiting, isTrue);
+      expect(harness.last.continueOnAlternative.expectedOthers, 2);
+
+      // One waiting: Continue, and a refusal comes back in words.
+      await harness.apply(
+        tester,
+        workspace(agents: [_held()..usageWaitAlternative = alternative()]),
+      );
+      await settle(tester);
+      harness.backend.refuse = "Builder isn't waiting anymore.";
+      final one = continueOnAlternative(
+        tester.element(find.byType(WorkingLine)),
+        waiting: 'a1',
+        options: usageWaitOptions(context, 'a1')!,
+        allOnly: true,
+      );
+      await settle(tester);
+      await tester.tap(find.text('Continue'));
+      await settle(tester);
+      expect(await one, "Builder isn't waiting anymore.");
+      expect(harness.last.continueOnAlternative.allWaiting, isFalse);
+    });
   });
 }

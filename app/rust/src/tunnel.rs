@@ -19,7 +19,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -47,6 +47,25 @@ pub const ALPN_COMPRESSED: &[u8] = b"claktory/2";
 /// rather than waiting on. Under the app's own 10 s connect window, so a
 /// slow dial fails here first and the next try isn't queued behind it.
 pub const DIAL_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// How long an endpoint may go without a home relay chosen before that
+/// counts as trouble ([RelayTrouble::Unchosen]): its first measurement of
+/// the network takes a second or two, and it chooses none until then.
+pub const UNCHOSEN_AFTER: Duration = Duration::from_secs(5);
+
+/// How long a connection made on a direct path has to be confirmed by the
+/// backend (QUIC's HANDSHAKE_DONE) before the device takes it for a stall
+/// and dials again through the relay (#392). A path can answer one way only:
+/// a Mac backend reached at an address that isn't its route back to the
+/// device answers from that route's address (noq-udp asks macOS for the
+/// source address in a way it ignores). iroh lets the device follow it
+/// there mid-handshake, but the backend's half of the handshake stays
+/// pinned to the address the device's first packet reached, so it discards
+/// all the device sends next: the device thinks it's connected, the
+/// backend never does, and the relay's copy of the first packet, arriving
+/// later, is discarded as a duplicate. A working direct path confirms
+/// within one round trip, a few to a few hundred milliseconds.
+pub const CONFIRM_WITHIN: Duration = Duration::from_millis(1500);
 
 /// How long a socket has to say what it asks for, and how much it may say
 /// before its request line ends.
@@ -148,11 +167,30 @@ pub fn backend_addr(endpoint_id: &str, relays: &[String], addresses: &[String]) 
     Ok(addr)
 }
 
-/// A device endpoint with [key], on n0's relays (Matt's choice for now) and
-/// with iroh's address lookup, so a backend whose home relay changed is
-/// still found.
+/// Claktory's own relay (relay.claktory.com, Matt's choice of 21 Nov): the
+/// device's home relay. Written exactly as factoryd's default writes it
+/// (no dot after the host): iroh tells relays apart by the URL as written,
+/// so `relay.claktory.com./` would be another relay to it, and the device
+/// would hold two connections to the one server, each displacing the other.
+pub const CLAKTORY_RELAY: &str = "https://relay.claktory.com/";
+
+/// A device endpoint with [key], homed on Claktory's relay, with iroh's
+/// address lookup, so a backend whose home relay changed is still found.
+///
+/// Homed there rather than on n0's (#388): n0's map makes the device probe
+/// every region before it picks one (1 to 1.4 s on a good network against
+/// 0.35 s, app/rust/examples/relay_timing.rs, and far longer on a slow
+/// one). The device's home relay isn't what it dials through: a dial goes
+/// at once through the relay the backend's pairing code names (or the one
+/// the lookup finds), n0's or ours, whatever this map holds.
 pub async fn device_endpoint(key: SecretKey) -> anyhow::Result<Endpoint> {
-    Ok(Endpoint::builder(presets::N0).secret_key(key).transport_config(device_transport()).bind().await?)
+    Ok(Endpoint::builder(presets::N0).relay_mode(device_relays()).secret_key(key).transport_config(device_transport()).bind().await?)
+}
+
+/// The device's relays: Claktory's only.
+fn device_relays() -> iroh::RelayMode {
+    let ours: RelayUrl = CLAKTORY_RELAY.parse().expect("Claktory's relay URL");
+    iroh::RelayMode::Custom(iroh::RelayMap::from(ours))
 }
 
 /// iroh's QUIC settings, but on Android without segmentation offload
@@ -188,6 +226,56 @@ pub struct Status {
     pub failure: Failure,
     /// Whether this device reaches its home relay now.
     pub relay_connected: bool,
+    /// How long its home relay took to come up, in ms, from when the
+    /// endpoint was made or the relay was last lost; 0 while it's down
+    /// (#388: diagnostics, to see where a slow connect goes).
+    pub relay_up_ms: u32,
+    /// Why its home relay can't be reached, roughly, while it can't.
+    pub relay_trouble: RelayTrouble,
+}
+
+/// Why a home relay can't be reached, in a word (#388): from iroh's last
+/// error for it, which says more but may name hosts, so only its class is
+/// kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RelayTrouble {
+    /// None known: connected, or no try has failed yet.
+    #[default]
+    None,
+    /// No home relay chosen for [UNCHOSEN_AFTER]: iroh picks one from its
+    /// measurement of the network (its net report), and the last found
+    /// none it could reach. It measures again 20 to 26 s later, or when
+    /// the network changes. Before that, while the first measurement runs,
+    /// there's no trouble to tell (Zucchero: every launch said so).
+    Unchosen,
+    /// Its name couldn't be looked up.
+    Dns,
+    /// Nothing answered in time.
+    Timeout,
+    /// The secure connection to it failed.
+    Tls,
+    /// The network turned it away: refused, reset or unreachable.
+    Network,
+    Other,
+}
+
+impl RelayTrouble {
+    /// The class of [said], an iroh relay error with its causes.
+    fn of(said: &str) -> Self {
+        let said = said.to_lowercase();
+        let any = |signs: &[&str]| signs.iter().any(|sign| said.contains(sign));
+        if any(&["dns", "resolve", "lookup", "no addresses", "nodename", "name or service"]) {
+            RelayTrouble::Dns
+        } else if any(&["timeout", "timed out", "elapsed", "deadline"]) {
+            RelayTrouble::Timeout
+        } else if any(&["tls", "certificate", "handshake"]) {
+            RelayTrouble::Tls
+        } else if any(&["refused", "reset", "unreachable", "no route", "network is down", "not connected"]) {
+            RelayTrouble::Network
+        } else {
+            RelayTrouble::Other
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -258,6 +346,12 @@ struct Shared {
     /// Follows the current endpoint's home relay.
     relay_watch: Mutex<Option<JoinHandle<()>>>,
     backend: EndpointAddr,
+    /// Set once a direct path stalled ([CONFIRM_WITHIN]): dials go through
+    /// the backend's relay only, and iroh upgrades the connection to a
+    /// direct path it has checked both ways. Cleared when such a dial
+    /// fails, so a network where only the code's addresses work (no
+    /// internet, a LAN or a VPN) still gets them on the next.
+    relay_first: AtomicBool,
     /// The connection streams open on; dialled by the first socket that
     /// finds none open.
     connection: AsyncMutex<Option<Connection>>,
@@ -319,12 +413,7 @@ impl Tunnel {
         Self::start(endpoint, Some(make), rebuild_after, backend).await
     }
 
-    async fn start(
-        endpoint: Endpoint,
-        make: Option<MakeEndpoint>,
-        rebuild_after: Duration,
-        backend: EndpointAddr,
-    ) -> anyhow::Result<Self> {
+    async fn start(endpoint: Endpoint, make: Option<MakeEndpoint>, rebuild_after: Duration, backend: EndpointAddr) -> anyhow::Result<Self> {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
         let port = listener.local_addr()?.port();
         // A key's 32 bytes are as random as any: the system's CSPRNG.
@@ -338,6 +427,7 @@ impl Tunnel {
             connected_at: Mutex::new(None),
             relay_watch: Mutex::new(None),
             backend,
+            relay_first: AtomicBool::new(false),
             connection: AsyncMutex::new(None),
             status: Mutex::new(Status::default()),
             forwards: AsyncMutex::new(None),
@@ -435,20 +525,10 @@ impl Tunnel {
             }
             return;
         };
-        if let Some(old) = slot.endpoint.take() {
-            shared.stop_relay_watch();
-            close_endpoint(old).await;
-        }
-        shared.status.lock().unwrap().relay_connected = false;
-        match make_within(&make).await {
-            Ok(endpoint) => {
-                shared.watch_relay(&endpoint);
-                slot.endpoint = Some(endpoint);
-                slot.made = Instant::now();
-                shared.unanswered.fetch_add(1, Ordering::Relaxed);
-            }
-            // Left for the next dial to make; until then, nothing failed.
-            Err(_) => slot.endpoint = None,
+        // On failure, left for the next dial to make; until then, nothing
+        // failed.
+        if shared.replace_endpoint(&mut slot, &make).await.is_ok() {
+            shared.unanswered.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -502,7 +582,7 @@ impl Dialer {
             return Ok(open.clone());
         }
         let endpoint = self.0.endpoint().await.map_err(|error| ForwardingFailure::Failed(error.to_string()))?;
-        let dial = endpoint.connect(self.0.backend.clone(), ALPN_FORWARD);
+        let dial = endpoint.connect(self.0.target(), ALPN_FORWARD);
         let dialled = tokio::select! {
             dialled = tokio::time::timeout(DIAL_TIMEOUT, dial) => dialled,
             // reconnect or close: let go of this endpoint.
@@ -641,7 +721,56 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 /// Dials the backend offering [ALPN_COMPRESSED], then [ALPN].
 async fn dial(shared: &Shared, endpoint: &Endpoint) -> Result<Connection, ConnectError> {
     let options = ConnectOptions::new().with_additional_alpns(vec![ALPN.to_vec()]);
-    Ok(endpoint.connect_with_opts(shared.backend.clone(), ALPN_COMPRESSED, options).await?.await?)
+    Ok(endpoint.connect_with_opts(shared.target(), ALPN_COMPRESSED, options).await?.await?)
+}
+
+/// How a dial ended.
+enum Dialled {
+    Made(Connection),
+    Failed(ConnectError),
+    TimedOut,
+    /// `reconnect` or `close` told it to give up.
+    Cancelled,
+}
+
+/// [dial] within [DIAL_TIMEOUT], given up when `reconnect` says so: the
+/// dial may be stuck on a path that's gone.
+async fn dial_within(shared: &Shared, endpoint: &Endpoint) -> Dialled {
+    tokio::select! {
+        dialled = tokio::time::timeout(DIAL_TIMEOUT, dial(shared, endpoint)) => match dialled {
+            Ok(Ok(connection)) => Dialled::Made(connection),
+            Ok(Err(error)) => Dialled::Failed(error),
+            Err(_) => Dialled::TimedOut,
+        },
+        _ = shared.cancel_dials.notified() => Dialled::Cancelled,
+    }
+}
+
+/// Whether [connection], made on a direct path, stalled: the backend
+/// hasn't confirmed it within [CONFIRM_WITHIN] ([CONFIRM_WITHIN] says why
+/// that happens). None when `reconnect` cut the wait short.
+async fn stalled(shared: &Shared, connection: &Connection) -> Option<bool> {
+    if path_of(connection) == Path::Relayed {
+        return Some(false);
+    }
+    let confirmed = async {
+        let until = Instant::now() + CONFIRM_WITHIN;
+        loop {
+            // A backend that closed it (turning the device away, say) has
+            // answered: that's no stall, and the close says why.
+            if connection.stats().frame_rx.handshake_done > 0 || connection.close_reason().is_some() {
+                return false;
+            }
+            if Instant::now() >= until {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        stalled = confirmed => Some(stalled),
+        _ = shared.cancel_dials.notified() => None,
+    }
 }
 
 /// The open connection, or a new one; None when it can't be made (the
@@ -662,31 +791,59 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
         }
     };
     shared.status.lock().unwrap().phase = Phase::Dialing;
-    let dialled = tokio::select! {
-        dialled = tokio::time::timeout(DIAL_TIMEOUT, dial(shared, &endpoint)) => dialled,
-        // `reconnect`: this dial may be stuck on a path that's gone. Give
-        // up quietly; the next socket dials afresh on what the network is
-        // now.
-        _ = shared.cancel_dials.notified() => {
+    let relay_first = shared.relay_first.load(Ordering::Relaxed);
+    let mut dialled = dial_within(shared, &endpoint).await;
+    if let Dialled::Made(connection) = &dialled
+        && !relay_first
+        && shared.backend.relay_urls().next().is_some()
+    {
+        match stalled(shared, connection).await {
+            Some(false) => {}
+            Some(true) => {
+                // Through the relay only, on an endpoint made afresh: this
+                // one would send the next dial's first packet down the
+                // stalled path again, since iroh keeps every address it
+                // was given for the backend.
+                connection.close(0u32.into(), b"stalled");
+                shared.relay_first.store(true, Ordering::Relaxed);
+                drop(endpoint);
+                dialled = match shared.remake_endpoint().await {
+                    Ok(endpoint) => dial_within(shared, &endpoint).await,
+                    Err(error) => {
+                        shared.failed(&format!("This device couldn't start its side of the tunnel: {error}"), Failure::Other);
+                        *slot = None;
+                        return None;
+                    }
+                };
+            }
+            None => dialled = Dialled::Cancelled,
+        }
+    }
+    if shared.relay_first.load(Ordering::Relaxed) && !matches!(dialled, Dialled::Made(_) | Dialled::Cancelled) {
+        shared.relay_first.store(false, Ordering::Relaxed);
+    }
+    let connection = match dialled {
+        Dialled::Made(connection) => connection,
+        // `reconnect`: give up quietly; the next socket dials afresh on
+        // what the network is now.
+        Dialled::Cancelled => {
             let mut status = shared.status.lock().unwrap();
             status.phase = Phase::Idle;
             status.path = Path::None;
             *slot = None;
             return None;
         }
-    };
-    let connection = match dialled {
-        Ok(Ok(connection)) => connection,
-        Ok(Err(error)) => {
+        Dialled::Failed(error) => {
             let (said, failure) = explain_connect(&error);
             shared.failed(&said, failure);
             *slot = None;
             return None;
         }
-        Err(_) => {
+        Dialled::TimedOut => {
             let relay = shared.status.lock().unwrap().relay_connected;
             if relay {
-                let said = format!("Nothing answered within {} seconds: the machine may be off, asleep or offline.", DIAL_TIMEOUT.as_secs());
+                let said =
+                    format!("Nothing answered within {} seconds: the machine may be off, asleep or offline.", DIAL_TIMEOUT.as_secs());
                 shared.failed(&said, Failure::Unreachable);
             } else {
                 shared.failed("This device can't reach the relay or the machine: check its network.", Failure::Offline);
@@ -766,18 +923,104 @@ impl Shared {
         Ok(endpoint)
     }
 
+    /// Where dials go: the backend's pairing code, or only its relay once
+    /// a direct path stalled ([Shared::relay_first]).
+    fn target(&self) -> EndpointAddr {
+        if self.relay_first.load(Ordering::Relaxed) {
+            EndpointAddr::from_parts(self.backend.id, self.backend.relay_urls().cloned().map(iroh::TransportAddr::Relay))
+        } else {
+            self.backend.clone()
+        }
+    }
+
+    /// The endpoint made afresh, for a dial that mustn't meet what the
+    /// old one knew; the same one when it can't be made afresh.
+    async fn remake_endpoint(self: &Arc<Self>) -> anyhow::Result<Endpoint> {
+        let mut slot = self.endpoint.lock().await;
+        let make = self.make.as_ref().filter(|_| !slot.closed).cloned();
+        match make {
+            Some(make) => self.replace_endpoint(&mut slot, &make).await,
+            None => slot.endpoint.clone().ok_or_else(|| anyhow::anyhow!("the tunnel is closed")),
+        }
+    }
+
+    /// Closes [slot]'s endpoint, then makes another in its place: never
+    /// two with this device's key at once, for the relay. On failure the
+    /// slot is left empty, for the next dial to make.
+    async fn replace_endpoint(self: &Arc<Self>, slot: &mut Slot, make: &MakeEndpoint) -> anyhow::Result<Endpoint> {
+        if let Some(old) = slot.endpoint.take() {
+            self.stop_relay_watch();
+            close_endpoint(old).await;
+        }
+        self.status.lock().unwrap().relay_connected = false;
+        let endpoint = make_within(make).await?;
+        self.watch_relay(&endpoint);
+        slot.endpoint = Some(endpoint.clone());
+        slot.made = Instant::now();
+        Ok(endpoint)
+    }
+
     /// Follows whether [endpoint] reaches its home relay, in place of the
     /// one followed before.
     fn watch_relay(self: &Arc<Self>, endpoint: &Endpoint) {
         let shared = Arc::downgrade(self);
         let mut relays = endpoint.home_relay_status();
+        {
+            let mut status = self.status.lock().unwrap();
+            status.relay_up_ms = 0;
+            status.relay_trouble = RelayTrouble::None;
+        }
         let watch = tokio::spawn(async move {
+            // Since the endpoint was made, or the relay was last lost.
+            let mut down_since = Some(Instant::now());
+            // Since no home relay has been chosen: the endpoint is still
+            // measuring, until UNCHOSEN_AFTER says it found none.
+            let mut unchosen_since: Option<Instant> = None;
             loop {
-                let connected = relays.get().iter().any(|relay| relay.is_connected());
+                let now = relays.get();
+                let connected = now.iter().any(|relay| relay.is_connected());
+                // When to look again without an update: once still nothing
+                // chosen counts as trouble.
+                let mut look_again = None;
+                if !now.is_empty() {
+                    unchosen_since = None;
+                }
+                let trouble = if connected {
+                    RelayTrouble::None
+                } else if now.is_empty() {
+                    let since = *unchosen_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= UNCHOSEN_AFTER {
+                        RelayTrouble::Unchosen
+                    } else {
+                        look_again = Some(since + UNCHOSEN_AFTER);
+                        RelayTrouble::None
+                    }
+                } else {
+                    now.iter().find_map(|relay| relay.last_error()).map(|error| RelayTrouble::of(&format!("{error:#}"))).unwrap_or_default()
+                };
                 let Some(shared) = shared.upgrade() else { break };
-                shared.status.lock().unwrap().relay_connected = connected;
+                {
+                    let mut status = shared.status.lock().unwrap();
+                    status.relay_connected = connected;
+                    status.relay_trouble = trouble;
+                    if connected {
+                        if let Some(since) = down_since.take() {
+                            status.relay_up_ms = u32::try_from(since.elapsed().as_millis()).unwrap_or(u32::MAX).max(1);
+                        }
+                    } else {
+                        status.relay_up_ms = 0;
+                        down_since.get_or_insert_with(Instant::now);
+                    }
+                }
                 drop(shared);
-                if relays.updated().await.is_err() {
+                let updated = match look_again {
+                    Some(at) => tokio::select! {
+                        updated = relays.updated() => updated.is_ok(),
+                        () = tokio::time::sleep_until(at.into()) => true,
+                    },
+                    None => relays.updated().await.is_ok(),
+                };
+                if !updated {
                     break;
                 }
             }
@@ -877,6 +1120,99 @@ mod tests {
     use iroh::RelayMode;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    /// On the real network (#388): a device endpoint homes on Claktory's
+    /// relay, and the status says how long that took; one whose relay
+    /// can't be reached says none was chosen. `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs the network and relay.claktory.com"]
+    async fn the_status_says_how_long_the_relay_took_or_why_it_cant_be_reached() {
+        let backend = echo_backend().await;
+        let make: MakeEndpoint = Arc::new(|| Box::pin(device_endpoint(SecretKey::generate())));
+        let tunnel = Tunnel::open_with(make, REBUILD_AFTER, backend.addr()).await.unwrap();
+        let begun = Instant::now();
+        while !tunnel.status().relay_connected && begun.elapsed() < Duration::from_secs(15) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let status = tunnel.status();
+        assert!(status.relay_connected, "{status:?}");
+        assert!(status.relay_up_ms > 0 && u128::from(status.relay_up_ms) <= begun.elapsed().as_millis() + 1000, "{status:?}");
+        assert_eq!(status.relay_trouble, RelayTrouble::None);
+        eprintln!("home relay up after {} ms", status.relay_up_ms);
+        tunnel.close().await;
+
+        let nowhere: MakeEndpoint = Arc::new(|| {
+            Box::pin(async {
+                let relay: RelayUrl = "https://relay.claktory.invalid./".parse()?;
+                Ok(Endpoint::builder(presets::N0)
+                    .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::from(relay)))
+                    .secret_key(SecretKey::generate())
+                    .bind()
+                    .await?)
+            })
+        });
+        let tunnel = Tunnel::open_with(nowhere, REBUILD_AFTER, backend.addr()).await.unwrap();
+        let begun = Instant::now();
+        while tunnel.status().relay_trouble == RelayTrouble::None && begun.elapsed() < Duration::from_secs(10) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let status = tunnel.status();
+        assert!(!status.relay_connected);
+        assert_eq!(status.relay_up_ms, 0);
+        // Never reached, so never chosen as its home: iroh says no more.
+        assert_eq!(status.relay_trouble, RelayTrouble::Unchosen, "{status:?}");
+        tunnel.close().await;
+    }
+
+    /// While the endpoint is still measuring the network, no home relay
+    /// chosen is no trouble yet; once it has had UNCHOSEN_AFTER and chose
+    /// none (its only relay refuses), it is (Zucchero's #388 finding: every
+    /// launch noted err=unchosen before its relay came up).
+    #[tokio::test]
+    async fn no_relay_chosen_is_trouble_only_once_the_first_measurement_had_its_time() {
+        let backend = echo_backend().await;
+        let nowhere: MakeEndpoint = Arc::new(|| {
+            Box::pin(async {
+                let relay: RelayUrl = "http://127.0.0.1:9/".parse()?;
+                Ok(Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::from(relay)))
+                    .secret_key(SecretKey::generate())
+                    .bind()
+                    .await?)
+            })
+        });
+        let tunnel = Tunnel::open_with(nowhere, REBUILD_AFTER, backend.addr()).await.unwrap();
+        let begun = Instant::now();
+        while begun.elapsed() < UNCHOSEN_AFTER - Duration::from_millis(500) {
+            let status = tunnel.status();
+            assert_eq!(status.relay_trouble, RelayTrouble::None, "at {:?}: {status:?}", begun.elapsed());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        while tunnel.status().relay_trouble == RelayTrouble::None && begun.elapsed() < UNCHOSEN_AFTER + Duration::from_secs(3) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let status = tunnel.status();
+        assert!(!status.relay_connected);
+        assert_eq!(status.relay_trouble, RelayTrouble::Unchosen, "{status:?}");
+        assert!(begun.elapsed() < UNCHOSEN_AFTER + Duration::from_secs(1), "{:?}", begun.elapsed());
+        tunnel.close().await;
+    }
+
+    #[test]
+    fn a_relay_error_is_kept_only_as_its_class() {
+        assert_eq!(RelayTrouble::of("unable to connect: dns lookup failed: no record found"), RelayTrouble::Dns);
+        assert_eq!(RelayTrouble::of("timeout (>10s) trying to establish a connection"), RelayTrouble::Timeout);
+        assert_eq!(RelayTrouble::of("unable to connect: tls connection failed: invalid peer certificate"), RelayTrouble::Tls);
+        assert_eq!(RelayTrouble::of("unable to connect: Connection refused (os error 61)"), RelayTrouble::Network);
+        assert_eq!(RelayTrouble::of("unable to connect: Network is unreachable (os error 51)"), RelayTrouble::Network);
+        assert_eq!(RelayTrouble::of("Unexpected status during upgrade: 502"), RelayTrouble::Other);
+    }
+
+    #[test]
+    fn the_device_homes_on_claktorys_relay_only() {
+        let urls: Vec<RelayUrl> = device_relays().relay_map().urls();
+        assert_eq!(urls.iter().map(ToString::to_string).collect::<Vec<_>>(), vec![CLAKTORY_RELAY.to_owned()]);
+    }
+
     /// A backend stand-in on this machine, no relays: echoes every stream.
     async fn echo_backend() -> Endpoint {
         echo_backend_with(&[ALPN]).await
@@ -887,6 +1223,12 @@ mod tests {
     async fn echo_backend_with(alpns: &[&[u8]]) -> Endpoint {
         let alpns = alpns.iter().map(|alpn| alpn.to_vec()).collect();
         let endpoint = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).alpns(alpns).bind().await.unwrap();
+        serve_echo(&endpoint);
+        endpoint
+    }
+
+    /// Echoes on [endpoint] as [echo_backend_with] says.
+    fn serve_echo(endpoint: &Endpoint) {
         let server = endpoint.clone();
         tokio::spawn(async move {
             while let Some(incoming) = server.accept().await {
@@ -919,7 +1261,6 @@ mod tests {
                 });
             }
         });
-        endpoint
     }
 
     async fn local_device() -> Endpoint {
@@ -1433,5 +1774,127 @@ mod tests {
         assert_eq!(pairing_ids(&device, &backend_id.to_uppercase()).unwrap().1, backend_id);
         assert!(pairing_ids("abcd", &backend_id).is_err());
         assert!(pairing_ids(&device, "nope").is_err());
+    }
+
+    /// A relay on this computer, and a backend homed on it that echoes.
+    async fn relayed_backend() -> (Endpoint, RelayUrl, impl std::any::Any) {
+        let (_map, url, server) = iroh::test_utils::run_relay_server().await.unwrap();
+        let backend = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(iroh::RelayMap::from(url.clone())))
+            .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
+            .alpns(vec![ALPN_COMPRESSED.to_vec(), ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        serve_echo(&backend);
+        tokio::time::timeout(Duration::from_secs(10), backend.online()).await.expect("the backend reaches the relay");
+        (backend, url, server)
+    }
+
+    /// The backend's direct address on this computer.
+    fn direct_addr(backend: &Endpoint) -> SocketAddr {
+        let port = backend.bound_sockets().iter().find(|addr| addr.is_ipv4()).unwrap().port();
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+    }
+
+    /// Device endpoints homed on [relay], as [maker] makes them.
+    fn relayed_maker(relay: RelayUrl) -> (MakeEndpoint, Arc<Mutex<Vec<Endpoint>>>) {
+        let key = parse_key(&generate_key()).unwrap();
+        let made = Arc::new(Mutex::new(Vec::<Endpoint>::new()));
+        let make: MakeEndpoint = Arc::new({
+            let made = made.clone();
+            move || {
+                let (key, made, relay) = (key.clone(), made.clone(), relay.clone());
+                // The stalled endpoint may still be closing, in the
+                // background ([close_endpoint]): its connection drains.
+                Box::pin(async move {
+                    let endpoint = Endpoint::builder(presets::Minimal)
+                        .relay_mode(RelayMode::Custom(iroh::RelayMap::from(relay)))
+                        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
+                        .secret_key(key)
+                        .bind()
+                        .await?;
+                    made.lock().unwrap().push(endpoint.clone());
+                    Ok(endpoint)
+                })
+            }
+        });
+        (make, made)
+    }
+
+    /// A direct path that answers from the wrong address (#392), as a Mac
+    /// backend reached at an address that isn't its route back does: what
+    /// the device sends to the returned address reaches [backend]; the
+    /// backend's answers come back from another port, and what the device
+    /// sends there reaches the backend from another socket, which a
+    /// backend mid-handshake discards.
+    async fn wrong_source_path(backend: SocketAddr) -> (SocketAddr, JoinHandle<()>) {
+        use tokio::net::UdpSocket;
+        let bind = || UdpSocket::bind((Ipv4Addr::LOCALHOST, 0));
+        let (entry, side, up, up_side) = (bind().await.unwrap(), bind().await.unwrap(), bind().await.unwrap(), bind().await.unwrap());
+        let address = entry.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut device = None;
+            let (mut a, mut b, mut c, mut d) = (vec![0u8; 65536], vec![0u8; 65536], vec![0u8; 65536], vec![0u8; 65536]);
+            loop {
+                tokio::select! {
+                    Ok((read, from)) = entry.recv_from(&mut a) => {
+                        device = Some(from);
+                        let _ = up.send_to(&a[..read], backend).await;
+                    }
+                    Ok((read, from)) = side.recv_from(&mut b) => {
+                        device = Some(from);
+                        let _ = up_side.send_to(&b[..read], backend).await;
+                    }
+                    Ok((read, _)) = up.recv_from(&mut c) => if let Some(device) = device {
+                        let _ = side.send_to(&c[..read], device).await;
+                    },
+                    Ok((read, _)) = up_side.recv_from(&mut d) => if let Some(device) = device {
+                        let _ = side.send_to(&d[..read], device).await;
+                    },
+                }
+            }
+        });
+        (address, task)
+    }
+
+    #[tokio::test]
+    async fn a_direct_path_that_never_confirms_falls_back_to_the_relay_within_seconds() {
+        let (backend, relay, _server) = relayed_backend().await;
+        let (stalls, proxy) = wrong_source_path(direct_addr(&backend)).await;
+        let code = EndpointAddr::new(backend.id()).with_relay_url(relay.clone()).with_ip_addr(stalls);
+        let (make, made) = relayed_maker(relay);
+        let tunnel = Tunnel::open_with(make, REBUILD_AFTER, code).await.unwrap();
+        let begun = Instant::now();
+        let _socket = ask(&tunnel).await;
+        let took = begun.elapsed();
+        assert!(took >= CONFIRM_WITHIN && took < CONFIRM_WITHIN + Duration::from_secs(3), "took {took:?}");
+        assert!(tunnel.shared.relay_first.load(Ordering::Relaxed));
+        // Made afresh for the relay, the stalled one closed first.
+        assert_eq!(made.lock().unwrap().len(), 2);
+        round_trip(&tunnel).await;
+
+        // Later dials go through the relay at once.
+        tunnel.reconnect().await;
+        let begun = Instant::now();
+        let _socket = ask(&tunnel).await;
+        assert!(begun.elapsed() < CONFIRM_WITHIN, "took {:?}", begun.elapsed());
+        tunnel.close().await;
+        proxy.abort();
+    }
+
+    #[tokio::test]
+    async fn a_direct_path_that_confirms_is_kept() {
+        let (backend, relay, _server) = relayed_backend().await;
+        let code = EndpointAddr::new(backend.id()).with_relay_url(relay.clone()).with_ip_addr(direct_addr(&backend));
+        let (make, made) = relayed_maker(relay);
+        let tunnel = Tunnel::open_with(make, REBUILD_AFTER, code).await.unwrap();
+        let begun = Instant::now();
+        let _socket = ask(&tunnel).await;
+        assert!(begun.elapsed() < CONFIRM_WITHIN, "took {:?}", begun.elapsed());
+        assert_eq!(tunnel.status().path, Path::Direct);
+        assert!(!tunnel.shared.relay_first.load(Ordering::Relaxed));
+        assert_eq!(made.lock().unwrap().len(), 1);
+        tunnel.close().await;
     }
 }

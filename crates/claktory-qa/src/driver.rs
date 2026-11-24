@@ -273,12 +273,15 @@ impl Connection {
     }
 }
 
-/// A ServerMessage's JSON without its envelope: `{"ack": {}}`.
+/// A ServerMessage's JSON without its envelope (reply_to, the Workspace
+/// revisions): only its body, `{"ack": {}}`.
 pub fn body_of(message: Value) -> Value {
+    let envelope = descriptor("ServerMessage");
+    let envelope: Vec<_> = envelope.fields().filter(|field| field.containing_oneof().is_none()).map(|field| field.name().to_owned()).collect();
     match message {
-        Value::Object(fields) => {
-            Value::Object(fields.into_iter().filter(|(key, value)| !matches!(key.as_str(), "reply_to") && !value.is_null()).collect())
-        }
+        Value::Object(fields) => Value::Object(
+            fields.into_iter().filter(|(key, value)| !envelope.iter().any(|name| name == key) && !value.is_null()).collect(),
+        ),
         other => other,
     }
 }

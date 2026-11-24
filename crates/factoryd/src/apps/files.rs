@@ -229,7 +229,7 @@ pub(crate) fn choices(config: &Config, home: &Home, query: &str) -> (Vec<factory
                 let why = if meta.len() > MOST_BYTES {
                     format!("It's over {} MB, more than an app can read.", MOST_BYTES >> 20)
                 } else if meta.nlink() != 1 {
-                    "It has other names on this computer (hard links), so apps can't read it.".to_owned()
+                    "It has more than one name on this computer, so apps can't read it.".to_owned()
                 } else {
                     String::new()
                 };
@@ -358,10 +358,10 @@ fn open(home: &Home, folder: &Path, file: &FileId, words: &str) -> Result<(std::
         .map(|meta| (meta.dev(), meta.ino()))
         .collect();
     let workspace = std::fs::metadata(home.workspace()).ok().map(|meta| (meta.dev(), meta.ino()));
-    let inside = || format!("{shown} is inside Claktory's own folder, outside its workspace, so apps can't read it.");
+    let inside = || format!("{shown} is in Claktory's own folder, which apps can't read.");
     let failed = |error: std::io::Error, at: &str| match error.raw_os_error() {
         Some(libc::ELOOP) | Some(libc::EMLINK) => {
-            format!("{shown} goes through a symbolic link ({at}), so apps can't read it: name the file itself, with no link in its path.")
+            format!("{shown} is reached through a link ({at}), so apps can't read it. Choose the file itself.")
         }
         Some(libc::ENOENT) => format!("There's no file {shown}."),
         Some(libc::ENOTDIR) => format!("{shown} can't be reached: {at} isn't a folder."),
@@ -411,12 +411,10 @@ fn open(home: &Home, folder: &Path, file: &FileId, words: &str) -> Result<(std::
     let opened = std::fs::File::from(opened);
     let meta = opened.metadata().map_err(|error| format!("{shown} can't be read: {error}"))?;
     if !meta.file_type().is_file() {
-        return Err(format!("{shown} isn't a file: apps read only regular files."));
+        return Err(format!("{shown} isn't a file apps can read."));
     }
     if meta.nlink() != 1 {
-        return Err(format!(
-            "{shown} has other names on this computer (hard links), so it can't be known which file it is: apps read only a file with one name."
-        ));
+        return Err(format!("{shown} has more than one name on this computer, so apps can't read it."));
     }
     if meta.len() > MOST_BYTES {
         return Err(format!("{shown} is over {} MB, more than an app can read.", MOST_BYTES >> 20));
@@ -523,7 +521,7 @@ fn quote(name: &str) -> String {
 /// on: only reading `rows` is allowed, for 10 s.
 pub(crate) fn table(bytes: &[u8], file: &FileId, shown: &str) -> Result<rusqlite::Connection, String> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
-    let text = std::str::from_utf8(bytes).map_err(|_| format!("{shown} isn't UTF-8 text, so it can't be read as a table."))?;
+    let text = std::str::from_utf8(bytes).map_err(|_| format!("{shown} isn't plain text, so it can't be read as a table."))?;
     let separator = if file.tsv() { '\t' } else { ',' };
     let records = records(text, separator).map_err(|why| format!("{shown} can't be read as a table: {why}."))?;
     let Some((header, rows)) = records.split_first() else {
@@ -535,7 +533,7 @@ pub(crate) fn table(bytes: &[u8], file: &FileId, shown: &str) -> Result<rusqlite
     let columns = columns(header);
     let width = columns.len();
     if let Some((index, _)) = rows.iter().enumerate().find(|(_, row)| row.len() > width) {
-        return Err(format!("{shown} can't be read as a table: row {} has more fields than its header names ({width}).", index + 2));
+        return Err(format!("{shown} can't be read as a table: row {} has more columns than its header ({width}).", index + 2));
     }
     let kinds: Vec<Kind> = (0..width)
         .map(|column| {
@@ -688,11 +686,11 @@ mod tests {
         assert_eq!(names(&db), ["a", "a_2", "A_3"]);
         assert_eq!(rows(&db, "SELECT * FROM rows"), [[Integer(1), Integer(2), Integer(3)]]);
 
-        for (text, why) in [("", "is empty"), ("a,b\n1,2,3\n", "row 2 has more fields"), ("a\n\"open\n", "never closed")] {
+        for (text, why) in [("", "is empty"), ("a,b\n1,2,3\n", "row 2 has more columns"), ("a\n\"open\n", "never closed")] {
             let error = table(text.as_bytes(), &file, "bugs.csv").unwrap_err();
             assert!(error.contains(why), "{text:?}: {error}");
         }
-        assert!(table(b"a\n\xff\n", &file, "bugs.csv").unwrap_err().contains("isn't UTF-8"));
+        assert!(table(b"a\n\xff\n", &file, "bugs.csv").unwrap_err().contains("isn't plain text"));
         let many = format!("a\n{}", "1\n".repeat(MOST_ROWS + 1));
         assert!(table(many.as_bytes(), &file, "bugs.csv").unwrap_err().contains("more than 100000 rows"));
     }

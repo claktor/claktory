@@ -204,6 +204,27 @@ struct VoiceTests {
     #expect(unknown as? NSObject === FlutterMethodNotImplemented)
   }
 
+  /// Where recordings are made and kept until sent (#401): in the app's
+  /// Application Support, this user's only, never backed up, and readable
+  /// after the first unlock, so a send can be retried while locked.
+  @Test func theVoiceFolderIsPrivateAndNeverBackedUp() async throws {
+    let messenger = FakeMessenger()
+    Recorder.register(with: messenger)
+    let path = try #require(
+      await messenger.call("factory/recorder", "voiceFolder") as? String)
+    #expect(path.hasSuffix("/Library/Application Support/Voice not sent"))
+    let url = URL(fileURLWithPath: path, isDirectory: true)
+    let values = try url.resourceValues(forKeys: [.isExcludedFromBackupKey])
+    #expect(values.isExcludedFromBackup == true)
+    let attributes = try FileManager.default.attributesOfItem(atPath: path)
+    #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+    #expect(
+      attributes[.protectionKey] as? FileProtectionType
+        == .completeUntilFirstUserAuthentication)
+    // Asked again, the same folder, still so.
+    #expect(await messenger.call("factory/recorder", "voiceFolder") as? String == path)
+  }
+
   @Test func thePlayerPlaysARecordingAndSaysWhere() async throws {
     let path = try Self.tone(seconds: 1)
     let messenger = FakeMessenger()

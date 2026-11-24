@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Makes a release's source public: one commit per release in the public
 # repository (scripts/publish.sh runs it for each release). That commit's
-# files are exactly the release's source, main as committed here; its parent
+# files are the release's source, main as committed here, except what isn't
+# for the public (only PUBLIC_TOP in scripts/lib.sh goes; coordination/, say,
+# stays, and is named as left out); its parent
 # is the previous release's public commit; its message is what the release
 # brings, from the changelog (public_commit in scripts/lib.sh). The
 # day-to-day commits never leave this Mac, except to the private backup.
@@ -92,7 +94,7 @@ else
   what="main, after ${REMOTE:0:10} ($(git log -1 --format=%s "$REMOTE"))"
 fi
 
-if [[ -n "$PARENT" && "$(git rev-parse "$PARENT^{tree}")" == "$(git rev-parse "$SHA^{tree}")" ]]; then
+if [[ -n "$PARENT" && "$(git rev-parse "$PARENT^{tree}")" == "$(public_tree "$ROOT" "$SHA" 2>/dev/null)" ]]; then
   git update-ref refs/heads/public "$PARENT"
   echo "the source at $URL is already $SHA's, as ${PARENT:0:10}"
   exit 0

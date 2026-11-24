@@ -3,6 +3,7 @@
 // Back from the edge still works; "Page 2 of 9" in the header; Search in
 // More opens a find bar at the page's foot, above the keyboard, with the
 // previous and next match and Done; a link asks first.
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
@@ -18,6 +19,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
 import 'panes_test.dart' show beside, snapshot;
+import 'viewers_test.dart' show png;
 
 const _path = '/w/paper.pdf';
 
@@ -191,6 +193,42 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets("ink saved on an iPad shows over the iPhone's pages, only "
+      'read (#368)', (tester) async {
+    final native = _Native();
+    final bytes = utf8.encode('ink of page 2');
+    final drawing = sha256.convert(bytes).toString();
+    final harness = await _phone(tester);
+    harness.backend.inkBlobs[drawing] = bytes;
+    await native.send('ready', {'page_count': 9});
+    await pumpFrames(tester);
+    harness.backend.inkLayerLists.value = InkLayerList(
+      path: _path,
+      layers: [
+        InkLayer(
+          id: 'a',
+          path: _path,
+          sourceSha256: _pdf().sha256,
+          space: InkSpace(kind: 'pdf_page', page1based: 2),
+          revision: 1,
+          drawing: InkBlobRef(sha256: drawing),
+        ),
+      ],
+    );
+    await pumpFrames(tester);
+    final load = native.calls.singleWhere((c) => c.method == 'loadDrawing');
+    final layer = ((load.arguments as Map)['layers'] as List).single as Map;
+    expect(layer['page_1based'], 2);
+    expect(
+      utf8.decode(
+        base64Decode((layer['drawing'] as Map)['bytes_base64'] as String),
+      ),
+      'ink of page 2',
+    );
+    // Still nothing draws there.
+    expect(native.params['drawing_policy'], 'none');
+  });
+
   testWidgets('Search in More opens the find bar at the foot, with the '
       'keyboard; arrows go from match to match, Done closes it', (
     tester,
@@ -307,5 +345,164 @@ void main() {
       find.text('To see PDFs here, update this iPhone to iOS 16 or later.'),
       findsOneWidget,
     );
+  });
+
+  testWidgets('a big PDF shows its pages as images at once while it comes, '
+      'then the PDF takes over on the same page (#379)', (tester) async {
+    final native = _Native();
+    final big = Uint8List(6000000)..setAll(0, utf8.encode('%PDF-1.7\n'));
+    final sha = sha256.convert(big).toString();
+    final page = await png(tester, 612, 792);
+    final hold = Completer<void>();
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(snapshot(layout: beside('pdf', _path)));
+    harness.backend
+      ..rangedReads = true
+      ..files[_path] = FileContent(
+        path: _path,
+        mime: 'application/pdf',
+        size: Int64(big.length),
+        data: big,
+        sha256: sha,
+      )
+      ..previews[_path] = FileContent(
+        path: _path,
+        mime: 'image/webp',
+        size: Int64(page.length),
+        data: page,
+        sha256: sha,
+        preview: FilePreview.FILE_PREVIEW_MADE,
+        pixelWidth: 612,
+        pixelHeight: 792,
+        originalSize: Int64(big.length),
+        originalPixelWidth: 612,
+        originalPixelHeight: 792,
+        pageCount: 12,
+      )
+      // The PDF itself keeps coming until the test lets it.
+      ..holdRead = (request) async {
+        if (request.previewPage == 0 && request.maxBytes.toInt() != 1) {
+          await hold.future;
+        }
+      };
+    tester.view.padding = const FakeViewPadding(top: 59, bottom: 34);
+    addTearDown(tester.view.resetPadding);
+    await harness.show(tester, size: const Size(393, 852));
+    await pumpFrames(tester);
+    await tester.tap(find.bySemanticsLabel('Extensions'));
+    await pumpFrames(tester);
+    await tester.tap(find.text('paper.pdf').last);
+    for (var i = 0; i < 6; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump();
+    }
+    await pumpFrames(tester);
+    expect(find.bySemanticsLabel('Page 1'), findsOneWidget);
+    expect(find.text('Page 1 of 12'), findsOneWidget);
+    expect(
+      find.textContaining('Preview · Loading the full PDF…'),
+      findsOneWidget,
+    );
+    expect(find.byType(UiKitView), findsNothing);
+    // Search is there, and says when it works.
+    await tester.tap(find.bySemanticsLabel('More').last);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Search').last);
+    await pumpFrames(tester);
+    expect(
+      find.text('You can search once the full PDF has loaded.'),
+      findsOneWidget,
+    );
+    // The next page, asked for as it's turned to.
+    await tester.fling(
+      find.bySemanticsLabel('Page 1'),
+      const Offset(0, -500),
+      2000,
+    );
+    for (var i = 0; i < 4; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump();
+    }
+    await pumpFrames(tester);
+    expect(find.text('Page 2 of 12'), findsOneWidget);
+    expect(
+      harness.backend.sent.where(
+        (m) => m.hasReadFile() && m.readFile.previewPage == 2,
+      ),
+      isNotEmpty,
+    );
+    // The PDF is in: PDFKit, on the page the person is on.
+    hold.complete();
+    for (var i = 0; i < 6; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump();
+    }
+    await pumpFrames(tester);
+    expect(find.byType(UiKitView), findsOneWidget);
+    expect((native.params['initial'] as Map?)?['page_1based'], 2);
+    expect(find.textContaining('Preview'), findsNothing);
+    await tester.pump(const Duration(seconds: 5));
+  });
+
+  testWidgets("a big PDF on a Claktory that can't make page images says so "
+      'while it comes (#379)', (tester) async {
+    _Native();
+    final big = Uint8List(6000000)..setAll(0, utf8.encode('%PDF-1.7\n'));
+    final sha = sha256.convert(big).toString();
+    final hold = Completer<void>();
+    addTearDown(() {
+      if (!hold.isCompleted) hold.complete();
+    });
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(snapshot(layout: beside('pdf', _path)));
+    final pdf = FileContent(
+      path: _path,
+      mime: 'application/pdf',
+      size: Int64(big.length),
+      data: big,
+      sha256: sha,
+    );
+    harness.backend
+      ..rangedReads = true
+      ..files[_path] = pdf
+      // As the backend answers: the PDF's own start, as far as one read
+      // goes.
+      ..previews[_path] = (pdf.deepCopy()
+        ..data = big.sublist(0, 4000000)
+        ..truncated = true
+        ..preview = FilePreview.FILE_PREVIEW_UNAVAILABLE)
+      ..holdRead = (request) async {
+        if (request.previewPage == 0 && request.maxBytes.toInt() != 1) {
+          await hold.future;
+        }
+      };
+    await harness.show(tester, size: const Size(393, 852));
+    await pumpFrames(tester);
+    await tester.tap(find.bySemanticsLabel('Extensions'));
+    await pumpFrames(tester);
+    await tester.tap(find.text('paper.pdf').last);
+    for (var i = 0; i < 6; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump();
+    }
+    await pumpFrames(tester);
+    expect(
+      find.text("Full size: this Claktory can't make a smaller copy."),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Preview'), findsNothing);
+    // The page image's answer was the PDF's start: none of it read past
+    // its first piece, where it took minutes on a slow link (Zucchero).
+    expect(harness.backend.stoppedAtFirst, [_path]);
   });
 }

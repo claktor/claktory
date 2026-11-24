@@ -78,7 +78,7 @@ fn notify(factory: &Arc<Factory>, agent: &str, args: Args) -> Result<ToolResult,
     let delivered = super::deliver(factory, &config, &settings, note);
     let said = match delivered {
         Delivered::Sent { apps: 0, pushed: 0 } => format!(
-            "Not delivered: {person} has no Claktory app open and no device that gets notifications pushed. They'll see it in your conversation when they look."
+            "Not delivered: {person} has no Claktory app open that shows notifications, and no device that gets them pushed. They'll see it in your conversation when they look."
         ),
         Delivered::Sent { .. } => format!("Sent: {person} gets it as a notification."),
         Delivered::Skipped(Skipped::Off) if settings.mode(agent) == Mode::Never => {

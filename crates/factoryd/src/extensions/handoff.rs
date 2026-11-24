@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use factory_agent::Tool;
 
-use super::{Extension, Manifest, PromptKind, PromptSection};
+use super::{Extension, Manifest, PromptSection};
 use crate::config::AgentConfig;
 use crate::factory::{Factory, Inner};
 use crate::pipes::handoff::tools;
@@ -44,10 +44,10 @@ impl Extension for Handoff {
                         .is_some_and(|forward| !forward.recipient.is_empty())
             });
         if liaison {
-            sections.push(PromptSection { kind: PromptKind::Static, text: LIAISON.replace("{person}", inner.config.person()) });
+            sections.push(PromptSection::static_text(LIAISON.replace("{person}", inner.config.person())));
         }
         if !crate::pipes::handoff::reads_reports(factory, &agent.id).is_empty() {
-            sections.push(PromptSection { kind: PromptKind::Static, text: READER.to_owned() });
+            sections.push(PromptSection::static_text(READER));
         }
         sections
     }

@@ -17,12 +17,14 @@
 pub(crate) mod agents;
 pub(crate) mod bound;
 pub(crate) mod curator;
+pub(crate) mod groups;
 pub mod handoff;
 pub mod identity;
 pub(crate) mod lead;
 pub(crate) mod quarantine;
 pub(crate) mod spend;
 pub(crate) mod start;
+pub(crate) mod waiting;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -45,6 +47,12 @@ pub(crate) const TAINT_VIA: &str = "
 ALTER TABLE pipe_taint ADD COLUMN via TEXT;
 ALTER TABLE asks ADD COLUMN taint TEXT;
 ALTER TABLE proposals ADD COLUMN taint TEXT;
+";
+
+/// The pipe shown, if one, so a restart (an update) shows it again, as it
+/// does the selected agent (`Pipes::saved`). At most one row.
+pub(crate) const SELECTED: &str = "
+CREATE TABLE pipe_selected (pipe TEXT NOT NULL);
 ";
 
 pub(crate) const SCHEMA: &str = "
@@ -89,6 +97,15 @@ CREATE TABLE pipe_secret_approvals (
     -- An allowed one was used (once).
     used INTEGER NOT NULL DEFAULT 0
 );
+";
+
+/// The migration that added replies (#370 Submit): a held message the
+/// person sent back to its writer with a comment (state 'discarded'), and a
+/// use of a secret they answered with a comment (state 'denied'). The
+/// comment itself is in decision_notes, never in a pipe table (Fugo).
+pub(crate) const REPLIED: &str = "
+ALTER TABLE pipe_messages ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE pipe_secret_approvals ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
 ";
 
 /// A pipe's state, as `v1::PipeState`.
@@ -278,6 +295,13 @@ pub(crate) struct Record {
     /// count as named by the other side. Agents that list pipes (Rivet's
     /// pipes_list) never see a name the other side chose.
     pub named_here: Option<bool>,
+    /// What this side last told the other of its liaison's wait, once
+    /// heard (`waiting`); None before anything was.
+    pub told_liaison: Option<waiting::Told>,
+    /// The other side says its liaison waits, and until when (ms since
+    /// 1970, checked; 0: no known end).
+    pub peer_waiting: bool,
+    pub peer_waiting_until: i64,
     /// While JOINING: why the other Claktory can't be reached yet, in a
     /// short line, and since when (the join keeps retrying); empty once
     /// it connects. Runtime state, not kept across restarts.
@@ -323,6 +347,9 @@ pub(crate) type Taint = BTreeMap<String, Vec<String>>;
 struct Data {
     pipes: BTreeMap<String, Record>,
     selected: Option<String>,
+    /// What factory.db says is shown (pipe_selected); `view` writes
+    /// `selected` there when it differs, whatever changed it.
+    saved: Option<String>,
     /// Agents that have read pipes in their current context: agent → pipe
     /// → the agents it came through, by id (empty when it read it itself).
     tainted: BTreeMap<String, Taint>,
@@ -338,6 +365,9 @@ pub(crate) struct Pipes {
     data: Mutex<Data>,
     /// How long the lead's wakes are apart, at least (a minute); tests make it shorter.
     wake_every_ms: AtomicU64,
+    /// How much later than now tests judge the age of a file the person
+    /// attached (`agents::attached_by_person`); 0 otherwise.
+    attached_later_ms: AtomicU64,
     /// How the other sides' statements are checked (`identity`).
     pub(crate) identity: identity::Identity,
     /// Report readers' wakes (`handoff::wake`).
@@ -349,6 +379,7 @@ impl Default for Pipes {
         Pipes {
             data: Mutex::default(),
             wake_every_ms: AtomicU64::new(60_000),
+            attached_later_ms: AtomicU64::new(0),
             identity: identity::Identity::default(),
             handoff: handoff::wake::Wakes::default(),
         }
@@ -431,13 +462,24 @@ pub(crate) fn link() -> &'static dyn pipe_link::Store {
 /// Loads the pipes; at start.
 pub(crate) fn start(factory: &Arc<Factory>) {
     let loaded = load(factory);
+    let saved = factory.store.db().query_row("SELECT pipe FROM pipe_selected", [], |row| row.get::<_, String>(0)).optional();
     let mut data = factory.pipes.data();
+    let mut retired = Vec::new();
     match loaded {
-        Ok((pipes, tainted)) => {
+        Ok((pipes, tainted, gone)) => {
             data.pipes = pipes;
             data.tainted = tainted;
+            retired = gone;
         }
         Err(error) => tracing::error!(%error, "could not read the pipes"),
+    }
+    // The pipe shown before the restart, unless it's gone since.
+    match saved {
+        Ok(saved) => {
+            data.selected = saved.clone().filter(|id| data.pipes.contains_key(id));
+            data.saved = saved;
+        }
+        Err(error) => tracing::error!(%error, "could not read which pipe is shown"),
     }
     match curator::load(factory) {
         Ok(curators) => data.curators = curators,
@@ -453,15 +495,19 @@ pub(crate) fn start(factory: &Arc<Factory>) {
     }
     quarantine::upgrade(factory);
     bound::upgrade(factory);
+    agents::retired(factory, retired);
     // A pipe with agents and no lead (from before every pipe had one) gets one.
     lead::settle_all(factory);
     handoff::start(factory);
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
         runtime.spawn(start::expire(Arc::downgrade(factory)));
+        runtime.spawn(waiting::watch(Arc::downgrade(factory)));
     }
 }
 
-type Loaded = (BTreeMap<String, Record>, BTreeMap<String, Taint>);
+/// The pipes, who's marked, and the secret uses retired at start (#346):
+/// each asker and the secrets it asked for.
+type Loaded = (BTreeMap<String, Record>, BTreeMap<String, Taint>, Vec<(String, Vec<String>)>);
 
 fn load(factory: &Factory) -> rusqlite::Result<Loaded> {
     let db = factory.store.db();
@@ -484,9 +530,16 @@ fn load(factory: &Factory) -> rusqlite::Result<Loaded> {
     // secrets asks each time. Only a web page read through browser control
     // still marks its reader. Every start; a no-op once done.
     db.execute("DELETE FROM pipe_taint WHERE pipe NOT LIKE 'browser:%'", [])?;
+    let retiring = "state = 'pending' AND pipes NOT IN ('', '[]') AND agent NOT IN (SELECT agent FROM pipe_taint)";
+    let mut retired: Vec<(String, Vec<String>)> = Vec::new();
+    let mut statement = db.prepare(&format!("SELECT agent, secrets FROM pipe_secret_approvals WHERE {retiring} ORDER BY id"))?;
+    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
+        let (agent, secrets) = row?;
+        retired.push((agent, serde_json::from_str(&secrets).unwrap_or_default()));
+    }
+    drop(statement);
     db.execute(
-        "UPDATE pipe_secret_approvals SET state = 'expired', decided = ?1 WHERE state = 'pending' AND pipes NOT IN ('', '[]')
-         AND agent NOT IN (SELECT agent FROM pipe_taint)",
+        &format!("UPDATE pipe_secret_approvals SET state = 'expired', decided = ?1 WHERE {retiring}"),
         [crate::transcript::now_ms()],
     )?;
     let mut tainted: BTreeMap<String, Taint> = BTreeMap::new();
@@ -497,7 +550,7 @@ fn load(factory: &Factory) -> rusqlite::Result<Loaded> {
         let via: Vec<String> = via.and_then(|via| serde_json::from_str(&via).ok()).unwrap_or_default();
         tainted.entry(agent).or_default().insert(pipe, via);
     }
-    Ok((pipes, tainted))
+    Ok((pipes, tainted, retired))
 }
 
 fn save(factory: &Factory, record: &Record) {
@@ -570,6 +623,9 @@ pub(crate) struct Message {
     pub files: Vec<FileRecord>,
     pub state: MessageState,
     pub note: String,
+    /// Sent back to its writer by the person's reply (#370): never sent.
+    /// The reply is in decision_notes, shown as its note (`for_person`).
+    pub replied: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -700,11 +756,12 @@ impl Message {
                 .collect(),
             state: self.state.to_proto().into(),
             note: self.note.clone(),
+            replied: self.replied,
         }
     }
 }
 
-const COLUMNS: &str = "seq, msg_id, created, author, name, role, agent, text, files, state, note";
+const COLUMNS: &str = "seq, msg_id, created, author, name, role, agent, text, files, state, note, replied";
 
 fn read_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     let files: String = row.get(8)?;
@@ -720,6 +777,7 @@ fn read_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         files: serde_json::from_str(&files).unwrap_or_default(),
         state: MessageState::parse(&row.get::<_, String>(9)?),
         note: row.get(10)?,
+        replied: row.get(11)?,
     })
 }
 
@@ -748,7 +806,7 @@ pub(crate) fn add(factory: &Factory, pipe: &str, mut message: Message) -> Option
     }
     let files = serde_json::to_string(&message.files).unwrap_or_else(|_| "[]".to_owned());
     let stored = factory.store.db().execute(
-        &format!("INSERT INTO pipe_messages (pipe, {COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
+        &format!("INSERT INTO pipe_messages (pipe, {COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
         params![
             pipe,
             i64::try_from(seq).unwrap_or(i64::MAX),
@@ -761,7 +819,8 @@ pub(crate) fn add(factory: &Factory, pipe: &str, mut message: Message) -> Option
             message.text,
             files,
             message.state.as_str(),
-            message.note
+            message.note,
+            message.replied
         ],
     );
     if let Err(error) = stored {
@@ -804,6 +863,23 @@ pub(crate) fn set_state(factory: &Factory, pipe: &str, seq: u64, state: MessageS
     shown(factory, pipe, &message);
     factory.broadcast_workspace(&factory.lock());
     Some(message)
+}
+
+/// A held message goes back to its writer with the person's reply (#370):
+/// discarded, never sent. The reply is in decision_notes.
+fn sent_back(factory: &Factory, pipe: &str, seq: u64) {
+    let changed = factory.store.db().execute(
+        "UPDATE pipe_messages SET state = 'discarded', replied = 1 WHERE pipe = ?1 AND seq = ?2",
+        params![pipe, i64::try_from(seq).unwrap_or(i64::MAX)],
+    );
+    if let Err(error) = changed {
+        tracing::error!(%pipe, %error, "could not send a pipe's message back");
+        return;
+    }
+    if let Some(message) = message(factory, pipe, seq) {
+        shown(factory, pipe, &message);
+    }
+    factory.broadcast_workspace(&factory.lock());
 }
 
 pub(crate) fn message(factory: &Factory, pipe: &str, seq: u64) -> Option<Message> {
@@ -886,18 +962,38 @@ fn waiting(factory: &Factory, pipe: &str) -> Vec<u64> {
 
 /// Sends the message to clients showing the pipe.
 fn shown(factory: &Factory, pipe: &str, message: &Message) {
-    factory.send(Body::PipeMessageUpdate(v1::PipeMessageUpdate { pipe_id: pipe.to_owned(), message: Some(message.to_proto()) }));
+    factory.send(Body::PipeMessageUpdate(v1::PipeMessageUpdate { pipe_id: pipe.to_owned(), message: Some(for_person(factory, pipe, message)) }));
+}
+
+/// A message as the person's app shows it: one sent back with their reply
+/// (#370) has the reply as its note, from decision_notes, which nothing
+/// that reaches the other side reads.
+fn for_person(factory: &Factory, pipe: &str, message: &Message) -> v1::PipeMessage {
+    let mut shown = message.to_proto();
+    if message.replied {
+        shown.note = crate::needs_you::note_of(factory, "pipe_message", &format!("{pipe}:{}", message.seq));
+    }
+    shown
 }
 
 // ---- The Workspace ----
 
 /// The pipes, as every client shows them.
 pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Pipe>, String) {
-    let (records, selected) = {
-        let data = factory.pipes.data();
-        (data.pipes.values().cloned().collect::<Vec<_>>(), data.selected.clone().unwrap_or_default())
+    let (records, selected, save) = {
+        let mut data = factory.pipes.data();
+        // Every change of what's shown is broadcast, so it's saved here.
+        let save = (data.loaded && data.saved != data.selected).then(|| data.selected.clone());
+        if let Some(shown) = &save {
+            data.saved.clone_from(shown);
+        }
+        (data.pipes.values().cloned().collect::<Vec<_>>(), data.selected.clone().unwrap_or_default(), save)
     };
+    if let Some(shown) = save {
+        save_selected(factory, shown.as_deref());
+    }
     let can_check = identity::checks(factory, &inner.config.account);
+    let mut grouped = groups::members(factory);
     let mut pipes: Vec<v1::Pipe> = records
         .iter()
         .filter(|record| inner.config.project(&record.project).is_some())
@@ -907,7 +1003,10 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Pipe>, String) 
             let members: Vec<String> = record.members.iter().filter(|id| inner.config.agent(id).is_some()).cloned().collect();
             let lead = if members.contains(&record.lead) { record.lead.clone() } else { String::new() };
             let (forward, reports) = handoff::pipe_view(factory, record);
+            let (peer_waiting, peer_waiting_until_ms) = waiting::shown(record);
             v1::Pipe {
+                peer_waiting,
+                peer_waiting_until_ms,
                 id: record.id.clone(),
                 name: record.name.clone(),
                 project_id: record.project.clone(),
@@ -944,6 +1043,12 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Pipe>, String) 
                 quarantined_ids: record.quarantined.iter().filter(|id| members.contains(id)).cloned().collect(),
                 can_run_commands_ids: members.iter().filter(|id| !record.quarantined.contains(id)).cloned().collect(),
                 member_ids: members,
+                group_id: grouped.remove(&record.id).unwrap_or_default(),
+                reply_agent_id: if record.state == State::Approval {
+                    replies_to(factory, &inner.config, &record.id).unwrap_or_default()
+                } else {
+                    String::new()
+                },
             }
         })
         .collect();
@@ -1295,6 +1400,12 @@ fn offered_name(theirs: &str, now: i64) -> String {
     format!("Pipe joined {day}").trim().to_owned()
 }
 
+/// How many times the other Claktory may turn a joining code away before
+/// the pipe closes saying the code no longer works, and for how long after
+/// the first time (the tries back off: 1, 2, 4 s…).
+const TURNED_AWAY_TRIES: u32 = 4;
+const TURNED_AWAY_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// AcceptPipeInvite: a pipe to `project`, JOINING and selected, then
 /// APPROVAL once the other Claktory answers.
 pub(crate) fn accept(factory: &Arc<Factory>, request: &v1::AcceptPipeInvite) -> Result<(), RequestError> {
@@ -1326,10 +1437,15 @@ pub(crate) fn accept(factory: &Arc<Factory>, request: &v1::AcceptPipeInvite) -> 
         // The first dial can fail for a passing reason: the other machine's
         // way there isn't up yet, or macOS is still asking its person about
         // the local network. Unreachable retries until the code's own
-        // expiry ends it (join refuses an expired code); anything else is
-        // definitive and closes the pipe as before.
+        // expiry ends it (join refuses an expired code), and at most as long
+        // as a code lives (an expiry forged far ahead, or a clock behind,
+        // can't keep it waiting). The other Claktory turning the code away
+        // ends it after a few tries, or a minute after the first; anything
+        // else is definitive and closes the pipe as before.
+        let started = std::time::Instant::now();
         let mut backoff = std::time::Duration::from_secs(1);
         let mut said = String::new();
+        let mut turned_away: Option<(u32, std::time::Instant)> = None;
         loop {
             match pipe_link::join(&factory, &id, &code, &mine).await {
                 Ok((peer, digits)) => {
@@ -1345,9 +1461,26 @@ pub(crate) fn accept(factory: &Arc<Factory>, request: &v1::AcceptPipeInvite) -> 
                     line(&factory, &id, "Connected. Check that both screens show the same four digits, then approve or turn it down.");
                     return;
                 }
-                Err(PipeError::Unreachable(reason)) => {
+                Err(error @ (PipeError::Unreachable(_) | PipeError::TurnedAway)) => {
                     if !factory.pipes.get(&id).is_some_and(|record| record.state == State::Joining) {
                         // Turned down or deleted meanwhile: nothing to reach.
+                        return;
+                    }
+                    let reason = match error {
+                        PipeError::Unreachable(reason) => reason,
+                        _ => {
+                            turned_away.get_or_insert((0, std::time::Instant::now())).0 += 1;
+                            "it turned the code away".to_owned()
+                        }
+                    };
+                    // Turned away a few times, or a minute after the first:
+                    // the code doesn't work there.
+                    if turned_away.is_some_and(|(tries, first)| tries >= TURNED_AWAY_TRIES || first.elapsed() >= TURNED_AWAY_FOR) {
+                        close_with(&factory, &id, &format!("Couldn't connect: {}", PipeError::TurnedAway));
+                        return;
+                    }
+                    if started.elapsed() >= pipe_link::INVITE_LIFETIME {
+                        close_with(&factory, &id, &format!("Couldn't connect: {}", PipeError::Expired));
                         return;
                     }
                     if said != reason {
@@ -1385,23 +1518,29 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
     if record.state != State::Approval {
         return Err(RequestError::Pipe("This pipe isn't waiting for your approval.".to_owned()));
     }
+    let starter = || replies_to(factory, &factory.lock().config, &record.id);
+    // A reply (#370 Submit): the pipe still waits, unchanged; the agent
+    // that set it up gets the person's words.
+    if request.reply {
+        if comment.is_empty() {
+            return Err(RequestError::Pipe("Write a reply, or approve or turn it down.".to_owned()));
+        }
+        let Some(agent) = starter() else {
+            return Err(RequestError::Pipe("No agent of yours set up this pipe, so there's no one to reply to.".to_owned()));
+        };
+        let person = factory.person_capitalized();
+        let summary = format!("{person} replied about {}", called(&record));
+        let text = format!("{summary}; it still waits for their approval. They say:\n\n{comment}");
+        factory.deliver_event(&agent, text, crate::factory::host_event(summary));
+        return Ok(());
+    }
     if !request.approve {
         pipe_link::close(factory, &record.id);
         close_with(factory, &record.id, "You turned it down.");
-        if !comment.is_empty() {
-            let starter = start::agent_of(&factory.store, &record.id);
-            let told = starter.or_else(|| {
-                let inner = factory.lock();
-                inner
-                    .config
-                    .agents
-                    .iter()
-                    .find(|agent| crate::proposals::is_admin(agent) && crate::extensions::enabled(agent, crate::extensions::pipes::ID))
-                    .map(|agent| agent.id.clone())
-            });
-            if let Some(agent) = told {
-                noted(factory, &agent, &format!("turned down {}", called(&record)), comment);
-            }
+        if !comment.is_empty()
+            && let Some(agent) = starter()
+        {
+            noted(factory, &agent, &format!("turned down {}", called(&record)), comment);
         }
         return Ok(());
     }
@@ -1469,6 +1608,18 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
         noted(factory, &record.lead, &format!("approved {}, with you answering it", called(&record)), comment);
     }
     Ok(())
+}
+
+/// The agent the person's comment on approving `pipe` goes to: the one whose
+/// card started it, else the admin agent with Pipes.
+fn replies_to(factory: &Factory, config: &crate::config::Config, pipe: &str) -> Option<String> {
+    start::agent_of(&factory.store, pipe).filter(|agent| config.agent(agent).is_some()).or_else(|| {
+        config
+            .agents
+            .iter()
+            .find(|agent| crate::proposals::is_admin(agent) && crate::extensions::enabled(agent, crate::extensions::pipes::ID))
+            .map(|agent| agent.id.clone())
+    })
 }
 
 /// The pipe as this side's agents may read it: by its name only when this
@@ -1819,6 +1970,21 @@ fn unsent(factory: &Factory, pipe: &str) {
     }
 }
 
+/// Records which pipe is shown (none: an agent or a chat is).
+fn save_selected(factory: &Factory, shown: Option<&str>) {
+    let saved = (|| -> rusqlite::Result<()> {
+        let db = factory.store.db();
+        db.execute("DELETE FROM pipe_selected", [])?;
+        if let Some(pipe) = shown {
+            db.execute("INSERT INTO pipe_selected (pipe) VALUES (?1)", [pipe])?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = saved {
+        tracing::error!(%error, "could not record which pipe is shown");
+    }
+}
+
 fn delete(factory: &Factory, id: &str) {
     {
         let mut data = factory.pipes.data();
@@ -1860,12 +2026,18 @@ pub(crate) async fn select(factory: &Arc<Factory>, id: &str) -> Result<(), Reque
 }
 
 fn send_transcript(factory: &Factory, id: &str) {
+    factory.send(Body::PipeTranscript(transcript(factory, id)));
+}
+
+/// The pipe's latest messages, as a client shows them when it's selected:
+/// on SelectPipe, and to a client connecting while it's shown.
+pub(crate) fn transcript(factory: &Factory, id: &str) -> v1::PipeTranscript {
     let (messages, has_earlier) = messages(factory, id, 0, 200);
-    factory.send(Body::PipeTranscript(v1::PipeTranscript {
+    v1::PipeTranscript {
         pipe_id: id.to_owned(),
-        messages: messages.iter().map(Message::to_proto).collect(),
+        messages: messages.iter().map(|message| for_person(factory, id, message)).collect(),
         has_earlier,
-    }));
+    }
 }
 
 /// LoadPipeMessages.
@@ -1875,7 +2047,8 @@ pub(crate) fn load_messages(factory: &Factory, request: &v1::LoadPipeMessages) -
         Some(from) => messages_from(factory, &request.pipe_id, from, request.before_seq),
         None => messages(factory, &request.pipe_id, request.before_seq, request.limit),
     };
-    Ok(v1::PipeMessagePage { pipe_id: request.pipe_id.clone(), messages: messages.iter().map(Message::to_proto).collect(), has_earlier })
+    let messages = messages.iter().map(|message| for_person(factory, &request.pipe_id, message)).collect();
+    Ok(v1::PipeMessagePage { pipe_id: request.pipe_id.clone(), messages, has_earlier })
 }
 
 /// SendPipeMessage: the person writes in the pipe; it goes out at once.
@@ -1927,10 +2100,11 @@ pub(crate) fn not_open(record: &Record) -> String {
 /// (a held one may have changed since the person saw it), and nothing in
 /// it may be a secret now. Refused otherwise, saying why.
 pub(crate) fn transmit(factory: &Arc<Factory>, pipe: &str, message: &Message, via: Via) {
-    if let Err(why) = unchanged(factory, message) {
+    if let Err((why, advice)) = unchanged(factory, message) {
         set_state(factory, pipe, message.seq, MessageState::Refused, Some(&why));
         if let Some(record) = factory.pipes.get(pipe) {
-            agents::tell(factory, &message.agent, &record, Some("Claktory"), &format!("didn't send your message: {why}"), &message.text);
+            let note = format!(" {why}{advice}");
+            agents::tell_noted(factory, &message.agent, &record, Some("Claktory"), "didn't send your message", &message.text, &note);
         }
         return;
     }
@@ -1959,6 +2133,23 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
         return Err(RequestError::Pipe("No such message in this pipe.".to_owned()));
     };
     let person = factory.person_capitalized();
+    // A reply (#370 Submit), on a message this side's agent wrote: it isn't
+    // sent, and goes back to its writer with the person's words.
+    if request.reply {
+        if comment.is_empty() {
+            return Err(RequestError::Pipe("Write a reply, or send or discard it.".to_owned()));
+        }
+        if message.state != MessageState::Held {
+            return Err(RequestError::Pipe("Only a message your agent wrote can go back to it with a reply.".to_owned()));
+        }
+        // The reply is kept for the history first: the card shows it from there.
+        let kind = crate::needs_you::PipeDecision::Held;
+        crate::needs_you::pipe_decided(factory, &record.id, message.seq, kind, &message.agent, false, comment, message.created);
+        sent_back(factory, &record.id, message.seq);
+        let again = format!(" It wasn't sent. They say:\n\n{comment}\n\nWrite it again with that in mind, and send it again.");
+        agents::tell_noted(factory, &message.agent, &record, None, "sent your message back", &message.text, &again);
+        return Ok(());
+    }
     let note = crate::decisions::note(&person, comment);
     // Only with a comment: the lead hears nothing else of it.
     let tell_lead = |what: &str| {
@@ -2024,21 +2215,23 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
 }
 
 /// The message's files are as they were scanned, and nothing it carries is
-/// a secret; the reason it can't go otherwise.
-fn unchanged(factory: &Factory, message: &Message) -> Result<(), String> {
+/// a secret. Otherwise why it can't go, as the app shows it after "Not
+/// sent:", and what its writer could do, for the event it gets.
+fn unchanged(factory: &Factory, message: &Message) -> Result<(), (String, &'static str)> {
     let mut contents = Vec::with_capacity(message.files.len());
     for file in &message.files {
-        let bytes = std::fs::read(&file.path).map_err(|_| format!("{} is gone, so it wasn't sent.", file.name))?;
+        let bytes = std::fs::read(&file.path).map_err(|_| (format!("{} is gone.", file.name), ""))?;
         if !file.sha256.is_empty() && agents::sha256(&bytes) != file.sha256 {
-            return Err(format!(
-                "{} changed after it was written in, so it wasn't sent: send it again to look at the new version.",
-                file.name
-            ));
+            // A file the person attached is sent from their upload (friend bug #15).
+            let uploads = factory.home.agent_dir(&message.agent).join("uploads");
+            let attached = file.path.starts_with(&uploads) || uploads.canonicalize().is_ok_and(|real| file.path.starts_with(real));
+            let when = if attached { "it was attached" } else { "the message was written" };
+            return Err((format!("{} changed after {when}.", file.name), " Send it again to send the new version."));
         }
         contents.push(bytes);
     }
     if let Some(secrets) = agents::secrets_in(factory, &message.text, &contents) {
-        return Err(format!("It contains your secret {secrets}, so it wasn't sent."));
+        return Err((format!("It contains your secret {secrets}."), ""));
     }
     Ok(())
 }
@@ -2294,6 +2487,14 @@ impl pipe_link::Store for Link {
         identity::changed_account(factory, pipe)
     }
 
+    fn peer_liaison(&self, factory: &Arc<Factory>, pipe: &str, liaison: pipe_link::Liaison) {
+        waiting::heard(factory, pipe, liaison);
+    }
+
+    fn liaison_told(&self, factory: &Arc<Factory>, pipe: &str, liaison: pipe_link::Liaison) {
+        waiting::told(factory, pipe, liaison);
+    }
+
     fn link_changed(&self, factory: &Arc<Factory>, _pipe: &str, _status: LinkStatus) {
         // Later, not here: the transport may hold its own locks, which
         // `status` takes under Factory's.
@@ -2463,22 +2664,76 @@ pub fn taint_for_test(factory: &Arc<Factory>, agent: &str, key: &str) {
     agents::taint(factory, agent, key);
 }
 
+/// Tests: `agent` waits on a usage limit until `until_ms` (0: for the
+/// person, out of credit), as its run's wait sets it; None: it doesn't.
+#[doc(hidden)]
+pub fn set_usage_wait_for_test(factory: &Factory, agent: &str, until_ms: Option<i64>) {
+    let mut inner = factory.lock();
+    let model = inner.config.agent(agent).map(|known| known.model.clone()).unwrap_or_default();
+    let provider = model.split_once('/').map_or(model.as_str(), |(provider, _)| provider).to_owned();
+    let runtime = inner.agents.get_mut(agent).expect("the agent");
+    runtime.usage_wait = until_ms.map(|until_ms| crate::waits::UsageWait {
+        text: "Waiting for your Claude usage to reset".to_owned(),
+        until_ms,
+        switchable: true,
+        provider,
+    });
+}
+
+/// Tests: what the other side of `pipe` is to be told of its liaison now
+/// (`waiting::due`).
+#[doc(hidden)]
+pub fn liaison_due_for_test(factory: &Factory, pipe: &str) -> Option<pipe_link::Liaison> {
+    waiting::due(factory, &factory.pipes.get(pipe)?)
+}
+
+/// Tests: the other side heard what this side told it of its liaison.
+#[doc(hidden)]
+pub fn liaison_told_for_test(factory: &Factory, pipe: &str, liaison: pipe_link::Liaison) {
+    waiting::told(factory, pipe, liaison);
+}
+
+/// Tests: the other side says its liaison waits or is awake, as the
+/// transport hands it on.
+#[doc(hidden)]
+pub fn peer_liaison_for_test(factory: &Factory, pipe: &str, liaison: pipe_link::Liaison) {
+    waiting::heard(factory, pipe, liaison);
+}
+
+/// Tests: tells each open pipe's other side of its liaison now, as the
+/// watch does every 15 seconds.
+#[doc(hidden)]
+pub fn tell_liaisons_for_test(factory: &Arc<Factory>) {
+    waiting::tell(factory);
+}
+
 /// Tests: the lead's wakes apart by `every` at least.
 #[doc(hidden)]
 pub fn set_wake_every(factory: &Factory, every: std::time::Duration) {
     factory.pipes.wake_every_ms.store(u64::try_from(every.as_millis()).unwrap_or(u64::MAX), Ordering::Relaxed);
 }
 
+/// Tests: judges how long ago the person attached a file as if `later` had
+/// passed since.
+#[doc(hidden)]
+pub fn attached_later_for_test(factory: &Factory, later: std::time::Duration) {
+    factory.pipes.attached_later_ms.store(u64::try_from(later.as_millis()).unwrap_or(u64::MAX), Ordering::Relaxed);
+}
+
 impl Pipes {
     pub(crate) fn wake_every_ms(&self) -> u64 {
         self.wake_every_ms.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn attached_later_ms(&self) -> i64 {
+        i64::try_from(self.attached_later_ms.load(Ordering::Relaxed)).unwrap_or(i64::MAX)
     }
 }
 
 /// The pipe's messages as tests read them.
 #[doc(hidden)]
 pub fn messages_for_test(factory: &Factory, pipe: &str) -> Vec<v1::PipeMessage> {
-    messages(factory, pipe, 0, 1000).0.iter().map(Message::to_proto).collect()
+    messages(factory, pipe, 0, 1000).0.iter().map(|message| for_person(factory, pipe, message)).collect()
 }
 
 #[cfg(test)]

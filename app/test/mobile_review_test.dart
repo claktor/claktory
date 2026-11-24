@@ -2,16 +2,19 @@
 // showFile opens the file as a page over the agent's conversation (chosen
 // first, the file put in its layout as its `show` would, unless it's
 // there), and the viewer's foot says who asks and what, with the answer's
-// field always open: Return or Send answers (Approve with nothing typed),
-// Dismiss takes the same words, and the viewer closes, back where the
-// person was.
+// field always open: Approve or Dismiss with nothing typed; a typed
+// comment is one Submit (Return too), sent as a reply that carries out
+// nothing (#370); and the viewer closes, back where the person was.
 import 'dart:convert';
 
 import 'package:factory_app/mobile/navigation.dart';
+import 'package:factory_app/mobile/needs_you_button.dart';
+import 'package:factory_app/mobile/presentation.dart' show PhoneSheet;
 import 'package:factory_app/scope.dart' show AppPage;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -22,6 +25,7 @@ import 'package:factory_app/voice.dart' show voiceMessagesOn;
 import 'harness.dart';
 import 'voice_test.dart' show FakeRecorder, io;
 import 'panes_test.dart' show beside, snapshot;
+import 'tool_views_test.dart' show call;
 import 'viewers_test.dart' show png;
 
 const _plan = '/w/plan.md';
@@ -124,6 +128,37 @@ void main() {
     expect(find.text('Builder asks you to review this'), findsOneWidget);
   });
 
+  testWidgets("a show row's file name opens the file as a page, as Files "
+      'in ⋯ does (#379, Zucchero)', (tester) async {
+    final harness = await phone(tester, layout: beside('text', _plan));
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'a1',
+        entries: [
+          call(
+            'show',
+            {'path': _plan},
+            seq: 3,
+            output: 'Showing plan.md to Matt.',
+            details: {
+              'path': _plan,
+              'kind': 'text',
+              'pane': 'v1',
+              'agent': 'a1',
+            },
+          ),
+        ],
+      ),
+    );
+    await pumpFrames(tester);
+    expect(find.text('Showing'), findsOneWidget);
+    expect(find.text('Ship it on Friday.'), findsNothing);
+    await tester.tap(find.text('plan.md').last);
+    await pumpFrames(tester);
+    expect(find.text('Ship it on Friday.'), findsOneWidget);
+    expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
+  });
+
   testWidgets('another agent showing: it is chosen, and the file pushed '
       'once it shows', (tester) async {
     final harness = await phone(tester, selected: 'rivet');
@@ -175,6 +210,34 @@ void main() {
     expect(find.text('Review'), findsWidgets);
   });
 
+  testWidgets("from the header's Needs you, Review shows the file on top "
+      'at once, and Back returns to Needs you (Matt\'s bug)', (tester) async {
+    final harness = await phone(tester, size: const Size(320, 568));
+    await tester.tap(find.byType(PhoneNeedsYouButton));
+    await pumpFrames(tester);
+    expect(harness.page.value, AppPage.inbox);
+    await tester.tap(find.text('Builder').last);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Review').last);
+    await pumpFrames(tester);
+    // On top: its bar takes a tap, with nothing over it.
+    final bar = find.text('Builder asks you to review this');
+    expect(bar, findsOneWidget);
+    expect(
+      tester
+          .hitTestOnBinding(tester.getCenter(bar))
+          .path
+          .any((entry) => entry.target is RenderParagraph),
+      isTrue,
+    );
+    expect(find.byType(PhoneSheet), findsNothing);
+    await tester.tap(find.bySemanticsLabel('Back').last);
+    await pumpFrames(tester);
+    expect(bar, findsNothing);
+    expect(harness.page.value, AppPage.inbox);
+    expect(find.text('Review'), findsWidgets);
+  });
+
   /// The layout's last SetLayout, and whether it still holds the file.
   bool planShown(Harness harness) {
     bool holds(ViewNode node) =>
@@ -185,19 +248,22 @@ void main() {
         layouts.last.setLayout.hasRoot() && holds(layouts.last.setLayout.root);
   }
 
-  testWidgets('typed, Return answers with the words: Approve, and the '
-      'viewer closes back to the conversation', (tester) async {
+  testWidgets('typed, Return sends the words as a reply, never a yes, and '
+      'the viewer closes back to the conversation', (tester) async {
     final harness = await phone(tester, layout: beside('text', _plan));
     _routes(tester).showFile('a1', _plan);
     await pumpFrames(tester);
     await tester.enterText(find.byType(EditableText).last, 'Go ahead.');
     await pumpFrames(tester);
-    expect(find.text('Send'), findsOneWidget);
+    expect(find.text('Submit'), findsOneWidget);
     expect(find.text('Approve'), findsNothing);
+    expect(find.text('Dismiss'), findsNothing);
     await tester.testTextInput.receiveAction(TextInputAction.send);
     await pumpFrames(tester);
     final answer = harness.backend.sent.lastWhere((m) => m.hasAnswerAsk());
-    expect(answer.answerAsk.dismiss, isFalse);
+    expect(answer.answerAsk.reply, isTrue);
+    // An older Claktory reads no yes in it.
+    expect(answer.answerAsk.dismiss, isTrue);
     expect(answer.answerAsk.text, 'Go ahead.');
     expect(answer.answerAsk.seq, Int64(7));
     expect(planShown(harness), isFalse, reason: 'its pane closed');
@@ -221,22 +287,38 @@ void main() {
     await pumpFrames(tester);
     final answer = harness.backend.sent.lastWhere((m) => m.hasAnswerAsk());
     expect(answer.answerAsk.dismiss, isFalse);
+    expect(answer.answerAsk.reply, isFalse);
     expect(answer.answerAsk.text, isEmpty);
     expect(find.text('Builder asks you to review this'), findsNothing);
   });
 
-  testWidgets('Dismiss takes the words typed', (tester) async {
+  testWidgets('Submit sends the words as a reply; cleared, Approve and '
+      'Dismiss come back, and Dismiss dismisses', (tester) async {
     final harness = await phone(tester, layout: beside('text', _plan));
     _routes(tester).showFile('a1', _plan);
     await pumpFrames(tester);
     await tester.enterText(find.byType(EditableText).last, 'Not this week.');
     await pumpFrames(tester);
+    await tester.enterText(find.byType(EditableText).last, '');
+    await pumpFrames(tester);
+    expect(find.text('Submit'), findsNothing);
+    expect(find.text('Approve'), findsOneWidget);
     await tester.tap(find.text('Dismiss'));
     await pumpFrames(tester);
-    final answer = harness.backend.sent.lastWhere((m) => m.hasAnswerAsk());
+    var answer = harness.backend.sent.lastWhere((m) => m.hasAnswerAsk());
     expect(answer.answerAsk.dismiss, isTrue);
-    expect(answer.answerAsk.text, 'Not this week.');
+    expect(answer.answerAsk.reply, isFalse);
     expect(planShown(harness), isFalse);
+
+    _routes(tester).showFile('a1', _plan);
+    await pumpFrames(tester);
+    await tester.enterText(find.byType(EditableText).last, 'Not this week.');
+    await pumpFrames(tester);
+    await tester.tap(find.text('Submit'));
+    await pumpFrames(tester);
+    answer = harness.backend.sent.lastWhere((m) => m.hasAnswerAsk());
+    expect(answer.answerAsk.reply, isTrue);
+    expect(answer.answerAsk.text, 'Not this week.');
   });
 
   testWidgets('a question that wants words: Send, faint until some are '
@@ -255,6 +337,9 @@ void main() {
     await pumpFrames(tester);
     final answer = harness.backend.sent.lastWhere((m) => m.hasAnswerAsk());
     expect(answer.answerAsk.text, 'The second.');
+    // The words it asked for are an answer, not a reply.
+    expect(answer.answerAsk.reply, isFalse);
+    expect(answer.answerAsk.dismiss, isFalse);
   });
 
   testWidgets('a failed answer keeps the words and the viewer, and says '
@@ -265,7 +350,7 @@ void main() {
     await tester.enterText(find.byType(EditableText).last, 'Go ahead.');
     await pumpFrames(tester);
     harness.backend.refuse = 'Offline.';
-    await tester.tap(find.text('Send'));
+    await tester.tap(find.text('Submit'));
     await pumpFrames(tester);
     expect(find.text("Couldn't send your answer. Try again."), findsOneWidget);
     expect(find.text('Go ahead.'), findsOneWidget);
@@ -398,7 +483,7 @@ void main() {
     }
 
     testWidgets('the mic records; Done puts the words in at the caret, '
-        'nothing sent until Send', (tester) async {
+        'nothing sent until Submit', (tester) async {
       transcribeRecording = (backend, recording) async {
         heard.add(recording);
         return 'the second one';
@@ -421,7 +506,7 @@ void main() {
       expect(find.text('I like the second one'), findsOneWidget);
       await shots?.call(tester, 'dictation-done');
       expect(harness.backend.sent.where((m) => m.hasAnswerAsk()), isEmpty);
-      await tester.tap(find.text('Send'));
+      await tester.tap(find.text('Submit'));
       await pumpFrames(tester);
       final answer = harness.backend.sent.lastWhere((m) => m.hasAnswerAsk());
       expect(answer.answerAsk.text, 'I like the second one');

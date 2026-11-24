@@ -19,12 +19,13 @@ import 'mobile/input.dart' show InputKind;
 import 'mobile/metrics.dart';
 import 'mobile/page_find.dart' show phonePageSearch;
 import 'mobile/presentation.dart' show SheetAction, showActions;
+import 'model_select.dart' show ModelChooser;
 import 'model_step.dart' show showConnectModel;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'settings_view.dart' show modelLabel;
 import 'transcript.dart';
-import 'usage_wait.dart' show UsageSwitchLine, usageWaitLine;
+import 'usage_wait.dart' show UsageSwitchLine, chatAtWork, chatUsageWaitLine;
 
 /// A chat's color: its glyph, its bar's line and the person's bubbles in
 /// it. Slate, no agent's, since a chat is no one in particular; white text
@@ -74,6 +75,30 @@ Future<void> renameChat(BuildContext context, Chat chat) => showModal(
   (context, close) => _RenameChatForm(chat: chat, close: close),
 );
 
+/// Puts [chat] on another model (U17), chosen as an agent's is: a search,
+/// then the models by provider. From its next model call, even mid-reply;
+/// a chat stopped for want of a model waits for the next message.
+Future<void> changeChatModel(BuildContext context, Chat chat) {
+  final backend = AppScope.of(context);
+  return showModal(
+    context,
+    (context, close) => ModelChooser(
+      workspace: backend.workspace.workspace,
+      value: chat.model,
+      title: 'Change model',
+      onChoose: (model) {
+        close();
+        // Refused only for a model that went or a chat deleted meanwhile:
+        // nothing changes, and the chat shows its model as it is.
+        if (model != chat.model) {
+          fireAndLog(backend.setChatModel(chat.id, model));
+        }
+      },
+      onCancel: close,
+    ),
+  );
+}
+
 /// Deletes [chat] once the person says so: it can't be undone.
 Future<void> deleteChat(BuildContext context, Chat chat) async {
   final backend = AppScope.of(context);
@@ -87,15 +112,21 @@ Future<void> deleteChat(BuildContext context, Chat chat) async {
   fireAndLog(backend.deleteChat(chat.id));
 }
 
-/// What can be done with [chat] from its "…": on a phone, Search (its
-/// find bar); Rename… and Delete….
-Future<void> _chatActions(BuildContext context, Chat chat) async {
-  final search = phonePageSearch(context);
+/// What can be done with [chat] from its "…" (and a right click or touch
+/// and hold on its row, here and in the sidebar): on a phone, Search (its
+/// find bar, only from the chat itself: [search]); Rename…, Change model…
+/// and Delete….
+Future<void> chatActions(
+  BuildContext context,
+  Chat chat, {
+  bool search = true,
+}) async {
+  final find = search ? phonePageSearch(context) : null;
   final action = await showActions<String>(
     context,
     title: chatTitle(chat),
     actions: [
-      if (search != null)
+      if (find != null)
         SheetAction(
           'Search',
           'search',
@@ -107,15 +138,18 @@ Future<void> _chatActions(BuildContext context, Chat chat) async {
           ),
         ),
       const SheetAction('Rename…', 'rename'),
+      const SheetAction('Change model…', 'model'),
       const SheetAction('Delete…', 'delete', destructive: true),
     ],
   );
   if (!context.mounted) return;
   switch (action) {
     case 'search':
-      search?.call();
+      find?.call();
     case 'rename':
       await renameChat(context, chat);
+    case 'model':
+      await changeChatModel(context, chat);
     case 'delete':
       await deleteChat(context, chat);
   }
@@ -189,8 +223,9 @@ class _ChatPainter extends CustomPainter {
   bool shouldRepaint(_ChatPainter old) => old.color != color;
 }
 
-/// A chat's message box: text only, its draft kept as any agent's, sent
-/// through the chat's outbox; without a model, why it can't answer.
+/// A chat's message box: text, or a voice message (#367), its draft kept as
+/// any agent's, sent through the chat's outbox; no files. Without a model,
+/// why it can't answer.
 class ChatMessageTarget extends MessageTarget {
   ChatMessageTarget(this.chat, this.backend);
 
@@ -207,9 +242,6 @@ class ChatMessageTarget extends MessageTarget {
   bool get takesFiles => false;
 
   @override
-  bool get takesVoice => false;
-
-  @override
   MessageBlocked? blocked(BuildContext context) {
     if (chat.modelAvailable) return null;
     if (backend.workspace.workspace.models.isEmpty) {
@@ -224,12 +256,14 @@ class ChatMessageTarget extends MessageTarget {
         ],
       );
     }
+    // Another model that runs, or signing in to its own again.
     return MessageBlocked(
       "No model available, so this chat can't answer.",
       actions: [
+        MessageAction('Sign in…', () => AppScope.openProviders(context)),
         MessageAction(
-          'Sign in…',
-          () => AppScope.openProviders(context),
+          'Change model…',
+          () => changeChatModel(context, chat),
           primary: true,
         ),
       ],
@@ -238,6 +272,11 @@ class ChatMessageTarget extends MessageTarget {
 
   @override
   void send(String text, {List<LocalFile> files = const [], Duration? voice}) {
+    // A voice message is its recording alone; a chat takes no other file.
+    if (voice != null) {
+      backend.chatOutbox.send(chat.id, '', files: files, voice: voice);
+      return;
+    }
     if (text.isEmpty) return;
     backend.chatOutbox.send(chat.id, text);
   }
@@ -316,14 +355,7 @@ class _ChatViewState extends State<ChatView> {
         ),
       ),
     );
-    final wait = chat.usageWait.isEmpty
-        ? ''
-        : usageWaitLine(
-            Agent(
-              usageWait: chat.usageWait,
-              usageWaitUntilMs: chat.usageWaitUntilMs,
-            ),
-          );
+    final wait = chatUsageWaitLine(chat);
     final body = LayoutBuilder(
       builder: (context, constraints) {
         final bottom = [
@@ -390,13 +422,14 @@ class _ChatViewState extends State<ChatView> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // Waiting out its provider's usage, it isn't replying: no wave.
           _phone
               ? _PhoneChatHeader(
                   chat: chat,
-                  working: _working,
+                  working: chatAtWork(chat),
                   onMenu: widget.onMenu,
                 )
-              : _ChatHeader(chat: chat, working: _working),
+              : _ChatHeader(chat: chat, working: chatAtWork(chat)),
           Expanded(child: body),
         ],
       ),
@@ -485,7 +518,7 @@ class _ChatHeader extends StatelessWidget {
               GlyphButton(
                 label: 'More',
                 active: false,
-                onTap: () => _chatActions(context, chat),
+                onTap: () => chatActions(context, chat),
                 glyph: (color) => ExtensionGlyph(
                   icon: 'ellipsis',
                   name: 'More',
@@ -555,7 +588,7 @@ class _PhoneChatHeader extends StatelessWidget {
       titleLabel: chatTitle(chat),
       titleHint: 'Renames the chat',
       onTitleTap: () => renameChat(context, chat),
-      trailing: [HeaderButton.more(onTap: () => _chatActions(context, chat))],
+      trailing: [HeaderButton.more(onTap: () => chatActions(context, chat))],
       bottom: SizedBox(
         height: 2,
         child: Stack(
@@ -778,9 +811,12 @@ class _ChatRow extends StatelessWidget {
     final when = chat.updated.isZero
         ? ''
         : logTime(DateTime.fromMillisecondsSinceEpoch(chat.updated.toInt()));
+    // Waiting out its provider's usage: what it waits for, in its time's
+    // place.
+    final wait = chatUsageWaitLine(chat);
     final Widget? mark = waiting > 0
         ? _Pill(waiting)
-        : chat.status == AgentStatus.AGENT_STATUS_WORKING
+        : chatAtWork(chat)
         ? const LiveDot()
         : chat.unseen
         ? Dot(color: palette.text, size: 7)
@@ -789,13 +825,13 @@ class _ChatRow extends StatelessWidget {
       button: true,
       label: [
         chatTitle(chat),
-        if (when.isNotEmpty) when,
+        if (wait.isNotEmpty) wait else if (when.isNotEmpty) when,
         if (waiting > 0) '$waiting waiting for your answer',
       ].join(', '),
       excludeSemantics: true,
       child: GestureDetector(
-        onSecondaryTap: () => _chatActions(context, chat),
-        onLongPress: () => _chatActions(context, chat),
+        onSecondaryTap: () => chatActions(context, chat),
+        onLongPress: () => chatActions(context, chat),
         child: Pressable(
           onTap: onOpen,
           builder: (context, hovered) => Container(
@@ -832,9 +868,9 @@ class _ChatRow extends StatelessWidget {
                               : null,
                         ),
                       ),
-                      if (when.isNotEmpty)
+                      if (wait.isNotEmpty || when.isNotEmpty)
                         Text(
-                          when,
+                          wait.isNotEmpty ? wait : when,
                           style: type.caption.copyWith(
                             color: palette.textFaint,
                           ),
@@ -847,7 +883,7 @@ class _ChatRow extends StatelessWidget {
                 GlyphButton(
                   label: 'More',
                   active: false,
-                  onTap: () => _chatActions(context, chat),
+                  onTap: () => chatActions(context, chat),
                   glyph: (color) => ExtensionGlyph(
                     icon: 'ellipsis',
                     name: 'More',

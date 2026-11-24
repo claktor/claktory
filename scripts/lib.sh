@@ -73,6 +73,15 @@ backend_fingerprint() {
     echo "build: home remapped (Rust, C, C++, Objective-C)"
     find crates proto -type f ! -name .DS_Store -print0 | sort -z | xargs -0 shasum -a 256
     shasum -a 256 Cargo.toml Cargo.lock docs/MANUAL.md
+    # Patched crates the backend builds from ([patch.crates-io] in Cargo.toml).
+    # Left out when absent, so older commits fingerprint as they always did.
+    if [[ -d vendor ]]; then
+      find vendor -type f ! -name .DS_Store -print0 | sort -z | xargs -0 shasum -a 256
+    fi
+    # The video preview helper ships with the backend (build_video_preview).
+    if [[ -d app/macos/VideoPreview ]]; then
+      find app/macos/VideoPreview -type f ! -name .DS_Store -print0 | sort -z | xargs -0 shasum -a 256
+    fi
     if [[ -n "${FACTORY_UPDATE_URL:-}" ]]; then
       echo "update url: $FACTORY_UPDATE_URL"
     fi
@@ -255,6 +264,7 @@ bundled_apps() { # SRC DEST
     done
   done < <(traces)
   [[ -z "$found" ]] || { echo "these apps carry this Mac's home folder, user or host name; not shipping them:$found (build the wasm with --remap-path-prefix=\$HOME=~)" >&2; return 1; }
+  check_tar_headers "$dest"/apps/*.clapp || return 1
   echo "bundled apps: $(cd "$dest/apps" && ls | tr '\n' ' ')"
 }
 
@@ -272,6 +282,7 @@ add_helpers() {
   cp "$release/factoryd" "$helpers/factoryd"
   if [[ -f "$release/claktory-apps" ]]; then cp "$release/claktory-apps" "$helpers/claktory-apps"; fi
   if [[ -f "$release/claktory-speech" ]]; then cp "$release/claktory-speech" "$helpers/claktory-speech"; fi
+  if [[ -f "$release/claktory-video-preview" ]]; then cp "$release/claktory-video-preview" "$helpers/claktory-video-preview"; fi
   # Claktory's own apps are data, not code: in Resources, since codesign
   # refuses anything unsigned in Helpers ("code object is not signed at all").
   rm -rf "$app/Contents/Resources/apps"
@@ -279,6 +290,26 @@ add_helpers() {
   if [[ -d "$release/supervisor/Claktory Agents.app" ]]; then
     ditto "$release/supervisor/Claktory Agents.app" "$helpers/Claktory Agents.app"
   fi
+}
+
+# The video preview helper (#379): app/macos/VideoPreview/main.swift
+# (AVFoundation only), universal for macOS 12, into OUT. factoryd runs it
+# from its own folder to make a phone-sized copy of a video; it ships with
+# the backend, so backend_fingerprint covers its source. Signed ad hoc here
+# under its fixed identifier; scripts/sign-release.sh signs it for real.
+#   build_video_preview OUT
+build_video_preview() {
+  local out="$1" root src work arch
+  root="${SRC_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+  src="$root/app/macos/VideoPreview/main.swift"
+  [[ -f "$src" ]] || return 0
+  work="$(mktemp -d)"
+  for arch in arm64 x86_64; do
+    xcrun swiftc -target "$arch-apple-macos12" -O -o "$work/$arch" "$src" || { rm -rf "$work"; return 1; }
+  done
+  lipo -create -output "$out" "$work/arm64" "$work/x86_64"
+  rm -rf "$work"
+  codesign --force --sign - --identifier dev.factory.claktory-video-preview "$out"
 }
 
 # Release builds carry no trace of this Mac (Fugo, 2026-11-22): its user name,
@@ -378,6 +409,40 @@ traces() {
   return 0
 }
 
+# Refuses (exit 1, naming each) unless every header in the given tar files
+# (.tar, .tar.gz, .clapp) and in each .clapp inside them is neutral: uid and
+# gid 0, no user or group name, and no name of this Mac (its user, home or
+# host names) in a member's path or link (Fugo, v0.1.19's Charts). gitleaks
+# can't see inside an archive, and a header's owner is this Mac's user name.
+check_tar_headers() {
+  local user="${USER:-$(id -un)}"
+  python3 - "$user" "$(traces | tr '\n' '\t')" "$@" <<'PYCHECK'
+import io, sys, tarfile
+user, needles, files = sys.argv[1], [n for n in sys.argv[2].split("\t") if n] + [sys.argv[1]], sys.argv[3:]
+bad = []
+def check(label, fileobj=None, name=None):
+    with tarfile.open(name=name, fileobj=fileobj, mode="r:*") as t:
+        for m in t:
+            where = f"{label}: {m.name}"
+            if m.uid or m.gid or m.uname or m.gname:
+                bad.append(f"{where} has owner {m.uid}:{m.gid} ({m.uname or '-'}:{m.gname or '-'})")
+            for n in needles:
+                if n in m.name or n in (m.linkname or ""):
+                    bad.append(f"{where} names this Mac ({'its user' if n == user else 'a home or host name'})")
+            if m.isfile() and m.name.endswith(".clapp"):
+                check(where, fileobj=io.BytesIO(t.extractfile(m).read()))
+for f in files:
+    check(f, name=f)
+if bad:
+    print("these archives carry this Mac's owner or names; not shipping them (pack with --uid 0 --gid 0 --uname '' --gname ''):", file=sys.stderr)
+    for b in bad[:20]:
+        print("  " + b, file=sys.stderr)
+    if len(bad) > 20:
+        print(f"  … and {len(bad) - 20} more", file=sys.stderr)
+    sys.exit(1)
+PYCHECK
+}
+
 # Refuses (exit 1, naming each file and what it holds) unless no Mach-O or
 # ELF file under the given paths carries one of this Mac's traces.
 check_no_traces() {
@@ -427,17 +492,37 @@ add_browser_host() {
 # day-to-day commits stay on this Mac (and its private backup).
 #   public_commit REPO SOURCE VERSION [PARENT]
 # makes that commit in the git repository REPO (without moving any branch)
-# and prints its id: SOURCE's files, VERSION's changelog section from
+# and prints its id: SOURCE's public files (public_tree), VERSION's changelog section from
 # SOURCE's docs/CHANGELOG.md (and those of versions between PARENT's and it
 # that weren't published on their own), dated when it was released, by
 # Claktory. The same arguments always make the same commit, so a publish
 # that's tried again makes the one it made before.
 PUBLIC_NAME="Claktory"
 PUBLIC_EMAIL="releases@claktory.com"
+# What goes public of a release's source: only what people who install
+# Claktory need, these top-level folders and files. Anything else there
+# (agents' working notes and drafts, such as coordination/) stays here.
+PUBLIC_TOP=(.factoryignore .gitignore .gitleaks.toml AGENTS.md CLAUDE.md Cargo.lock Cargo.toml LICENSE.md README.md
+  TENETS.md rustfmt.toml app apps browser-extension crates docs proto scripts vendor)
+#   public_tree REPO SOURCE
+# prints the tree of SOURCE's files that go public (PUBLIC_TOP), and names
+# on stderr what it left out.
+public_tree() {
+  local repo="$1" source="$2" entries kept left name line
+  entries="$(git -C "$repo" ls-tree "$source^{tree}")" || return 1
+  kept="" left=""
+  while IFS= read -r line; do
+    name="${line#*$'\t'}"
+    if [[ " ${PUBLIC_TOP[*]} " == *" $name "* ]]; then kept+="$line"$'\n'; else left+=" $name"; fi
+  done <<<"$entries"
+  [[ -z "$left" ]] || echo "left out of the public source (not in PUBLIC_TOP, scripts/lib.sh):$left" >&2
+  printf '%s' "$kept" | git -C "$repo" mktree
+}
 public_commit() {
   local repo="$1" source="$2" version="$3" parent="${4:-}"
-  local changelog previous="" sections released date
+  local changelog previous="" sections released date tree
   changelog="$(git -C "$repo" show "$source:docs/CHANGELOG.md")" || return 1
+  tree="$(public_tree "$repo" "$source")" || return 1
   # The newest version the parent has: its sections are already public.
   [[ -z "$parent" ]] ||
     previous="$(git -C "$repo" show "$parent:docs/CHANGELOG.md" 2>/dev/null | sed -n 's/^## \(v[0-9][0-9.]*\)$/\1/p' | head -1)"
@@ -459,5 +544,5 @@ public_commit() {
   printf 'Claktory %s\n\n%s\n' "$version" "$sections" |
     GIT_AUTHOR_NAME="$PUBLIC_NAME" GIT_AUTHOR_EMAIL="$PUBLIC_EMAIL" GIT_AUTHOR_DATE="$date" \
     GIT_COMMITTER_NAME="$PUBLIC_NAME" GIT_COMMITTER_EMAIL="$PUBLIC_EMAIL" GIT_COMMITTER_DATE="$date" \
-    git -C "$repo" -c commit.gpgsign=false commit-tree "$source^{tree}" ${parent:+-p "$parent"}
+    git -C "$repo" -c commit.gpgsign=false commit-tree "$tree" ${parent:+-p "$parent"}
 }

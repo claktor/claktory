@@ -7,6 +7,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:factory_app/backend.dart';
@@ -155,9 +156,15 @@ class _InkBackend extends RecordingBackend {
       s.kind == 'pdf_page' ? 'page ${s.page1based}' : s.kind;
 
   /// Another device saves [page]'s next revision (or its first).
-  InkLayer otherDevice(int page, List<int> drawing, {String? source}) {
+  InkLayer otherDevice(
+    int page,
+    List<int> drawing, {
+    String? source,
+    List<int>? preview,
+  }) {
     final sha = _sha(drawing);
     blobs[sha] = Uint8List.fromList(drawing);
+    if (preview != null) blobs[_sha(preview)] = Uint8List.fromList(preview);
     final had = layers.values
         .where(
           (l) =>
@@ -179,6 +186,9 @@ class _InkBackend extends RecordingBackend {
         sha256: sha,
         bytes: Int64(drawing.length),
       ),
+      preview: preview == null
+          ? null
+          : InkBlobRef(sha256: _sha(preview), bytes: Int64(preview.length)),
       deviceKind: 'tablet',
     );
     layers[layer.id] = layer;
@@ -439,6 +449,25 @@ class _Journal extends InkJournal {
     for (final MapEntry(:key, :value) in kept.entries)
       if (key.startsWith('$document/')) value,
   ];
+}
+
+/// A preview as the iPad makes one: the ink alone, transparent elsewhere.
+Future<List<int>> _png({required bool ink}) async {
+  final recorder = ui.PictureRecorder();
+  final canvas = ui.Canvas(recorder);
+  if (ink) {
+    canvas.drawLine(
+      const ui.Offset(2, 2),
+      const ui.Offset(14, 10),
+      ui.Paint()
+        ..strokeWidth = 2
+        ..color = const ui.Color(0xFF1A1A1A),
+    );
+  }
+  final image = await recorder.endRecording().toImage(16, 12);
+  final data = await image.toByteData(format: ui.ImageByteFormat.png);
+  image.dispose();
+  return data!.buffer.asUint8List();
 }
 
 InkDrawingChanged _change(
@@ -980,6 +1009,65 @@ void main() {
       expect(native.told.last['ink_layer_id'], 'layer-3');
       expect(sync.state.value, isA<InkOutdated>());
       expect((sync.state.value as InkOutdated).pages, [5]);
+    });
+
+    test('a new version names only changed pages with strokes, never one '
+        'erased (#368 QA)', () async {
+      await sync.ready(controller, sourceSha256: _v1);
+      await draw(4, 'on page 4', 1);
+      await draw(5, 'on page 5', 2);
+      // Page 4 erased: its layer stays, empty.
+      native.drawn[4] = (const <int>[], 3);
+      await sync.changed(controller, _change(4, const [], 3, strokes: 0));
+      expect(sync.inkedPages, [5]);
+      backend.current = _v2;
+      native.source = _v2;
+      final reload = Map<String, Object?>.from(
+        _read('bridge/cmd_reload_document.json')['result'] as Map,
+      );
+      reload['kept_layers'] = [];
+      reload['outdated_layers'] = [
+        {'page_1based': 4, 'ink_layer_id': 'layer-1', 'revision': 2},
+        {'page_1based': 5, 'ink_layer_id': 'layer-2', 'revision': 1},
+      ];
+      await sync.reloaded(InkReload(reload));
+      expect(sync.state.value, isA<InkOutdated>());
+      expect((sync.state.value as InkOutdated).pages, [5]);
+      expect(sync.layerOf(4), (inkLayerId: null, revision: null));
+
+      // Drawing on page 4 again starts a layer of the new version.
+      await draw(4, 'of v2', 4);
+      expect(backend.saves.last.inkLayerId, isEmpty);
+      expect(backend.saves.last.sourceSha256, _v2);
+      expect((sync.state.value as InkOutdated).pages, [5]);
+    });
+
+    test('opening names only the earlier version\'s pages with strokes, '
+        'never one erased there (#368 QA)', () async {
+      final blank = await _png(ink: false);
+      final inked = await _png(ink: true);
+      // Page 3 drawn, then erased, on the earlier version.
+      backend.otherDevice(
+        3,
+        utf8.encode('a line'),
+        source: _v2,
+        preview: inked,
+      );
+      backend.otherDevice(
+        3,
+        utf8.encode('erased'),
+        source: _v2,
+        preview: blank,
+      );
+      backend.otherDevice(
+        4,
+        utf8.encode('circle'),
+        source: _v2,
+        preview: inked,
+      );
+      await sync.ready(controller, sourceSha256: _v1);
+      expect(sync.state.value, isA<InkOutdated>());
+      expect((sync.state.value as InkOutdated).pages, [4]);
     });
 
     test('drawing again on a page whose ink was set aside starts a layer of '

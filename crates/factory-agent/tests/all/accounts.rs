@@ -554,6 +554,91 @@ async fn a_fable_mark_does_not_block_the_normal_models() {
     assert!(!stored.contains("\"factoryExhaustedUntil\""), "{stored}");
 }
 
+/// A Claude model of a family: "opus", "sonnet", "haiku".
+fn claude_family(base_url: &str, family: &str) -> Model {
+    let id = catalog::models("anthropic").into_iter().find(|model| model.id.contains(family)).expect("a model of the family").id;
+    model("anthropic", &id, base_url)
+}
+
+/// Anthropic's refusal at a limit of Opus models alone (U11): a 429
+/// "rejected" naming "seven_day_opus" as its representative claim.
+fn opus_limit(resets_at_seconds: u64) -> Answer {
+    json_answer(
+        429,
+        vec![
+            ("anthropic-ratelimit-unified-status".into(), "rejected".into()),
+            ("anthropic-ratelimit-unified-reset".into(), resets_at_seconds.to_string()),
+            ("anthropic-ratelimit-unified-representative-claim".into(), "seven_day_opus".into()),
+        ],
+        json!({"type": "error", "error": {"type": "rate_limit_error", "message": "Error"}}),
+    )
+}
+
+/// U11: Opus models' own weekly limit holds back only Opus requests: Sonnet
+/// and Haiku carry on on the same account, and Opus waits until it resets,
+/// saying it's the weekly Opus limit. A usage read with that limit at 100%
+/// keeps the mark; one with room forgets it.
+#[tokio::test]
+async fn an_opus_limit_holds_back_only_opus() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let resets = now_ms() / 1000 + 3 * 24 * 3600;
+    let server = mock(Arc::new(move |seen| if seen.body.contains("opus") { opus_limit(resets) } else { claude_reply() })).await;
+    store_accounts(&file, "anthropic", vec![account("a", "a@x.com", &claude_token("a"))]);
+    let registry = registry(&file, &server.base_url);
+    let (notes, said) = recorder();
+    let opus = claude_family(&server.base_url, "opus");
+
+    let error = ask(&registry, &notes, &opus, StreamOptions::default()).await.expect_err("at the Opus limit");
+    let at = factory_agent::accounts::local_time(resets * 1000).expect("a time");
+    assert_eq!(error, format!("Your Claude account reached its weekly Opus limit; it resets {at}."));
+    assert_eq!(*said.lock(), [AccountNote::Exhausted]);
+    let stored = std::fs::read_to_string(&file).expect("auth.json");
+    assert!(stored.contains("factoryOpusExhaustedUntil") && !stored.contains("\"factoryExhaustedUntil\""), "{stored}");
+
+    for family in ["sonnet", "haiku"] {
+        let reply = ask(&registry, &notes, &claude_family(&server.base_url, family), StreamOptions::default()).await;
+        assert_eq!(reply, Ok("hi".into()), "{family} carries on");
+    }
+    // Opus isn't asked again before the reset.
+    let asked = || server.seen.lock().iter().filter(|seen| seen.path.ends_with("/v1/messages") && seen.body.contains("opus")).count();
+    ask(&registry, &notes, &opus, StreamOptions::default()).await.expect_err("still at the limit");
+    assert_eq!(asked(), 1);
+    assert_eq!(said.lock().len(), 1, "no switching for Sonnet or Haiku");
+
+    // A usage read: at 100% on Opus's own limit, the mark stays; with room,
+    // it goes.
+    let full = vec!["weekly_opus".to_owned()];
+    assert!(!registry.forget_spent_with_room("anthropic", None, &full).await.expect("forget"));
+    assert!(std::fs::read_to_string(&file).expect("auth.json").contains("factoryOpusExhaustedUntil"));
+    assert!(registry.forget_spent_with_room("anthropic", None, &["five_hour".to_owned()]).await.expect("forget"));
+    assert!(!std::fs::read_to_string(&file).expect("auth.json").contains("factoryOpusExhaustedUntil"));
+}
+
+/// An Opus request refused on a shared limit (the 5-hour one) marks the
+/// shared limits, as before: Sonnet waits too.
+#[tokio::test]
+async fn an_opus_request_at_a_shared_limit_holds_back_every_model() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let resets = now_ms() / 1000 + 90 * 60;
+    let server = mock(Arc::new(move |seen| if seen.body.contains("opus") { claude_limit(resets) } else { claude_reply() })).await;
+    store_accounts(&file, "anthropic", vec![account("a", "a@x.com", &claude_token("a"))]);
+    let registry = registry(&file, &server.base_url);
+    let (notes, _) = recorder();
+
+    let error = ask(&registry, &notes, &claude_family(&server.base_url, "opus"), StreamOptions::default()).await.expect_err("at the limit");
+    assert!(error.starts_with("Your Claude account reached its usage limit; it resets "), "{error}");
+    let error = ask(&registry, &notes, &claude_family(&server.base_url, "sonnet"), StreamOptions::default()).await.expect_err("waits too");
+    assert!(error.starts_with("Your Claude account reached its usage limit; it resets "), "{error}");
+
+    // A usage read with only Opus's own limit full: the shared limits have
+    // room, so their mark goes and Sonnet carries on.
+    assert!(registry.forget_spent_with_room("anthropic", None, &["weekly_opus".to_owned()]).await.expect("forget"));
+    let reply = ask(&registry, &notes, &claude_family(&server.base_url, "sonnet"), StreamOptions::default()).await;
+    assert_eq!(reply, Ok("hi".into()));
+}
+
 #[tokio::test]
 async fn a_credential_stored_before_accounts_is_the_first_and_stays_readable_the_old_way() {
     let dir = tempfile::tempdir().expect("dir");
@@ -689,6 +774,7 @@ fn pasted_registry(file: &std::path::Path) -> Registry {
         identity: Some(who),
         reset: None,
         check_key: None,
+        credit: None,
     };
     Registry::with_providers(FileCredentialStore::new(file.to_path_buf()), no_env(), vec![provider])
 }
@@ -1267,6 +1353,7 @@ async fn a_sign_in_the_provider_wont_refresh_is_refused() {
         identity: None,
         reset: None,
         check_key: None,
+        credit: None,
     };
     let mut stale = account("s", "s@x.com", "stale");
     stale["expires"] = json!(0);
@@ -1334,6 +1421,7 @@ async fn a_refused_sign_in_is_skipped_until_it_is_signed_in_to_again() {
         identity: None,
         reset: None,
         check_key: None,
+        credit: None,
     };
     let mut stale = account("s", "s@x.com", "stale");
     stale["expires"] = json!(0);
@@ -1403,6 +1491,7 @@ async fn a_usage_read_marks_a_refused_sign_in() {
         identity: None,
         reset: None,
         check_key: None,
+        credit: None,
     };
     let mut stale = account("s", "s@x.com", "stale");
     stale["expires"] = json!(0);
@@ -1413,4 +1502,120 @@ async fn a_usage_read_marks_a_refused_sign_in() {
     assert!(registry.accounts("revoked").await.expect("accounts")[0].sign_in_again);
     assert!(registry.account_usage("revoked", Some("s")).await.expect("skipped").is_none());
     assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// OpenRouter's answer to a streamed chat completion: "hi".
+fn openrouter_reply() -> Answer {
+    let chunks = [
+        json!({"id": "c1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hi"}}]}),
+        json!({"id": "c1", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 3, "completion_tokens": 1}}),
+    ];
+    let mut body: String = chunks.iter().map(|chunk| format!("data: {chunk}\n\n")).collect();
+    body.push_str("data: [DONE]\n\n");
+    Answer { status: 200, headers: Vec::new(), content_type: "text/event-stream", body }
+}
+
+fn openrouter_model(base_url: &str) -> Model {
+    let id = catalog::models("openrouter").into_iter().find(|model| model.id == "anthropic/claude-opus-4.8").expect("a model").id;
+    model("openrouter", &id, base_url)
+}
+
+const OR_1: &str = "sk-or-v1-first-1111";
+const OR_2: &str = "sk-or-v1-second-2222";
+
+/// U13 (#343): a key at its own spending limit (OpenRouter's 403, its
+/// `limit_source` and `resets_at`) is skipped until the limit resets, as a
+/// subscription at its limit is, and the request carries on with the next
+/// key; not failed with the raw error.
+#[tokio::test]
+async fn an_openrouter_key_at_its_spending_limit_is_skipped_until_it_resets() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let resets = "2099-01-05T00:00:00.000Z";
+    let server = mock(Arc::new(move |seen| {
+        if seen.token == OR_1 {
+            json_answer(
+                403,
+                Vec::new(),
+                json!({"error": {"code": 403, "message": "Key limit exceeded (weekly limit). $10.20 of $10.00 used; resets 2099-01-05T00:00:00.000Z.", "metadata": {"limit_source": "openrouter_key_limit", "resets_at": resets}}}),
+            )
+        } else {
+            openrouter_reply()
+        }
+    }))
+    .await;
+    store_accounts(&file, "openrouter", vec![keyed("k1", OR_1), keyed("k2", OR_2)]);
+    let registry = registry(&file, &server.base_url);
+    let (notes, _) = recorder();
+    let model = openrouter_model(&server.base_url);
+
+    assert_eq!(ask(&registry, &notes, &model, StreamOptions::default()).await, Ok("hi".into()));
+    assert_eq!(server.tokens("/chat/completions"), [OR_1, OR_2]);
+    let accounts = registry.accounts("openrouter").await.expect("accounts");
+    let shown: Vec<_> = accounts.iter().map(|account| (account.out_of_credit, account.exhausted_until, account.in_use)).collect();
+    let until = factory_agent::clock::parse_iso_ms(resets).expect("a time");
+    assert_eq!(shown, [(false, until, false), (false, 0, true)]);
+
+    // Skipped from then on.
+    assert_eq!(ask(&registry, &notes, &model, StreamOptions::default()).await, Ok("hi".into()));
+    assert_eq!(server.tokens("/chat/completions"), [OR_1, OR_2, OR_2]);
+
+    // With that key alone, the request fails saying it's a spending limit.
+    store_accounts(&file, "openrouter", vec![keyed("k1", OR_1)]);
+    let error = ask(&registry, &notes, &model, StreamOptions::default()).await.expect_err("at its limit");
+    assert!(error.starts_with("Your OpenRouter key reached its spending limit; it resets "), "{error}");
+}
+
+/// A key whose spending limit has reset, and then runs out of credit, says
+/// only that: not the old limit with its reset time, long gone (Abbacchio's
+/// row 750).
+#[tokio::test]
+async fn a_key_out_of_credit_after_its_spending_limit_reset_says_only_credit() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let server = mock(Arc::new(|_| {
+        json_answer(
+            402,
+            Vec::new(),
+            json!({"error": {"code": 402, "message": "Insufficient credits.", "metadata": {"limit_source": "openrouter_credits"}}}),
+        )
+    }))
+    .await;
+    let mut spent = keyed("k1", OR_1);
+    spent["factoryExhaustedUntil"] = json!(now_ms() - 60_000);
+    store_accounts(&file, "openrouter", vec![spent]);
+    let registry = registry(&file, &server.base_url);
+    let (notes, _) = recorder();
+    let error = ask(&registry, &notes, &openrouter_model(&server.base_url), StreamOptions::default()).await.expect_err("no credit");
+    assert_eq!(error, "Your OpenRouter account ran out of credit.");
+}
+
+#[test]
+fn openrouter_spending_limits_are_told_apart_from_its_balance() {
+    use factory_agent::accounts::{credit_error, spending_limit};
+    let body = |limit_source: &str, resets_at: Value| {
+        json!({"error": {"code": 403, "message": "Budget limit exceeded", "metadata": {"limit_source": limit_source, "resets_at": resets_at}}})
+            .to_string()
+    };
+    let at = factory_agent::clock::parse_iso_ms("2026-10-12T00:00:00.000Z");
+    assert_eq!(spending_limit(403, &body("openrouter_key_limit", json!("2026-10-12T00:00:00.000Z")), None), Some(at));
+    assert_eq!(spending_limit(403, &body("openrouter_guardrail_budget", json!("2026-10-12T00:00:00.000Z")), None), Some(at));
+    // A lifetime budget never resets: as out of credit.
+    assert_eq!(spending_limit(403, &body("openrouter_workspace_budget", Value::Null), None), Some(None));
+    assert_eq!(spending_limit(402, &body("openrouter_key_limit", Value::Null), None), Some(None));
+    // Without the metadata, by its words.
+    let bare = json!({"error": {"code": 403, "message": "Key limit exceeded (daily limit)"}}).to_string();
+    assert_eq!(spending_limit(403, &bare, None), Some(None));
+    // The in-flight budget frees up shortly, when Retry-After says.
+    let in_flight = json!({"error": {"code": 402, "message": "This request would exceed your available credits given your current in-flight requests.", "metadata": {"reason": "in_flight_budget_exhausted", "limit_source": "openrouter_in_flight_budget"}}}).to_string();
+    let before = now_ms();
+    let freed = spending_limit(402, &in_flight, Some(5000)).expect("a limit").expect("a time");
+    assert!((before + 5000..=now_ms() + 5000).contains(&freed), "{freed}");
+    // The balance itself is credit, as before; other refusals are neither.
+    let balance =
+        json!({"error": {"code": 402, "message": "Insufficient credits.", "metadata": {"limit_source": "openrouter_credits"}}}).to_string();
+    assert_eq!(spending_limit(402, &balance, None), None);
+    assert!(credit_error(402, &balance));
+    let permission = json!({"error": {"code": 403, "message": "This model is not available in your region"}}).to_string();
+    assert_eq!(spending_limit(403, &permission, None), None);
 }

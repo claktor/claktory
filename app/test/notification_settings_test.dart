@@ -72,12 +72,17 @@ Future<Harness> _show(
   NotificationSettings? settings,
   bool has = true,
   _FakeDevice? device,
+  bool noDevice = false,
+  RemoteAccess? remote,
   Size size = const Size(1200, 2000),
 }) async {
-  DeviceNotifications.debugOverride = device ?? _FakeDevice('allowed');
+  DeviceNotifications.debugOverride = noDevice
+      ? null
+      : device ?? _FakeDevice('allowed');
   addTearDown(() => DeviceNotifications.debugOverride = null);
   final snapshot = workspace();
   if (has) snapshot.settings.notifications = settings ?? _settings();
+  if (remote != null) snapshot.remote = remote;
   final harness = Harness(snapshot);
   await harness.show(tester, size: size);
   harness.page.value = AppPage.settings;
@@ -114,7 +119,7 @@ void main() {
     final here = now.timeZoneOffset.inMinutes;
     expect(
       quietHoursNote(NotificationSettings(), now),
-      'Nothing notifies between these times, in the time zone of the '
+      'Notifications wait until these hours end, in the time zone of the '
       'computer Claktory runs on.',
     );
     expect(
@@ -122,7 +127,7 @@ void main() {
         NotificationSettings(timeZone: 'Europe/Rome', utcOffsetMinutes: here),
         now,
       ),
-      'Nothing notifies between these times.',
+      'Notifications wait until these hours end.',
     );
     expect(
       quietHoursNote(
@@ -132,7 +137,7 @@ void main() {
         ),
         now,
       ),
-      'Nothing notifies between these times, in America/New York time.',
+      'Notifications wait until these hours end, in America/New York time.',
     );
   });
 
@@ -233,7 +238,7 @@ void main() {
     await reveal(
       tester,
       find.text(
-        'Nothing notifies between these times, in the time zone of the '
+        'Notifications wait until these hours end, in the time zone of the '
         'computer Claktory runs on.',
       ),
     );
@@ -310,7 +315,82 @@ void main() {
     );
     await _tap(tester, find.text('Send a test notification'));
     expect(harness.last.hasSendTestNotification(), isTrue);
-    expect(find.text('Sent.'), findsOneWidget);
+    // Where it went: this device, as it shows notifications.
+    expect(find.text('Sent to this Mac.'), findsOneWidget);
+  });
+
+  test('where a test notification went (#352 P2)', () {
+    PairedDevice paired(
+      String id,
+      String name, {
+      String platform = '',
+      bool connected = false,
+      bool notifications = false,
+    }) => PairedDevice(
+      id: id,
+      name: name,
+      platform: platform,
+      connected: connected,
+      notifications: notifications,
+    );
+    final devices = [
+      // Registered for pushes: gets it, connected or not.
+      paired('d1', "Matt's iPhone", platform: 'ios', notifications: true),
+      // A Mac with Claktory open shows it; closed, it doesn't.
+      paired('d2', 'Studio', platform: 'macos', connected: true),
+      paired('d3', 'Laptop', platform: 'macos'),
+      // Android shows none yet, connected or not.
+      paired('d4', 'Pixel', platform: 'android', connected: true),
+      // An iPad that hasn't turned them on, and an app too old to say.
+      paired('d5', "Matt's iPad", platform: 'ipados', connected: true),
+      paired('d6', 'Old', connected: true),
+    ];
+    expect(
+      testSentTo(devices: devices, thisDevice: 'local', here: 'this Mac'),
+      "Sent to this Mac, Matt's iPhone and Studio.",
+    );
+    // This device is named once, as "this …", never again by its name.
+    expect(
+      testSentTo(devices: devices, thisDevice: 'd1', here: 'this iPhone'),
+      'Sent to this iPhone and Studio.',
+    );
+    expect(
+      testSentTo(devices: devices.take(1), thisDevice: 'd4'),
+      "Sent to Matt's iPhone.",
+    );
+    expect(
+      testSentTo(devices: devices.skip(2), thisDevice: 'd4'),
+      'No device gets notifications yet. Turn them on in Claktory on an '
+      'iPhone, iPad or Mac.',
+    );
+  });
+
+  testWidgets("Android: this phone says it doesn't get notifications yet, "
+      'and the test names where it went', (tester) async {
+    await _show(
+      tester,
+      noDevice: true,
+      remote: RemoteAccess(
+        devices: [
+          PairedDevice(id: 'me', name: 'Pixel', platform: 'android'),
+          PairedDevice(
+            id: 'd1',
+            name: "Matt's iPhone",
+            platform: 'ios',
+            notifications: true,
+          ),
+        ],
+      ),
+    );
+    await reveal(tester, find.text('Send a test notification'));
+    expect(
+      find.textContaining("doesn't get notifications yet."),
+      findsOneWidget,
+    );
+    expect(find.text('Turn on'), findsNothing);
+    await _tap(tester, find.text('Send a test notification'));
+    expect(find.text("Sent to Matt's iPhone."), findsOneWidget);
+    expect(find.text('Sent.'), findsNothing);
   });
 
   testWidgets('a backend without them: no Notifications section', (

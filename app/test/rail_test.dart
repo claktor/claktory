@@ -5,6 +5,7 @@ import 'package:factory_app/account_match.dart';
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/controls.dart';
 import 'package:factory_app/device_account.dart';
+import 'package:factory_app/devices.dart' show thisDeviceKind;
 import 'package:factory_app/drafts.dart';
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/main.dart';
@@ -554,7 +555,7 @@ void main() {
     expect(_labeled('mac-mini has something new'), findsOneWidget);
 
     // Another: its agents, in the drawer still open.
-    await tester.tap(_labeled("mac-mini, can't check whose it is"));
+    await tester.tap(_labeled('mac-mini, this $thisDeviceKind is signed out'));
     await pumpFrames(tester);
     expect(app.connections.current?.code, _mini);
     expect(
@@ -569,8 +570,11 @@ void main() {
     (back as dynamic).back();
     await pumpFrames(tester);
     expect(find.byType(ClaktoryList), findsOneWidget);
-    expect(_labeled("nixos, can't check whose it is"), findsOneWidget);
-    await tester.tap(_labeled("nixos, can't check whose it is"));
+    expect(
+      _labeled('nixos, this $thisDeviceKind is signed out'),
+      findsOneWidget,
+    );
+    await tester.tap(_labeled('nixos, this $thisDeviceKind is signed out'));
     await pumpFrames(tester);
     expect(find.byType(ClaktoryList), findsNothing);
     expect(app.connections.current?.code, _nixos);
@@ -633,6 +637,8 @@ void main() {
           error: 'timed out',
           failure: TunnelFailure.unreachable,
           relayConnected: false,
+          relayUpMs: 0,
+          relayTrouble: TunnelRelayTrouble.none,
         );
         app.backends[long]!.connected.value = false;
         app.backends[long]!.refused.value = 'unknown device';
@@ -762,6 +768,7 @@ void main() {
       var signedOut = false;
       var who = 'a@example.com';
       Object? failure;
+      var now = DateTime(2026, 11, 23, 21, 39);
       final changes = ChangeNotifier();
       final account = ChangeNotifier();
       final remotes = [_nixosKey];
@@ -775,6 +782,7 @@ void main() {
             ? api.claktories()
             : Future.error(failure),
         whose: () => who,
+        now: () => now,
       );
       addTearDown(match.dispose);
       expect(match.check(_nixosKey), isNull, reason: 'not read yet');
@@ -807,8 +815,13 @@ void main() {
       expect(match.check(_nixosKey), AccountCheck.signedOut);
       expect(match.check(null), AccountCheck.theirs);
 
-      // Signed in again, but never read since: nothing can be checked.
+      // Signed in again, but never read since: nothing can be checked,
+      // once reads have failed for [AccountMatch.unsureFor] (#388).
       signedOut = false;
+      account.notifyListeners();
+      await pumpEventQueue();
+      expect(match.check(_nixosKey), isNull, reason: 'not for long yet');
+      now = now.add(AccountMatch.unsureFor);
       account.notifyListeners();
       await pumpEventQueue();
       expect(match.check(_nixosKey), AccountCheck.unreadable);
@@ -827,12 +840,100 @@ void main() {
       failure = const AccountServiceUnreachable('offline');
       account.notifyListeners();
       await pumpEventQueue();
+      expect(match.check(_nixosKey), isNull);
+      now = now.add(AccountMatch.unsureFor);
+      account.notifyListeners();
+      await pumpEventQueue();
       expect(match.check(_nixosKey), AccountCheck.unreadable);
       failure = null;
       api.claktoryList = [];
       account.notifyListeners();
       await pumpEventQueue();
       expect(match.check(_nixosKey), AccountCheck.notTheirs);
+    });
+
+    testWidgets("just launched on a slow network, nothing's marked until "
+        'reads have failed for 30 s, tried again 2, 4, 8 and 16 s apart '
+        '(#388)', (tester) async {
+      var now = DateTime(2026, 11, 23, 21, 39, 11);
+      Object? failure = const AccountServiceUnreachable('offline');
+      var reads = 0;
+      final api = FakeAccountApi()
+        ..claktoryList = [
+          const AccountClaktory(id: 'n', name: 'nixos', endpointId: _nixosKey),
+        ];
+      final match = AccountMatch(
+        remotes: () => [_nixosKey],
+        changes: ChangeNotifier(),
+        account: ChangeNotifier(),
+        theirs: () {
+          reads++;
+          return failure == null ? api.claktories() : Future.error(failure);
+        },
+        now: () => now,
+      );
+      addTearDown(match.dispose);
+      var told = 0;
+      match.addListener(() => told++);
+      Future<void> after(int seconds) async {
+        now = now.add(Duration(seconds: seconds));
+        await tester.pump(Duration(seconds: seconds));
+      }
+
+      await tester.pump();
+      expect(reads, 1);
+      expect(match.check(_nixosKey), isNull);
+      for (final (wait, read) in [(2, 2), (4, 3), (8, 4)]) {
+        await after(wait - 1);
+        expect(reads, read - 1, reason: 'not before ${wait}s');
+        await after(1);
+        expect(reads, read);
+        expect(match.check(_nixosKey), isNull, reason: 'still unsure');
+      }
+      expect(told, 0, reason: 'nothing marked meanwhile');
+      // 30 s after the first failure: unchecked, and said so.
+      await after(16);
+      expect(reads, 5);
+      expect(match.check(_nixosKey), AccountCheck.unreadable);
+      expect(told, 1);
+      // Then once a minute, as before; read, it's theirs.
+      failure = null;
+      await after(59);
+      expect(reads, 5);
+      await after(1);
+      expect(reads, 6);
+      expect(match.check(_nixosKey), AccountCheck.theirs);
+    });
+
+    testWidgets('a read that works within the 30 s marks nothing at all', (
+      tester,
+    ) async {
+      var now = DateTime(2026, 11, 23, 21, 39, 51);
+      Object? failure = const AccountServiceUnreachable('offline');
+      final api = FakeAccountApi()
+        ..claktoryList = [
+          const AccountClaktory(id: 'n', name: 'nixos', endpointId: _nixosKey),
+        ];
+      final seen = <AccountCheck?>[];
+      late final AccountMatch match;
+      match = AccountMatch(
+        remotes: () => [_nixosKey],
+        changes: ChangeNotifier(),
+        account: ChangeNotifier(),
+        theirs: () =>
+            failure == null ? api.claktories() : Future.error(failure),
+        now: () => now,
+      )..addListener(() => seen.add(match.check(_nixosKey)));
+      addTearDown(match.dispose);
+      await tester.pump();
+      now = now.add(const Duration(seconds: 2));
+      await tester.pump(const Duration(seconds: 2));
+      failure = null;
+      now = now.add(const Duration(seconds: 4));
+      await tester.pump(const Duration(seconds: 4));
+      expect(match.check(_nixosKey), AccountCheck.theirs);
+      expect(seen, [AccountCheck.theirs]);
+      expect(match.check(_miniKey), AccountCheck.notTheirs);
     });
 
     testWidgets('one not on it is marked: its tile, its card and its form; '
@@ -914,7 +1015,10 @@ void main() {
         ..use(null);
       await app.show(tester);
       expect(_labeled('This Mac'), findsOneWidget);
-      expect(_labeled("nixos, can't check whose it is"), findsOneWidget);
+      expect(
+        _labeled('nixos, this $thisDeviceKind is signed out'),
+        findsOneWidget,
+      );
       // Neutral: no `danger` ring, the words in `textMuted`.
       final palette = Palette.of(tester.element(find.byType(ClaktoryRail)));
       final tile = find.ancestor(
@@ -931,25 +1035,82 @@ void main() {
         isNot(palette.danger),
       );
       await tester.tap(
-        _labeled("nixos, can't check whose it is"),
+        _labeled('nixos, this $thisDeviceKind is signed out'),
         buttons: kSecondaryButton,
       );
       await pumpFrames(tester);
+      final signedOut = find.textContaining(
+        'This $thisDeviceKind is signed out',
+        findRichText: true,
+      );
+      expect(signedOut, findsOneWidget);
       expect(
-        find.textContaining("Can't check whose it is", findRichText: true),
+        find.text('Sign in to check that this Claktory is yours.'),
         findsOneWidget,
       );
+      final label = tester.widget<RichText>(signedOut);
+      expect(label.text.style?.color, palette.textMuted);
+      // With the way to sign in (#388).
+      await tester.tap(find.text('Sign in…'));
+      await pumpFrames(tester);
+      expect(find.text('Sign in to your Claktory account'), findsOneWidget);
       expect(
         find.text(
-          'Sign in to your Claktory account on this device to check whose '
-          'it is.',
+          'So Claktory can check that the Claktories you connect to are '
+          'yours.',
         ),
         findsOneWidget,
       );
-      final label = tester.widget<RichText>(
-        find.textContaining("Can't check whose it is", findRichText: true),
+    });
+
+    testWidgets("on a phone, signed out, the drawer's header offers Sign "
+        'in, and its connection word follows the connection by itself '
+        '(#388)', (tester) async {
+      final app = _App(localBackend: false, account: DeviceAccount());
+      app.connections.use(parsePairingCode(_nixos));
+      await app.show(tester, size: const Size(390, 844));
+      tester
+          .state<PhoneDrawerHostState>(find.byType(PhoneDrawerHost))
+          .openDrawer();
+      await pumpFrames(tester);
+      final header = find.byWidgetPredicate(
+        (w) => w.runtimeType.toString() == '_DrawerHeader',
       );
-      expect(label.text.style?.color, palette.textMuted);
+      expect(
+        find.descendant(
+          of: header,
+          matching: find.textContaining(
+            'This $thisDeviceKind is signed out',
+            findRichText: true,
+          ),
+        ),
+        findsOneWidget,
+      );
+      final signIn = find.descendant(
+        of: header,
+        matching: find.text('Sign in…'),
+      );
+      expect(signIn, findsOneWidget);
+      expect(
+        tester.getSize(signIn).height,
+        lessThanOrEqualTo(tester.getSize(header).height),
+      );
+      Finder word(String text) =>
+          find.descendant(of: header, matching: find.text(text));
+      final backend = app.backends[_nixos]!;
+      expect(backend.connected.value, isTrue);
+      expect(word('Connected'), findsOneWidget);
+      // Down, then welcomed again, with no new Workspace: the word follows.
+      backend.connected.value = false;
+      await pumpFrames(tester);
+      expect(word('Connecting…'), findsOneWidget);
+      backend.connected.value = true;
+      await pumpFrames(tester);
+      expect(word('Connected'), findsOneWidget);
+
+      await tester.tap(signIn);
+      await pumpFrames(tester);
+      expect(find.text('Sign in to your Claktory account'), findsOneWidget);
     });
 
     testWidgets("on a phone, the drawer's header and the list say so too", (

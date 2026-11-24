@@ -113,7 +113,7 @@ impl Said {
 
 /// A new send's id: 128 random bits.
 pub(crate) fn send_id() -> String {
-    crate::vault::crypto::random::<16>().iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::encoding::hex(&crate::vault::crypto::random::<16>())
 }
 
 /// What the sender records now: the send's id and its run. Its taint is
@@ -204,7 +204,7 @@ pub(crate) fn unread(store: &Store) -> BTreeMap<String, u32> {
         return BTreeMap::new();
     };
     statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)))
+        .query_map([], crate::store::row2::<String, u32>)
         .map(|rows| rows.flatten().collect())
         .unwrap_or_default()
 }
@@ -217,7 +217,7 @@ pub(crate) fn note(store: &Store, agent: &str, direct: bool) -> Option<String> {
     let mut statement =
         db.prepare_cached("SELECT id, sender FROM quiet_copies WHERE agent = ?1 AND noted IS NULL AND read IS NULL ORDER BY id").ok()?;
     let rows: Vec<(i64, String)> =
-        statement.query_map([agent], |row| Ok((row.get(0)?, row.get(1)?))).ok()?.flatten().collect();
+        statement.query_map([agent], crate::store::row2).ok()?.flatten().collect();
     let last = rows.last()?.0;
     let mut by: Vec<(String, usize)> = Vec::new();
     for (_, sender) in &rows {

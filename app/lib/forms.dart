@@ -8,6 +8,7 @@ import 'controls.dart';
 import 'folder_browser.dart';
 import 'identity.dart';
 import 'mobile/metrics.dart';
+import 'model_select.dart' show ModelSelect;
 import 'mobile/presentation.dart' show confirmDiscard, guardSheet;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/input.dart' show InputKind;
@@ -1060,24 +1061,6 @@ class _PathField extends StatelessWidget {
   }
 }
 
-/// Model choices: models that can run now, plus [current] if it can't, shown
-/// as what it is (no model). [defaultLabel] names the Factory default when it
-/// may be chosen.
-List<SelectOption<String>> _modelOptions(
-  Workspace workspace,
-  String current, {
-  String? defaultLabel,
-}) {
-  final options = [if (defaultLabel != null) SelectOption('', defaultLabel)];
-  var found = defaultLabel != null && current.isEmpty;
-  for (final model in workspace.models) {
-    options.add(SelectOption(model.id, modelLabel(model)));
-    if (model.id == current) found = true;
-  }
-  if (!found) options.add(SelectOption(current, 'No model available'));
-  return options;
-}
-
 List<SelectOption<String>> _effortOptions(
   Workspace workspace,
   String model,
@@ -1364,15 +1347,13 @@ class _AgentFields extends StatelessWidget {
                 flex: 3,
                 child: Field(
                   label: 'Model',
-                  child: Select(
+                  child: ModelSelect(
+                    workspace: workspace,
                     value: model,
-                    options: _modelOptions(
-                      workspace,
-                      model,
-                      defaultLabel: offerDefault
-                          ? _defaultModelLabel(workspace)
-                          : null,
-                    ),
+                    extra: [
+                      if (offerDefault)
+                        SelectOption('', _defaultModelLabel(workspace)),
+                    ],
                     onChanged: onModel,
                   ),
                 ),
@@ -1970,13 +1951,11 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
                 note:
                     'If its model declines a step for safety reasons, '
                     'Claktory tries it again on this one.',
-                child: Select(
+                child: ModelSelect(
+                  workspace: workspace,
                   value: _fallback,
-                  options: fallbackModelOptions(
-                    workspace,
-                    _fallback,
-                    emptyLabel: _followDefaultLabel(workspace),
-                  ),
+                  title: 'Fallback model',
+                  extra: [SelectOption('', _followDefaultLabel(workspace))],
                   onChanged: (id) => setState(() => _fallback = id),
                 ),
               ),

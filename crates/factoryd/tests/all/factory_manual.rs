@@ -68,6 +68,15 @@ async fn rivet_reads_the_factory_manual_and_other_agents_get_the_core() {
     assert!(names.contains(&"memory_read".to_owned()) && !names.contains(&"memory_update".to_owned()), "{names:?}");
     let searched = call(&mut client, &mut view, "rivet", "memory_read", r#"{"q": "compact_at_tokens"}"#).await;
     assert!(searched.lines().any(|line| line.starts_with("settings-file:")), "{searched}");
+    // Asked for a scheduled job in any words, it finds monitors (friend bug
+    // #10), and a match far into a line shows its own words.
+    for q in ["every 6 hours", "scheduled jobs", "recurring", "Scheduled Jobs"] {
+        let searched = call(&mut client, &mut view, "rivet", "memory_read", &serde_json::json!({"q": q}).to_string()).await;
+        assert!(searched.lines().any(|line| line.starts_with("ext-monitors")), "{q}: {searched}");
+    }
+    let searched = call(&mut client, &mut view, "rivet", "memory_read", r#"{"q": "costs nothing while all is well"}"#).await;
+    let hit = searched.lines().find(|line| line.starts_with("ext-monitors:")).unwrap_or_else(|| panic!("{searched}"));
+    assert!(hit.contains("costs nothing while all is well") && hit.contains(": …"), "the words around it: {hit}");
     let missing = call(&mut client, &mut view, "rivet", "memory_read", r#"{"note": "nope"}"#).await;
     assert!(missing.contains("The Claktory manual has no note \"nope\". Notes: app-claktories, app-sidebar, "), "{missing}");
 

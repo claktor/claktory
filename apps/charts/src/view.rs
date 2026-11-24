@@ -6,12 +6,16 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use crate::model::{self, CHART_KINDS, COLUMNS, Dashboard, Grid, Panel, Query, Viz};
+use crate::model::{self, CHART_KINDS, COLUMNS, Dashboard, Grid, Panel, Query, Threshold, Viz};
 use crate::sql;
 use crate::{DataError, DataSource, Host};
 
 /// The ranges offered, besides the dashboard's own.
-pub const RANGES: [&str; 5] = ["now-1h", "now-24h", "now-7d", "now-30d", "now-90d"];
+pub const RANGES: [&str; 13] =
+    ["now-5m", "now-15m", "now-30m", "now-1h", "now-3h", "now-6h", "now-12h", "now-24h", "now-2d", "now-7d", "now-30d", "now-90d", "now-1y"];
+
+/// The width, in points, below which a row's panels go one under another.
+const STACK_BELOW: u32 = 768;
 
 /// A chart's most rows, downsampled past it; a table's most rows.
 pub const CHART_ROWS: usize = 2_000;
@@ -36,6 +40,8 @@ pub struct View {
     pub editor: Option<Editor>,
     pub form: Option<Form>,
     pub confirm_delete: bool,
+    /// The menu open under its button: "board", "range" or "var<index>".
+    pub menu: Option<String>,
     /// One line about what just happened ("Couldn't save: …").
     pub notice: String,
     /// What was last pushed.
@@ -66,7 +72,7 @@ pub struct Editor {
 }
 
 /// A panel as the editor's fields have it.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Draft {
     pub title: String,
     pub source: String,
@@ -77,20 +83,126 @@ pub struct Draft {
     pub unit: String,
     pub width: u32,
     pub height: u32,
+    /// How a chart draws, as its fields have it: numbers as text, "" for
+    /// unset (min, max, decimals).
+    pub line_width: String,
+    pub fill: String,
+    pub points: String,
+    pub legend: bool,
+    pub min: String,
+    pub max: String,
+    pub decimals: String,
+    /// What a stat shows (`model::REDUCERS`).
+    pub reduce: String,
+    /// A stat's thresholds as written: "green, 80 red".
+    pub thresholds: String,
+    pub color_mode: String,
+    /// A stat's spark line shows.
+    pub graph: bool,
+}
+
+impl Default for Draft {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            source: String::new(),
+            sql: String::new(),
+            kind: String::new(),
+            x: String::new(),
+            series_by: String::new(),
+            unit: String::new(),
+            width: COLUMNS,
+            height: model::HEIGHT,
+            line_width: number_text(LINE_WIDTH),
+            fill: number_text(FILL),
+            points: POINTS_AUTO.into(),
+            legend: true,
+            min: String::new(),
+            max: String::new(),
+            decimals: String::new(),
+            reduce: model::NEW_REDUCE.into(),
+            thresholds: String::new(),
+            color_mode: COLOR_MODE.into(),
+            graph: true,
+        }
+    }
+}
+
+const COLOR_MODE: &str = "value";
+
+/// Thresholds as the editor writes them: the base's color, then each
+/// step's value and color, "green, 80 red".
+pub fn thresholds_text(steps: &[Threshold]) -> String {
+    steps
+        .iter()
+        .map(|step| match step.value {
+            Some(value) => format!("{} {}", number_text(value), step.color),
+            None => step.color.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Thresholds from how the editor writes them; None when they don't read
+/// so.
+pub fn read_thresholds(text: &str) -> Option<Vec<Threshold>> {
+    if text.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    text.split(',')
+        .enumerate()
+        .map(|(index, step)| {
+            let words: Vec<String> = step.split_whitespace().map(str::to_lowercase).collect();
+            match (index, words.as_slice()) {
+                (0, [color]) => Some(Threshold { color: color.clone(), value: None }),
+                (1.., [value, color]) => {
+                    let value = value.parse::<f64>().ok().filter(|value| value.is_finite())?;
+                    Some(Threshold { color: color.clone(), value: Some(value) })
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// The renderer's defaults (Grafana's), which a panel leaves unset.
+const LINE_WIDTH: f64 = 1.0;
+const FILL: f64 = 0.0;
+const POINTS_AUTO: &str = "auto";
+
+/// A number as a field shows it: "2", "0.5".
+pub fn number_text(value: f64) -> String {
+    if value.fract() == 0.0 && value.abs() < 9e15 { format!("{}", value as i64) } else { value.to_string() }
 }
 
 impl Draft {
     pub fn of(panel: &Panel) -> Self {
+        let viz = &panel.viz;
+        let legacy = legacy_thresholds();
+        let optional = |value: Option<f64>| value.map(number_text).unwrap_or_default();
         Self {
             title: panel.title.clone(),
             source: panel.query.source.clone(),
             sql: panel.query.sql.clone(),
-            kind: panel.viz.kind.clone(),
-            x: panel.viz.x.clone().unwrap_or_default(),
-            series_by: panel.viz.series_by.clone().unwrap_or_default(),
-            unit: panel.viz.unit.clone(),
+            kind: viz.kind.clone(),
+            x: viz.x.clone().unwrap_or_default(),
+            series_by: viz.series_by.clone().unwrap_or_default(),
+            unit: viz.unit.clone(),
             width: panel.grid.w,
             height: panel.grid.h,
+            line_width: number_text(viz.line_width.unwrap_or(LINE_WIDTH)),
+            fill: number_text(viz.fill.unwrap_or(FILL)),
+            points: viz.points.clone().unwrap_or_else(|| POINTS_AUTO.into()),
+            legend: viz.legend.unwrap_or(true),
+            min: optional(viz.min),
+            max: optional(viz.max),
+            decimals: viz.decimals.map(|decimals| decimals.to_string()).unwrap_or_default(),
+            // Unset is what stats showed before there was a choice.
+            reduce: viz.reduce.clone().unwrap_or_else(|| "sum".into()),
+            // A stat from before keeps its one color once edited.
+            thresholds: thresholds_text(if legacy_stat(viz) { &legacy } else { &viz.thresholds }),
+            color_mode: viz.color_mode.clone().unwrap_or_else(|| COLOR_MODE.into()),
+            graph: viz.graph.as_deref() != Some("none"),
         }
     }
 
@@ -103,6 +215,8 @@ impl Draft {
             _ => String::new(),
         };
         let number = |key: &str, default: u32| text(key).trim().parse().unwrap_or(default);
+        let or = |key: &str, default: String| Some(text(key).trim().to_owned()).filter(|text| !text.is_empty()).unwrap_or(default);
+        let defaults = Self::default();
         Self {
             title: text("title").trim().to_owned(),
             source: text("source"),
@@ -112,7 +226,18 @@ impl Draft {
             series_by: text("series_by").trim().to_owned(),
             unit: text("unit").trim().to_owned(),
             width: number("width", COLUMNS),
-            height: number("height", 4),
+            height: number("height", model::HEIGHT),
+            line_width: or("line_width", defaults.line_width),
+            fill: or("fill", defaults.fill),
+            points: or("points", defaults.points),
+            legend: context["legend"].as_bool().unwrap_or(true),
+            min: text("min").trim().to_owned(),
+            max: text("max").trim().to_owned(),
+            decimals: text("decimals").trim().to_owned(),
+            reduce: or("reduce", defaults.reduce),
+            thresholds: text("thresholds").trim().to_owned(),
+            color_mode: or("color_mode", defaults.color_mode),
+            graph: context["graph"].as_bool().unwrap_or(true),
         }
     }
 
@@ -122,28 +247,82 @@ impl Draft {
             "title": self.title, "source": [self.source], "sql": self.sql, "kind": [self.kind],
             "x": self.x, "series_by": self.series_by, "unit": self.unit,
             "width": [self.width.to_string()], "height": [self.height.to_string()],
+            "line_width": [self.line_width], "fill": [self.fill], "points": [self.points], "legend": self.legend,
+            "min": self.min, "max": self.max, "decimals": self.decimals,
+            "reduce": [self.reduce], "thresholds": self.thresholds, "color_mode": [self.color_mode], "graph": self.graph,
         })
+    }
+
+    /// Why its style fields can't be kept, as the editor says it.
+    pub fn style_problem(&self) -> Option<String> {
+        let number = |text: &str| text.is_empty() || text.parse::<f64>().is_ok_and(f64::is_finite);
+        if !number(&self.min) || !number(&self.max) {
+            return Some("Enter numbers for min and max, or leave them empty to fit the data.".into());
+        }
+        if !self.decimals.is_empty() && !self.decimals.parse::<u32>().is_ok_and(|decimals| decimals <= 10) {
+            return Some("Enter a whole number from 0 to 10 for decimals, or leave it empty.".into());
+        }
+        let Some(steps) = read_thresholds(&self.thresholds) else {
+            return Some("Enter a color, then a value and a color for each step, such as \u{201c}green, 80 red\u{201d}.".into());
+        };
+        if let Some(step) = steps.iter().find(|step| !model::COLOR_NAMES.contains(&step.color.as_str())) {
+            return Some(format!("\u{201c}{}\u{201d} isn't a color here. Use {}.", step.color, model::COLOR_NAMES.join(", ")));
+        }
+        if steps.windows(2).skip(1).any(|pair| pair[0].value >= pair[1].value) {
+            return Some("Make each threshold value higher than the one before.".into());
+        }
+        if let Some(why) = model::thresholds_problem(&steps) {
+            return Some(format!("Thresholds: {why}."));
+        }
+        let viz = self.viz(None);
+        if let (Some(min), Some(max)) = (viz.min, viz.max)
+            && min >= max
+        {
+            return Some("Make min lower than max.".into());
+        }
+        viz.style_problems().first().map(|(field, why)| format!("{field}: {why}."))
+    }
+
+    /// How the panel it makes shows (keeping what the editor doesn't show
+    /// from `old`). What's at the renderer's default stays unset.
+    pub fn viz(&self, old: Option<&Viz>) -> Viz {
+        let optional = |text: &str| (!text.is_empty()).then(|| text.to_owned());
+        let number = |text: &str| text.parse::<f64>().ok().filter(|value| value.is_finite());
+        let unless = |value: Option<f64>, default: f64| value.filter(|value| *value != default);
+        let kept = old.cloned().unwrap_or_default();
+        Viz {
+            kind: self.kind.clone(),
+            unit: self.unit.clone(),
+            x: optional(&self.x),
+            series_by: optional(&self.series_by),
+            y: if self.series_by.is_empty() || kept.y.len() <= 1 { kept.y } else { Vec::new() },
+            color: kept.color,
+            columns: kept.columns,
+            line_width: unless(number(&self.line_width), LINE_WIDTH),
+            fill: unless(number(&self.fill), FILL),
+            points: optional(&self.points).filter(|points| points != POINTS_AUTO),
+            point_size: kept.point_size,
+            min: number(&self.min),
+            max: number(&self.max),
+            decimals: self.decimals.parse().ok(),
+            legend: (!self.legend).then_some(false),
+            // A stat's always says, so a new one's last stays last.
+            reduce: if self.kind == "stat" { Some(self.reduce.clone()) } else { kept.reduce },
+            thresholds: read_thresholds(&self.thresholds).unwrap_or(kept.thresholds),
+            color_mode: Some(self.color_mode.clone()).filter(|mode| !mode.is_empty() && mode != COLOR_MODE),
+            graph: (!self.graph).then(|| "none".into()),
+        }
     }
 
     /// The panel it makes, as `id` at `grid` (keeping what the editor
     /// doesn't show from `old`).
     pub fn panel(&self, id: &str, grid: Grid, old: Option<&Panel>) -> Panel {
-        let optional = |text: &str| (!text.is_empty()).then(|| text.to_owned());
-        let kept = old.map(|panel| panel.viz.clone()).unwrap_or_default();
         Panel {
             id: id.to_owned(),
             title: self.title.clone(),
             grid: Grid { w: self.width, h: self.height, x: grid.x.min(COLUMNS.saturating_sub(self.width)), ..grid },
             query: Query { source: self.source.clone(), sql: self.sql.clone() },
-            viz: Viz {
-                kind: self.kind.clone(),
-                unit: self.unit.clone(),
-                x: optional(&self.x),
-                series_by: optional(&self.series_by),
-                y: if self.series_by.is_empty() || kept.y.len() <= 1 { kept.y } else { Vec::new() },
-                color: kept.color,
-                columns: kept.columns,
-            },
+            viz: self.viz(old.map(|panel| &panel.viz)),
         }
     }
 }
@@ -174,6 +353,11 @@ pub struct Ran {
     pub nothing_granted: bool,
     /// Some panel waits for its source.
     pub waiting: bool,
+    /// The range it ran for, in milliseconds: where a time axis starts and
+    /// ends.
+    pub span: Option<(i64, i64)>,
+    /// When it ran.
+    pub now: i64,
 }
 
 /// The range a view shows, as written.
@@ -223,9 +407,10 @@ pub fn query(host: &mut impl Host, query: &Query, values: &BTreeMap<String, Valu
 pub fn run(host: &mut impl Host, view: &View, dashboard: &Dashboard, sources: &[DataSource]) -> Ran {
     let now = host.now_ms();
     let values = values(view, dashboard, now);
+    let span = values["from"].as_i64().zip(values["to"].as_i64());
     let nothing_granted = !sources.iter().any(|source| source.granted);
     if nothing_granted {
-        return Ran { nothing_granted, waiting: true, ..Ran::default() };
+        return Ran { nothing_granted, waiting: true, span, now, ..Ran::default() };
     }
     let options = dashboard
         .variables
@@ -248,7 +433,7 @@ pub fn run(host: &mut impl Host, view: &View, dashboard: &Dashboard, sources: &[
         .collect();
     let panels: Vec<Outcome> = dashboard.panels.iter().map(|panel| query(host, &panel.query, &values, sources)).collect();
     let waiting = panels.iter().any(|outcome| matches!(outcome, Outcome::NotGranted(_)));
-    Ran { panels, options, nothing_granted, waiting }
+    Ran { panels, options, nothing_granted, waiting, span, now }
 }
 
 fn cell(value: &Value) -> String {
@@ -284,9 +469,42 @@ fn button(out: &mut Vec<Value>, id: &str, label: &str, name: &str, context: Valu
     out.push(text(&format!("{id}_t"), label, "body"));
 }
 
-/// How a range reads on its button: "7 days".
+/// A button that opens a menu (`which`): its words and a chevron, the
+/// words `<id>_t`.
+fn menu_button(out: &mut Vec<Value>, id: &str, words: Value, which: &str) {
+    out.push(json!({
+        "id": id, "component": "Button", "child": format!("{id}_c"), "variant": "borderless",
+        "action": {"event": {"name": "menu", "context": {"which": which}}},
+    }));
+    out.push(json!({"id": format!("{id}_c"), "component": "List", "direction": "horizontal", "align": "center", "children": [format!("{id}_t"), format!("{id}_i")]}));
+    out.push(text(&format!("{id}_t"), words, "body"));
+    out.push(json!({"id": format!("{id}_i"), "component": "Icon", "name": "chevron-down"}));
+}
+
+/// The open menu's options, each (words, action, context, chosen), in a
+/// card under its button: rows, as Grafana's picker has them, each a
+/// Button over a List of its words, which a renderer draws as a full-width
+/// row, the chosen one ("primary") tinted with a bar on its left.
+fn menu(out: &mut Vec<Value>, children: &mut Vec<String>, options: Vec<(String, &str, Value, bool)>) {
+    let mut ids = Vec::new();
+    for (index, (words, name, context, chosen)) in options.into_iter().enumerate() {
+        let id = format!("menu_o{index}");
+        out.push(json!({
+            "id": id, "component": "Button", "child": format!("{id}_c"), "variant": if chosen { "primary" } else { "borderless" },
+            "action": {"event": {"name": name, "context": context}},
+        }));
+        out.push(json!({"id": format!("{id}_c"), "component": "List", "direction": "horizontal", "children": [format!("{id}_t")]}));
+        out.push(text(&format!("{id}_t"), words, "body"));
+        ids.push(id);
+    }
+    out.push(json!({"id": "menu", "component": "Card", "child": "menu_col"}));
+    out.push(json!({"id": "menu_col", "component": "Column", "children": ids}));
+    children.push("menu".into());
+}
+
+/// How a range reads: "Last 7 days".
 pub fn range_label(from: &str) -> String {
-    let Some(ago) = from.strip_prefix("now-") else { return from.to_owned() };
+    let Some(ago) = from.strip_prefix("now-") else { return from.parse::<i64>().map_or_else(|_| from.to_owned(), date_time) };
     let (count, unit) = ago.split_at(ago.len().saturating_sub(1));
     let one = count == "1";
     let unit = match (unit, one) {
@@ -298,9 +516,76 @@ pub fn range_label(from: &str) -> String {
         ("d", false) => "days",
         ("w", true) => "week",
         ("w", false) => "weeks",
+        ("y", true) => "year",
+        ("y", false) => "years",
         _ => return from.to_owned(),
     };
-    format!("{count} {unit}")
+    format!("Last {count} {unit}")
+}
+
+/// A range as the bar shows it: "Last 7 days", or its ends ("2026-11-23
+/// 08:00:00 to now"), in UTC when one is a fixed time, since an app can't
+/// know the device's time zone.
+pub fn shown_range(from: &str, to: &str) -> String {
+    if to == "now" && from.starts_with("now-") {
+        return range_label(from);
+    }
+    let fixed = [from, to].iter().any(|end| end.parse::<i64>().is_ok());
+    format!("{} to {}{}", range_label(from), range_label(to), if fixed { " UTC" } else { "" })
+}
+
+/// A range short enough for the bar on a phone, with its chevron: "Last 7
+/// days", or a fixed one as "23 Nov 08:00 – 14:00 UTC" (the second date
+/// only when it's another day, the year only when it isn't `now`'s, seconds
+/// only when there are some). The menu has it whole (`shown_range`).
+pub fn short_range(from: &str, to: &str, now: i64) -> String {
+    let (start, end) = (from.parse::<i64>().ok(), to.parse::<i64>().ok());
+    if start.is_none() && end.is_none() {
+        return shown_range(from, to);
+    }
+    let this_year = civil(now).0;
+    let day = |ms: i64| {
+        let (year, month, day, ..) = civil(ms);
+        let month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][(month - 1) as usize];
+        if year == this_year { format!("{day} {month}") } else { format!("{day} {month} {year}") }
+    };
+    let time = |ms: i64| {
+        let (.., hour, minute, second) = civil(ms);
+        if second == 0 { format!("{hour:02}:{minute:02}") } else { format!("{hour:02}:{minute:02}:{second:02}") }
+    };
+    let first = match start {
+        Some(ms) => format!("{} {}", day(ms), time(ms)),
+        None => range_label(from),
+    };
+    let last = match (start, end) {
+        (Some(a), Some(b)) if a.div_euclid(86_400_000) == b.div_euclid(86_400_000) => time(b),
+        (_, Some(ms)) => format!("{} {}", day(ms), time(ms)),
+        (_, None) => range_label(to),
+    };
+    format!("{first} \u{2013} {last} UTC")
+}
+
+/// Milliseconds since 1970 as a UTC date and time, "2026-11-23 08:00:00".
+fn date_time(ms: i64) -> String {
+    let (year, month, day, hour, minute, second) = civil(ms);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+}
+
+/// Milliseconds since 1970 in UTC: (year, month, day, hour, minute, second).
+fn civil(ms: i64) -> (i64, i64, i64, i64, i64, i64) {
+    let (days, ms) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
+    // Days since 1970 to a civil date (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let s = ms / 1000;
+    (year, month, day, s / 3600, s / 60 % 60, s % 60)
 }
 
 /// The whole view's components, root first.
@@ -313,9 +598,16 @@ pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
     }
     let dashboard = scene.dashboard;
 
-    // The heading: the dashboard's name, and Edit or Done.
+    // The heading: the dashboard's name (a menu of the others, when there
+    // are), and Edit or Done.
     let mut head = Vec::new();
-    head.push(json!({"id": "name", "component": "Text", "text": dashboard.map_or("Charts", |d| d.name.as_str()), "variant": "heading"}));
+    let name = dashboard.map_or("Charts", |d| d.name.as_str());
+    if scene.boards.len() > 1 {
+        menu_button(&mut head, "name", json!(name), "board");
+        head.iter_mut().find(|component| component["id"] == "name_t").expect("its words")["variant"] = json!("heading");
+    } else {
+        head.push(json!({"id": "name", "component": "Text", "text": name, "variant": "heading"}));
+    }
     let mut head_children = vec!["name".to_owned()];
     if dashboard.is_some() && !scene.ran.nothing_granted {
         let (label, on) = if view.editing { ("Done", false) } else { ("Edit", true) };
@@ -326,18 +618,14 @@ pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
     head.insert(0, json!({"id": "head", "component": "List", "direction": "horizontal", "align": "center", "children": head_children}));
     add(&mut out, &mut children, "head", head);
 
-    // The dashboards, when there's a choice.
-    if scene.boards.len() > 1 {
-        let mut built = Vec::new();
-        let mut ids = Vec::new();
-        for (index, (id, name)) in scene.boards.iter().enumerate() {
-            let shown = dashboard.is_some_and(|d| d.id == *id);
-            let component = format!("board{index}");
-            button(&mut built, &component, name, "board", json!({"id": id}), if shown { "primary" } else { "default" });
-            ids.push(component);
-        }
-        built.insert(0, json!({"id": "boards", "component": "List", "direction": "horizontal", "children": ids}));
-        add(&mut out, &mut children, "boards", built);
+    // The dashboards, when that menu is open.
+    if view.menu.as_deref() == Some("board") && scene.boards.len() > 1 {
+        let options = scene
+            .boards
+            .iter()
+            .map(|(id, name)| (name.clone(), "board", json!({"id": id}), dashboard.is_some_and(|d| d.id == *id)))
+            .collect();
+        menu(&mut out, &mut children, options);
     }
 
     let Some(dashboard) = dashboard else {
@@ -370,39 +658,45 @@ pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
         return out;
     }
 
-    // The range.
-    let (from, _) = range(view, Some(dashboard));
-    let mut ranges: Vec<String> = RANGES.iter().map(|range| (*range).to_owned()).collect();
-    if !ranges.contains(&dashboard.time.from) && dashboard.time.to == "now" {
-        ranges.insert(0, dashboard.time.from.clone());
-    }
+    // The bar: the range and each variable, each a menu.
+    let (from, to) = range(view, Some(dashboard));
+    let range_words = short_range(&from, &to, scene.ran.now);
     let mut built = Vec::new();
-    let mut ids = Vec::new();
-    for (index, range) in ranges.iter().enumerate() {
-        let id = format!("range{index}");
-        button(&mut built, &id, &range_label(range), "range", json!({"from": range}), if *range == from { "primary" } else { "default" });
-        ids.push(id);
-    }
-    built.insert(0, json!({"id": "ranges", "component": "List", "direction": "horizontal", "children": ids}));
-    add(&mut out, &mut children, "ranges", built);
-
-    // The variables: All, then each option.
+    let mut ids = vec!["range".to_owned()];
+    menu_button(&mut built, "range", json!(range_words), "range");
+    let mut options = Vec::new();
     for (index, variable) in dashboard.variables.iter().enumerate() {
         let chosen = view.values.get(&variable.name).unwrap_or(&variable.default);
         let label = if variable.label.is_empty() { &variable.name } else { &variable.label };
         let id = format!("var{index}");
-        let mut built = vec![text(&format!("{id}_label"), label.as_str(), "caption")];
-        let mut ids = vec![format!("{id}_label")];
-        let options = scene.ran.options.get(index).cloned().unwrap_or_default();
-        let all = std::iter::once((String::new(), "All".to_owned())).chain(options);
-        for (option, (value, shown)) in all.enumerate() {
-            let component = format!("{id}_o{option}");
-            let variant = if value == *chosen { "primary" } else { "default" };
-            button(&mut built, &component, &shown, "variable", json!({"name": variable.name, "value": value}), variant);
-            ids.push(component);
+        let all = std::iter::once((String::new(), "All".to_owned())).chain(scene.ran.options.get(index).cloned().unwrap_or_default());
+        let all: Vec<(String, String)> = all.collect();
+        let shown = all.iter().find(|(value, _)| value == chosen).map_or(chosen.as_str(), |(_, shown)| shown.as_str());
+        menu_button(&mut built, &id, json!(format!("{label}: {shown}")), &id);
+        ids.push(id.clone());
+        if view.menu.as_deref() == Some(id.as_str()) {
+            options = all
+                .into_iter()
+                .map(|(value, shown)| {
+                    let is = value == *chosen;
+                    (shown, "variable", json!({"name": variable.name, "value": value}), is)
+                })
+                .collect();
         }
-        built.insert(0, json!({"id": id, "component": "List", "direction": "horizontal", "align": "center", "children": ids}));
-        add(&mut out, &mut children, &id, built);
+    }
+    if view.menu.as_deref() == Some("range") {
+        // The dashboard's own range first, when it isn't a quick one: ""
+        // goes back to it.
+        let own = &dashboard.time;
+        if own.to != "now" || !RANGES.contains(&own.from.as_str()) {
+            options.push((shown_range(&own.from, &own.to), "range", json!({"from": ""}), view.range.is_none()));
+        }
+        options.extend(RANGES.iter().map(|range| (range_label(range), "range", json!({"from": range}), to == "now" && *range == from)));
+    }
+    built.insert(0, json!({"id": "bar", "component": "List", "direction": "horizontal", "align": "center", "children": ids}));
+    add(&mut out, &mut children, "bar", built);
+    if !options.is_empty() {
+        menu(&mut out, &mut children, options);
     }
 
     // Changing it.
@@ -474,10 +768,18 @@ pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
         if at < COLUMNS {
             gap(&mut built, &mut cells, COLUMNS - at);
         }
-        built.insert(0, json!({"id": id, "component": "Row", "align": "start", "children": cells}));
+        // Below a tablet's width, one panel under another, full width.
+        built.insert(0, json!({"id": id, "component": "Row", "align": "start", "children": cells, "stackBelow": STACK_BELOW}));
         add(&mut out, &mut children, &id, built);
     }
     out.insert(0, json!({"id": "root", "component": "Column", "children": children}));
+    // A time axis spans the range shown, as Grafana's does, rows or not.
+    if let Some((from, to)) = scene.ran.span.filter(|(from, _)| *from >= 0) {
+        for chart in out.iter_mut().filter(|component| component["component"] == "Chart" && component["kind"] == "timeseries") {
+            chart["timeFrom"] = json!(from);
+            chart["timeTo"] = json!(to);
+        }
+    }
     out
 }
 
@@ -507,9 +809,30 @@ fn dashboard_form(view: &View, out: &mut Vec<Value>, children: &mut Vec<String>)
     children.push("form".into());
 }
 
+/// A stat as kept before 0.5.0, untouched since: its total (no reduce) in
+/// one color. It keeps one color, green, rather than the renderer's
+/// default steps (red from 80), which would turn its totals red.
+pub fn legacy_stat(viz: &Viz) -> bool {
+    viz.kind == "stat" && viz.reduce.is_none() && viz.thresholds.is_empty() && viz.color.is_none()
+}
+
+fn legacy_thresholds() -> Vec<Threshold> {
+    vec![Threshold { color: "green".into(), value: None }]
+}
+
+/// A stat's height in points: its panel's, so its number fills it, and at
+/// least 140, Grafana's default stat's, below which its number would be too
+/// small to read beside its spark line (the default dashboard's stats are 3
+/// rows, 106).
+fn stat_height(grid: Grid) -> u32 {
+    model::points(grid.h).clamp(STAT_HEIGHT, 480)
+}
+
+const STAT_HEIGHT: u32 = 140;
+
 /// A panel's height in a chart's points.
 fn height(grid: Grid) -> u32 {
-    (grid.h * 50).clamp(120, 480)
+    model::points(grid.h).clamp(120, 480)
 }
 
 /// A panel's card: its body, and in edit mode Edit and Remove.
@@ -553,11 +876,26 @@ pub fn panel_body(id: &str, at: &str, title: &str, viz: &Viz, grid: Grid, outcom
     }
     let mut component = match viz.kind.as_str() {
         "stat" => {
-            let color = match viz.color.as_deref() {
-                Some("muted") => "muted",
-                _ => "signal",
-            };
-            json!({"id": id, "component": "Stat", "label": title, "value": path("value"), "spark": path("spark"), "color": color})
+            let mut stat = json!({"id": id, "component": "Stat", "label": title, "value": path("value"), "spark": path("spark"), "height": stat_height(grid)});
+            // One fixed color when it says so; else its thresholds'.
+            if let Some(color) = viz.color.as_deref().filter(|color| *color != "palette" && *color != "agent") {
+                stat["color"] = json!(color);
+            }
+            if !viz.thresholds.is_empty() {
+                stat["thresholds"] = json!(viz.thresholds);
+            } else if legacy_stat(viz) {
+                stat["thresholds"] = json!(legacy_thresholds());
+            }
+            if let Some(mode) = &viz.color_mode {
+                stat["colorMode"] = json!(mode);
+            }
+            if let Some(graph) = &viz.graph {
+                stat["graph"] = json!(graph);
+            }
+            if let Some(decimals) = viz.decimals {
+                stat["decimals"] = json!(decimals);
+            }
+            stat
         }
         "table" => {
             let mut table = json!({"id": format!("{id}_table"), "component": "Table", "data": path("data")});
@@ -581,6 +919,7 @@ pub fn panel_body(id: &str, at: &str, title: &str, viz: &Viz, grid: Grid, outcom
             if let Some(color) = &viz.color {
                 chart["color"] = json!(color);
             }
+            style(&mut chart, viz);
             chart
         }
     };
@@ -588,6 +927,26 @@ pub fn panel_body(id: &str, at: &str, title: &str, viz: &Viz, grid: Grid, outcom
         component["unit"] = json!(viz.unit);
     }
     vec![component]
+}
+
+/// How a Chart draws, the properties its panel sets (none for the
+/// renderer's defaults, Grafana's).
+fn style(chart: &mut Value, viz: &Viz) {
+    let mut set = |key: &str, value: Option<Value>| {
+        if let Some(value) = value {
+            chart[key] = value;
+        }
+    };
+    // Whole numbers as such: 2, not 2.0.
+    let number = |value: f64| if value.fract() == 0.0 && value.abs() < 9e15 { json!(value as i64) } else { json!(value) };
+    set("lineWidth", viz.line_width.map(number));
+    set("fill", viz.fill.map(number));
+    set("points", viz.points.clone().map(Value::from));
+    set("pointSize", viz.point_size.map(number));
+    set("min", viz.min.map(number));
+    set("max", viz.max.map(number));
+    set("decimals", viz.decimals.map(Value::from));
+    set("legend", viz.legend.map(Value::from));
 }
 
 /// A panel's data, where its body looks for it.
@@ -598,7 +957,7 @@ pub fn panel_data(viz: &Viz, outcome: &Outcome, rows: usize) -> Value {
             json!({"error": format!("To see this panel, Charts needs to read {label}. Ask Rivet to set it up.")})
         }
         Outcome::Table(_) if !drawable(&viz.kind) => json!({"error": format!("Charts can't draw \"{}\".", viz.kind)}),
-        Outcome::Table(table) if viz.kind == "stat" => stat(table),
+        Outcome::Table(table) if viz.kind == "stat" => stat(table, viz.reduce.as_deref().unwrap_or("sum")),
         Outcome::Table(table) if viz.kind == "table" => json!({"data": truncate(table, TABLE_ROWS.min(rows))}),
         Outcome::Table(table) => json!({"data": downsample(table, rows, viz.series_by.as_deref())}),
     }
@@ -611,12 +970,24 @@ pub fn panels_data(dashboard: &Dashboard, ran: &Ran) -> Value {
 }
 
 /// A Stat's value and spark line from a query's answer: the last column's
-/// numbers, in order, and their total.
-pub fn stat(table: &Value) -> Value {
+/// numbers, in order, and what `reduce` makes of them (`model::REDUCERS`):
+/// a total of none is 0, the others of none null.
+pub fn stat(table: &Value, reduce: &str) -> Value {
     let rows = table["rows"].as_array().cloned().unwrap_or_default();
     let spark: Vec<f64> = rows.iter().filter_map(|row| row.as_array()?.last()?.as_f64()).collect();
-    let total: f64 = spark.iter().sum();
-    let value = if total.fract() == 0.0 && total.abs() < 9e15 { json!(total as i64) } else { json!(total) };
+    let numbers = spark.iter().copied();
+    let value = match reduce {
+        "last" => spark.last().copied(),
+        "mean" => (!spark.is_empty()).then(|| spark.iter().sum::<f64>() / spark.len() as f64),
+        "max" => numbers.reduce(f64::max),
+        "min" => numbers.reduce(f64::min),
+        _ => Some(spark.iter().sum()),
+    };
+    let value = match value {
+        Some(value) if value.fract() == 0.0 && value.abs() < 9e15 => json!(value as i64),
+        Some(value) => json!(value),
+        None => Value::Null,
+    };
     let mut spark: Vec<f64> = spark.into_iter().rev().take(200).collect();
     spark.reverse();
     json!({"value": value, "spark": spark})
@@ -676,7 +1047,25 @@ const KIND_LABELS: [(&str, &str); 7] = [
     ("table", "Table"),
 ];
 const WIDTHS: [(u32, &str); 5] = [(3, "Quarter"), (4, "Third"), (6, "Half"), (8, "Two thirds"), (12, "Full")];
-const HEIGHTS: [(u32, &str); 4] = [(2, "Short"), (4, "Medium"), (6, "Tall"), (8, "Taller")];
+/// In Grafana's rows: 144, 296, 372 and 480 points.
+const HEIGHTS: [(u32, &str); 4] = [(4, "Short"), (8, "Medium"), (10, "Tall"), (13, "Taller")];
+
+const LINE_WIDTHS: [(&str, &str); 5] = [("0", "None"), ("1", "1"), ("2", "2"), ("3", "3"), ("5", "5")];
+const FILLS: [(&str, &str); 5] = [("0", "None"), ("10", "10%"), ("25", "25%"), ("50", "50%"), ("100", "100%")];
+const REDUCE_LABELS: [(&str, &str); 5] = [("last", "Last"), ("sum", "Total"), ("mean", "Mean"), ("max", "Max"), ("min", "Min")];
+const COLOR_MODE_LABELS: [(&str, &str); 4] =
+    [("value", "Value"), ("background", "Background gradient"), ("solid", "Background solid"), ("none", "None")];
+const POINT_LABELS: [(&str, &str); 3] = [("auto", "Auto"), ("always", "Always"), ("never", "Never")];
+
+/// Chips for `known`, and for `current` (as `current` and `unit`) when it
+/// isn't one of them, such as an agent's choice.
+fn choices(known: &[(&str, &str)], current: &str, unit: &str) -> Value {
+    let mut options: Vec<Value> = known.iter().map(|(value, label)| json!({"label": label, "value": value})).collect();
+    if !current.is_empty() && !known.iter().any(|(value, _)| *value == current) {
+        options.push(json!({"label": format!("{current}{unit}"), "value": current}));
+    }
+    Value::Array(options)
+}
 
 fn sizes(known: &[(u32, &str)], current: u32, unit: &str) -> Value {
     let mut options: Vec<Value> = known.iter().map(|(value, label)| json!({"label": label, "value": value.to_string()})).collect();
@@ -707,22 +1096,31 @@ pub fn editor_components(editor: &Editor, sources: &[DataSource]) -> Vec<Value> 
             "caption",
         ),
         json!({"id": "ed_kind", "component": "ChoicePicker", "label": "Show as", "options": KIND_LABELS.iter().map(|(value, label)| json!({"label": label, "value": value})).collect::<Vec<_>>(), "value": {"@path": "/editor/kind"}, "variant": "mutuallyExclusive", "displayStyle": "chips"}),
+        json!({"id": "ed_reduce", "component": "ChoicePicker", "label": "Number shows", "options": choices(&REDUCE_LABELS, &draft.reduce, ""), "value": {"@path": "/editor/reduce"}, "variant": "mutuallyExclusive", "displayStyle": "chips"}),
+        json!({"id": "ed_thresholds", "component": "TextField", "label": "Thresholds", "value": {"@path": "/editor/thresholds"}, "placeholder": "green, 80 red"}),
+        json!({"id": "ed_color_mode", "component": "ChoicePicker", "label": "Color mode", "options": choices(&COLOR_MODE_LABELS, &draft.color_mode, ""), "value": {"@path": "/editor/color_mode"}, "variant": "mutuallyExclusive", "displayStyle": "chips"}),
+        json!({"id": "ed_graph", "component": "CheckBox", "label": "Sparkline", "value": {"@path": "/editor/graph"}}),
         json!({"id": "ed_columns", "component": "Row", "align": "start", "children": ["ed_x", "ed_series", "ed_unit"]}),
         json!({"id": "ed_x", "component": "TextField", "label": "Along the bottom", "value": {"@path": "/editor/x"}, "placeholder": "The first column", "weight": 1}),
         json!({"id": "ed_series", "component": "TextField", "label": "Split by", "value": {"@path": "/editor/series_by"}, "placeholder": "Nothing", "weight": 1}),
         json!({"id": "ed_unit", "component": "TextField", "label": "Unit", "value": {"@path": "/editor/unit"}, "placeholder": "None", "weight": 1}),
         json!({"id": "ed_width", "component": "ChoicePicker", "label": "Width", "options": sizes(&WIDTHS, draft.width, "columns"), "value": {"@path": "/editor/width"}, "variant": "mutuallyExclusive", "displayStyle": "chips"}),
         json!({"id": "ed_height", "component": "ChoicePicker", "label": "Height", "options": sizes(&HEIGHTS, draft.height, "units"), "value": {"@path": "/editor/height"}, "variant": "mutuallyExclusive", "displayStyle": "chips"}),
+        json!({"id": "ed_line", "component": "ChoicePicker", "label": "Line width", "options": choices(&LINE_WIDTHS, &draft.line_width, ""), "value": {"@path": "/editor/line_width"}, "variant": "mutuallyExclusive", "displayStyle": "chips"}),
+        json!({"id": "ed_fill", "component": "ChoicePicker", "label": "Fill", "options": choices(&FILLS, &draft.fill, "%"), "value": {"@path": "/editor/fill"}, "variant": "mutuallyExclusive", "displayStyle": "chips"}),
+        json!({"id": "ed_points", "component": "ChoicePicker", "label": "Points", "options": choices(&POINT_LABELS, &draft.points, ""), "value": {"@path": "/editor/points"}, "variant": "mutuallyExclusive", "displayStyle": "chips"}),
+        json!({"id": "ed_axis", "component": "Row", "align": "start", "children": ["ed_min", "ed_max", "ed_decimals"]}),
+        json!({"id": "ed_min", "component": "TextField", "label": "Min", "value": {"@path": "/editor/min"}, "placeholder": "Auto", "variant": "number", "weight": 1}),
+        json!({"id": "ed_max", "component": "TextField", "label": "Max", "value": {"@path": "/editor/max"}, "placeholder": "Auto", "variant": "number", "weight": 1}),
+        json!({"id": "ed_decimals", "component": "TextField", "label": "Decimals", "value": {"@path": "/editor/decimals"}, "placeholder": "Auto", "variant": "number", "weight": 1}),
+        json!({"id": "ed_legend", "component": "CheckBox", "label": "Legend", "value": {"@path": "/editor/legend"}}),
     ];
-    let mut col = vec!["ed_heading", "ed_title", "ed_source", "ed_sql", "ed_help", "ed_kind", "ed_columns", "ed_width", "ed_height"];
+    let mut col = vec![
+        "ed_heading", "ed_title", "ed_source", "ed_sql", "ed_help", "ed_kind", "ed_reduce", "ed_thresholds", "ed_color_mode", "ed_graph", "ed_columns", "ed_width", "ed_height", "ed_line", "ed_fill",
+        "ed_points", "ed_axis", "ed_legend",
+    ];
     if let Some(preview) = &editor.preview {
-        let viz = Viz {
-            kind: draft.kind.clone(),
-            unit: draft.unit.clone(),
-            x: (!draft.x.is_empty()).then(|| draft.x.clone()),
-            series_by: (!draft.series_by.is_empty()).then(|| draft.series_by.clone()),
-            ..Viz::default()
-        };
+        let viz = draft.viz(None);
         let grid = Grid { h: draft.height, ..Grid::default() };
         out.push(json!({"id": "ed_preview", "component": "Card", "child": "ed_preview_body"}));
         out.extend(panel_body("ed_preview_body", "/editor/preview", &draft.title, &viz, grid, preview));
@@ -738,6 +1136,10 @@ pub fn editor_components(editor: &Editor, sources: &[DataSource]) -> Vec<Value> 
         "title": {"@path": "/editor/title"}, "source": {"@path": "/editor/source"}, "sql": {"@path": "/editor/sql"},
         "kind": {"@path": "/editor/kind"}, "x": {"@path": "/editor/x"}, "series_by": {"@path": "/editor/series_by"},
         "unit": {"@path": "/editor/unit"}, "width": {"@path": "/editor/width"}, "height": {"@path": "/editor/height"},
+        "line_width": {"@path": "/editor/line_width"}, "fill": {"@path": "/editor/fill"}, "points": {"@path": "/editor/points"},
+        "min": {"@path": "/editor/min"}, "max": {"@path": "/editor/max"}, "decimals": {"@path": "/editor/decimals"},
+        "legend": {"@path": "/editor/legend"}, "reduce": {"@path": "/editor/reduce"},
+        "thresholds": {"@path": "/editor/thresholds"}, "color_mode": {"@path": "/editor/color_mode"}, "graph": {"@path": "/editor/graph"},
     });
     let mut buttons = vec!["ed_run", "ed_save", "ed_cancel"];
     button(&mut out, "ed_run", "Run", "run", context.clone(), "default");
@@ -756,12 +1158,7 @@ pub fn preview_data(editor: &Editor) -> Value {
     match &editor.preview {
         None => Value::Null,
         Some(outcome) => {
-            let viz = Viz {
-                kind: editor.draft.kind.clone(),
-                series_by: Some(editor.draft.series_by.clone()).filter(|s| !s.is_empty()),
-                ..Viz::default()
-            };
-            panel_data(&viz, outcome, CHART_ROWS)
+            panel_data(&editor.draft.viz(None), outcome, CHART_ROWS)
         }
     }
 }
@@ -773,6 +1170,9 @@ pub fn draft_problem(draft: &Draft, dashboard: &Dashboard) -> Option<String> {
     }
     if draft.kind.is_empty() {
         return Some("Choose how to show it.".into());
+    }
+    if let Some(why) = draft.style_problem() {
+        return Some(why);
     }
     let known: Vec<&str> = sql::BUILTINS.iter().copied().chain(dashboard.variables.iter().map(|v| v.name.as_str())).collect();
     sql::check(&draft.sql, &known).err().map(|why| format!("The query: {why}."))

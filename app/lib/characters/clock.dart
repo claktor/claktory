@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
+import '../controls.dart' show LiveClock;
 import 'identity.dart';
 import 'pose.dart';
 
@@ -39,12 +40,22 @@ const minimumStep = 0.1;
 /// something paints it again. With nothing to move, the clock stops; if
 /// only compact characters are showing, it sleeps until the next blink.
 /// Reduced motion, a muted subtree ([TickerMode]) or the app hidden stops
-/// it.
+/// it. While [LiveClock] runs (something working on screen), it moves on
+/// that clock's ticks instead of its own timer, at that clock's rate, so
+/// faces and waves move in the same frames.
 class CharacterClock {
+  CharacterClock() {
+    LiveClock.instance.running.addListener(_schedule);
+  }
+
   final _subscribers = <CharacterSubscription>{};
   final _tracks = <String, MoodTrack>{};
   Timer? _ticks;
   Timer? _sleep;
+
+  /// Moving on [LiveClock]'s ticks, while it runs, instead of [_ticks]:
+  /// faces and waves then move in the same frames.
+  var _riding = false;
   var _base = 0.0;
   var _now = 0.0;
   var _frame = 0;
@@ -126,7 +137,7 @@ class CharacterClock {
   int get subscribers => _subscribers.length;
 
   /// Whether the clock is ticking: for tests and profiling.
-  bool get ticking => _ticks != null;
+  bool get ticking => _ticks != null || _riding;
 
   /// Thinking or working: it moves all the time, not only in the calm
   /// windows.
@@ -147,8 +158,12 @@ class CharacterClock {
       ? characterFps
       : smallFaceFps;
 
-  void _tick(Timer timer) {
-    _now = _base + timer.tick / _rate;
+  void _tick(Timer timer) => _advance(_base + timer.tick / _rate);
+
+  void _beat() => _advance(_now + 1 / LiveClock.waveFps);
+
+  void _advance(double now) {
+    _now = now;
     _frame++;
     var asked = false;
     for (final subscriber in _subscribers) {
@@ -189,6 +204,16 @@ class CharacterClock {
   }
 
   void _start(int fps) {
+    // While the window's live clock runs (an agent working), faces move
+    // on its ticks, at its rate: every frame on a Mac redraws the whole
+    // window, so a timer of their own would add frames between its.
+    if (LiveClock.instance.running.value) {
+      _ticks?.cancel();
+      _ticks = null;
+      _ride(true);
+      return;
+    }
+    _ride(false);
     if (_ticks != null && fps == _rate) return;
     _ticks?.cancel();
     _rate = fps;
@@ -199,6 +224,15 @@ class CharacterClock {
   void _stop() {
     _ticks?.cancel();
     _ticks = null;
+    _ride(false);
+  }
+
+  void _ride(bool ride) {
+    if (ride == _riding) return;
+    _riding = ride;
+    ride
+        ? LiveClock.instance.beat.addListener(_beat)
+        : LiveClock.instance.beat.removeListener(_beat);
   }
 
   /// Ticks while anything on screen moves, as fast as the fastest needs;
@@ -236,6 +270,7 @@ class CharacterClock {
   }
 
   void dispose() {
+    LiveClock.instance.running.removeListener(_schedule);
     _sleep?.cancel();
     _stop();
   }

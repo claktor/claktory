@@ -5,7 +5,9 @@
 // `claktory://`), which the iPhone's
 // Camera opens from a Mac's QR code. The Mac's app takes them
 // (AppDelegate.swift), the iPhone's (SceneDelegate) and Android's
-// (MainActivity) too; Claktory Dev's scheme is claktory-dev, and debug
+// (MainActivity) too, and https://claktory.com/pair#<the code's query>,
+// the page a QR code may open, as a Universal Link or App Link; Claktory
+// Dev's scheme is claktory-dev, and debug
 // builds' claktory-debug, so claktory:// always opens the real Claktory.
 // Nothing connects without the person's Connect in [confirmPairing], the
 // one confirmation every way in uses (a link, the scanner, a paste).
@@ -45,6 +47,12 @@ AddLink? parseLink(Uri link) {
   final shaped = link.host.isEmpty || link.hasPort;
   if (link.scheme == 'factory' || (link.scheme == 'claktory' && shaped)) {
     return AddLink(parsePairingCode(link.toString()));
+  }
+  // The pairing page's link, as a Universal Link or App Link opens the app
+  // with it (#352 P6): only the code after its `#` is read.
+  if (link.scheme == 'https') {
+    final code = pairLinkCode(link.toString());
+    return code == null ? null : AddLink(parsePairingCode(code));
   }
   if (!linkSchemes.contains(link.scheme) || link.host != 'add') return null;
   // The code is URL-encoded in `code`; one pasted in as it is runs on into

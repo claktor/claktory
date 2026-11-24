@@ -32,7 +32,7 @@ use super::{
     AccessSpec, BoxFuture, Choice, Choices, Control, Derive, Derived, ExportMeta, FlowKind, Http, Inspected, Problem, Recipe, Spec, Start,
     Variable, setting as set,
 };
-use crate::encoding::hex;
+use crate::encoding::{hex, percent_decode as uri_decode, percent_encode as uri_encode};
 
 /// The connector's id.
 pub const ID: &str = "aws";
@@ -521,38 +521,6 @@ pub struct Keys {
     pub id: String,
     pub secret: Zeroizing<String>,
     pub token: String,
-}
-
-/// RFC 3986's encoding, as SigV4 wants it.
-fn uri_encode(text: &str) -> String {
-    let mut out = String::new();
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
-            out.push(char::from(byte));
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
-}
-
-/// Undoes percent-encoding ("+" stays "+"), as IAM sends policy documents.
-fn uri_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && let Some(byte) = text.get(index + 1..index + 3).and_then(|pair| u8::from_str_radix(pair, 16).ok())
-        {
-            out.push(byte);
-            index += 3;
-            continue;
-        }
-        out.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn hmac(key: &[u8], data: &str) -> Vec<u8> {

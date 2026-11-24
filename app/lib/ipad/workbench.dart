@@ -248,7 +248,7 @@ class _SafeWindow extends StatelessWidget {
         padding.right,
         0,
       ),
-      child: _WindowKeyboard(
+      child: WindowKeyboard(
         height: MediaQuery.viewInsetsOf(context).bottom,
         child: MediaQuery(
           data: MediaQuery.of(context)
@@ -267,14 +267,15 @@ class _SafeWindow extends StatelessWidget {
 
 /// The on-screen keyboard's height over the window, kept for what's laid
 /// over the whole window from inside it (an expanded pane, in the
-/// window's overlay), which sees no keyboard in its MediaQuery.
-class _WindowKeyboard extends InheritedWidget {
-  const _WindowKeyboard({required this.height, required super.child});
+/// window's overlay), which sees no keyboard in its MediaQuery. The iPad's
+/// workbench and the wide shell's row (an Android tablet's) both give it.
+class WindowKeyboard extends InheritedWidget {
+  const WindowKeyboard({super.key, required this.height, required super.child});
 
   final double height;
 
   @override
-  bool updateShouldNotify(_WindowKeyboard old) => old.height != height;
+  bool updateShouldNotify(WindowKeyboard old) => old.height != height;
 }
 
 /// How much of the window's bottom the on-screen keyboard covers, for
@@ -282,7 +283,7 @@ class _WindowKeyboard extends InheritedWidget {
 /// workbench, the keyboard it took out of the MediaQuery; elsewhere, the
 /// MediaQuery's own.
 double keyboardOverWindow(BuildContext context) =>
-    context.dependOnInheritedWidgetOfExactType<_WindowKeyboard>()?.height ??
+    context.dependOnInheritedWidgetOfExactType<WindowKeyboard>()?.height ??
     MediaQuery.viewInsetsOf(context).bottom;
 
 /// What the on-screen keyboard leaves of the content's and the panel's

@@ -117,7 +117,8 @@ Future<void> _type(WidgetTester tester, String text) async {
 
 void main() {
   testWidgets('the expanded file shows the question and its answer field; '
-      'Return sends the answer and the pane closes', (tester) async {
+      'typed, one Submit, and Return sends the words as a reply, never a yes '
+      '(#370); the pane closes', (tester) async {
     final harness = await _showing(tester, _text, 'text');
     expect(find.text('Fugo asks you to review this'), findsOneWidget);
     expect(find.text('Which option is better?'), findsOneWidget);
@@ -129,7 +130,9 @@ void main() {
     expect(find.text('Approve'), findsOneWidget);
 
     await _type(tester, 'I like the second one better');
-    expect(find.text('Send'), findsOneWidget);
+    expect(find.text('Submit'), findsOneWidget);
+    expect(find.text('Approve'), findsNothing);
+    expect(find.text('Dismiss'), findsNothing);
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await settle(tester);
 
@@ -137,9 +140,11 @@ void main() {
         .lastWhere((m) => m.hasAnswerAsk())
         .answerAsk;
     expect(
-      (answer.agentId, answer.seq.toInt(), answer.text, answer.dismiss),
-      ('fugo', 7, 'I like the second one better', false),
+      (answer.agentId, answer.seq.toInt(), answer.text, answer.reply),
+      ('fugo', 7, 'I like the second one better', true),
     );
+    // A Claktory from before Submit takes it as a comment, never a yes.
+    expect(answer.dismiss, isTrue);
     final set = harness.last.setLayout;
     expect(set.agentId, 'fugo');
     expect(set.hasRoot(), isFalse, reason: 'only the conversation is left');
@@ -201,8 +206,8 @@ void main() {
   });
 
   testWidgets('said rather than typed: the mic records in the field\'s '
-      'place (Dismiss and Send aside), Return is Done, the words go in at '
-      'the caret, and nothing goes until Send', (tester) async {
+      'place (its buttons aside), Return is Done, the words go in at the '
+      'caret, and nothing goes until Submit', (tester) async {
     final was = deviceRecorder;
     final recorder = FakeRecorder();
     deviceRecorder = recorder;
@@ -219,14 +224,14 @@ void main() {
     await tester.tap(dictate);
     await io(tester);
     expect(recorder.recordingInto, isNotNull);
-    expect(find.text('Send'), findsNothing);
+    expect(find.text('Submit'), findsNothing);
     expect(find.text('Dismiss'), findsNothing);
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await io(tester);
     await pumpFrames(tester);
     expect(find.text('I like the second one'), findsOneWidget);
     expect(harness.backend.sent.where((m) => m.hasAnswerAsk()), isEmpty);
-    await tester.tap(find.text('Send'));
+    await tester.tap(find.text('Submit'));
     await settle(tester);
     expect(
       harness.backend.sent.lastWhere((m) => m.hasAnswerAsk()).answerAsk.text,
@@ -267,15 +272,18 @@ void main() {
     );
   });
 
-  testWidgets('Dismiss takes what was typed as its comment', (tester) async {
+  testWidgets('typed, Dismiss gives way to Submit; cleared, it comes back '
+      'and dismisses', (tester) async {
     final harness = await _showing(tester, _text, 'text');
     await _type(tester, 'Not now');
+    expect(find.text('Dismiss'), findsNothing);
+    await _type(tester, '');
     await tester.tap(find.text('Dismiss'));
     await settle(tester);
     final answer = harness.backend.sent
         .lastWhere((m) => m.hasAnswerAsk())
         .answerAsk;
-    expect((answer.text, answer.dismiss), ('Not now', true));
+    expect((answer.text, answer.dismiss, answer.reply), ('', true, false));
     expect(harness.last.hasSetLayout(), isTrue);
   });
 
@@ -283,7 +291,7 @@ void main() {
     final harness = await _showing(tester, _text, 'text');
     await _type(tester, 'The second');
     harness.backend.refuse = 'Claktory is restarting.';
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.tap(find.text('Submit'));
     await settle(tester);
     expect(find.text("Couldn't send your answer. Try again."), findsOneWidget);
     expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
@@ -357,7 +365,7 @@ void main() {
     );
 
     await _type(tester, 'Looks right');
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.tap(find.text('Submit'));
     await settle(tester);
     expect(
       harness.backend.sent.lastWhere((m) => m.hasAnswerAsk()).answerAsk.text,

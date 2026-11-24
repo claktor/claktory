@@ -10,11 +10,13 @@
 // attach, goToPage, search; ready, pageChanged, linkTapped, error. Mac
 // only: findRequested {forward}, when ⌘F (⌘G, ⇧⌘G) is pressed with the
 // page focused, for the app's find bar. The app-wide "claktory/ink" channel
-// is the render cache (PaperCache.swift).
+// is the render cache (PaperCache.swift). And loadDrawing, as on the iPad:
+// ink saved there shows over its page, only read (#368, [InkOverlay]).
 
 import Cocoa
 import FlutterMacOS
 import PDFKit
+import PencilKit
 
 enum Paper {
   static let viewType = "claktory/ink"
@@ -107,6 +109,10 @@ final class PaperPane: NSView, PDFViewDelegate {
   private var url: URL?
   private let searching = DispatchQueue(label: "claktory.paper.search", qos: .userInitiated)
   private var searches = 0
+  /// Each page's saved ink (loadDrawing), laid over it once the document
+  /// is open.
+  private var inks: [Int: PKDrawing] = [:]
+  private var overlays: [Int: InkOverlay] = [:]
 
   init(params: [String: Any], channel: FlutterMethodChannel) {
     self.params = params
@@ -173,6 +179,8 @@ final class PaperPane: NSView, PDFViewDelegate {
           self.url = URL(fileURLWithPath: path)
           PaperCore.readOnlyForms(document)
           self.pdf.document = document
+          self.overlays = [:]
+          for page in self.inks.keys { self.showInk(page: page) }
           if let page = (self.params["initial"] as? [String: Any])?["page_1based"] as? Int,
             let target = document.page(at: page - 1)
           {
@@ -215,10 +223,74 @@ final class PaperPane: NSView, PDFViewDelegate {
       search(args, result)
     case "setActive":
       result(["active": args["active"] as? Bool ?? true, "pending_flushed": false])
+    case "loadDrawing":
+      result(loadDrawing(args["layers"] as? [[String: Any]] ?? []))
     default:
-      // Drawing, tools and ink: not on a Mac.
+      // Drawing and tools: not on a Mac.
       result(FlutterMethodNotImplemented)
     }
+  }
+
+  // MARK: Ink
+
+  /// The newest content version this Mac's PencilKit reads.
+  private static var maxContentVersion: Int {
+    if #available(macOS 14.0, *) { return PKContentVersion.latest.rawValue }
+    return 1
+  }
+
+  /// Saved drawings (cmd_load_drawing.json), each over its page, only
+  /// read: a cleared one takes its page's away. Answers what was loaded and
+  /// what this Mac can't read (a newer PencilKit's, or damaged), as the
+  /// iPad does.
+  private func loadDrawing(_ refs: [[String: Any]]) -> [String: Any] {
+    var loaded: [[String: Any]] = []
+    var unreadable: [[String: Any]] = []
+    for ref in refs {
+      guard let page = ref["page_1based"] as? Int, page > 0 else { continue }
+      var entry: [String: Any] = [
+        "page_1based": page, "ink_layer_id": ref["ink_layer_id"] ?? NSNull(),
+        "revision": ref["revision"] ?? NSNull(),
+      ]
+      if ref["clear"] as? Bool == true {
+        inks[page] = nil
+        showInk(page: page)
+        entry["strokes"] = 0
+        loaded.append(entry)
+        continue
+      }
+      let wire = ref["drawing"] as? [String: Any] ?? [:]
+      let version = wire["content_version"] as? Int ?? 1
+      guard let base64 = wire["bytes_base64"] as? String, let data = Data(base64Encoded: base64),
+        version <= Self.maxContentVersion,
+        let drawing = try? PKDrawing(data: data)
+      else {
+        entry["content_version"] = version
+        entry["max_content_version"] = Self.maxContentVersion
+        unreadable.append(entry)
+        continue
+      }
+      inks[page] = drawing.strokes.isEmpty ? nil : drawing
+      showInk(page: page)
+      entry["strokes"] = drawing.strokes.count
+      loaded.append(entry)
+    }
+    return ["loaded": loaded, "unreadable": unreadable]
+  }
+
+  /// [page]'s ink as it is now in [inks], over the page, or none.
+  private func showInk(page n: Int) {
+    if let old = overlays.removeValue(forKey: n) { old.page?.removeAnnotation(old) }
+    guard let drawing = inks[n], let page = pdf.document?.page(at: n - 1) else { return }
+    let overlay = InkOverlay(drawing: drawing, crop: page.bounds(for: .cropBox))
+    // Under the page's own annotations: PDFKit takes a click for the last
+    // one added under it (PDFPage.annotation(at:)), so the ink, as big as
+    // the page, would take every link's click (Abbacchio's find).
+    let own = page.annotations
+    for annotation in own { page.removeAnnotation(annotation) }
+    page.addAnnotation(overlay)
+    for annotation in own { page.addAnnotation(annotation) }
+    overlays[n] = overlay
   }
 
   private var currentPage: Int {
@@ -319,4 +391,52 @@ final class PaperPane: NSView, PDFViewDelegate {
 
   /// A link into another PDF file: not followed.
   func pdfViewOpenPDF(_ sender: PDFView, forRemoteGoToAction action: PDFActionRemoteGoTo) {}
+}
+
+/// A page's saved ink, drawn over the page in its own space: the drawing's
+/// is the page's CropBox from its top left, y down (the iPad's
+/// "page_overlay", drawing_to_document [1, 0, 0, -1, x, y + height]).
+/// PDFKit turns it with the page. Only shown: never printed or saved, and
+/// under the page's links, so they still take their clicks.
+final class InkOverlay: PDFAnnotation {
+  private let drawing: PKDrawing
+  private let crop: CGRect
+  /// The drawing as an image, at the pixels per point it was last drawn.
+  private var rendered: (scale: CGFloat, image: CGImage)?
+
+  init(drawing: PKDrawing, crop: CGRect) {
+    self.drawing = drawing
+    self.crop = crop
+    super.init(bounds: crop, forType: .stamp, withProperties: nil)
+    shouldPrint = false
+    isReadOnly = true
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  override func draw(with box: PDFDisplayBox, in context: CGContext) {
+    // As sharp as the page is shown, in steps, so zooming doesn't redraw
+    // it at every frame.
+    let ctm = context.ctm
+    let shown = max(hypot(ctm.a, ctm.b), hypot(ctm.c, ctm.d))
+    // At most 4096 pixels along its long edge.
+    let most = 4096 / max(crop.width, crop.height, 1)
+    let scale = min(most, 8, max(1, (shown * 2).rounded(.up) / 2))
+    if rendered?.scale != scale {
+      var image: NSImage?
+      // Ink as on paper: PencilKit lightens dark ink in dark mode, and the
+      // page is white whatever the Mac's appearance.
+      NSAppearance(named: .aqua)?.performAsCurrentDrawingAppearance {
+        image = drawing.image(from: CGRect(origin: .zero, size: crop.size), scale: scale)
+      }
+      guard let cg = image?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+      rendered = (scale, cg)
+    }
+    guard let image = rendered?.image else { return }
+    context.saveGState()
+    // PDFKit gives an annotation the page unturned: turn it as the page.
+    if let page { context.concatenate(page.transform(for: box)) }
+    context.draw(image, in: crop)
+    context.restoreGState()
+  }
 }

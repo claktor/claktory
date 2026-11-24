@@ -83,6 +83,29 @@
                 <data android:scheme="factory"/>
             </intent-filter>
         </activity>
+        <!-- What other apps share to Claktory (factory/shared): text, links,
+             images and any file. It shows nothing and hands the app's one
+             screen only the text, the subject and the files, with a read
+             grant for those alone; the app lets the person choose where it
+             goes, as a draft, and never sends by itself (#366 A6). -->
+        <activity
+            android:name=".ShareActivity"
+            android:exported="true"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="*/*"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="*/*"/>
+            </intent-filter>
+        </activity>
         <!-- Flutter generates GeneratedPluginRegistrant.java from this. -->
         <meta-data
             android:name="flutterEmbedding"

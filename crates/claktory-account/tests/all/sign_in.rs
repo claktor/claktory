@@ -71,6 +71,7 @@ async fn names_in_emails_are_cleaned() {
     let instance = start().await;
     let mut claktory = Claktory::new("198.51.100.4");
     instance.sign_in(&mut claktory, "matt@example.com", "Visit https://evil.example now\u{7}").await;
+    instance.advance(16 * 60);
     instance.share(&claktory, None).await.expect("a share");
     let notice = instance.mail.sent().pop().expect("the notice");
     assert_eq!(notice.subject, "Visit now unlocked its secrets");

@@ -16,7 +16,7 @@ use factory_agent::{Tool, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{Extension, Manifest, PromptKind, PromptSection};
+use super::{Extension, Manifest, PromptSection};
 use crate::config::AgentConfig;
 use crate::factory::{Factory, Inner};
 
@@ -62,7 +62,7 @@ impl Extension for Web {
     }
 
     fn prompt(&self, _factory: &Factory, _inner: &Inner, _agent: &AgentConfig) -> Vec<PromptSection> {
-        vec![PromptSection { kind: PromptKind::Static, text: PROMPT.to_owned() }]
+        vec![PromptSection::static_text(PROMPT)]
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {

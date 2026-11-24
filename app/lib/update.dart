@@ -4,11 +4,17 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/widgets.dart';
 
+import 'android/android_app_updates.dart';
 import 'app_update.dart';
 import 'backend.dart';
 import 'changelog.dart';
+import 'claktory_identity.dart' show claktoryName;
+import 'compatibility.dart' show Mismatch, mismatch;
 import 'controls.dart';
+import 'devices.dart' show thisDeviceKind;
 import 'identity.dart';
+import 'mobile/lines.dart' show ActionLine;
+import 'mobile/metrics.dart' show TypeScale;
 import 'mobile/platform_policy.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -114,6 +120,71 @@ bool updateOffered(Workspace workspace, String appVersion) =>
     (restartsBackend(workspace) ||
         isNewer(workspace.latestRelease, appVersion));
 
+/// Whether this app replaces itself when it updates: a desktop's does (as
+/// the banner's Update), a phone's or tablet's comes from its store, so
+/// there Update updates only the Claktory.
+bool get replacesItself => switch (defaultTargetPlatform) {
+  TargetPlatform.macOS ||
+  TargetPlatform.linux ||
+  TargetPlatform.windows => true,
+  _ => false,
+};
+
+/// The backend the update on offer brings: [Workspace.latestBackend], or
+/// [Workspace.latestRelease] when it doesn't say.
+String offeredBackend(Workspace workspace) => workspace.latestBackend.isEmpty
+    ? workspace.latestRelease
+    : workspace.latestBackend;
+
+/// The paired devices, other than [thisDevice], whose app won't connect
+/// after the update on offer until it's updated (#355 D1): the backend's
+/// word (PairedDevice.update_leaves_behind), by its kept app versions.
+List<PairedDevice> leftBehind(Workspace workspace, String thisDevice) => [
+  for (final device in workspace.remote.devices)
+    if (device.updateLeavesBehind && device.id != thisDevice) device,
+];
+
+/// What the update's offer says of [devices] ([leftBehind]); null when
+/// there are none.
+String? leftBehindText(List<PairedDevice> devices) =>
+    switch ([for (final device in devices) device.name]) {
+      [] => null,
+      [final one] =>
+        "$one won't connect after this update until its app is updated.",
+      [...final rest, final last] =>
+        "${rest.join(', ')} and $last won't connect after this update until "
+            'their apps are updated.',
+    };
+
+/// Whether this device's own app can't follow the update on offer, where
+/// the update doesn't replace it ([replacesApp] false: a phone's or
+/// tablet's comes from its store): its own row says so
+/// (PairedDevice.update_leaves_behind), or, with a backend too old to
+/// say, its build is on another line than the backend on offer. Updating
+/// would lock it out, so it isn't offered there (#355 D1).
+bool cantFollowUpdate(
+  Workspace workspace, {
+  required String thisDevice,
+  required String appVersion,
+  required bool replacesApp,
+}) {
+  if (replacesApp || !restartsBackend(workspace)) return false;
+  return workspace.remote.devices.any(
+        (device) => device.id == thisDevice && device.updateLeavesBehind,
+      ) ||
+      mismatch(appVersion, offeredBackend(workspace)) == Mismatch.appOlder;
+}
+
+/// What a device that can't follow the update says in its place
+/// ([cantFollowUpdate]): its app first, then the Claktory. The iPhone and
+/// iPad app comes from the App Store or TestFlight; the Android app from
+/// its download page, which Download beside it opens (Sale's row 60).
+String updateAppFirstText(String claktory, String release) => updatesHere
+    ? "Update this $thisDeviceKind's app first, from the App Store or "
+          'TestFlight. Then $claktory can update to Claktory $release.'
+    : "Update this $thisDeviceKind's app first: tap Download for its new "
+          'version. Then $claktory can update to Claktory $release.';
+
 /// Whether this app offers Claktory's updates and installs them: not the
 /// Android app, whose new version is a new APK from its link, so it never
 /// shows the update banner or touches the installer. The Android app is
@@ -134,15 +205,66 @@ bool restartsBackend(Workspace workspace) => isNewer(
 
 /// What Update does, in the banner and in Settings: installs
 /// [Workspace.latestRelease]. An app older than it is replaced too ([app]):
-/// on a Claktory on another machine the app first fetches the release's own,
+/// on a Claktory on another machine the app fetches the release's own,
 /// with [onProgress] saying how far (null once it's done). Says whether
 /// this app is being replaced, so it should quit now; throws what went
-/// wrong, with nothing changed.
+/// wrong.
+///
+/// There the Claktory updates first, since it has the release already,
+/// and the app's download follows, over its restart and any drop of the
+/// connection (#408): a slow link never holds the Claktory back. Only a
+/// release this app can't work with (another line, [mismatch]) is
+/// downloaded first, so the app never faces a Claktory it can't follow.
 Future<bool> installLatest(
   AppScope scope,
   Workspace workspace, {
   void Function(UpdateProgress?)? onProgress,
   bool app = true,
+}) async {
+  if (_underWay case final running?) {
+    // Already under way: this joins it, rather than a second download of
+    // the same app into the same folder.
+    void forward() => onProgress?.call(running.progress.value);
+    forward();
+    running.progress.addListener(forward);
+    try {
+      return await running.done;
+    } finally {
+      running.progress.removeListener(forward);
+    }
+  }
+  final progress = ValueNotifier<UpdateProgress?>(null);
+  void forward() => onProgress?.call(progress.value);
+  progress.addListener(forward);
+  final done = _install(
+    scope,
+    workspace,
+    app: app,
+    onProgress: (step) => progress.value = step,
+  );
+  final mine = (done: done, progress: progress);
+  _underWay = mine;
+  try {
+    return await done;
+  } finally {
+    progress.removeListener(forward);
+    if (identical(_underWay, mine)) _underWay = null;
+  }
+}
+
+/// The update under way in this app, and how far it is. A banner or
+/// Settings row made again meanwhile (the window rebuilt while the
+/// Claktory restarts, say) joins it ([installLatest]).
+({Future<bool> done, ValueNotifier<UpdateProgress?> progress})? _underWay;
+
+/// Whether an update is under way in this app ([installLatest]).
+bool get updateUnderWay => _underWay != null;
+
+Future<bool> _install(
+  AppScope scope,
+  Workspace workspace, {
+  required void Function(UpdateProgress?) onProgress,
+  required bool app,
 }) async {
   final build = scope.appBuild;
   final latest = workspace.latestRelease;
@@ -151,22 +273,30 @@ Future<bool> installLatest(
   // Claktory's to replace), only the backend.
   final appOlder = app && isNewer(latest, build.version);
   final remote = scope.backend.target != null;
+  // A Factory on another machine can't reach this app's bundle, so the
+  // app fetches the release's own, checks it and swaps itself.
+  final fetches = remote && appOlder;
+  final appFirst =
+      fetches && mismatch(build.version, offeredBackend(workspace)) != null;
+  Future<StagedApp> fetch() async {
+    final staged = await build.updater.stage(
+      fetch: scope.backend.fetchApp,
+      version: latest,
+      bundlePath: build.bundlePath,
+      connected: scope.backend.connected,
+      onProgress: onProgress,
+    );
+    onProgress(null);
+    return staged;
+  }
+
   StagedApp? staged;
   try {
-    if (remote && appOlder) {
-      // A Factory on another machine can't reach this app's bundle, so
-      // the app fetches the release's own, checks it and swaps itself.
-      staged = await build.updater.stage(
-        fetch: scope.backend.fetchApp,
-        version: latest,
-        bundlePath: build.bundlePath,
-        onProgress: (progress) => onProgress?.call(progress),
-      );
-      onProgress?.call(null);
-    }
+    if (appFirst) staged = await fetch();
     await scope.backend.installUpdate(
       !remote && appOlder ? build.bundlePath : '',
     );
+    if (fetches && !appFirst) staged = await fetch();
     if (staged != null) {
       await build.updater.replace(staged, app: build.bundlePath);
     }
@@ -204,6 +334,23 @@ class _UpdateBannerState extends State<UpdateBanner> {
   /// Re-enables Update if a backend that should restart doesn't.
   Timer? _restartTimeout;
 
+  /// Update is under way: the Claktory updating, and on another machine
+  /// this app's download after it.
+  var _installing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Made again while an update is under way: it shows that one.
+    if (updateUnderWay) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_updating) {
+          _update(AppScope.scope(context).backend.workspace.workspace);
+        }
+      });
+    }
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -223,7 +370,8 @@ class _UpdateBannerState extends State<UpdateBanner> {
   /// The restarted backend is back. If it still needs updating, offer it
   /// again.
   void _reconnected() {
-    if (_connected?.value == true && _updating) {
+    // A download that carries on over the restart isn't done yet.
+    if (_connected?.value == true && _updating && !_installing) {
       setState(() => _updating = false);
     }
   }
@@ -237,6 +385,7 @@ class _UpdateBannerState extends State<UpdateBanner> {
       _progress = null;
     });
     final bool appReplaced;
+    _installing = true;
     try {
       appReplaced = await installLatest(
         scope,
@@ -253,6 +402,8 @@ class _UpdateBannerState extends State<UpdateBanner> {
         _failure = updateFailureText(failure);
       });
       return;
+    } finally {
+      _installing = false;
     }
     if (appReplaced) {
       // This app's bundle is replaced once it's gone, then reopened: by the
@@ -290,8 +441,19 @@ class _UpdateBannerState extends State<UpdateBanner> {
           // after the restart, as it would have.
           if (atWork(agent)) working++;
         }
+        final thisDevice = scope.backend.deviceId;
         return _Strip(
           release: latest,
+          behind: leftBehindText(leftBehind(workspace, thisDevice)),
+          appFirst:
+              cantFollowUpdate(
+                workspace,
+                thisDevice: thisDevice,
+                appVersion: scope.appBuild.version,
+                replacesApp: replacesItself,
+              )
+              ? updateAppFirstText(claktoryName(scope.backend), latest)
+              : null,
           working: working,
           restarts: restartsBackend(workspace),
           undone: workspace.updateError,
@@ -324,7 +486,17 @@ class _Strip extends StatelessWidget {
     this.progress,
     this.machine = '',
     this.news = false,
+    this.behind,
+    this.appFirst,
   });
+
+  /// The paired devices the update would leave behind, said before Update
+  /// ([leftBehindText]); null when none.
+  final String? behind;
+
+  /// This device can't follow the update (its app is from its store): what
+  /// to do first, said in place of the offer, with no Update.
+  final String? appFirst;
 
   /// How far fetching the app from the other machine is, while it is.
   final UpdateProgress? progress;
@@ -384,10 +556,10 @@ class _Strip extends StatelessWidget {
                     TextSpan(
                       children: [
                         TextSpan(
-                          text: 'Claktory $release is ready.',
+                          text: appFirst ?? 'Claktory $release is ready.',
                           style: TextStyles.label.copyWith(color: palette.text),
                         ),
-                        if (stops != null)
+                        if (stops != null && appFirst == null)
                           TextSpan(
                             text: ' $stops',
                             style: TextStyles.body.copyWith(
@@ -397,6 +569,13 @@ class _Strip extends StatelessWidget {
                       ],
                     ),
                   ),
+                  if (behind case final behind? when appFirst == null)
+                    Text(
+                      behind,
+                      style: TextStyles.caption.copyWith(
+                        color: palette.textMuted,
+                      ),
+                    ),
                   if (undone.isNotEmpty)
                     Text(
                       undone,
@@ -429,15 +608,16 @@ class _Strip extends StatelessWidget {
               ),
               const SizedBox(width: Space.xs),
             ],
-            Button(
-              label: updating
-                  ? 'Updating…'
-                  : undone.isNotEmpty || failure != null
-                  ? 'Try again'
-                  : 'Update',
-              onPressed: onUpdate,
-              primary: true,
-            ),
+            if (appFirst == null)
+              Button(
+                label: updating
+                    ? 'Updating…'
+                    : undone.isNotEmpty || failure != null
+                    ? 'Try again'
+                    : 'Update',
+                onPressed: onUpdate,
+                primary: true,
+              ),
           ],
         ),
       ),
@@ -465,6 +645,12 @@ class _Progress extends StatelessWidget {
         'Downloading the app from $where: '
             '${_megabytes(progress.received)} of '
             '${_megabytes(progress.size)} MB',
+      UpdateStage.waiting when progress.size == 0 =>
+        'Waiting for the connection to $where…',
+      UpdateStage.waiting =>
+        'Waiting for the connection to $where to carry on: '
+            '${_megabytes(progress.received)} of '
+            '${_megabytes(progress.size)} MB so far',
       UpdateStage.checking => 'Checking the new app…',
     };
     return Padding(
@@ -472,7 +658,9 @@ class _Progress extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (progress.stage == UpdateStage.downloading) ...[
+          if (progress.size > 0 &&
+              progress.stage != UpdateStage.preparing &&
+              progress.stage != UpdateStage.checking) ...[
             Container(
               width: 48,
               height: 4,
@@ -505,6 +693,158 @@ class _Progress extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The Android app's check for a new version of itself (#355 D2, Doppio's
+/// android_app_updates.dart), for what's below it to show
+/// ([AndroidUpdateNotice]): read as the app starts and each time it comes
+/// back to the front, never polled or kept. Off outside a release build on
+/// Android, where it finds nothing.
+class AndroidAppUpdateHost extends StatefulWidget {
+  const AndroidAppUpdateHost({super.key, required this.child});
+
+  final Widget child;
+
+  /// The check, where there is one.
+  static AndroidAppUpdates? of(BuildContext context) => context
+      .dependOnInheritedWidgetOfExactType<_AndroidAppUpdatesScope>()
+      ?.notifier;
+
+  /// Makes the check in tests in place of the real one.
+  @visibleForTesting
+  static AndroidAppUpdates Function()? debugMake;
+
+  @override
+  State<AndroidAppUpdateHost> createState() => _AndroidAppUpdateHostState();
+}
+
+class _AndroidAppUpdateHostState extends State<AndroidAppUpdateHost>
+    with WidgetsBindingObserver {
+  late final _updates =
+      (AndroidAppUpdateHost.debugMake ?? AndroidAppUpdates.new)();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_updates.refresh());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) unawaited(_updates.refresh());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _updates.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      _AndroidAppUpdatesScope(notifier: _updates, child: widget.child);
+}
+
+class _AndroidAppUpdatesScope extends InheritedNotifier<AndroidAppUpdates> {
+  const _AndroidAppUpdatesScope({
+    required super.notifier,
+    required super.child,
+  });
+}
+
+/// What [AndroidUpdateNotice] says: with this app's own version when it's
+/// stamped, since in Settings it sits under the Claktory's (Sale's row,
+/// Trish's words).
+String androidUpdateText(String appVersion) =>
+    RegExp(r'^v\d').hasMatch(appVersion)
+    ? 'This app is $appVersion. A new version is available.'
+    : 'A new version of this app is available.';
+
+/// On Android, while a newer build of this app is out that works with the
+/// Claktory it shows: says so, with Download, which opens its download page
+/// in the browser (nothing installs by itself). Nothing otherwise.
+class AndroidUpdateNotice extends StatefulWidget {
+  const AndroidUpdateNotice({super.key, this.padding = EdgeInsets.zero});
+
+  /// Around it, only when it shows.
+  final EdgeInsetsGeometry padding;
+
+  /// Opens a page in tests in place of the browser.
+  @visibleForTesting
+  static Future<bool> Function(Uri)? debugOpen;
+
+  @override
+  State<AndroidUpdateNotice> createState() => _AndroidUpdateNoticeState();
+}
+
+class _AndroidUpdateNoticeState extends State<AndroidUpdateNotice> {
+  /// The browser didn't open the page, since the last tap.
+  var _failed = false;
+
+  /// Asking the browser to open it.
+  var _opening = false;
+
+  Future<void> _open(AndroidAppUpdate offer) async {
+    setState(() {
+      _failed = false;
+      _opening = true;
+    });
+    final opened = await openAndroidAppUpdatePage(
+      page: offer.page,
+      open: AndroidUpdateNotice.debugOpen,
+    );
+    if (!mounted) return;
+    setState(() {
+      _opening = false;
+      _failed = !opened;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final updates = AndroidAppUpdateHost.of(context);
+    if (updates == null) return const SizedBox.shrink();
+    final store = AppScope.of(context).workspace;
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        final offer = androidAppUpdate(
+          latest: updates.latest,
+          installedVersionCode: updates.installedVersionCode,
+          backendVersion: store.workspace.version,
+        );
+        if (offer == null) return const SizedBox.shrink();
+        final palette = Palette.of(context);
+        final type = TypeScale.of(context);
+        return Padding(
+          padding: widget.padding,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ActionLine(
+                lead: Text(
+                  androidUpdateText(AppScope.scope(context).appBuild.version),
+                  style: type.body.copyWith(color: palette.text),
+                ),
+                action: Button(
+                  label: _opening ? 'Opening…' : 'Download',
+                  onPressed: _opening ? null : () => unawaited(_open(offer)),
+                ),
+              ),
+              if (_failed)
+                Text(
+                  "Couldn't open the download page. Try again.",
+                  style: type.caption.copyWith(color: palette.danger),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

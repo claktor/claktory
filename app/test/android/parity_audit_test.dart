@@ -172,6 +172,10 @@ SecretRequest _secret({bool collect = false}) => SecretRequest(
     variables: [SecretVariable(name: 'EXAMPLE_TOKEN')],
   ),
   reason: 'Exercise the shared request card.',
+  // A connected service makes it: the card's main action is Approve, the
+  // admin agent's (#360).
+  fittingSecretId: collect ? '' : 'audit-connection',
+  fittingSecretName: collect ? '' : 'Audit service',
 );
 
 Future<Harness> _showSecret(
@@ -182,7 +186,17 @@ Future<Harness> _showSecret(
 }) async {
   final id = collect ? 'rivet' : 'mike';
   final snapshot = workspace()..selectedAgentId = id;
-  snapshot.vault = VaultState(exists: true, unlocked: true);
+  snapshot.vault = VaultState(
+    exists: true,
+    unlocked: true,
+    secrets: [
+      SecretInfo(
+        id: 'audit-connection',
+        name: 'Audit service',
+        connection: SecretConnection(connectorId: 'audit'),
+      ),
+    ],
+  );
   final harness = Harness(snapshot);
   harness.backend.transcript.load(
     Transcript(

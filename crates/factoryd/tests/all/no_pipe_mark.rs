@@ -95,4 +95,13 @@ async fn marks_from_pipes_are_dropped_at_start_and_a_web_pages_kept() {
         .collect::<Result<_, _>>()
         .expect("states");
     assert_eq!(states, ["expired", "pending", "pending"], "Lea's pipe approval retired; Max still read a page; an ask-each-time one stays");
+    // Lea was told she'd hear when the person decided: she hears it's gone.
+    let told: Vec<(String, String)> = db
+        .prepare("SELECT agent, summary FROM messages WHERE summary LIKE 'Your request to use%' ORDER BY id")
+        .expect("prepare")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("told");
+    assert_eq!(told, [("lea".to_owned(), "Your request to use AWS was withdrawn".to_owned())]);
 }

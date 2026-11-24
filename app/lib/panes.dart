@@ -19,6 +19,9 @@ import 'scope.dart';
 import 'selection.dart' show Unselectable;
 import 'pane_chrome.dart';
 import 'map.dart';
+import 'monitors_overview.dart' show MonitorsOverview;
+import 'mobile/back.dart'
+    show BackHandle, CallbackBackToken, PhoneBack, PhoneBackScope;
 import 'mobile/haptics.dart';
 import 'mobile/device.dart' show WindowControls, windowControls;
 import 'mobile/metrics.dart';
@@ -26,6 +29,7 @@ import 'settings_view.dart';
 import 'viewers/registry.dart';
 import 'zoom.dart' show ZoomScope;
 import 'inbox.dart' show InboxView;
+import 'ipad/columns.dart' show textFactorOf;
 import 'ipad/document_host.dart' show ipadDocumentPane;
 import 'ipad/workbench.dart' show keyboardOverWindow;
 import 'review_answer.dart' show ReviewFrame;
@@ -39,6 +43,32 @@ const paneMinHeight = 120.0;
 /// A page's pane (Settings…) is at least as wide as a small phone's screen,
 /// which its rows are laid out for.
 const pagePaneMinWidth = 320.0;
+
+/// The conversation is never narrower than this at the default text size,
+/// and grows with larger text ([chatLeastOf]): no pane beside it squeezes
+/// it (Sale's A4, Bruno 23882).
+const chatMinWidth = 360.0;
+
+/// The conversation's least width at [context]'s text size.
+double chatLeastOf(BuildContext context) =>
+    chatMinWidth * textFactorOf(MediaQuery.textScalerOf(context).scale);
+
+/// The room an agent's panes have across, and the conversation's least
+/// there: what [withPage], [withFiles] and [withApp] fit a new pane into.
+typedef PaneFit = ({double room, double chatLeast});
+
+final _fits = Expando<PaneFit>('pane fit');
+
+/// The room the shown agent's panes had when last laid out for [backend]:
+/// kept while a page shows in the conversation's place, which has the same
+/// room. Null until its panes are laid out without a [PaneProjection] (the
+/// iPad's shows what fits by itself); nothing is closed to make room then.
+PaneFit? paneFitOf(Backend backend) => _fits[backend];
+
+/// Whether a pane at least [least] wide fits beside the conversation in
+/// [fit], once the other panes give way. True while it isn't known.
+bool fitsBesideChat(PaneFit? fit, double least) =>
+    fit == null || fit.chatLeast + 1 + least <= fit.room;
 
 /// A pane's header on a Mac.
 const paneHeaderHeight = 32.0;
@@ -112,6 +142,7 @@ const pageKinds = {
   AppPage.map: 'map',
   AppPage.usage: 'usage',
   AppPage.inbox: 'inbox',
+  AppPage.monitors: 'monitors',
 };
 
 /// The page a leaf of [kind] shows, or null for a file's viewer or the
@@ -135,12 +166,13 @@ ViewNode? pagePane(ViewNode root, AppPage page) {
 /// takes half the conversation's share and the panes beside keep theirs;
 /// else the two share the conversation's place. At [maxPanes] the oldest
 /// pane other than the conversation gives way.
-ViewNode withPage(ViewNode root, AppPage page) => _besideChat(
+ViewNode withPage(ViewNode root, AppPage page, {PaneFit? fit}) => _besideChat(
   root,
   ViewNode(
     id: newPaneId(pageKinds[page]!),
     leaf: ViewLeaf(kind: pageKinds[page]!),
   ),
+  fit: fit,
 );
 
 /// The pane showing [projectId]'s Files in [root], or null.
@@ -156,14 +188,16 @@ ViewNode? filesPane(ViewNode root, String projectId) {
 /// [root] with [project]'s Files right of the conversation, as [withPage]
 /// places a page, taking a quarter of the conversation's share: a file tree
 /// needs less room than what's read beside it.
-ViewNode withFiles(ViewNode root, Project project) => _besideChat(
-  root,
-  ViewNode(
-    id: newPaneId(filesKind),
-    leaf: ViewLeaf(kind: filesKind, path: project.id, title: project.name),
-  ),
-  share: 1 / 4,
-);
+ViewNode withFiles(ViewNode root, Project project, {PaneFit? fit}) =>
+    _besideChat(
+      root,
+      ViewNode(
+        id: newPaneId(filesKind),
+        leaf: ViewLeaf(kind: filesKind, path: project.id, title: project.name),
+      ),
+      share: 1 / 4,
+      fit: fit,
+    );
 
 /// The pane showing [appId]'s [view] in [root] (empty: its first), or
 /// null. [first] is the id of the app's first view, so a pane opened by
@@ -188,7 +222,7 @@ ViewNode? appPane(
 
 /// [root] with [app]'s [view] (empty: its first) right of the
 /// conversation, as [withPage] places a page.
-ViewNode withApp(ViewNode root, AppInfo app, [String view = '']) {
+ViewNode withApp(ViewNode root, AppInfo app, [String view = '', PaneFit? fit]) {
   final spec = view.isEmpty
       ? app.views.firstOrNull
       : app.views.where((v) => v.id == view).firstOrNull;
@@ -204,18 +238,47 @@ ViewNode withApp(ViewNode root, AppInfo app, [String view = '']) {
         title: spec?.title ?? '',
       ),
     ),
+    fit: fit,
   );
 }
 
 /// [root] with [pane] right of the conversation, taking [share] of the
-/// conversation's share in a row.
-ViewNode _besideChat(ViewNode root, ViewNode pane, {double share = 0.5}) {
+/// conversation's share in a row. When it won't fit beside the
+/// conversation and the others in [fit], the oldest panes give way
+/// first, as at [maxPanes]; when it won't fit even alone, it's placed all
+/// the same (the panes then scroll sideways, the conversation at its
+/// least): [fitsBesideChat] says so first, for a page to open in place.
+ViewNode _besideChat(
+  ViewNode root,
+  ViewNode pane, {
+  double share = 0.5,
+  PaneFit? fit,
+}) {
   var tree = root;
   if (leaves(tree).length >= maxPanes) {
     final oldest = leaves(tree)
         .firstWhere((leaf) => leaf.leaf.kind != chatKind);
     tree = close(tree, oldest.id) ?? tree;
   }
+  // Too narrow for it even alone: the others stay.
+  if (fit != null && fit.chatLeast + 1 + minExtent(pane, true) > fit.room) {
+    return _placeBesideChat(tree, pane, share);
+  }
+  while (fit != null) {
+    final placed = _placeBesideChat(tree, pane, share);
+    if (minExtent(placed, true, chatLeast: fit.chatLeast) <= fit.room) {
+      return placed;
+    }
+    final oldest = leaves(tree)
+        .where((leaf) => leaf.leaf.kind != chatKind)
+        .firstOrNull;
+    if (oldest == null) return placed;
+    tree = close(tree, oldest.id) ?? tree;
+  }
+  return _placeBesideChat(tree, pane, share);
+}
+
+ViewNode _placeBesideChat(ViewNode tree, ViewNode pane, double share) {
   final chat = leaves(tree).firstWhere((leaf) => leaf.leaf.kind == chatKind);
   ViewNode place(ViewNode node) {
     if (!node.hasSplit()) return node;
@@ -335,6 +398,99 @@ class _PaneLayoutState extends State<PaneLayout> {
   /// The whole layout: as last changed here until the backend has it.
   ViewNode get _full => _sent ?? layoutOf(widget.agent);
 
+  /// The window's Back, where there is one (Android, a phone), and while a
+  /// pane is expanded, its hold on it: Back collapses the pane (#366 A3),
+  /// as its own Back chip does. On Android, Back then closes the newest
+  /// pane beside the conversation, one at a time, before it leaves the app
+  /// (Sale's A3, Bruno 23882).
+  PhoneBack? _back;
+  BackHandle? _backHandle;
+
+  /// The leaves as they appeared here, oldest first: between panes opened
+  /// at the same time ([_newest]), the later is the newer. Those there when
+  /// the agent was shown count in the layout's order.
+  final _seen = <String>[];
+
+  /// The conversation's least width at this text size.
+  double _chatLeast = chatMinWidth;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final back = context
+        .dependOnInheritedWidgetOfExactType<PhoneBackScope>()
+        ?.back;
+    if (identical(back, _back)) return;
+    // Another window or layout owns Back now: hold it there instead.
+    _backHandle?.release();
+    _backHandle = null;
+    _back = back;
+  }
+
+  /// Holds the window's Back while [expanded], else lets go of it.
+  void _holdBack(bool expanded) {
+    if (expanded == (_backHandle != null)) return;
+    if (!expanded) {
+      _backHandle!.release();
+      _backHandle = null;
+      return;
+    }
+    _backHandle = _back?.registerNavigation(
+      CallbackBackToken(
+        onBack: () {
+          if (!mounted) return;
+          if (_expanded != null) return _expand(null);
+          final newest = _newest(_full);
+          if (newest != null) _change(close(_full, newest));
+        },
+      ),
+    );
+  }
+
+  /// The newest pane beside the conversation in [full], if any: the one
+  /// opened last (`ViewLeaf.opened_ms`: by the person or an agent, a file
+  /// shown again too), then the one that appeared here last (Sale's row 25).
+  String? _newest(ViewNode full) {
+    ViewNode? newest;
+    var newestSeen = -1;
+    for (final leaf in leaves(full)) {
+      if (leaf.leaf.kind == chatKind) continue;
+      final seen = _seen.indexOf(leaf.id);
+      final opened = leaf.leaf.openedMs;
+      if (newest == null ||
+          opened > newest.leaf.openedMs ||
+          (opened == newest.leaf.openedMs && seen > newestSeen)) {
+        newest = leaf;
+        newestSeen = seen;
+      }
+    }
+    return newest?.id;
+  }
+
+  /// Notes the leaves of [full] that are new here, as the newest.
+  void _see(ViewNode full) {
+    final ids = [for (final leaf in leaves(full)) leaf.id];
+    _seen
+      ..removeWhere((id) => !ids.contains(id))
+      ..addAll(ids.where((id) => !_seen.contains(id)));
+  }
+
+  /// Panes beside the conversation are Back targets on Android only: an
+  /// iPad has no Back, and a phone's panes are pages of its own.
+  bool get _panesTakeBack => defaultTargetPlatform == TargetPlatform.android;
+
+  /// Notes the room the panes have across, for a pane opened next.
+  void _room(double room) {
+    if (!room.isFinite) return;
+    _fits[AppScope.of(context)] = (room: room, chatLeast: _chatLeast);
+  }
+
+  @override
+  void dispose() {
+    _backHandle?.release();
+    super.dispose();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -345,6 +501,7 @@ class _PaneLayoutState extends State<PaneLayout> {
   void didUpdateWidget(PaneLayout old) {
     super.didUpdateWidget(old);
     if (old.agent.id != widget.agent.id) {
+      _seen.clear();
       _sent = null;
       _dragged = null;
       _sentFocus = null;
@@ -401,9 +558,20 @@ class _PaneLayoutState extends State<PaneLayout> {
   Widget build(BuildContext context) {
     final full = _full;
     final chat = KeyedSubtree(key: _chatKey, child: widget.chat);
+    _chatLeast = chatLeastOf(context);
+    final projection = PaneProjection.maybeOf(context);
+    _see(full);
     if (isChatOnly(full)) {
       _keys.clear();
-      return chat;
+      _expanded = null;
+      _holdBack(false);
+      if (projection != null) return chat;
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          _room(constraints.maxWidth);
+          return chat;
+        },
+      );
     }
     // Every leaf of the layout keeps its key, shown or not, so a pane the
     // projection moves to another split keeps its state. A hidden pane
@@ -411,9 +579,9 @@ class _PaneLayoutState extends State<PaneLayout> {
     // playing unseen).
     final ids = {for (final leaf in leaves(full)) leaf.id};
     _keys.removeWhere((id, _) => !ids.contains(id));
-    final projection = PaneProjection.maybeOf(context);
     _focus = projection?.focus;
     final expanded = _expanded = _expandedIn(full);
+    _holdBack(expanded != null || (_panesTakeBack && projection == null));
     if (expanded == null) _before = null;
     final before = expanded == null ? null : (_before ??= ids);
     return OverlayPortal(
@@ -436,7 +604,12 @@ class _PaneLayoutState extends State<PaneLayout> {
               ),
             ),
       child: projection == null
-          ? _laid(full, null, _dragged ?? full, chat)
+          ? LayoutBuilder(
+              builder: (context, constraints) {
+                _room(constraints.maxWidth);
+                return _laid(full, null, _dragged ?? full, chat);
+              },
+            )
           : LayoutBuilder(
               builder: (context, constraints) {
                 // Asked every time: what fits follows the room and the
@@ -472,9 +645,21 @@ class _PaneLayoutState extends State<PaneLayout> {
         // Each at least as big as it can be used (the conversation squeezed
         // to a word a line beside two pages and a file, Abbacchio): the room
         // comes from those that have more.
-        final shares = fitShares(sharesOf(split), [
-          for (final child in split.children) minExtent(child, row),
-        ], room);
+        final least = [
+          for (final child in split.children)
+            minExtent(child, row, chatLeast: _chatLeast),
+        ];
+        final need = least.fold<double>(0, (sum, each) => sum + each);
+        final holdsChat = split.children.indexWhere(
+          (child) => leaves(child).any((leaf) => leaf.leaf.kind == chatKind),
+        );
+        // Too narrow for them all (a window narrowed since they opened):
+        // the conversation keeps its least, and those beside it share the
+        // rest, a page scrolling sideways ([PageSideways]), rather than the
+        // conversation squeezed to a word a line (Sale's A4).
+        final shares = row && need > room && holdsChat >= 0
+            ? keepConversation(sharesOf(split), least, holdsChat, room)
+            : fitShares(sharesOf(split), least, room);
         final children = <Widget>[];
         final handles = <Widget>[];
         var at = 0.0;
@@ -569,7 +754,10 @@ class _PaneLayoutState extends State<PaneLayout> {
   ) {
     final shares = [..._from];
     if (room <= 0 || shares.length != split.children.length) return shares;
-    final least = view?.minExtent ?? minExtent;
+    final least =
+        view?.minExtent ??
+        (ViewNode node, bool row) =>
+            minExtent(node, row, chatLeast: _chatLeast);
     final pair = shares[i] + shares[i + 1];
     final low = least(split.children[i], row) / room;
     final high = pair - least(split.children[i + 1], row) / room;
@@ -607,6 +795,7 @@ class _PaneLayoutState extends State<PaneLayout> {
               // A canvas pans by itself: no sideways scroll around it.
               AppPage.map => const InPane(child: MapView()),
               AppPage.usage => const _PagePane(child: UsageView()),
+              AppPage.monitors => const _PagePane(child: MonitorsOverview()),
               AppPage.inbox => const _PagePane(child: InboxView()),
               _ when leaf.kind == filesKind => FilesPane(
                 projectId: leaf.path,
@@ -614,14 +803,16 @@ class _PaneLayoutState extends State<PaneLayout> {
               ),
               _ when leaf.kind == appKind => AppPane(leaf: leaf),
               _ => Builder(
-                builder: (context) =>
-                    ipadDocumentPane(context, node) ??
-                    // While an ask to review it waits, its answer's bar.
-                    ReviewFrame(
-                      agentId: agent.id,
-                      path: leaf.path,
-                      child: viewerBody(context, leaf),
-                    ),
+                builder: (context) {
+                  // While an ask to review it waits, its answer's bar.
+                  Widget viewer(BuildContext context) => ReviewFrame(
+                    agentId: agent.id,
+                    path: leaf.path,
+                    child: viewerBody(context, leaf),
+                  );
+                  return ipadDocumentPane(context, node, viewer: viewer) ??
+                      viewer(context);
+                },
               ),
             },
           );
@@ -1009,15 +1200,52 @@ List<double> fitShares(List<double> shares, List<double> least, double room) {
   return [for (final size in sizes) size / room];
 }
 
-/// The smallest [node] can be along a row ([row]) or a column.
-double minExtent(ViewNode node, bool row) {
-  final own = row
-      ? (pageOfKind(node.leaf.kind) != null ? pagePaneMinWidth : paneMinWidth)
-      : paneMinHeight;
+/// [shares] of [room] when even the least of each won't fit: the one at
+/// [keep] (holding the conversation) gets its least, leaving the others at
+/// least a sliver each, and the others share the rest as they had it.
+List<double> keepConversation(
+  List<double> shares,
+  List<double> least,
+  int keep,
+  double room,
+) {
+  if (room <= 0 || shares.length != least.length || shares.length < 2) {
+    return shares;
+  }
+  final others = shares.length - 1;
+  final sliver = math.min(paneMinWidth / 2, room / shares.length);
+  final kept = math.max(0.0, math.min(least[keep], room - sliver * others));
+  var theirs = 0.0;
+  for (var i = 0; i < shares.length; i++) {
+    if (i != keep) theirs += shares[i];
+  }
+  return [
+    for (var i = 0; i < shares.length; i++)
+      i == keep
+          ? kept / room
+          : theirs <= 0
+          ? (1 - kept / room) / others
+          : (1 - kept / room) * shares[i] / theirs,
+  ];
+}
+
+/// The smallest [node] can be along a row ([row]) or a column, the
+/// conversation at least [chatLeast] across.
+double minExtent(ViewNode node, bool row, {double chatLeast = chatMinWidth}) {
+  final own = !row
+      ? paneMinHeight
+      : node.leaf.kind == chatKind
+      ? chatLeast
+      : pageOfKind(node.leaf.kind) != null
+      ? pagePaneMinWidth
+      : paneMinWidth;
   if (!node.hasSplit()) return own;
   final split = node.split;
   final along = (split.axis != ViewAxis.VIEW_AXIS_COLUMN) == row;
-  final sizes = [for (final child in split.children) minExtent(child, row)];
+  final sizes = [
+    for (final child in split.children)
+      minExtent(child, row, chatLeast: chatLeast),
+  ];
   return along
       ? sizes.fold<double>(0, (sum, size) => sum + size) + sizes.length - 1
       : sizes.reduce(math.max);
@@ -1305,6 +1533,7 @@ String paneTitle(ViewLeaf leaf, [Workspace? workspace]) {
     AppPage.map => 'Map',
     AppPage.usage => 'Usage',
     AppPage.inbox => 'Needs you',
+    AppPage.monitors => 'Monitors',
     _ => viewerTitle(leaf),
   };
 }
@@ -1344,6 +1573,12 @@ Widget paneGlyph(Agent agent, ViewLeaf leaf, Color color) {
     AppPage.inbox => ExtensionGlyph(
       icon: 'inbox',
       name: 'Needs you',
+      color: color,
+      size: 14,
+    ),
+    AppPage.monitors => ExtensionGlyph(
+      icon: 'alarm-clock',
+      name: 'Monitors',
       color: color,
       size: 14,
     ),
@@ -1394,7 +1629,7 @@ class PaneHeader extends StatelessWidget {
     final height = paneHeaderHeightOf(context);
     final titleStyle = TextStyles.label.copyWith(color: palette.text);
     // Expand's or ×'s width with its gap: a finger's target on touch.
-    final button = (touch ? Metrics.of(context).target : 28) + 2;
+    final double button = (touch ? Metrics.of(context).target : 28) + 2;
     // The title's room, which the viewer's controls never take: as wide as
     // it is, up to the start of a name, so a narrow pane keeps saying what
     // it shows (Abbacchio's rows 521 and 545).
@@ -1480,69 +1715,27 @@ class PaneHeader extends StatelessWidget {
           border: Border(bottom: BorderSide(color: palette.hairline)),
         ),
         child: LayoutBuilder(
-          builder: (context, constraints) => Row(
-            children: [
-              Expanded(child: named(withDetails: true)),
-              if (controls.isNotEmpty)
-                // A narrow pane clips the viewer's controls at their end
-                // (the first, the most used, stay) rather than overflowing:
-                // the glyph (and the gaps beside the title), the start of
-                // the title, Expand and × always show.
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxWidth: math.max(
-                      0,
-                      constraints.maxWidth -
-                          (onExpand == null ? 0 : button) -
-                          (onClose == null ? 0 : button) -
-                          14 -
-                          2 * Space.s -
-                          titleRoom,
-                    ),
-                  ),
-                  child: UnconstrainedBox(
-                    constrainedAxis: Axis.vertical,
-                    alignment: Alignment.centerLeft,
-                    clipBehavior: Clip.hardEdge,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        for (final control in controls)
-                          Padding(
-                            padding: const EdgeInsets.only(left: 2),
-                            child: control,
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              if (onExpand != null)
-                Padding(
-                  padding: const EdgeInsets.only(left: 2),
-                  child: GlyphButton(
-                    label: '${expanded ? 'Collapse' : 'Expand'} $title',
-                    active: false,
-                    onTap: onExpand!,
-                    glyph: (color) => ExtensionGlyph(
-                      icon: expanded ? 'minimize-2' : 'maximize-2',
-                      name: expanded ? 'Collapse' : 'Expand',
-                      color: color,
-                    ),
-                  ),
-                ),
-              if (onClose != null)
-                Padding(
-                  padding: const EdgeInsets.only(left: 2),
-                  child: GlyphButton(
-                    label: 'Close',
-                    active: false,
-                    onTap: onClose!,
-                    glyph: (color) =>
-                        ExtensionGlyph(icon: 'x', name: 'Close', color: color),
-                  ),
-                ),
-            ],
-          ),
+          builder: (context, constraints) {
+            // Squeezed narrower than the glyph, a little of the title and
+            // both buttons (a pane beside the conversation as the window
+            // narrowed, Sale's row 26): Expand goes first, then the name,
+            // and × stays whole.
+            const least = 14 + Space.s + 24;
+            final double close = onClose == null ? 0 : button;
+            final withExpand =
+                onExpand != null &&
+                constraints.maxWidth >= least + close + button;
+            final withName =
+                constraints.maxWidth >=
+                least + close + (withExpand ? button : 0);
+            return _headerRow(
+              constraints,
+              named: withName ? named(withDetails: true) : null,
+              withExpand: withExpand,
+              button: button,
+              titleRoom: titleRoom,
+            );
+          },
         ),
       ),
     );
@@ -1557,6 +1750,79 @@ class PaneHeader extends StatelessWidget {
     }
     return _draggable(touch, feedback, bar, false);
   }
+
+  /// The header's row in [constraints]: [named] (the glyph and title; null
+  /// leaves their room empty), the viewer's controls, Expand when
+  /// [withExpand], and ×.
+  Widget _headerRow(
+    BoxConstraints constraints, {
+    required Widget? named,
+    required bool withExpand,
+    required double button,
+    required double titleRoom,
+  }) => Row(
+    children: [
+      Expanded(child: named ?? const SizedBox.shrink()),
+      if (controls.isNotEmpty && named != null)
+        // A narrow pane clips the viewer's controls at their end
+        // (the first, the most used, stay) rather than overflowing:
+        // the glyph (and the gaps beside the title), the start of
+        // the title, Expand and × show while they fit.
+        ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: math.max(
+              0,
+              constraints.maxWidth -
+                  (withExpand ? button : 0) -
+                  (onClose == null ? 0 : button) -
+                  14 -
+                  2 * Space.s -
+                  titleRoom,
+            ),
+          ),
+          child: UnconstrainedBox(
+            constrainedAxis: Axis.vertical,
+            alignment: Alignment.centerLeft,
+            clipBehavior: Clip.hardEdge,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final control in controls)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 2),
+                    child: control,
+                  ),
+              ],
+            ),
+          ),
+        ),
+      if (withExpand)
+        Padding(
+          padding: const EdgeInsets.only(left: 2),
+          child: GlyphButton(
+            label: '${expanded ? 'Collapse' : 'Expand'} $title',
+            active: false,
+            onTap: onExpand!,
+            glyph: (color) => ExtensionGlyph(
+              icon: expanded ? 'minimize-2' : 'maximize-2',
+              name: expanded ? 'Collapse' : 'Expand',
+              color: color,
+            ),
+          ),
+        ),
+      if (onClose != null)
+        Padding(
+          padding: const EdgeInsets.only(left: 2),
+          child: GlyphButton(
+            label: 'Close',
+            active: false,
+            onTap: onClose!,
+            glyph: (color) =>
+                ExtensionGlyph(icon: 'x', name: 'Close', color: color),
+          ),
+        ),
+    ],
+  );
 
   /// [bar] as the pane's handle; [held], it starts no drag.
   Widget _draggable(bool touch, Widget feedback, Widget bar, bool held) {

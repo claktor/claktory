@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
-import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
@@ -18,6 +18,10 @@ import '../resources.dart' show formatBytes;
 import '../review_answer.dart' show ReviewAnswering;
 import '../scope.dart';
 import '../selection.dart';
+import '../paced.dart' show FilePreviews, PreviewBox;
+import 'loading_progress.dart';
+import 'preview_badge.dart';
+import 'previews.dart';
 import 'registry.dart';
 
 /// How much of a video one read brings (the backend's cap).
@@ -189,10 +193,21 @@ class _VideoViewerState extends State<VideoViewer>
   @override
   String get path => widget.path;
 
+  @override
+  String get loadingLabel => 'Loading video…';
+
   VideoPlayback? _playback;
 
   /// The copy on this device being played, deleted when the pane closes.
   File? _copy;
+
+  /// The copy of the version that stopped part way, carried on from when
+  /// it's read again (#375), and whether it's the preview's (#379);
+  /// deleted with the pane.
+  ({String sha256, File copy, bool preview})? _partial;
+
+  /// A preview was due, but this Claktory can't make one (#379).
+  var _noPreview = false;
 
   /// How much of it has come, while it comes.
   int _received = 0;
@@ -233,7 +248,17 @@ class _VideoViewerState extends State<VideoViewer>
     super.dispose();
   }
 
+  /// The part-way copy is of no use any more: gone.
+  void _dropPartial() {
+    final partial = _partial;
+    _partial = null;
+    if (partial != null && partial.copy.path != _copy?.path) {
+      unawaited(partial.copy.delete().catchError((_) => partial.copy));
+    }
+  }
+
   void _close() {
+    _dropPartial();
     unawaited(_playback?.dispose());
     _playback = null;
     final copy = _copy;
@@ -285,30 +310,133 @@ class _VideoViewerState extends State<VideoViewer>
       _received = 0;
     });
     try {
-      final first = await backend.readFile(path, maxBytes: videoChunk);
+      // Progress as each piece comes, not each range (#375): its size
+      // only once the first piece says it.
+      void progress(int through, int size) {
+        if (!mounted || generation != _generation) return;
+        setState(() {
+          _received = through;
+          _size = size;
+          // In the badge, while the preview plays.
+          if (originalLoad is OriginalLoading) {
+            originalLoad = OriginalLoading(through, size);
+          }
+        });
+      }
+
+      // Stopped part way before (the connection didn't come back in
+      // time): from there, while the file is still that version.
+      final partial = _partial;
+      var resumeAt = 0;
+      FileContent? head;
+      // A preview made for this screen, on a link too slow for the
+      // original (#379); the original once it's asked for.
+      PreviewBox? preview;
+      // (A preview's, unless it's the original that's wanted now.)
+      if (partial != null &&
+          !(partial.preview && wantOriginal) &&
+          await partial.copy.exists()) {
+        if (partial.preview) preview = previewScreen();
+        head = await backend.readFile(
+          path,
+          maxBytes: 1,
+          expectedSha256: partial.sha256,
+          preview: preview,
+        );
+        if (!mounted || generation != _generation) return;
+        if (head.error.isEmpty) {
+          resumeAt = await partial.copy.length();
+        } else {
+          head = null;
+        }
+      }
+      if (head == null) {
+        _dropPartial();
+        preview = null;
+      }
+      // The original's start, stopping once it's clear the rest would be
+      // slow to come: a preview comes instead, from the start (#379).
+      var first =
+          head ??
+          await backend.readFile(
+            path,
+            maxBytes: videoChunk,
+            onProgress: progress,
+            carryOn: wantOriginal ? null : stopWhenSlow(backend),
+          );
+      if (head == null &&
+          !wantOriginal &&
+          first.error.isEmpty &&
+          first.size.toInt() >= previewFrom &&
+          // Stopped short: a whole chunk that came isn't thrown away.
+          first.data.length < math.min(videoChunk, first.size.toInt()) &&
+          slowFor(backend, first.size.toInt() - first.data.length)) {
+        if (!mounted || generation != _generation) return;
+        preview = previewScreen();
+        first = await backend.readFile(
+          path,
+          maxBytes: videoChunk,
+          onProgress: progress,
+          preview: preview,
+        );
+      }
       if (!mounted || generation != _generation) return;
       if (first.error.isNotEmpty) {
+        if (_replacing) return _originalFailed();
         setState(() => file = first);
         return;
       }
+      // Asked for and not made: the original came, and the rest of it is
+      // read as the original.
+      if (!first.isPreview) preview = null;
       _size = first.size.toInt();
+      // What a change on the machine is compared with, and why a lost
+      // connection doesn't start it again: the read carries on by itself.
+      // The preview playing meanwhile keeps its own.
+      setState(() {
+        _noPreview = first.preview == FilePreview.FILE_PREVIEW_UNAVAILABLE;
+        if (!_replacing) file = first.deepCopy()..data = const [];
+        failure = null;
+      });
       final name = path.split('/').last;
       final version = first.sha256.isEmpty
           ? '${DateTime.now().microsecondsSinceEpoch}'
           : first.sha256.substring(0, first.sha256.length.clamp(0, 16));
-      final copy = File('${Directory.systemTemp.path}/claktory-$version-$name');
-      final sink = copy.openWrite();
+      final copy = head != null
+          ? partial!.copy
+          : File(
+              '${Directory.systemTemp.path}/claktory-$version'
+              '${preview != null ? '-preview' : ''}-$name',
+            );
+      if (first.sha256.isNotEmpty) {
+        _partial = (sha256: first.sha256, copy: copy, preview: preview != null);
+      }
+      final sink = copy.openWrite(
+        mode: head != null ? FileMode.append : FileMode.write,
+      );
       try {
-        sink.add(first.data);
-        var offset = first.data.length;
+        var offset = resumeAt;
+        if (head == null) {
+          sink.add(first.data);
+          offset = first.data.length;
+        }
         setState(() => _received = offset);
         while (offset < _size) {
           final chunk = await backend.readFile(
             path,
             maxBytes: videoChunk,
             offset: offset,
+            expectedSha256: first.sha256,
+            onProgress: progress,
+            preview: preview,
           );
           if (!mounted || generation != _generation) return;
+          if (chunk.error == 'changed') {
+            // Changed while it came: start again with the new one.
+            _dropPartial();
+            unawaited(reload());
+            return;
+          }
           if (chunk.error.isNotEmpty) return _fail(chunk.error);
           if (chunk.offset.toInt() != offset || chunk.data.isEmpty) {
             // A backend that can't read from the middle of a file.
@@ -322,6 +450,7 @@ class _VideoViewerState extends State<VideoViewer>
           }
           if (chunk.sha256 != first.sha256) {
             // Changed while it came: start again with the new one.
+            _dropPartial();
             unawaited(reload());
             return;
           }
@@ -336,20 +465,20 @@ class _VideoViewerState extends State<VideoViewer>
         unawaited(copy.delete().catchError((_) => copy));
         return;
       }
+      _partial = null;
       final playback = newVideoPlayback();
       final was = _playback?.state.value.position;
       _close();
       _copy = copy;
       _playback = playback;
       setState(() {
-        file = FileContent(
-          path: first.path,
-          mime: first.mime,
-          size: first.size,
-          modifiedMs: first.modifiedMs,
-          sha256: first.sha256,
-        );
+        // As the first piece said it, a preview or not.
+        file = first.deepCopy()
+          ..data = const []
+          ..clearOffset()
+          ..clearTruncated();
         failure = null;
+        originalLoad = const OriginalNotLoaded();
       });
       playback.state.addListener(_playbackChanged);
       await playback.open(copy.path);
@@ -360,6 +489,7 @@ class _VideoViewerState extends State<VideoViewer>
         comments.show(kind: 'video', text: '', version: first.sha256);
       }
     } on RequestFailure catch (error) {
+      if (_replacing) return _originalFailed();
       if (mounted) setState(() => failure = error.message);
     } on FileSystemException catch (error) {
       _fail("Couldn't load the video: ${error.message}");
@@ -367,7 +497,29 @@ class _VideoViewerState extends State<VideoViewer>
   }
 
   void _fail(String problem) {
+    if (_replacing) return _originalFailed();
     if (mounted) setState(() => _problem = problem);
+  }
+
+  /// The original is coming in place of the preview playing (#379).
+  bool get _replacing =>
+      originalLoad is OriginalLoading && _playback != null && mounted;
+
+  /// It couldn't: the preview plays on, and the badge says so.
+  void _originalFailed() {
+    wantOriginal = false;
+    setState(() => originalLoad = const OriginalFailed());
+  }
+
+  /// The original in place of the preview, read as a video is: the
+  /// preview plays meanwhile, and the original carries on from where it
+  /// was.
+  @override
+  Future<void> loadOriginal() async {
+    if (originalLoad is OriginalLoading) return;
+    wantOriginal = true;
+    setState(() => originalLoad = const OriginalLoading(0, 0));
+    await reload();
   }
 
   void _playbackChanged() {
@@ -443,6 +595,23 @@ class _VideoViewerState extends State<VideoViewer>
     );
   }
 
+  /// The video's size for its header: the original's, also while its
+  /// preview plays (#379, Zucchero), as an image's; none while a preview
+  /// plays from a Claktory that doesn't say the original's, rather than
+  /// the preview's as if it were the original's.
+  static Size? _shownSize(FileContent? file, PlaybackState state) {
+    if (file != null && file.isPreview) {
+      if (file.originalPixelWidth <= 0 || file.originalPixelHeight <= 0) {
+        return null;
+      }
+      return Size(
+        file.originalPixelWidth.toDouble(),
+        file.originalPixelHeight.toDouble(),
+      );
+    }
+    return state.ready && state.size != Size.zero ? state.size : null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
@@ -458,10 +627,11 @@ class _VideoViewerState extends State<VideoViewer>
         : null;
     final details = this.details(
       [
-        if (state.ready && state.size != Size.zero)
-          '${state.size.width.round()} × ${state.size.height.round()}',
+        if (_shownSize(file, state) case final size?)
+          '${size.width.round()} × ${size.height.round()}',
         if (state.ready) formatTime(state.duration),
-        if (file != null && file.error.isEmpty) formatBytes(file.size),
+        if (file != null && file.error.isEmpty)
+          formatBytes(file.isPreview ? file.originalSize : file.size),
       ].join(' · '),
     );
     final controls = <Widget>[
@@ -477,17 +647,45 @@ class _VideoViewerState extends State<VideoViewer>
             ? null
             : ViewerProblem("Claktory can't play this video.", path: path)) ??
         (file != null && file.error.isNotEmpty ? waiting() : null) ??
-        (failure != null ? waiting() : null);
+        // The read failed (the connection didn't come back in time): it
+        // says so, and Try again reads it again (#375).
+        // Lost with the connection, it's read again once that's back
+        // (FileLoading): till then it waits, rather than saying it failed.
+        (failure != null && AppScope.of(context).connected.value
+            ? _Failed(text: failure!, path: path, onRetry: reload)
+            : null);
     final Widget body;
     if (problem != null) {
       body = problem;
     } else if (!state.ready) {
-      body = _Fetching(received: _received, size: _size);
+      body = LoadingProgress(
+        label: 'Loading video…',
+        received: _received,
+        size: _size,
+        connected: AppScope.of(context).connected,
+        note: _noPreview
+            ? "Full size: this Claktory can't make a smaller copy."
+            : null,
+      );
     } else {
       body = Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Expanded(child: _frame(palette, state, comments)),
+          Expanded(
+            child: Stack(
+              children: [
+                Positioned.fill(child: _frame(palette, state, comments)),
+                // A preview says so (#379), clear of Comment at the top.
+                if (previewBadge() case final badge?)
+                  Positioned(
+                    left: Space.m,
+                    right: Space.m,
+                    bottom: Space.m,
+                    child: Align(alignment: Alignment.bottomLeft, child: badge),
+                  ),
+              ],
+            ),
+          ),
           _Controls(
             timelineKey: _timeline,
             state: state,
@@ -680,50 +878,30 @@ Color _agentColor(Backend backend, String agentId) {
   return agentColor('');
 }
 
-/// While the video comes: how much of it has.
-class _Fetching extends StatelessWidget {
-  const _Fetching({required this.received, required this.size});
+/// The video couldn't be read: why, and Try again.
+class _Failed extends StatelessWidget {
+  const _Failed({
+    required this.text,
+    required this.path,
+    required this.onRetry,
+  });
 
-  final int received;
-  final int size;
+  final String text;
+  final String path;
+  final VoidCallback onRetry;
 
   @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    if (size == 0) return const SizedBox.shrink();
-    return Center(
+  Widget build(BuildContext context) => Center(
+    child: SingleChildScrollView(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            'Loading video… ${formatBytes(Int64(received))} of '
-            '${formatBytes(Int64(size))}',
-            style: TextStyles.caption.copyWith(
-              color: palette.textMuted,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
-          const SizedBox(height: Space.s),
-          SizedBox(
-            width: 160,
-            height: 4,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(2),
-              child: Stack(
-                children: [
-                  Positioned.fill(child: ColoredBox(color: palette.selected)),
-                  FractionallySizedBox(
-                    widthFactor: (received / size).clamp(0.0, 1.0),
-                    child: ColoredBox(color: palette.signal),
-                  ),
-                ],
-              ),
-            ),
-          ),
+          ViewerProblem(text, path: path),
+          Button(label: 'Try again', onPressed: onRetry),
         ],
       ),
-    );
-  }
+    ),
+  );
 }
 
 /// Under the frame, behind a hairline: play or pause, the time, and the

@@ -1,14 +1,20 @@
 // An agent's question card (#238): its words select and copy wherever it
 // shows, in a conversation and in Needs you, and a command in its body has
 // Copy beside it.
+import 'dart:io';
+
 import 'package:factory_app/ask_card.dart';
+import 'package:factory_app/backend.dart' show RequestFailure;
 import 'package:factory_app/controls.dart' show Pressable;
-import 'package:factory_app/dictation.dart' show transcribeRecording;
+import 'package:factory_app/dictation.dart'
+    show dictationWaiting, transcribeRecording;
 import 'package:factory_app/inbox.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/recorder.dart' show deviceRecorder;
+import 'package:factory_app/voice_keep.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -175,6 +181,67 @@ void main() {
     await settle(tester);
     expect(find.text(r'Restart evil\u{202E}txt.exe'), findsWidgets);
     expect(find.textContaining('\u202E', findRichText: true), findsNothing);
+  });
+
+  testWidgets('an approval with a comment typed: one Submit, and Submit or '
+      'Return sends it as a reply, never a yes; replied, it says so (#370)', (
+    tester,
+  ) async {
+    final harness = Harness(_workspace());
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'june',
+        entries: [
+          Entry(seq: Int64(7), timestampMs: Int64(1000), askPerson: _ask()),
+        ],
+      ),
+    );
+    await harness.show(tester);
+    await settle(tester);
+    expect(find.text('Approve'), findsOneWidget);
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(AskPersonCard),
+        matching: find.byType(EditableText),
+      ),
+      'No, staging first',
+    );
+    await settle(tester);
+    expect(find.text('Approve'), findsNothing);
+    expect(find.text('Dismiss'), findsNothing);
+    expect(find.text('Submit'), findsOneWidget);
+    expect(
+      find.text('June gets your comment and carries on from it.'),
+      findsOneWidget,
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await settle(tester);
+    final answer = harness.last.answerAsk;
+    expect((answer.text, answer.reply), ('No, staging first', true));
+    // A Claktory from before Submit takes it as a comment, never a yes.
+    expect(answer.dismiss, isTrue);
+
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'june',
+        entries: [
+          Entry(
+            seq: Int64(7),
+            timestampMs: Int64(1000),
+            askPerson: _ask()
+              ..state = AskPersonState.ASK_PERSON_STATE_ANSWERED
+              ..replied = true
+              ..answer = 'No, staging first',
+          ),
+        ],
+      ),
+    );
+    await settle(tester);
+    expect(find.textContaining('Replied'), findsOneWidget);
+    expect(find.textContaining('Approved'), findsNothing);
+    expect(find.text('No, staging first'), findsOneWidget);
   });
 
   testWidgets('a written answer dismissed sends what was typed as the '
@@ -551,6 +618,89 @@ void main() {
     });
   });
 
+  group('a typed answer on a weak connection (#401)', () {
+    Future<Harness> show(WidgetTester tester) async {
+      final harness = Harness(_workspace());
+      harness.backend.transcript.load(
+        Transcript(
+          agentId: 'june',
+          entries: [
+            Entry(
+              seq: Int64(7),
+              timestampMs: Int64(1000),
+              askPerson: _ask()..wantsText = true,
+            ),
+          ],
+        ),
+      );
+      await harness.show(tester);
+      await settle(tester);
+      return harness;
+    }
+
+    Finder inCard(Finder finder) =>
+        find.descendant(of: find.byType(AskPersonCard), matching: finder);
+
+    int answers(Harness harness) =>
+        harness.backend.sent.where((m) => m.hasAnswerAsk()).length;
+
+    testWidgets('cut off, it stays in its field, "Not sent yet", and goes by '
+        'itself once the connection is back', (tester) async {
+      final harness = await show(tester);
+      harness.backend.refuse = 'Connection lost.';
+      await tester.enterText(inCard(find.byType(EditableText)), 'Ship it');
+      await tester.pump();
+      await tester.tap(inCard(find.text('Answer')));
+      await settle(tester);
+      expect(inCard(find.text(askWaiting)), findsOneWidget);
+      expect(find.text('Ship it'), findsOneWidget);
+      final tried = answers(harness);
+
+      harness.backend.refuse = null;
+      harness.backend.connected.value = false;
+      await tester.pump();
+      expect(answers(harness), tried);
+      harness.backend.connected.value = true;
+      await settle(tester);
+      expect(answers(harness), tried + 1);
+      expect(harness.last.answerAsk.text, 'Ship it');
+      expect(inCard(find.text(askWaiting)), findsNothing);
+    });
+
+    testWidgets('sent again, an answer the Claktory already has counts as '
+        'delivered', (tester) async {
+      final harness = await show(tester);
+      harness.backend.refuse = 'Connection lost.';
+      await tester.enterText(inCard(find.byType(EditableText)), 'Ship it');
+      await tester.pump();
+      await tester.tap(inCard(find.text('Answer')));
+      await settle(tester);
+      harness.backend.refuse = 'This question was already answered.';
+      harness.backend.connected.value = false;
+      await tester.pump();
+      harness.backend.connected.value = true;
+      await settle(tester);
+      expect(inCard(find.text(askWaiting)), findsNothing);
+      expect(find.text('This question was already answered.'), findsNothing);
+    });
+
+    testWidgets('a refusal says why, and waits for the person', (tester) async {
+      final harness = await show(tester);
+      harness.backend.refuse = 'The agent was deleted.';
+      await tester.enterText(inCard(find.byType(EditableText)), 'Ship it');
+      await tester.pump();
+      await tester.tap(inCard(find.text('Answer')));
+      await settle(tester);
+      expect(inCard(find.text('The agent was deleted.')), findsOneWidget);
+      final tried = answers(harness);
+      harness.backend.connected.value = false;
+      await tester.pump();
+      harness.backend.connected.value = true;
+      await settle(tester);
+      expect(answers(harness), tried);
+    });
+  });
+
   group('said rather than typed', () {
     late FakeRecorder recorder;
     setUp(() {
@@ -599,6 +749,142 @@ void main() {
       await io(tester);
       await pumpFrames(tester);
     }
+
+    group('kept until its words come (#401)', () {
+      late Directory kept;
+      final asked = <KeptVoice>[];
+
+      setUp(() {
+        kept = Directory.systemTemp.createTempSync('kept');
+        final was = keptVoiceFolder;
+        keptVoiceFolder = () async => kept.path;
+        asked.clear();
+        addTearDown(() {
+          keptVoiceFolder = was;
+          kept.deleteSync(recursive: true);
+        });
+      });
+
+      /// The recordings' folders kept now.
+      List<Directory> folders() =>
+          kept.listSync().whereType<Directory>().toList();
+
+      Finder inCard(Finder finder) =>
+          find.descendant(of: find.byType(AskPersonCard), matching: finder);
+
+      /// Fails with [failure] the first time, then hears the words.
+      void failFirst(RequestFailure failure) {
+        transcribeRecording = (backend, recording) async {
+          asked.add(recording as KeptVoice);
+          if (asked.length == 1) {
+            // As a dropped connection is: down, then the failure.
+            if (failure.message == 'Connection lost.') {
+              backend.connected.value = false;
+            }
+            throw failure;
+          }
+          return 'after the release';
+        };
+      }
+
+      testWidgets('the connection lost while it transcribes: "Not sent yet", '
+          'kept on the device; back, it goes by itself, with the same ids', (
+        tester,
+      ) async {
+        failFirst(const RequestFailure('Connection lost.'));
+        final harness = await show(tester, _ask()..wantsText = true);
+        await say(tester, 'Do it');
+        expect(inCard(find.text(dictationWaiting)), findsOneWidget);
+        expect(inCard(find.text('Retry')), findsOneWidget);
+        expect(inCard(find.text('Delete')), findsOneWidget);
+        expect(find.text('Do it'), findsOneWidget);
+        final folder = folders().single;
+        final saved = KeptVoice.read(folder)!;
+        expect(File(saved.path).existsSync(), isTrue);
+        expect(saved.target, 'ask/june/ask7');
+        expect(saved.kind, KeptKind.dictation);
+
+        harness.backend.connected.value = false;
+        await tester.pump();
+        harness.backend.connected.value = true;
+        await io(tester);
+        await pumpFrames(tester);
+        expect(find.text('Do it after the release'), findsOneWidget);
+        expect(inCard(find.text(dictationWaiting)), findsNothing);
+        expect(asked, hasLength(2));
+        expect(asked[1].uploadId, asked[0].uploadId);
+        expect(asked[1].requestId, asked[0].requestId);
+        await io(tester);
+        expect(folders(), isEmpty, reason: 'deleted once its words came');
+      });
+
+      testWidgets("a refusal says why, and waits for Retry", (tester) async {
+        failFirst(const RequestFailure('Too many dictations waiting.'));
+        await show(tester, _ask()..wantsText = true);
+        await say(tester, 'Do it');
+        expect(
+          inCard(find.text('Not sent yet. Too many dictations waiting.')),
+          findsOneWidget,
+        );
+        expect(folders(), hasLength(1));
+        await tester.tap(inCard(find.text('Retry')));
+        await io(tester);
+        await pumpFrames(tester);
+        expect(find.text('Do it after the release'), findsOneWidget);
+        await io(tester);
+        expect(folders(), isEmpty);
+      });
+
+      testWidgets('Delete asks first, then the recording is gone', (
+        tester,
+      ) async {
+        failFirst(const RequestFailure('Connection lost.'));
+        final harness = await show(tester, _ask()..wantsText = true);
+        await say(tester, 'Do it');
+        // Still not connected, so it waits.
+        harness.backend.connected.value = false;
+        await tester.tap(inCard(find.text('Delete')));
+        await pumpFrames(tester);
+        expect(find.text('Delete this recording?'), findsOneWidget);
+        await tester.tap(find.text('Delete').last);
+        await io(tester);
+        await pumpFrames(tester);
+        expect(inCard(find.text(dictationWaiting)), findsNothing);
+        expect(find.text('Do it'), findsOneWidget);
+        expect(folders(), isEmpty);
+        expect(asked, hasLength(1));
+      });
+
+      testWidgets('after a relaunch, a recording kept for the card comes '
+          'back to it and goes', (tester) async {
+        transcribeRecording = (backend, recording) async {
+          asked.add(recording as KeptVoice);
+          return 'after the release';
+        };
+        final folder = Directory('${kept.path}/1-abc')..createSync();
+        File('${folder.path}/Voice.m4a').writeAsBytesSync([1, 2, 3]);
+        // Real files: outside the test's fake time.
+        await tester.runAsync(
+          () => KeptVoice(
+            path: '${folder.path}/Voice.m4a',
+            duration: const Duration(seconds: 7),
+            claktory: keptClaktoryKey(null),
+            kind: KeptKind.dictation,
+            target: 'ask/june/ask7',
+            uploadId: 'upload-1',
+            requestId: 'request-1',
+            uploaded: true,
+          ).save(),
+        );
+        await show(tester, _ask()..wantsText = true);
+        await io(tester);
+        await pumpFrames(tester);
+        expect(find.text('after the release'), findsOneWidget);
+        expect(asked.single.requestId, 'request-1');
+        await io(tester);
+        expect(folders(), isEmpty);
+      });
+    });
 
     testWidgets('a written answer: the words go in after what was typed, '
         'and nothing goes until Answer', (tester) async {
@@ -792,12 +1078,13 @@ void main() {
           'After the release',
           open: 'Add a comment',
         );
-        await center(tester, find.text('Approve'));
+        // Typed: Submit, the words a reply (#370).
+        await center(tester, find.text('Submit'));
         await tester.pump();
-        await tester.tap(find.text('Approve'));
+        await tester.tap(find.text('Submit'));
         await settle(tester);
         expect(harness.last.answerAsk.text, 'After the release');
-        expect(harness.last.answerAsk.dismiss, isFalse);
+        expect(harness.last.answerAsk.reply, isTrue);
       });
     },
   );

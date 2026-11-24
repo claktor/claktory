@@ -21,7 +21,12 @@ pub const MAX_PANELS: usize = 24;
 pub const MAX_VARIABLES: usize = 4;
 /// A grid row's columns.
 pub const COLUMNS: u32 = 12;
-pub const MAX_HEIGHT: u32 = 12;
+/// The tallest a panel is, in Grafana's rows: 13 is 486 points, past the
+/// most a chart draws (480).
+pub const MAX_HEIGHT: u32 = 13;
+/// What a kept dashboard's `_v` says: 1 since 0.5.0, its heights in
+/// Grafana's rows; 0 (none) before, 50 points a unit.
+pub const FORMAT: u32 = 1;
 
 /// How a panel can show its answer.
 pub const KINDS: [&str; 7] = ["stat", "timeseries", "bars", "stackedBars", "pie", "scatter", "table"];
@@ -52,13 +57,16 @@ pub struct Dashboard {
     /// Who saved it: an agent's id, or empty for the person.
     #[serde(default, rename = "_by", skip_serializing_if = "String::is_empty")]
     pub by: String,
+    /// How it was kept (`FORMAT`); none before 0.5.0.
+    #[serde(default, rename = "_v")]
+    pub format: u32,
 }
 
 fn default_refresh() -> u64 {
     30
 }
 
-/// A range of time, each end "now", "now-<n><m|h|d|w>" or milliseconds.
+/// A range of time, each end "now", "now-<n><m|h|d|w|y>" or milliseconds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimeRange {
@@ -104,7 +112,8 @@ pub struct Panel {
 }
 
 /// A panel's place on a 12-column grid: rows by `y`, `x` and `w` in
-/// columns, `h` its height (a chart's is 50 points a unit).
+/// columns, `h` its height in Grafana's rows (30 points each and 8 between:
+/// 8 is 296 points).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grid {
@@ -114,7 +123,7 @@ pub struct Grid {
     pub y: u32,
     #[serde(default = "full")]
     pub w: u32,
-    #[serde(default = "four")]
+    #[serde(default = "eight")]
     pub h: u32,
 }
 
@@ -122,14 +131,22 @@ fn full() -> u32 {
     COLUMNS
 }
 
-fn four() -> u32 {
-    4
+/// Grafana's new panel's height.
+pub const HEIGHT: u32 = 8;
+
+fn eight() -> u32 {
+    HEIGHT
 }
 
 impl Default for Grid {
     fn default() -> Self {
-        Self { x: 0, y: 0, w: COLUMNS, h: 4 }
+        Self { x: 0, y: 0, w: COLUMNS, h: HEIGHT }
     }
+}
+
+/// A grid's height in points: Grafana's rows, 30 points each and 8 between.
+pub fn points(h: u32) -> u32 {
+    (h * 38).saturating_sub(8)
 }
 
 /// One read-only statement against a source.
@@ -158,6 +175,147 @@ pub struct Viz {
     /// A table's columns, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<Column>,
+    /// How a chart draws, each unset for the renderer's own default
+    /// (Grafana's): the line's width in px (0–10, 0 for none; 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_width: Option<f64>,
+    /// The area under a line, its opacity in percent (0–100; 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<f64>,
+    /// Its points: auto (when far enough apart), always or never.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub points: Option<String>,
+    /// A point's diameter in px (1–40; 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point_size: Option<f64>,
+    /// The value axis's ends; unset, fitted to the data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    /// Decimals shown (0–10); unset, as many as the value needs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decimals: Option<u32>,
+    /// The legend under a chart (shown unless false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend: Option<bool>,
+    /// What a stat shows of its last column: last (the last number), sum,
+    /// mean, max or min. Unset, the sum: what every stat showed before
+    /// 0.5.0, so they keep it; new ones are given last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduce: Option<String>,
+    /// A stat's colors by its value: the first step's (no value) up to the
+    /// next one's value, and so on. Unset, green, red from 80.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thresholds: Vec<Threshold>,
+    /// What a stat's color colors: value, background, solid or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_mode: Option<String>,
+    /// A stat's spark line: area, or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<String>,
+}
+
+/// One step of a stat's thresholds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Threshold {
+    pub color: String,
+    /// From where it starts; none for the first, the base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+}
+
+/// The charts' colors by name, which the renderer shades for the theme;
+/// "text" is the text's own.
+pub const COLOR_NAMES: [&str; 14] = [
+    "green",
+    "yellow",
+    "semi-dark-yellow",
+    "blue",
+    "orange",
+    "red",
+    "purple",
+    "dark-green",
+    "dark-yellow",
+    "dark-blue",
+    "dark-orange",
+    "dark-red",
+    "dark-purple",
+    "text",
+];
+pub const COLOR_MODES: [&str; 4] = ["value", "background", "solid", "none"];
+pub const GRAPHS: [&str; 2] = ["area", "none"];
+pub const MAX_THRESHOLDS: usize = 10;
+
+/// What a stat can show of its column, and what a new one shows.
+pub const REDUCERS: [&str; 5] = ["last", "sum", "mean", "max", "min"];
+pub const NEW_REDUCE: &str = "last";
+
+/// What's wrong with a stat's thresholds, if anything.
+pub fn thresholds_problem(steps: &[Threshold]) -> Option<String> {
+    if steps.len() > MAX_THRESHOLDS {
+        return Some(format!("at most {MAX_THRESHOLDS}"));
+    }
+    if let Some(step) = steps.iter().find(|step| !COLOR_NAMES.contains(&step.color.as_str())) {
+        return Some(format!("\"{}\" isn't a color: use one of {}", step.color, COLOR_NAMES.join(", ")));
+    }
+    if steps.first().is_some_and(|base| base.value.is_some()) {
+        return Some("the first is the base, with no value".into());
+    }
+    let values: Vec<Option<f64>> = steps.iter().skip(1).map(|step| step.value).collect();
+    if values.iter().any(Option::is_none) {
+        return Some("each after the first has a value".into());
+    }
+    if values.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Some("each value is above the one before".into());
+    }
+    None
+}
+
+/// A chart's points: when they show.
+pub const POINTS: [&str; 3] = ["auto", "always", "never"];
+
+impl Viz {
+    /// What's wrong with how it draws, each as (its field, why).
+    pub fn style_problems(&self) -> Vec<(&'static str, String)> {
+        let mut problems = Vec::new();
+        let within = |value: Option<f64>, low: f64, high: f64| value.is_some_and(|value| !(low..=high).contains(&value));
+        if within(self.line_width, 0.0, 10.0) {
+            problems.push(("line_width", "0 to 10".into()));
+        }
+        if within(self.fill, 0.0, 100.0) {
+            problems.push(("fill", "0 to 100 (percent)".into()));
+        }
+        if self.points.as_deref().is_some_and(|points| !POINTS.contains(&points)) {
+            problems.push(("points", format!("one of {}", POINTS.join(", "))));
+        }
+        if within(self.point_size, 1.0, 40.0) {
+            problems.push(("point_size", "1 to 40".into()));
+        }
+        // serde_json reads no infinities or NaN: these are finite.
+        if let (Some(min), Some(max)) = (self.min, self.max)
+            && min >= max
+        {
+            problems.push(("min", "below max".into()));
+        }
+        if self.decimals.is_some_and(|decimals| decimals > 10) {
+            problems.push(("decimals", "0 to 10".into()));
+        }
+        if self.reduce.as_deref().is_some_and(|reduce| !REDUCERS.contains(&reduce)) {
+            problems.push(("reduce", format!("one of {}", REDUCERS.join(", "))));
+        }
+        if let Some(why) = thresholds_problem(&self.thresholds) {
+            problems.push(("thresholds", why));
+        }
+        if self.color_mode.as_deref().is_some_and(|mode| !COLOR_MODES.contains(&mode)) {
+            problems.push(("color_mode", format!("one of {}", COLOR_MODES.join(", "))));
+        }
+        if self.graph.as_deref().is_some_and(|graph| !GRAPHS.contains(&graph)) {
+            problems.push(("graph", format!("one of {}", GRAPHS.join(", "))));
+        }
+        problems
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -202,7 +360,7 @@ impl Dashboard {
         match (sql::time(&self.time.from, now), sql::time(&self.time.to, now)) {
             (Some(from), Some(to)) if from < to => {}
             (Some(_), Some(_)) => say("time", "from is before to".into()),
-            _ => say("time", "each end is \"now\", \"now-<n><m|h|d|w>\" such as \"now-7d\", or milliseconds".into()),
+            _ => say("time", "each end is \"now\", \"now-<n><m|h|d|w|y>\" such as \"now-7d\", or milliseconds".into()),
         }
         if !(MIN_REFRESH_S..=MAX_REFRESH_S).contains(&self.refresh_s) {
             say("refresh_s", format!("{MIN_REFRESH_S} to {MAX_REFRESH_S} seconds"));
@@ -269,8 +427,10 @@ impl Dashboard {
             if !KINDS.contains(&viz.kind.as_str()) {
                 say(&format!("{at}.viz.kind"), format!("one of {}", KINDS.join(", ")));
             }
-            if viz.color.as_deref().is_some_and(|color| !COLORS.contains(&color)) {
-                say(&format!("{at}.viz.color"), format!("one of {}", COLORS.join(", ")));
+            let stat_color = |color: &str| viz.kind == "stat" && COLOR_NAMES.contains(&color);
+            if viz.color.as_deref().is_some_and(|color| !COLORS.contains(&color) && !stat_color(color)) {
+                let stat = if viz.kind == "stat" { format!(", or for a stat {}", COLOR_NAMES.join(", ")) } else { String::new() };
+                say(&format!("{at}.viz.color"), format!("one of {}{stat}", COLORS.join(", ")));
             }
             if viz.unit.chars().count() > 20 || viz.unit.chars().any(char::is_control) {
                 say(&format!("{at}.viz.unit"), "at most 20 characters".into());
@@ -280,6 +440,9 @@ impl Dashboard {
             }
             if viz.columns.len() > 64 {
                 say(&format!("{at}.viz.columns"), "at most 64".into());
+            }
+            for (field, why) in viz.style_problems() {
+                say(&format!("{at}.viz.{field}"), why);
             }
             for (column_index, column) in viz.columns.iter().enumerate() {
                 if column.format.as_deref().is_some_and(|format| !FORMATS.contains(&format)) {
@@ -386,7 +549,7 @@ pub fn default_dashboard() -> Dashboard {
     let stat = |id: &str, title: &str, x: u32, unit: &str, sql: String| Panel {
         id: id.into(),
         title: title.into(),
-        grid: Grid { x, y: 0, w: 3, h: 2 },
+        grid: Grid { x, y: 0, w: 3, h: 3 },
         query: records(sql),
         viz: Viz { kind: "stat".into(), unit: unit.into(), ..Viz::default() },
     };
@@ -418,7 +581,7 @@ pub fn default_dashboard() -> Dashboard {
             Panel {
                 id: "tokens_by_agent".into(),
                 title: "Tokens by agent".into(),
-                grid: Grid { x: 0, y: 1, w: 12, h: 5 },
+                grid: Grid { x: 0, y: 1, w: 12, h: 7 },
                 query: records(format!(
                     "SELECT strftime('%Y-%m-%d %H:%M', (hour / {hours}) * {hours}, 'unixepoch', 'localtime') AS time, agent, \
                      SUM(input + output) AS tokens FROM agent_usage WHERE hour >= $from_s - 3599 AND hour < $to_s {agents} \
@@ -436,7 +599,7 @@ pub fn default_dashboard() -> Dashboard {
             Panel {
                 id: "runs_by_agent".into(),
                 title: "Runs by agent".into(),
-                grid: Grid { x: 0, y: 2, w: 6, h: 4 },
+                grid: Grid { x: 0, y: 2, w: 6, h: 5 },
                 query: records(format!(
                     "SELECT strftime('%Y-%m-%d %H:%M', (started / $step) * $step / 1000, 'unixepoch', 'localtime') AS time, agent, \
                      COUNT(*) AS runs FROM runs WHERE started >= $from AND started < $to {agents} GROUP BY 1, 2 ORDER BY 1"
@@ -453,7 +616,7 @@ pub fn default_dashboard() -> Dashboard {
             Panel {
                 id: "running_tasks".into(),
                 title: "Background tasks running now".into(),
-                grid: Grid { x: 6, y: 2, w: 6, h: 4 },
+                grid: Grid { x: 6, y: 2, w: 6, h: 5 },
                 query: records(
                     "SELECT agent, task, started FROM tasks WHERE ended IS NULL AND ($agent = '' OR agent = $agent) \
                      ORDER BY started DESC"
@@ -472,6 +635,7 @@ pub fn default_dashboard() -> Dashboard {
         ],
         rev: 0,
         by: String::new(),
+        format: FORMAT,
     }
 }
 
@@ -504,12 +668,25 @@ pub fn ids(host: &mut impl Host) -> Vec<String> {
 }
 
 pub fn load(host: &mut impl Host, id: &str) -> Option<Dashboard> {
-    read(host, &current_key(id))
+    read(host, &current_key(id)).map(in_grafana_rows)
 }
 
 /// The version before the current one (or before it was deleted).
 pub fn previous(host: &mut impl Host, id: &str) -> Option<Dashboard> {
-    read(host, &previous_key(id))
+    read(host, &previous_key(id)).map(in_grafana_rows)
+}
+
+/// A dashboard kept before 0.5.0, its heights 50 points a unit, in
+/// Grafana's rows (38 points a row), so each panel stays as tall; kept so
+/// at its next save.
+fn in_grafana_rows(mut dashboard: Dashboard) -> Dashboard {
+    if dashboard.format < FORMAT {
+        for panel in &mut dashboard.panels {
+            panel.grid.h = ((f64::from(panel.grid.h) * 50.0 / 38.0).round() as u32).clamp(1, MAX_HEIGHT);
+        }
+        dashboard.format = FORMAT;
+    }
+    dashboard
 }
 
 /// Why a save didn't happen.
@@ -550,6 +727,7 @@ pub fn save(host: &mut impl Host, mut dashboard: Dashboard, base: Option<u64>, b
     let last = previous(host, &dashboard.id).map_or(0, |previous| previous.rev);
     dashboard.rev = at.max(last) + 1;
     dashboard.by = by.to_owned();
+    dashboard.format = FORMAT;
     if let Some(current) = &current {
         write(host, &previous_key(&dashboard.id), current).map_err(SaveError::Store)?;
     }

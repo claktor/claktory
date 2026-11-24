@@ -479,6 +479,8 @@ impl Factory {
             }
         }
         tracing::info!(version = VERSION, "update passed its trial");
+        // No rollback now: conversations are saved as JSON Lines.
+        self.old_segments.store(false, std::sync::atomic::Ordering::Relaxed);
         // No rollback now: the supervisor forgets the vault's key.
         crate::vault::handoff::release();
         let mut inner = self.lock();
@@ -781,9 +783,13 @@ pub const APPS_HOST: &str = "claktory-apps";
 /// Speech recognition for voice messages, beside factoryd like the apps host.
 pub const SPEECH_HOST: &str = "claktory-speech";
 
+/// Phone-sized video previews (#379, `previews/video.rs`), on a Mac,
+/// beside factoryd like the apps host.
+pub const VIDEO_PREVIEW: &str = "claktory-video-preview";
+
 /// The programs a release carries beside factoryd, which updates put in
 /// `<home>/bin` and roll back with it.
-pub const HELPERS: [&str; 2] = [APPS_HOST, SPEECH_HOST];
+pub const HELPERS: [&str; 3] = [APPS_HOST, SPEECH_HOST, VIDEO_PREVIEW];
 
 fn helper(home: &Home, name: &str) -> std::path::PathBuf {
     home.root().join("bin").join(name)
@@ -794,10 +800,10 @@ fn previous_helper(home: &Home, name: &str) -> std::path::PathBuf {
 }
 
 /// Before an update's backend goes in: each helper the release carries
-/// (`claktory-apps`, `claktory-speech`) replaces `bin/<name>`, which is
-/// kept as `bin/<name>.previous` for a roll-back. A release without one
-/// leaves what's there alone, and forgets an older `.previous` so a
-/// roll-back doesn't put back a helper from before.
+/// (`claktory-apps`, `claktory-speech`, `claktory-video-preview`) replaces
+/// `bin/<name>`, which is kept as `bin/<name>.previous` for a roll-back. A
+/// release without one leaves what's there alone, and forgets an older
+/// `.previous` so a roll-back doesn't put back a helper from before.
 fn stage_helpers(home: &Home, release: &Path) -> std::io::Result<()> {
     for name in HELPERS {
         stage_helper(home, name, &release.join(name))?;

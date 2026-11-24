@@ -10,13 +10,14 @@ use parking_lot::Mutex;
 
 use crate::accounts::{
     Refused, account_name, account_noun, exhausted_message, key_label, mark_answered_by, mark_none_left, mark_refused, out_of_credit,
-    refused, switch_note, usage_limit,
+    refused, switch_note, usage_limit, usage_limit_claim,
 };
 use crate::auth::{AuthCheck, AuthInteraction, AuthResult, Env, RequestAuth, process_env, resolve_account_auth, resolve_provider_auth};
 use crate::clock::now_ms;
 use crate::credentials::{Account, Credential, CredentialBacking, FileCredentialStore};
 use crate::errors::{Error, models_error};
 use crate::limits::{AccountUsage, ResetAnswer, UsageLimit, UsageReset};
+use crate::providers::anthropic::files::{Forgotten, ImageFiles, ImageFilesFor};
 use crate::providers::keys::KeyCheck;
 use crate::providers::{Provider, anthropic, merge_headers, model_headers, openai, openai_codex, openrouter, supported_thinking_levels};
 use crate::stream::{EventStream, LlmContext, StreamFn, StreamOptions, ThinkingLevel, event_stream};
@@ -47,6 +48,8 @@ pub struct ModelInfo {
     /// The model takes image input (the catalog's input list, the same
     /// source as read_image's gate).
     pub image_input: bool,
+    /// Added by its id, as the provider's list doesn't have it.
+    pub added: bool,
 }
 
 /// One of a provider's accounts, as a client shows it.
@@ -72,6 +75,12 @@ pub struct AccountInfo {
     pub stored: bool,
     /// Requests go to it now: the first with capacity.
     pub in_use: bool,
+    /// Fable's own pool reached its limit on it, until then (ms since 1970);
+    /// 0 when Fable has room on it.
+    pub fable_exhausted_until: u64,
+    /// Fable models' requests go to it now: the first with capacity in
+    /// Fable's pool (Anthropic only).
+    pub fable_in_use: bool,
 }
 
 /// The account a key in the environment is, after those stored.
@@ -100,47 +109,138 @@ pub type Notes = Arc<dyn Fn(AccountNote) + Send + Sync>;
 /// provider nor its usage says when the limit resets.
 const UNKNOWN_RESET_MS: u64 = 15 * 60 * 1000;
 
-/// Whether the model's usage counts against Anthropic's Fable pool. Fable
-/// has a weekly limit of its own (`weekly_fable`) on top of the shared
-/// ones, and the Opus and Sonnet weekly caps don't cover it, so each pool
-/// learns its own state: a mark on one doesn't stop the other's requests
-/// (at worst the provider refuses the probe and the pool is marked too).
-/// Every other model, and every other provider, draws on the normal pool.
-fn fable_pool(model: &Model) -> bool {
-    model.provider == "anthropic" && model.id.starts_with("claude-fable")
+/// Which of an account's limits a model's requests draw on. Anthropic keeps
+/// weekly limits of some models' own on top of the shared 5-hour and weekly
+/// ones: Fable's (`weekly_fable`), Opus's (`weekly_opus`) and Sonnet's
+/// (`weekly_sonnet`). At one of them only those models wait; the others
+/// carry on. Fable learns its state apart from the shared limits too (a
+/// mark on one doesn't stop the other's requests: at worst the provider
+/// refuses the probe and the pool is marked too); Opus and Sonnet wait for
+/// the shared limits' mark as well as their own. Every other model, and
+/// every other provider, draws on the normal pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Pool {
+    Normal,
+    Fable,
+    Opus,
+    Sonnet,
 }
 
-/// When the account's limit for the pool resets; 0 when it has capacity.
-fn pool_until(account: &Account, fable: bool) -> u64 {
-    if fable { account.fable_exhausted_until } else { account.exhausted_until }
+impl Pool {
+    /// The pool of a provider's model id ("claude-opus-4-8").
+    pub fn of(provider: &str, model: &str) -> Pool {
+        if provider != "anthropic" {
+            Pool::Normal
+        } else if model.starts_with("claude-fable") {
+            Pool::Fable
+        } else if model.contains("opus") {
+            Pool::Opus
+        } else if model.contains("sonnet") {
+            Pool::Sonnet
+        } else {
+            Pool::Normal
+        }
+    }
+
+    fn of_model(model: &Model) -> Pool {
+        Pool::of(&model.provider, &model.id)
+    }
+
+    /// The usage window of the pool's own weekly limit ("weekly_opus");
+    /// None for the normal pool.
+    pub fn own_window(self) -> Option<&'static str> {
+        match self {
+            Pool::Normal => None,
+            Pool::Fable => Some("weekly_fable"),
+            Pool::Opus => Some("weekly_opus"),
+            Pool::Sonnet => Some("weekly_sonnet"),
+        }
+    }
+
+    /// The name Anthropic gives the pool's own limit when it refuses a
+    /// request for it (`anthropic::limit_claim`).
+    fn claim(self) -> Option<&'static str> {
+        match self {
+            Pool::Opus => Some("seven_day_opus"),
+            Pool::Sonnet => Some("seven_day_sonnet"),
+            Pool::Normal | Pool::Fable => None,
+        }
+    }
+
+    /// Whether a usage window (`UsageLimit.id`) holds the pool's requests
+    /// back when it's full: the 5-hour and weekly ones every pool's, a
+    /// model's own weekly one only its pool's, any other every pool's but
+    /// Fable's.
+    pub fn limited_by(self, window: &str) -> bool {
+        match window {
+            "five_hour" | "weekly" => true,
+            "weekly_fable" | "weekly_opus" | "weekly_sonnet" => self.own_window() == Some(window),
+            _ => self != Pool::Fable,
+        }
+    }
+}
+
+/// Whether the model's usage counts against Anthropic's Fable pool.
+pub fn in_fable_pool(provider: &str, model: &str) -> bool {
+    Pool::of(provider, model) == Pool::Fable
+}
+
+/// An account's limit mark for `pool` alone, when it resets (ms since
+/// 1970); 0 when it isn't marked. The normal pool's mark is the shared
+/// limits'.
+fn mark_until(account: &Account, pool: Pool) -> u64 {
+    match pool {
+        Pool::Normal => account.exhausted_until,
+        Pool::Fable => account.fable_exhausted_until,
+        Pool::Opus => account.opus_exhausted_until,
+        Pool::Sonnet => account.sonnet_exhausted_until,
+    }
+}
+
+/// When the account's limits for the pool's requests reset; 0 (or past)
+/// when it has capacity. Opus and Sonnet wait for the shared limits' mark
+/// too; Fable learns its own.
+fn pool_until(account: &Account, pool: Pool) -> u64 {
+    match pool {
+        Pool::Normal | Pool::Fable => mark_until(account, pool),
+        Pool::Opus | Pool::Sonnet => account.exhausted_until.max(mark_until(account, pool)),
+    }
 }
 
 /// Whether requests for the pool's models can go to the account at `now`:
 /// past the pool's limit reset, with credit (or out of it long enough to try
 /// again), and with a sign-in the provider still refreshes.
-fn has_capacity(account: &Account, fable: bool, now: u64) -> bool {
-    pool_until(account, fable) <= now
+fn has_capacity(account: &Account, pool: Pool, now: u64) -> bool {
+    pool_until(account, pool) <= now
         && (account.out_of_credit_since == 0 || now >= account.out_of_credit_since + CREDIT_RETRY_MS)
         && account.refused_since == 0
 }
 
 /// The first account with capacity for the pool at `now`, leaving out `tried`.
-fn with_capacity<'a>(accounts: &'a [Account], tried: &[String], fable: bool, now: u64) -> Option<(usize, &'a Account)> {
-    accounts.iter().enumerate().find(|(_, account)| has_capacity(account, fable, now) && !tried.contains(&account.id))
+fn with_capacity<'a>(accounts: &'a [Account], tried: &[String], pool: Pool, now: u64) -> Option<(usize, &'a Account)> {
+    accounts.iter().enumerate().find(|(_, account)| has_capacity(account, pool, now) && !tried.contains(&account.id))
 }
 
 /// How an account's request failed for good on that account.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Spent {
-    /// Its usage limit, resetting then (ms since 1970) if said.
-    Limit(Option<u64>),
+    /// A usage limit, resetting then (ms since 1970) if said: the limits
+    /// of the pool it names (`Pool::Normal`: the shared ones).
+    Limit(Option<u64>, Pool),
     /// An API key out of credit.
     Credit,
 }
 
-fn spent(message: &AssistantMessage) -> Option<Spent> {
+/// How a request for `pool` failed on its account, if it did: a refusal
+/// naming the pool's own limit (Anthropic's "seven_day_opus" for an Opus
+/// request) marks that pool alone; Fable's any refusal; others the shared
+/// limits.
+fn spent(message: &AssistantMessage, pool: Pool) -> Option<Spent> {
     match usage_limit(message) {
-        Some(resets_at) => Some(Spent::Limit(resets_at)),
+        Some(resets_at) => {
+            let own = pool == Pool::Fable || (pool.claim().is_some() && usage_limit_claim(message) == pool.claim());
+            Some(Spent::Limit(resets_at, if own { pool } else { Pool::Normal }))
+        }
         None => out_of_credit(message).then_some(Spent::Credit),
     }
 }
@@ -196,8 +296,19 @@ fn failed(model: &Model, text: String) -> StreamEvent {
 struct EnvState {
     exhausted_until: u64,
     fable_exhausted_until: u64,
+    opus_exhausted_until: u64,
+    sonnet_exhausted_until: u64,
     out_of_credit_since: u64,
 }
+
+/// Which images went to Anthropic as files, beside the sign-ins (#382).
+const IMAGE_FILES: &str = "anthropic-files.jsonl";
+/// How long whose subscription it is holds once read (`files_for`), and
+/// how soon it's read again when it couldn't be.
+const PERSONAL_KEEP_MS: u64 = 6 * 3_600_000;
+const PERSONAL_RETRY_MS: u64 = 10 * 60_000;
+/// How long a request waits to read it.
+const PROFILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 struct Inner {
     providers: Vec<Provider>,
@@ -205,6 +316,17 @@ struct Inner {
     env: Env,
     /// The state of the keys in the environment, by provider id.
     env_state: Mutex<HashMap<String, EnvState>>,
+    /// Model lists fetched from a provider, in place of its bundled one, by
+    /// provider id.
+    fetched: Mutex<HashMap<String, Arc<Vec<Model>>>>,
+    /// Models added by their id, as the provider's list didn't have them
+    /// (friend bug #14), by provider id.
+    added: Mutex<HashMap<String, Vec<Model>>>,
+    /// The images Anthropic holds as files (#382); None sends them inline.
+    image_files: Option<Arc<ImageFiles>>,
+    /// Whether each Anthropic subscription sign-in is the person's own
+    /// (`files_for`), by `provider/account`, and until when that holds.
+    personal: Mutex<HashMap<String, (bool, u64)>>,
 }
 
 #[derive(Clone)]
@@ -214,12 +336,119 @@ pub struct Registry {
 
 impl Registry {
     /// The four providers, with credentials stored at `auth_path` (created 0600 on first login) or taken from the environment.
+    /// Which images went to Anthropic as files is kept beside them.
     pub fn new(auth_path: PathBuf) -> Registry {
-        Registry::with_providers(FileCredentialStore::new(auth_path), process_env(), default_providers())
+        let files = auth_path.with_file_name(IMAGE_FILES);
+        Registry::with_providers(FileCredentialStore::new(auth_path), process_env(), default_providers()).keeping_image_files(Some(files))
     }
 
     pub fn with_providers(store: FileCredentialStore, env: Env, providers: Vec<Provider>) -> Registry {
-        Registry { inner: Arc::new(Inner { providers, store, env, env_state: Mutex::new(HashMap::new()) }) }
+        Registry {
+            inner: Arc::new(Inner {
+                providers,
+                store,
+                env,
+                env_state: Mutex::new(HashMap::new()),
+                fetched: Mutex::new(HashMap::new()),
+                added: Mutex::new(HashMap::new()),
+                image_files: None,
+                personal: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// Sends images read since #382 to Anthropic once, as files, keeping
+    /// which in `path` (None: only while it runs). Before it's cloned.
+    #[must_use]
+    pub fn keeping_image_files(mut self, path: Option<PathBuf>) -> Registry {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.image_files = Some(Arc::new(ImageFiles::new(path)));
+        }
+        self
+    }
+
+    /// Deletes at Anthropic the files of the images of `digests` (those of
+    /// a conversation compacted or cleared), on every account that has
+    /// them; the next request with one uploads it again.
+    pub async fn forget_images(&self, digests: &[String]) {
+        let Some(files) = &self.inner.image_files else { return };
+        self.delete_files(files.forget(digests)).await;
+    }
+
+    /// Deletes files at Anthropic, each with its own account's sign-in.
+    async fn delete_files(&self, forgotten: Vec<Forgotten>) {
+        for forgotten in forgotten {
+            let account = forgotten.account.as_str();
+            let (provider_id, account_id) = account.split_once('/').unwrap_or((account, ""));
+            let (Some(provider), Some(model)) = (self.provider(provider_id), self.get_models(Some(provider_id)).into_iter().next()) else {
+                continue;
+            };
+            let account_id = Some(account_id).filter(|account_id| !account_id.is_empty());
+            let resolved = match (account_id, &provider.api_key) {
+                (Some(ENV_ACCOUNT), Some(api_key)) => api_key.resolve(&self.inner.env, None),
+                _ => resolve_account_auth(provider, &self.inner.store, &self.inner.env, account_id, &CancellationToken::new()).await,
+            };
+            let Ok(Some(resolved)) = resolved else { continue };
+            let oauth = resolved.auth.api_key.as_deref().is_some_and(|key| key.contains("sk-ant-oat"));
+            let options = StreamOptions { api_key: resolved.auth.api_key, headers: resolved.auth.headers, ..StreamOptions::default() };
+            let headers = crate::providers::anthropic::file_headers(&model, &options, oauth);
+            if let Err(error) = crate::providers::anthropic::files::delete(&forgotten.base_url, &headers, &forgotten.id).await {
+                tracing::info!(%account, %error, "could not delete an image's file at Anthropic; it expires by itself");
+            }
+        }
+    }
+
+    /// Deletes at Anthropic the files of the images sent to the provider's
+    /// accounts (`account`, or all of them when None) while their sign-ins
+    /// still can: before they're signed out of.
+    async fn delete_account_files(&self, id: &str, account: Option<&str>) {
+        let Some(files) = &self.inner.image_files else { return };
+        let accounts: Vec<String> = match account {
+            Some(account) => vec![format!("{id}/{account}")],
+            None => files.accounts().into_iter().filter(|key| key.split_once('/').is_some_and(|(provider, _)| provider == id)).collect(),
+        };
+        let forgotten = accounts.iter().flat_map(|account| files.forget_account(account)).collect();
+        self.delete_files(forgotten).await;
+    }
+
+    /// Forgets whose subscription each of the provider's accounts is (Fugo):
+    /// an account signed out of and in again under another plan is read
+    /// anew, not judged on the old one.
+    fn forget_whose(&self, id: &str) {
+        self.inner.personal.lock().retain(|key, _| key.split_once('/').is_none_or(|(provider, _)| provider != id));
+    }
+
+    /// Where a request to `provider`'s `account` keeps its images as files:
+    /// only Anthropic's, and only on a subscription that's the person's
+    /// own (Fugo, #382): a file is reachable to everyone with access to its
+    /// organization's workspace, so an API key's (often a company's) and a
+    /// Team's or Enterprise's send images inline, as does a plan it can't
+    /// read.
+    async fn files_for(&self, provider: &Provider, account: Option<&str>, base_url: &str, auth: &RequestAuth) -> Option<ImageFilesFor> {
+        let files = self.inner.image_files.as_ref().filter(|_| provider.id == "anthropic")?;
+        if !auth.api_key.as_deref().is_some_and(|key| key.contains("sk-ant-oat")) {
+            return None;
+        }
+        let key = format!("{}/{}", provider.id, account.unwrap_or_default());
+        let now = now_ms();
+        let known = self.inner.personal.lock().get(&key).copied().filter(|(_, until)| *until > now);
+        let personal = match known {
+            Some((personal, _)) => personal,
+            None => {
+                let read = tokio::time::timeout(PROFILE_TIMEOUT, crate::limits::anthropic_personal(base_url.to_owned(), auth.clone())).await;
+                let (personal, keep) = match read {
+                    Ok(Ok(personal)) => (personal, PERSONAL_KEEP_MS),
+                    Ok(Err(error)) => {
+                        tracing::info!(account = %key, %error, "could not read whose subscription it is; its images go inline for now");
+                        (false, PERSONAL_RETRY_MS)
+                    }
+                    Err(_) => (false, PERSONAL_RETRY_MS),
+                };
+                self.inner.personal.lock().insert(key.clone(), (personal, now + keep));
+                personal
+            }
+        };
+        personal.then(|| ImageFilesFor { files: files.clone(), account: key })
     }
 
     pub fn providers(&self) -> &[Provider] {
@@ -253,9 +482,138 @@ impl Registry {
 
     pub fn get_models(&self, provider: Option<&str>) -> Vec<Model> {
         match provider {
-            Some(id) => self.provider(id).map(|provider| provider.models.clone()).unwrap_or_default(),
-            None => self.inner.providers.iter().flat_map(|provider| provider.models.iter().cloned()).collect(),
+            Some(id) => self.provider(id).map(|provider| self.models_of(provider).to_vec()).unwrap_or_default(),
+            None => self.inner.providers.iter().flat_map(|provider| self.models_of(provider).to_vec()).collect(),
         }
+    }
+
+    /// A provider's models: the list fetched from it, else its bundled one,
+    /// then those added by their id that it doesn't have.
+    fn models_of(&self, provider: &Provider) -> Arc<Vec<Model>> {
+        let listed = match self.inner.fetched.lock().get(provider.id) {
+            Some(models) => models.clone(),
+            None => Arc::new(provider.models.clone()),
+        };
+        let added = self.inner.added.lock();
+        let extra: Vec<Model> = added
+            .get(provider.id)
+            .into_iter()
+            .flatten()
+            .filter(|model| !listed.iter().any(|known| known.id == model.id))
+            .cloned()
+            .collect();
+        if extra.is_empty() {
+            return listed;
+        }
+        Arc::new(listed.iter().cloned().chain(extra).collect())
+    }
+
+    /// Whether the provider's model id was added by its id and isn't in the
+    /// provider's own list.
+    fn is_added(&self, provider: &Provider, id: &str) -> bool {
+        let listed = match self.inner.fetched.lock().get(provider.id) {
+            Some(models) => models.iter().any(|model| model.id == id),
+            None => provider.models.iter().any(|model| model.id == id),
+        };
+        !listed && self.inner.added.lock().get(provider.id).is_some_and(|added| added.iter().any(|model| model.id == id))
+    }
+
+    /// Whether the provider's model list is to be fetched from the provider
+    /// itself: Anthropic's, OpenAI's, Codex's and OpenRouter's, at their own
+    /// address and not pointed elsewhere (`OPENROUTER_BASE_URL`, as QA's
+    /// sandboxes do, or `ANTHROPIC_BASE_URL`), whose list wouldn't be theirs.
+    pub fn fetches_models(&self, id: &str) -> bool {
+        let Some(provider) = self.provider(id) else { return false };
+        let elsewhere = |variable: &str| (self.inner.env)(variable).is_some();
+        match id {
+            "openrouter" => provider.base_url == crate::providers::catalog::OPENROUTER_BASE && !elsewhere("OPENROUTER_BASE_URL"),
+            "anthropic" => provider.base_url == "https://api.anthropic.com" && !elsewhere("ANTHROPIC_BASE_URL"),
+            "openai" => provider.base_url == "https://api.openai.com/v1" && !elsewhere("OPENAI_BASE_URL"),
+            "openai-codex" => provider.base_url == "https://chatgpt.com/backend-api",
+            _ => false,
+        }
+    }
+
+    /// The base url and auth of the provider's first account, to read its
+    /// model list with; None when it isn't signed in (or its sign-ins are
+    /// locked away), or it's signed in at another address.
+    async fn listing_auth(&self, id: &str) -> Result<Option<(String, RequestAuth)>, String> {
+        let Some(provider) = self.provider(id) else { return Ok(None) };
+        let resolved = match resolve_account_auth(provider, &self.inner.store, &self.inner.env, None, &CancellationToken::new()).await {
+            Err(error) if error.is_locked() => return Ok(None),
+            resolved => resolved.map_err(|error| error.to_string())?,
+        };
+        let Some(resolved) = resolved else { return Ok(None) };
+        let base_url = resolved.auth.base_url.clone().unwrap_or_else(|| provider.base_url.to_owned());
+        if base_url.trim_end_matches('/') != provider.base_url.trim_end_matches('/') {
+            return Ok(None);
+        }
+        Ok(Some((base_url, resolved.auth)))
+    }
+
+    /// Reads the provider's model list from the provider, as it came; None
+    /// when there's none to read (`fetches_models`, or not signed in).
+    pub async fn fetch_models(&self, id: &str) -> Result<Option<Vec<u8>>, String> {
+        if !self.fetches_models(id) {
+            return Ok(None);
+        }
+        let Some((base_url, auth)) = self.listing_auth(id).await? else { return Ok(None) };
+        crate::providers::listing::fetch(id, &base_url, &auth).await.map(Some)
+    }
+
+    /// Takes a list `fetch_models` brought, checked whole, in place of the
+    /// bundled one: whether the provider's models changed. One that fails
+    /// its checks changes nothing.
+    pub fn take_models(&self, id: &str, body: &[u8]) -> Result<bool, String> {
+        if !self.fetches_models(id) {
+            return Ok(false);
+        }
+        let models = crate::providers::listing::parse(id, body)?;
+        Ok(self.set_fetched_models(id, models))
+    }
+
+    /// Asks the provider whether it has the model `model` (its own id) for
+    /// this sign-in, and an agent can run on it: the model to add, or why
+    /// not in a sentence to show. None when it can't be asked here (a
+    /// provider pointed elsewhere).
+    pub async fn check_model(&self, id: &str, model: &str) -> Result<Option<Model>, String> {
+        if !self.fetches_models(id) {
+            return Ok(None);
+        }
+        let who = crate::providers::listing::name(id);
+        let Some((base_url, auth)) = self.listing_auth(id).await? else {
+            return Err(format!("Sign in to {who} first, in Settings → Providers."));
+        };
+        crate::providers::listing::check(id, &base_url, &auth, model).await.map(Some)
+    }
+
+    /// Adds a model `check_model` found to the provider's list; whether it's
+    /// new.
+    pub fn add_model(&self, provider: &str, model: Model) -> bool {
+        let Some(provider) = self.provider(provider) else { return false };
+        let mut added = self.inner.added.lock();
+        let models = added.entry(provider.id.to_owned()).or_default();
+        if models.contains(&model) {
+            return false;
+        }
+        models.retain(|known| known.id != model.id);
+        models.push(model);
+        true
+    }
+
+    /// Takes `models`, fetched from the provider, in place of its bundled
+    /// list (and of any fetched before); whether its models changed.
+    pub fn set_fetched_models(&self, provider: &str, models: Vec<Model>) -> bool {
+        let Some(provider) = self.provider(provider) else { return false };
+        let same = match self.inner.fetched.lock().get(provider.id) {
+            Some(fetched) => fetched.as_slice() == models.as_slice(),
+            None => provider.models.as_slice() == models.as_slice(),
+        };
+        if same {
+            return false;
+        }
+        self.inner.fetched.lock().insert(provider.id.to_owned(), Arc::new(models));
+        true
     }
 
     pub fn get_model(&self, provider: &str, id: &str) -> Option<Model> {
@@ -283,13 +641,14 @@ impl Registry {
                     continue;
                 }
             }
-            for model in &provider.models {
+            for model in self.models_of(provider).iter() {
                 models.push(ModelInfo {
                     id: format!("{}/{}", provider.id, model.id),
                     name: model.name.clone(),
                     context_window: model.context_window,
                     efforts: supported_thinking_levels(model),
                     image_input: model.input.iter().any(|input| input == "image"),
+                    added: self.is_added(provider, &model.id),
                 });
             }
         }
@@ -330,7 +689,9 @@ impl Registry {
         let now = now_ms();
         let accounts = self.outlined_candidates(id).await?;
         // As shown: the normal pool, which is what most models draw on.
-        let in_use = with_capacity(&accounts, &[], false, now).map(|(position, _)| position);
+        let in_use = with_capacity(&accounts, &[], Pool::Normal, now).map(|(position, _)| position);
+        let fable = in_fable_pool(id, "claude-fable");
+        let fable_in_use = with_capacity(&accounts, &[], Pool::Fable, now).map(|(position, _)| position).filter(|_| fable);
         Ok(accounts
             .into_iter()
             .enumerate()
@@ -342,9 +703,32 @@ impl Registry {
                 sign_in_again: account.refused_since != 0,
                 stored: account.id != ENV_ACCOUNT,
                 in_use: in_use == Some(position),
+                fable_exhausted_until: if fable && account.fable_exhausted_until > now { account.fable_exhausted_until } else { 0 },
+                fable_in_use: fable_in_use == Some(position),
                 id: account.id,
             })
             .collect())
+    }
+
+    /// Whether a request for `model` (an id of `provider`'s) would go to one
+    /// of the provider's accounts now: it has accounts, and one with
+    /// capacity for the model's pool. False with none listed, so a request
+    /// refused there isn't asked again at once.
+    pub async fn room_for(&self, provider: &str, model: &str) -> bool {
+        let Ok(accounts) = self.candidates(provider).await else { return false };
+        !accounts.is_empty() && with_capacity(&accounts, &[], Pool::of(provider, model), now_ms()).is_some()
+    }
+
+    /// When a request next tries one of the provider's keys out of credit
+    /// again, by itself (`CREDIT_RETRY_MS` after it ran out): the earliest,
+    /// in ms since 1970; None when none is out of credit.
+    pub async fn credit_retry_at(&self, id: &str) -> Result<Option<u64>, Error> {
+        let accounts = self.outlined_candidates(id).await?;
+        Ok(accounts
+            .iter()
+            .filter(|account| account.out_of_credit_since != 0 && account.refused_since == 0)
+            .map(|account| account.out_of_credit_since + CREDIT_RETRY_MS)
+            .min())
     }
 
     /// The provider's accounts in the order requests try them: those stored,
@@ -370,6 +754,8 @@ impl Registry {
                 identity: String::new(),
                 exhausted_until: state.exhausted_until,
                 fable_exhausted_until: state.fable_exhausted_until,
+                opus_exhausted_until: state.opus_exhausted_until,
+                sonnet_exhausted_until: state.sonnet_exhausted_until,
                 out_of_credit_since: state.out_of_credit_since,
                 refused_since: 0,
                 credential: Credential::ApiKey { key, extra: Map::new() },
@@ -411,27 +797,37 @@ impl Registry {
         credential_result(changed, "modify", id).map(drop)
     }
 
-    /// Changes an account's limit state (the pool `fable` names) and credit
-    /// state, stored or not; returns the provider's accounts then.
+    /// Changes an account's limit mark for `pool` alone (`mark_until`) and
+    /// its credit state, stored or not; returns the provider's accounts then.
     async fn set_state(
         &self,
         id: &str,
         account: &str,
-        fable: bool,
+        pool: Pool,
         change: impl FnOnce(&mut u64, &mut u64) + Send,
     ) -> Result<Vec<Account>, Error> {
         if account == ENV_ACCOUNT {
             {
                 let mut states = self.inner.env_state.lock();
                 let state = states.entry(id.to_owned()).or_default();
-                let until = if fable { &mut state.fable_exhausted_until } else { &mut state.exhausted_until };
+                let until = match pool {
+                    Pool::Normal => &mut state.exhausted_until,
+                    Pool::Fable => &mut state.fable_exhausted_until,
+                    Pool::Opus => &mut state.opus_exhausted_until,
+                    Pool::Sonnet => &mut state.sonnet_exhausted_until,
+                };
                 change(until, &mut state.out_of_credit_since);
             }
             return self.candidates(id).await;
         }
         let account = account.to_owned();
         self.modify_account(id, account, move |stored| {
-            let until = if fable { &mut stored.fable_exhausted_until } else { &mut stored.exhausted_until };
+            let until = match pool {
+                Pool::Normal => &mut stored.exhausted_until,
+                Pool::Fable => &mut stored.fable_exhausted_until,
+                Pool::Opus => &mut stored.opus_exhausted_until,
+                Pool::Sonnet => &mut stored.sonnet_exhausted_until,
+            };
             change(until, &mut stored.out_of_credit_since);
         })
         .await?;
@@ -446,13 +842,32 @@ impl Registry {
     }
 
     /// Forgets that one of the provider's accounts (None: all of them) is at
-    /// its usage limits (either pool) or out of credit, so the next request
+    /// its usage limits (every pool's) or out of credit, so the next request
     /// asks the provider itself again: for when usage may be back without a
     /// sign-in changing, such as a reset claimed on the provider's own site
     /// or one the provider applied late. True when any account was marked. A
     /// wrong guess costs one refused request, which marks the account spent
     /// again with the provider's fresh reset time.
     pub async fn forget_spent(&self, id: &str, account: Option<&str>) -> Result<bool, Error> {
+        self.forget_marks(id, account, |_| true, true).await
+    }
+
+    /// `forget_spent` for one account by its usage read now: each pool's
+    /// mark whose limits have room in it (`full`: the ids of the windows at
+    /// 100%) is forgotten, the others kept, so one model's weekly limit
+    /// doesn't hold the rest of the account back. Its credit is left as it
+    /// is: an account with usage limits has none to run out of.
+    pub async fn forget_spent_with_room(&self, id: &str, account: Option<&str>, full: &[String]) -> Result<bool, Error> {
+        let room = |pool: Pool| match pool {
+            // A model's own mark: its own limit has room. The shared
+            // limits' mark holds its requests back on its own.
+            Pool::Opus | Pool::Sonnet => !full.iter().any(|window| Some(window.as_str()) == pool.own_window()),
+            Pool::Normal | Pool::Fable => !full.iter().any(|window| pool.limited_by(window)),
+        };
+        self.forget_marks(id, account, room, false).await
+    }
+
+    async fn forget_marks(&self, id: &str, account: Option<&str>, room: impl Fn(Pool) -> bool, credit: bool) -> Result<bool, Error> {
         let now = now_ms();
         let accounts = self.candidates(id).await?;
         let mut any = false;
@@ -460,16 +875,16 @@ impl Registry {
             if account.is_some_and(|wanted| wanted != stored.id) {
                 continue;
             }
-            if stored.exhausted_until <= now && stored.fable_exhausted_until <= now && stored.out_of_credit_since == 0 {
-                continue;
+            if credit && stored.out_of_credit_since != 0 {
+                self.set_state(id, &stored.id, Pool::Normal, |_, since| *since = 0).await?;
+                any = true;
             }
-            self.set_state(id, &stored.id, false, |until, since| {
-                *until = 0;
-                *since = 0;
-            })
-            .await?;
-            self.set_state(id, &stored.id, true, |until, _| *until = 0).await?;
-            any = true;
+            for pool in [Pool::Normal, Pool::Fable, Pool::Opus, Pool::Sonnet] {
+                if mark_until(&stored, pool) > now && room(pool) {
+                    self.set_state(id, &stored.id, pool, |until, _| *until = 0).await?;
+                    any = true;
+                }
+            }
         }
         Ok(any)
     }
@@ -490,7 +905,7 @@ impl Registry {
             self.modify_account(id, wanted, move |stored| stored.label = label).await?;
         }
         if retry {
-            self.set_state(id, account, false, |_, since| *since = 0).await?;
+            self.set_state(id, account, Pool::Normal, |_, since| *since = 0).await?;
         }
         Ok(())
     }
@@ -529,9 +944,10 @@ impl Registry {
             };
             if let Some(reset_account) = reset_account.map(|stored| stored.id.clone()) {
                 // A reset refills limits; which pools have room again, the
-                // next request finds out, so both get to try.
-                self.set_state(id, &reset_account, false, |until, _| *until = 0).await?;
-                self.set_state(id, &reset_account, true, |until, _| *until = 0).await?;
+                // next request finds out, so every pool gets to try.
+                for pool in [Pool::Normal, Pool::Fable, Pool::Opus, Pool::Sonnet] {
+                    self.set_state(id, &reset_account, pool, |until, _| *until = 0).await?;
+                }
             }
         }
         Ok(Some(answer))
@@ -582,6 +998,34 @@ impl Registry {
             stored.identity = identity.key;
         })
         .await
+    }
+
+    /// Whether the provider says what its keys have to spend (`account_credit`).
+    pub fn reads_credit(&self, id: &str) -> bool {
+        self.provider(id).is_some_and(|provider| provider.credit.is_some())
+    }
+
+    /// What one of the provider's accounts has to spend, as its provider
+    /// says (#343 U8: OpenRouter's GET /key), read now: None when the
+    /// provider can't say, it has no such account, or its sign-ins are
+    /// locked away. `ENV_ACCOUNT` is the key in the environment. Why a read
+    /// failed is a short sentence with no body of the provider's answer.
+    pub async fn account_credit(&self, id: &str, account: &str) -> Result<Option<crate::providers::keys::KeyCredit>, Error> {
+        let Some(provider) = self.provider(id) else { return Ok(None) };
+        let Some(credit) = provider.credit else { return Ok(None) };
+        let resolved = match (account, &provider.api_key) {
+            (ENV_ACCOUNT, Some(api_key)) => api_key.resolve(&self.inner.env, None)?,
+            _ => {
+                let account = Some(account).filter(|account| !account.is_empty());
+                match resolve_account_auth(provider, &self.inner.store, &self.inner.env, account, &CancellationToken::new()).await {
+                    Err(error) if error.is_locked() => return Ok(None),
+                    resolved => resolved?,
+                }
+            }
+        };
+        let Some(resolved) = resolved else { return Ok(None) };
+        let base_url = resolved.auth.base_url.clone().unwrap_or_else(|| provider.base_url.to_owned());
+        credit(base_url, resolved.auth).await.map(Some).map_err(Error::Other)
     }
 
     /// The base url and auth of a provider's account signed in with a subscription; None when it isn't.
@@ -649,6 +1093,8 @@ impl Registry {
     /// instead of replacing its first (unless it's one of them).
     pub async fn login_account(&self, id: &str, kind: &str, interaction: &dyn AuthInteraction, add: bool) -> Result<Credential, Error> {
         let provider = self.provider(id).ok_or_else(|| models_error("provider", format!("Unknown provider: {id}"), None))?;
+        // Signed in again, perhaps on another plan: whose it is is read anew.
+        self.forget_whose(id);
         let login = match kind {
             "oauth" => provider.oauth.as_ref().map(|oauth| oauth.login(interaction)),
             _ => provider.api_key.as_ref().map(|api_key| api_key.login(interaction)),
@@ -746,6 +1192,8 @@ impl Registry {
 
     /// Signs out of all of the provider's accounts.
     pub async fn logout(&self, id: &str) -> Result<(), Error> {
+        self.delete_account_files(id, None).await;
+        self.forget_whose(id);
         credential_result(self.inner.store.delete(id).await, "delete", id)
     }
 
@@ -755,6 +1203,8 @@ impl Registry {
             return self.logout(id).await;
         }
         self.not_locked(id, Some(account)).await?;
+        self.delete_account_files(id, Some(account)).await;
+        self.forget_whose(id);
         let account = account.to_owned();
         let removed = self
             .inner
@@ -799,10 +1249,10 @@ impl Registry {
     }
 
     /// Marks an account as having reached its usage limit for the pool
-    /// (`fable` or not) until it resets: when the provider said, or else
-    /// when its usage read now says the pool's full limits do, or else in a
-    /// while. Returns the provider's accounts then.
-    async fn exhaust(&self, id: &str, account: &str, fable: bool, resets_at: Option<u64>) -> Result<Vec<Account>, Error> {
+    /// (`Pool::Normal`: the shared limits) until it resets: when the
+    /// provider said, or else when its usage read now says the pool's full
+    /// limits do, or else in a while. Returns the provider's accounts then.
+    async fn exhaust(&self, id: &str, account: &str, pool: Pool, resets_at: Option<u64>) -> Result<Vec<Account>, Error> {
         let now = now_ms();
         let resets_at = match resets_at.filter(|at| *at > now) {
             Some(at) => Some(at),
@@ -811,16 +1261,14 @@ impl Registry {
                     .limits
                     .iter()
                     .filter(|limit| limit.used_percent >= 100.0)
-                    // Only limits the pool draws on. Fable requests pass
+                    // Only limits the mark stands for. Fable requests pass
                     // the 5-hour gate, the weekly one (it applies across
-                    // all models, Anthropic says) and Fable's own; the
-                    // other models everything but Fable's.
-                    .filter(|limit| {
-                        if fable {
-                            matches!(limit.id.as_str(), "five_hour" | "weekly" | "weekly_fable")
-                        } else {
-                            limit.id != "weekly_fable"
-                        }
+                    // all models, Anthropic says) and Fable's own; an Opus
+                    // or Sonnet mark is its own weekly limit's alone; the
+                    // shared mark every limit but the models' own.
+                    .filter(|limit| match pool {
+                        Pool::Opus | Pool::Sonnet => Some(limit.id.as_str()) == pool.own_window(),
+                        Pool::Normal | Pool::Fable => pool.limited_by(&limit.id),
                     })
                     .map(|limit| limit.resets_at)
                     .filter(|at| *at > now)
@@ -833,7 +1281,7 @@ impl Registry {
             },
         };
         let until = resets_at.unwrap_or(now + UNKNOWN_RESET_MS);
-        self.set_state(id, account, fable, move |exhausted_until, _| *exhausted_until = until).await
+        self.set_state(id, account, pool, move |exhausted_until, _| *exhausted_until = until).await
     }
 
     async fn open(&self, model: &Model, context: LlmContext, options: StreamOptions, account: Option<&str>) -> Result<EventStream, Error> {
@@ -851,9 +1299,15 @@ impl Registry {
         if let Some(base_url) = options.base_url.as_ref().or(resolution.auth.base_url.as_ref()) {
             request_model.base_url.clone_from(base_url);
         }
+        // Kept per account: a file is its account's alone.
+        let image_files = match &options.image_files {
+            Some(_) => None,
+            None => self.files_for(provider, account, &request_model.base_url, &resolution.auth).await,
+        };
         let request_options = StreamOptions {
             api_key: options.api_key.or(resolution.auth.api_key),
             headers: merge_headers(&resolution.auth.headers, &options.headers),
+            image_files: options.image_files.or(image_files),
             ..options
         };
         api.stream_simple(&request_model, context, request_options)
@@ -877,7 +1331,7 @@ impl Registry {
             let (sink, stream) = event_stream();
             let (registry, model, notes) = (registry.clone(), model.clone(), notes.clone());
             tokio::spawn(async move {
-                let fable = fable_pool(&model);
+                let pool = Pool::of_model(&model);
                 let mut tried = Vec::new();
                 loop {
                     let accounts = match registry.candidates(&model.provider).await {
@@ -911,7 +1365,7 @@ impl Registry {
                         sink.push(event);
                         return;
                     }
-                    let chosen = with_capacity(&accounts, &tried, fable, now_ms()).map(|(_, account)| account.clone());
+                    let chosen = with_capacity(&accounts, &tried, pool, now_ms()).map(|(_, account)| account.clone());
                     if chosen.is_none() && !accounts.is_empty() {
                         sink.push(registry.none_left(&model, &accounts));
                         return;
@@ -965,8 +1419,8 @@ impl Registry {
                                     held = Some(event);
                                     continue;
                                 }
-                                StreamEvent::Error { error, .. } if account.is_some() && spent(error).is_some() => {
-                                    gone = spent(error);
+                                StreamEvent::Error { error, .. } if account.is_some() && spent(error, pool).is_some() => {
+                                    gone = spent(error, pool);
                                     held = Some(event);
                                     break;
                                 }
@@ -1001,7 +1455,7 @@ impl Registry {
                         }
                         // A key out of credit that answered has some again.
                         if let (true, Some(chosen)) = (done, chosen.filter(|chosen| chosen.out_of_credit_since != 0)) {
-                            match registry.set_state(&model.provider, &chosen.id, fable, |_, since| *since = 0).await {
+                            match registry.set_state(&model.provider, &chosen.id, Pool::Normal, |_, since| *since = 0).await {
                                 Ok(_) => {
                                     if let Some(notes) = &notes {
                                         notes(AccountNote::Changed);
@@ -1014,8 +1468,8 @@ impl Registry {
                     };
                     tried.push(account.clone());
                     let marked = match gone {
-                        Spent::Limit(resets_at) => registry.exhaust(&model.provider, &account, fable, resets_at).await,
-                        Spent::Credit => registry.set_state(&model.provider, &account, fable, |_, since| *since = now_ms()).await,
+                        Spent::Limit(resets_at, marked) => registry.exhaust(&model.provider, &account, marked, resets_at).await,
+                        Spent::Credit => registry.set_state(&model.provider, &account, Pool::Normal, |_, since| *since = now_ms()).await,
                     };
                     let accounts = match marked {
                         Ok(accounts) => accounts,
@@ -1026,8 +1480,8 @@ impl Registry {
                     };
                     // In the log too, so it can be seen and watched for.
                     let why = match gone {
-                        Spent::Limit(_) => {
-                            let until = accounts.iter().find(|stored| stored.id == account).map_or(0, |stored| pool_until(stored, fable));
+                        Spent::Limit(..) => {
+                            let until = accounts.iter().find(|stored| stored.id == account).map_or(0, |stored| pool_until(stored, pool));
                             let resets = if until > now_ms() { crate::clock::iso_from_ms(until) } else { "unknown".to_owned() };
                             tracing::info!(provider = %model.provider, %account, %resets, "account reached its usage limit");
                             format!("usage limit, resets {resets}")
@@ -1037,7 +1491,7 @@ impl Registry {
                             "out of credit".to_owned()
                         }
                     };
-                    let Some((position, next)) = with_capacity(&accounts, &tried, fable, now_ms()) else {
+                    let Some((position, next)) = with_capacity(&accounts, &tried, pool, now_ms()) else {
                         tracing::info!(provider = %model.provider, "no account left with capacity ({why} on account {account})");
                         if let Some(notes) = &notes {
                             notes(AccountNote::Exhausted);
@@ -1075,9 +1529,9 @@ impl Registry {
             return event;
         }
         let now = now_ms();
-        let fable = fable_pool(model);
-        let until = accounts.iter().map(|account| pool_until(account, fable)).filter(|at| *at > now).min();
-        let mut event = failed(model, self.exhausted(&model.provider, accounts, fable));
+        let pool = Pool::of_model(model);
+        let until = accounts.iter().map(|account| pool_until(account, pool)).filter(|at| *at > now).min();
+        let mut event = failed(model, self.exhausted(&model.provider, accounts, pool));
         if let StreamEvent::Error { error, .. } = &mut event {
             mark_none_left(error, until);
         }
@@ -1091,14 +1545,32 @@ impl Registry {
 
     /// Why a request can't go to any of the provider's `accounts`: all are at
     /// their limit for the model's pool, and when the first resets.
-    fn exhausted(&self, id: &str, accounts: &[Account], fable: bool) -> String {
+    fn exhausted(&self, id: &str, accounts: &[Account], pool: Pool) -> String {
+        // A limit whose reset has passed holds nothing back: a key out of
+        // credit since says only that.
+        let now = now_ms();
         let first = accounts
             .iter()
             .enumerate()
-            .filter(|(_, account)| pool_until(account, fable) > 0)
-            .min_by_key(|(_, account)| pool_until(account, fable));
-        let first = first.map(|(position, account)| (account_name(&shown_label(account), position), pool_until(account, fable)));
+            .filter(|(_, account)| pool_until(account, pool) > now)
+            .min_by_key(|(_, account)| pool_until(account, pool));
+        let first = first.map(|(position, account)| (account_name(&shown_label(account), position), pool_until(account, pool)));
         let credit = accounts.iter().any(|account| account.out_of_credit_since != 0);
-        exhausted_message(&self.noun(id), accounts.len(), first.as_ref().map(|(name, at)| (name.as_str(), *at)), credit)
+        let keys = accounts.iter().all(|account| matches!(account.credential, Credential::ApiKey { .. }));
+        // Said as the model's own weekly limit when that's what holds every
+        // account back, not the shared ones.
+        let own = match pool {
+            Pool::Opus => "weekly Opus limit",
+            Pool::Sonnet => "weekly Sonnet limit",
+            Pool::Normal | Pool::Fable => "usage limit",
+        };
+        let held = accounts.iter().filter(|account| pool_until(account, pool) > now);
+        let limit = if pool.claim().is_some() && held.clone().next().is_some() && held.clone().all(|account| account.exhausted_until <= now)
+        {
+            own
+        } else {
+            "usage limit"
+        };
+        exhausted_message(&self.noun(id), accounts.len(), first.as_ref().map(|(name, at)| (name.as_str(), *at)), credit, keys, limit)
     }
 }

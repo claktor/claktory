@@ -15,6 +15,7 @@ import 'layout.dart' show layoutOf, open;
 import 'markdown.dart';
 import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
+import 'outbox.dart' show connectionLost, decisionWaiting;
 import 'mobile/navigation.dart' show PhoneRoutes;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'review_answer.dart' show rememberReviewReturn;
@@ -22,6 +23,9 @@ import 'scope.dart';
 import 'selection.dart' show SelectableArea;
 import 'taint_label.dart';
 import 'visible_codes.dart' show proseCodes, visibleCodes;
+
+/// Why an answer waits, under its card.
+const askWaiting = decisionWaiting;
 
 /// An agent's question for the person, one it can't go on without: what it
 /// needs (its title) and why (the body, Markdown), and the person's answer
@@ -82,41 +86,138 @@ class _AskPersonCardState extends State<AskPersonCard> {
       _text.clear();
       _cant = false;
       _error = null;
+      _waiting = false;
+      _whenBack = null;
     }
   }
 
   @override
   void dispose() {
+    _backend?.connected.removeListener(_connectedChanged);
     _text.dispose();
     _focus.dispose();
     super.dispose();
   }
 
-  Future<void> _answer({required bool dismiss, int? step}) async {
+  Future<void> _answer({
+    required bool dismiss,
+    int? step,
+    bool again = false,
+  }) async {
     final text = _text.text.trim();
     if (_busy ||
         (step == null && !dismiss && widget.ask.wantsText && text.isEmpty)) {
       return;
     }
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      await AppScope.of(context).answerAsk(
+    await _send(
+      (backend) => backend.answerAsk(
         widget.agentId,
         widget.seq,
         // Dismissed, what's typed goes too, as the person's comment.
         text: text,
         dismiss: dismiss,
         step: step,
-      );
+      ),
+      () => _answer(dismiss: dismiss, step: step, again: true),
+      again: again,
+    );
+  }
+
+  /// Sends what's typed as the person's reply (#370): the agent is told
+  /// their words, with no yes or no, and the question counts as answered.
+  Future<void> _reply({bool again = false}) async {
+    final text = _text.text.trim();
+    if (_busy || text.isEmpty) return;
+    await _send(
+      (backend) => backend.answerAsk(
+        widget.agentId,
+        widget.seq,
+        text: text,
+        reply: true,
+      ),
+      () => _reply(again: true),
+      again: again,
+    );
+  }
+
+  /// What was being sent when the connection dropped, to send again (as
+  /// it's typed then) once it's back; null when nothing waits.
+  VoidCallback? _whenBack;
+
+  /// [_error] says it waits for the connection, rather than what went
+  /// wrong.
+  var _waiting = false;
+
+  Backend? _backend;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final backend = AppScope.of(context);
+    if (identical(backend, _backend)) return;
+    _backend?.connected.removeListener(_connectedChanged);
+    _backend = backend..connected.addListener(_connectedChanged);
+  }
+
+  /// The connection is back: the answer that waited for it goes.
+  void _connectedChanged() {
+    final whenBack = _whenBack;
+    if (whenBack == null || _busy || _backend?.connected.value != true) return;
+    _whenBack = null;
+    whenBack();
+  }
+
+  /// Sends an answer. Cut off by the connection, it stays in the card,
+  /// "Not sent yet", and goes again by itself once the connection is back
+  /// (#401); sent [again], an answer the Claktory already has (it got the
+  /// first before the connection dropped) counts as delivered.
+  Future<void> _send(
+    Future<void> Function(Backend backend) request,
+    VoidCallback retry, {
+    required bool again,
+  }) async {
+    final backend = AppScope.of(context);
+    setState(() {
+      _busy = true;
+      _error = null;
+      _waiting = false;
+    });
+    _whenBack = null;
+    var now = false;
+    try {
+      await request(backend);
     } on RequestFailure catch (failure) {
-      if (mounted) setState(() => _error = failure.message);
+      if (!mounted) return;
+      if (again && failure.message.startsWith('This question was already')) {
+        return;
+      }
+      if (connectionLost(failure)) {
+        // Back already (it dropped and came back meanwhile): once more now.
+        if (backend.connected.value && !again) {
+          now = true;
+        } else {
+          _whenBack = retry;
+          setState(() {
+            _error = askWaiting;
+            _waiting = true;
+          });
+        }
+        return;
+      }
+      setState(() => _error = failure.message);
     } finally {
       if (mounted) setState(() => _busy = false);
+      if (now && mounted) retry();
     }
   }
+
+  /// The color of the line under the card: what went wrong, or that it
+  /// waits.
+  Color _statusColor(Palette palette) => _error == null
+      ? palette.textFaint
+      : _waiting
+      ? palette.textMuted
+      : palette.danger;
 
   @override
   Widget build(BuildContext context) {
@@ -211,6 +312,15 @@ class _AskPersonCardState extends State<AskPersonCard> {
     return SelectableArea(child: card);
   }
 
+  /// What a recording for this card is kept as until its words come
+  /// (#401): it comes back here after a relaunch.
+  DictationFor _keep(String name) => DictationFor(
+    'ask/${widget.agentId}/${widget.ask.id}',
+    widget.ask.title.isEmpty
+        ? 'Your answer to $name'
+        : 'Your answer to $name: ${widget.ask.title}',
+  );
+
   List<Widget> _pending(Palette palette, TypeScale type, String name) {
     final wantsText = widget.ask.wantsText;
     return [
@@ -225,6 +335,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
             controller: _text,
             focusNode: _focus,
             enabled: !_busy,
+            keep: _keep(name),
             child: CallbackShortcuts(
               bindings: {
                 const SingleActivator(LogicalKeyboardKey.enter): () =>
@@ -242,44 +353,53 @@ class _AskPersonCardState extends State<AskPersonCard> {
         ),
         const SizedBox(height: Space.s),
       ],
-      // On a phone at large text the buttons go under the words.
-      ActionLine(
-        lead: Text(
-          _error ??
-              (wantsText
-                  ? '$name gets your answer and carries on.'
-                  : widget.ask.reviewPath.isNotEmpty
-                  ? 'Your comments on it go to $name.'
-                  : '$name carries on once you approve.'),
-          style: type.caption.copyWith(
-            color: _error == null ? palette.textFaint : palette.danger,
-          ),
-        ),
-        action: ControlsLine(
-          children: [
-            Button(
-              label: 'Dismiss',
-              onPressed: _busy ? null : () => _answer(dismiss: true),
+      // On a phone at large text the buttons go under the words. Once a
+      // comment is typed on an approval, one Submit in place of both: what's
+      // typed is a reply, never a yes or a no (#370).
+      CommentTyped(
+        controller: _text,
+        builder: (context, typed) {
+          final submit = typed && !wantsText;
+          return ActionLine(
+            lead: Text(
+              _error ??
+                  (submit
+                      ? '$name gets your comment and carries on from it.'
+                      : wantsText
+                      ? '$name gets your answer and carries on.'
+                      : widget.ask.reviewPath.isNotEmpty
+                      ? 'Your comments on it go to $name.'
+                      : '$name carries on once you approve.'),
+              style: type.caption.copyWith(color: _statusColor(palette)),
             ),
-            ListenableBuilder(
-              listenable: _text,
-              builder: (context, _) => Button(
-                label: wantsText ? 'Answer' : 'Approve',
-                primary: true,
-                onPressed: _busy || (wantsText && _text.text.trim().isEmpty)
-                    ? null
-                    : () => _answer(dismiss: false),
-              ),
-            ),
-          ],
-        ),
+            action: submit
+                ? SubmitButton(onPressed: _busy ? null : _reply)
+                : ControlsLine(
+                    children: [
+                      Button(
+                        label: 'Dismiss',
+                        onPressed: _busy ? null : () => _answer(dismiss: true),
+                      ),
+                      Button(
+                        label: wantsText ? 'Answer' : 'Approve',
+                        primary: true,
+                        onPressed: _busy || (wantsText && !typed)
+                            ? null
+                            : () => _answer(dismiss: false),
+                      ),
+                    ],
+                  ),
+          );
+        },
       ),
       if (!wantsText)
+        // Return in it is Submit, once something is typed.
         DecisionComment(
           controller: _text,
           agent: name,
           enabled: !_busy,
-          onSubmitted: () => _answer(dismiss: false),
+          onSubmit: _reply,
+          keep: _keep(name),
         ),
     ];
   }
@@ -341,6 +461,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
               controller: _text,
               focusNode: _focus,
               enabled: !_busy,
+              keep: _keep(name),
               child: TextField(
                 controller: _text,
                 focusNode: _focus,
@@ -354,9 +475,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
           ActionLine(
             lead: Text(
               _error ?? '$name hears why and decides what to do next.',
-              style: type.caption.copyWith(
-                color: _error == null ? palette.textFaint : palette.danger,
-              ),
+              style: type.caption.copyWith(color: _statusColor(palette)),
             ),
             action: ControlsLine(
               children: [
@@ -381,9 +500,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
                   (at + 1 < steps.length
                       ? 'The next step shows once this one is done.'
                       : '$name carries on once this is done.'),
-              style: type.caption.copyWith(
-                color: _error == null ? palette.textFaint : palette.danger,
-              ),
+              style: type.caption.copyWith(color: _statusColor(palette)),
             ),
             action: ControlsLine(
               children: [
@@ -406,6 +523,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
             agent: name,
             enabled: !_busy,
             onSubmitted: () => _answer(dismiss: false, step: at),
+            keep: _keep(name),
           ),
         ],
       ];
@@ -494,13 +612,19 @@ class _AskPersonCardState extends State<AskPersonCard> {
               TextSpan(
                 children: [
                   TextSpan(
-                    text: dismissed
+                    // A reply (#370): the person's words, neither a yes
+                    // nor a no.
+                    text: ask.replied
+                        ? 'Replied'
+                        : dismissed
                         ? 'Left to $name'
                         : ask.wantsText
                         ? 'Answered'
                         : 'Approved',
                     style: TextStyle(
-                      color: dismissed ? palette.textMuted : color,
+                      color: dismissed && !ask.replied
+                          ? palette.textMuted
+                          : color,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
@@ -523,7 +647,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
         Text(
           ask.answer,
           style: type.body.copyWith(
-            color: dismissed ? palette.textMuted : palette.text,
+            color: dismissed && !ask.replied ? palette.textMuted : palette.text,
           ),
         ),
       ],

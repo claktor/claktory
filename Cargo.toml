@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Copies of crates.io crates built in their place ([patch.crates-io] below);
+# dependencies, never members.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -38,3 +41,24 @@ debug = "none"
 # optimized it takes a fraction of one, in the dev Claktory and in tests too.
 [profile.dev.package.argon2]
 opt-level = 3
+
+# Image previews (factoryd's previews.rs): decoding, resizing and encoding a
+# screenshot takes a minute unoptimized; optimized, a fraction of a second.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.image-webp]
+opt-level = 3
+[profile.dev.package.libwebp-sys]
+opt-level = 3
+
+# noq-udp (iroh's UDP), Claktory's copy of 1.5.0 (vendor/README.md): on
+# macOS an answer leaves from the address the device dialled, not the
+# route's (#392). Only this workspace sees it; app/rust keeps crates.io's.
+[patch.crates-io]
+noq-udp = { path = "vendor/noq-udp" }

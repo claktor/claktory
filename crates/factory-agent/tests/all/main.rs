@@ -10,6 +10,7 @@ mod support;
 mod accounts;
 mod agent;
 mod anthropic_auth;
+mod anthropic_files;
 mod anthropic_oauth;
 mod anthropic_provider;
 mod bash;

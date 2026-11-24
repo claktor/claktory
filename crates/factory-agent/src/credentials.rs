@@ -102,6 +102,8 @@ const ACCOUNT_LABEL: &str = "factoryLabel";
 const ACCOUNT_IDENTITY: &str = "factoryIdentity";
 const EXHAUSTED_UNTIL: &str = "factoryExhaustedUntil";
 const FABLE_EXHAUSTED_UNTIL: &str = "factoryFableExhaustedUntil";
+const OPUS_EXHAUSTED_UNTIL: &str = "factoryOpusExhaustedUntil";
+const SONNET_EXHAUSTED_UNTIL: &str = "factorySonnetExhaustedUntil";
 const OUT_OF_CREDIT: &str = "factoryOutOfCredit";
 const REFUSED_SINCE: &str = "factoryRefusedSince";
 const MORE_ACCOUNTS: &str = "factoryAccounts";
@@ -127,6 +129,12 @@ pub struct Account {
     /// counts against a weekly limit of their own: at the normal weekly
     /// limit the account can still run Fable, and the other way round.
     pub fable_exhausted_until: u64,
+    /// Anthropic's weekly limit of Opus models alone reached, until then
+    /// (ms since 1970); 0 when it hasn't. Opus requests wait for it and
+    /// for `exhausted_until`; other models carry on.
+    pub opus_exhausted_until: u64,
+    /// As `opus_exhausted_until`, for Sonnet models' weekly limit.
+    pub sonnet_exhausted_until: u64,
     /// An API key that ran out of credit: since when, in ms since 1970; 0
     /// when it has credit as far as Factory knows.
     pub out_of_credit_since: u64,
@@ -148,6 +156,8 @@ impl Account {
             identity: String::new(),
             exhausted_until: 0,
             fable_exhausted_until: 0,
+            opus_exhausted_until: 0,
+            sonnet_exhausted_until: 0,
             out_of_credit_since: 0,
             refused_since: 0,
             credential,
@@ -162,12 +172,25 @@ fn account_from(value: &Value, position: usize) -> Result<Account, Error> {
     let (id, label, identity) = (text(ACCOUNT_ID), text(ACCOUNT_LABEL), text(ACCOUNT_IDENTITY));
     let exhausted_until = object.remove(EXHAUSTED_UNTIL).and_then(|value| value.as_u64()).unwrap_or(0);
     let fable_exhausted_until = object.remove(FABLE_EXHAUSTED_UNTIL).and_then(|value| value.as_u64()).unwrap_or(0);
+    let opus_exhausted_until = object.remove(OPUS_EXHAUSTED_UNTIL).and_then(|value| value.as_u64()).unwrap_or(0);
+    let sonnet_exhausted_until = object.remove(SONNET_EXHAUSTED_UNTIL).and_then(|value| value.as_u64()).unwrap_or(0);
     let out_of_credit_since = object.remove(OUT_OF_CREDIT).and_then(|value| value.as_u64()).unwrap_or(0);
     let refused_since = object.remove(REFUSED_SINCE).and_then(|value| value.as_u64()).unwrap_or(0);
     let credential =
         if value.is_object() { serde_json::from_value(Value::Object(object))? } else { serde_json::from_value(value.clone())? };
     let id = if id.is_empty() { (position + 1).to_string() } else { id };
-    Ok(Account { id, label, identity, exhausted_until, fable_exhausted_until, out_of_credit_since, refused_since, credential })
+    Ok(Account {
+        id,
+        label,
+        identity,
+        exhausted_until,
+        fable_exhausted_until,
+        opus_exhausted_until,
+        sonnet_exhausted_until,
+        out_of_credit_since,
+        refused_since,
+        credential,
+    })
 }
 
 fn account_value(account: &Account) -> Result<Value, Error> {
@@ -185,6 +208,12 @@ fn account_value(account: &Account) -> Result<Value, Error> {
         }
         if account.fable_exhausted_until != 0 {
             object.insert(FABLE_EXHAUSTED_UNTIL.into(), Value::from(account.fable_exhausted_until));
+        }
+        if account.opus_exhausted_until != 0 {
+            object.insert(OPUS_EXHAUSTED_UNTIL.into(), Value::from(account.opus_exhausted_until));
+        }
+        if account.sonnet_exhausted_until != 0 {
+            object.insert(SONNET_EXHAUSTED_UNTIL.into(), Value::from(account.sonnet_exhausted_until));
         }
         if account.out_of_credit_since != 0 {
             object.insert(OUT_OF_CREDIT.into(), Value::from(account.out_of_credit_since));
@@ -227,7 +256,17 @@ fn accounts_value(accounts: &[Account]) -> Result<Option<Value>, Error> {
 
 /// The fields of a stored credential that are no secret, nor made from one:
 /// what an outline keeps.
-const OUTLINED: [&str; 7] = ["type", ACCOUNT_ID, ACCOUNT_LABEL, EXHAUSTED_UNTIL, FABLE_EXHAUSTED_UNTIL, OUT_OF_CREDIT, REFUSED_SINCE];
+const OUTLINED: [&str; 9] = [
+    "type",
+    ACCOUNT_ID,
+    ACCOUNT_LABEL,
+    EXHAUSTED_UNTIL,
+    FABLE_EXHAUSTED_UNTIL,
+    OPUS_EXHAUSTED_UNTIL,
+    SONNET_EXHAUSTED_UNTIL,
+    OUT_OF_CREDIT,
+    REFUSED_SINCE,
+];
 
 fn outline_value(value: &Value) -> Value {
     let Some(object) = value.as_object() else { return Value::Object(Map::new()) };

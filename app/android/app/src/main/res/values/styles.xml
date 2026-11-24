@@ -3,9 +3,12 @@
     <!-- While the process starts: the canvas color. -->
     <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
         <item name="android:windowBackground">@drawable/launch_background</item>
+        <!-- Dark status icons on the light canvas; SystemBars keeps them right after. -->
+        <item name="android:windowLightStatusBar">true</item>
     </style>
     <!-- Behind Flutter while it runs. -->
     <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
         <item name="android:windowBackground">@color/canvas</item>
+        <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>

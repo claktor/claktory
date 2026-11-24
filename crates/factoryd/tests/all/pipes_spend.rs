@@ -10,6 +10,7 @@ use crate::common::{Client, MODEL, Scripted, View, apply_request, create_project
 use crate::pipes::{events, idle, incoming, select, shown};
 use factory_protocol::v1::{self, client_message, entry::Kind, server_message::Body};
 use factoryd::factory::Factory;
+use factoryd::pipe_link::Liaison;
 use factoryd::pipes;
 
 /// A project "Site" with Lea, an open pipe, and its liaison "Liaison" (id
@@ -65,6 +66,21 @@ async fn a_liaison_past_its_cap_waits_until_it_has_more() {
     assert_eq!(spend(&view, "liaison").spent_tokens, 1_200);
     assert_eq!(spend(&view, "liaison").cap_usd, 10.0, "0 keeps the default");
 
+    // The other side hears it waits until midnight, rounded up to a quarter
+    // of an hour as any wait, and nothing of why (#357 L2).
+    factoryd::pipe_link::set_liaison_every(std::time::Duration::from_millis(600));
+    let quarter = 15 * 60 * 1000;
+    let midnight = spend(&view, "liaison").resumes_ms;
+    let told = Liaison::Waiting { until_ms: (midnight + quarter - 1) / quarter * quarter };
+    assert_eq!(pipes::liaison_due_for_test(&factory, &pipe), Some(told));
+    pipes::liaison_told_for_test(&factory, &pipe, told);
+    // A usage limit with no known end meanwhile: no time, the later.
+    pipes::set_usage_wait_for_test(&factory, "liaison", Some(0));
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    assert_eq!(pipes::liaison_due_for_test(&factory, &pipe), Some(Liaison::Waiting { until_ms: 0 }));
+    pipes::set_usage_wait_for_test(&factory, "liaison", None);
+    assert_eq!(pipes::liaison_due_for_test(&factory, &pipe), None, "midnight again, as told");
+
     // The other side's message waits, counted, and doesn't wake it.
     let before = view.entries.len();
     pipes::receive_for_test(&factory, &pipe, incoming("m1", "Can we talk about the launch?")).expect("received");
@@ -82,6 +98,9 @@ async fn a_liaison_past_its_cap_waits_until_it_has_more() {
     view.follow(&mut client, |view| !events(view).is_empty() && idle(view, "liaison")).await;
     assert!(events(&view)[0].text.contains("Can we talk about the launch?"), "{:?}", events(&view));
     view.follow(&mut client, |view| spend(view, "liaison").held_messages == 0 && !spend(view, "liaison").over).await;
+    // And the other side hears it's awake.
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    assert_eq!(pipes::liaison_due_for_test(&factory, &pipe), Some(Liaison::Awake));
 }
 
 #[tokio::test]

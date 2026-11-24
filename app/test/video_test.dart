@@ -260,6 +260,31 @@ void main() {
     expect(player.state.value.playing, isTrue);
   });
 
+  testWidgets('a read that fails while connected says why, and Try again '
+      'reads it again (#375)', (tester) async {
+    final harness = await _showVideo(tester);
+    harness.backend.refuse = 'Claktory is busy.';
+    await tester.tap(find.bySemanticsLabel('Reload').first);
+    for (var i = 0; i < 4; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)),
+      );
+      await tester.pump();
+    }
+    expect(find.text('Claktory is busy.'), findsOneWidget);
+    harness.backend.refuse = null;
+    await tester.tap(find.text('Try again'));
+    for (var i = 0; i < 6; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)),
+      );
+      await tester.pump();
+    }
+    await settle(tester);
+    expect(find.text('Claktory is busy.'), findsNothing);
+    expect(find.text('0:00 / 1:00'), findsOneWidget);
+  });
+
   testWidgets("a backend that can't read ranges says to update it", (
     tester,
   ) async {

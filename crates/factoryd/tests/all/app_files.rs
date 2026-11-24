@@ -131,13 +131,13 @@ async fn only_a_plain_file_with_one_name_outside_claktorys_own_folder_is_read_an
     apply_request(&mut client, &mut view, create_project("Above", &dir)).await;
 
     for (id, why) in [
-        ("file:web-site:link.csv", "goes through a symbolic link (link.csv)"),
-        ("file:web-site:out/x.csv", "goes through a symbolic link (out)"),
-        ("file:web-site:records.csv", "has other names on this computer (hard links)"),
-        ("file:web-site:pipe.csv", "isn't a file: apps read only regular files"),
+        ("file:web-site:link.csv", "is reached through a link (link.csv)"),
+        ("file:web-site:out/x.csv", "is reached through a link (out)"),
+        ("file:web-site:records.csv", "has more than one name on this computer"),
+        ("file:web-site:pipe.csv", "isn't a file apps can read"),
         ("file:web-site:big.csv", "is over 10 MB"),
-        ("file:above:home/secret.csv", "inside Claktory's own folder, outside its workspace"),
-        ("file:above:home/agents/rivet/x.csv", "inside Claktory's own folder, outside its workspace"),
+        ("file:above:home/secret.csv", "is in Claktory's own folder, which apps can't read"),
+        ("file:above:home/agents/rivet/x.csv", "is in Claktory's own folder, which apps can't read"),
         ("file:above:.ssh/x.csv", "a hidden name"),
     ] {
         let said = give(&mut client, &mut view, id).await.expect_err(id);
@@ -158,7 +158,7 @@ async fn only_a_plain_file_with_one_name_outside_claktorys_own_folder_is_read_an
             ("file:above:outside/reports/bugs.csv", ""),
             ("file:above:outside/x.csv", ""),
             ("file:web-site:big.csv", "It's over 10 MB, more than an app can read."),
-            ("file:web-site:records.csv", "It has other names on this computer (hard links), so apps can't read it."),
+            ("file:web-site:records.csv", "It has more than one name on this computer, so apps can't read it."),
             ("file:web-site:reports/bugs.csv", ""),
             ("file:workspace:ok.csv", ""),
         ]
@@ -182,12 +182,12 @@ async fn only_a_plain_file_with_one_name_outside_claktorys_own_folder_is_read_an
     std::fs::rename(site.join("reports"), site.join("reports-old")).expect("moved away");
     std::os::unix::fs::symlink(dir.join("outside/reports"), site.join("reports")).expect("a link in its place");
     let (_, message) = rows(&stand, BUGS, "SELECT * FROM rows").await.expect_err("a link now");
-    assert!(message.contains("goes through a symbolic link (reports)"), "{message}");
+    assert!(message.contains("is reached through a link (reports)"), "{message}");
     std::fs::remove_file(site.join("reports")).expect("the link");
     std::fs::rename(site.join("reports-old"), site.join("reports")).expect("back");
     std::fs::hard_link(site.join("reports/bugs.csv"), dir.join("outside/second-name.csv")).expect("a second name");
     let (_, message) = rows(&stand, BUGS, "SELECT * FROM rows").await.expect_err("two names now");
-    assert!(message.contains("hard links"), "{message}");
+    assert!(message.contains("more than one name"), "{message}");
     std::fs::remove_file(dir.join("outside/second-name.csv")).expect("one name again");
     std::fs::File::options().append(true).open(site.join("reports/bugs.csv")).expect("bugs").set_len(10 * 1024 * 1024 + 1).expect("grown");
     let (_, message) = rows(&stand, BUGS, "SELECT * FROM rows").await.expect_err("too big now");

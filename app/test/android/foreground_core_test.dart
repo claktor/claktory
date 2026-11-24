@@ -32,6 +32,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../harness.dart';
+import '../pair_start.dart';
 import '../phone_test.dart' show workspace;
 import 'support/channel_fakes.dart';
 import 'support/android_harness.dart';
@@ -700,6 +701,8 @@ void main() {
         harness: Harness(Workspace(), localBackend: false),
       );
       expect(find.byType(PairScreen), findsOneWidget);
+      // First, what's needed and the ways in (#363).
+      await pastPairStart(tester, paste: true);
       expect(find.text('Paste code'), findsOneWidget);
       final code = 'factory://?t=${'a' * 64}&e=${'c' * 64}&name=Fixture';
       await tester.enterText(find.byType(EditableText), code);

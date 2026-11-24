@@ -2,6 +2,7 @@ import 'package:factory_app/forms.dart' show AgentSettingsForm;
 import 'package:factory_app/layout.dart' show leaves;
 import 'package:factory_app/map.dart';
 import 'package:factory_app/marketplace.dart';
+import 'package:factory_app/monitors_overview.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/screens.dart';
 import 'package:factory_app/settings_view.dart';
@@ -85,6 +86,16 @@ void main() {
     expect(answer(harness).opened, isTrue);
     expect(kinds(harness), ['chat', 'map']);
     expect(find.byType(MapView), findsOneWidget);
+  });
+
+  testWidgets('the Monitors page opens as a pane', (tester) async {
+    final harness = await showMac(tester);
+    await touch(tester);
+    harness.backend.screenRequested(request('monitors'));
+    await settle(tester);
+    expect(answer(harness).opened, isTrue);
+    expect(kinds(harness), ['chat', 'monitors']);
+    expect(find.byType(MonitorsOverview), findsOneWidget);
   });
 
   testWidgets('the Marketplace opens on the tab asked for; an older '

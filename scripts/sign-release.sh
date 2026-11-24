@@ -6,7 +6,9 @@
 # notarizes both with Apple and staples the ticket to the app.
 # scripts/release.sh runs it on each release it builds; --dev releases stay
 # signed ad hoc. The app's helpers (Contents/Helpers) are the signed backend,
-# apps host and supervisor's app, copied in before the app is signed.
+# apps host and supervisor's app, copied in before the app is signed. No
+# release carries a launchd daemon (#371's root helper was dropped, Fugo
+# 24379): an app with one is refused.
 #
 #   scripts/sign-release.sh RELEASE_DIR [--dry-run]
 #
@@ -56,6 +58,14 @@ APPS_HOST="$DIR/claktory-apps"
 [[ -f "$APPS_HOST" ]] || APPS_HOST=""
 SPEECH="$DIR/claktory-speech"
 [[ -f "$SPEECH" ]] || SPEECH=""
+VIDEO="$DIR/claktory-video-preview"
+[[ -f "$VIDEO" ]] || VIDEO=""
+
+# No root daemon ships (#371: the lid-closed helper was dropped for good).
+if [[ -e "$APP/Contents/Library/LaunchDaemons" || -e "$APP/Contents/Helpers/claktory-lid-helper" ]]; then
+  echo "$APP carries a launchd daemon or the old lid-closed helper; no release ships one" >&2
+  exit 1
+fi
 
 IDENTITY="$(developer_id_identity)"
 KEY=false
@@ -72,6 +82,7 @@ if ! $DRY_RUN && ! { [[ -n "$IDENTITY" ]] && $KEY; }; then
     [[ -e "$helper" ]] || continue
     case "$(basename "$helper")" in
       claktory-browser-host) codesign --force --sign - --identifier com.claktory.browser-host "$helper" ;;
+      claktory-video-preview) codesign --force --sign - --identifier dev.factory.claktory-video-preview "$helper" ;;
       *) codesign --force --sign - "$helper" ;;
     esac
   done
@@ -107,6 +118,12 @@ if [[ -n "$SPEECH" ]]; then
   sign --identifier dev.factory.claktory-speech "$SPEECH"
   codesign --verify --strict "$SPEECH"
 fi
+# The video preview helper (#379): no entitlements (AVFoundation, one file in,
+# one out; no network, no other programs).
+if [[ -n "$VIDEO" ]]; then
+  sign --identifier dev.factory.claktory-video-preview "$VIDEO"
+  codesign --verify --strict "$VIDEO"
+fi
 # The supervisor's app: its identity is its bundle's (dev.factory.supervisor),
 # which a Developer Tools grant keeps across reinstalls.
 if [[ -n "$SUPERVISOR" ]]; then
@@ -120,6 +137,7 @@ if [[ -d "$HELPERS" ]]; then
   cp "$DIR/factoryd" "$HELPERS/factoryd"
   if [[ -n "$APPS_HOST" ]]; then cp "$APPS_HOST" "$HELPERS/claktory-apps"; fi
   if [[ -n "$SPEECH" ]]; then cp "$SPEECH" "$HELPERS/claktory-speech"; fi
+  if [[ -n "$VIDEO" ]]; then cp "$VIDEO" "$HELPERS/claktory-video-preview"; fi
   if [[ -n "$SUPERVISOR" ]]; then
     rm -rf "$HELPERS/Claktory Agents.app"
     ditto "$SUPERVISOR" "$HELPERS/Claktory Agents.app"
@@ -181,6 +199,7 @@ ditto "$APP" "$STAGE/release/$(basename "$APP")"
 cp "$DIR/factoryd" "$STAGE/release/factoryd"
 if [[ -n "$APPS_HOST" ]]; then cp "$APPS_HOST" "$STAGE/release/claktory-apps"; fi
 if [[ -n "$SPEECH" ]]; then cp "$SPEECH" "$STAGE/release/claktory-speech"; fi
+if [[ -n "$VIDEO" ]]; then cp "$VIDEO" "$STAGE/release/claktory-video-preview"; fi
 if [[ -n "$SUPERVISOR" ]]; then
   ditto "$SUPERVISOR" "$STAGE/release/supervisor/$(basename "$SUPERVISOR")"
 fi

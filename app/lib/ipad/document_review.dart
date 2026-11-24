@@ -1,9 +1,11 @@
 // A review an agent asks of a PDF, answered on an iPad right where it's
 // read, with what the person drew on it (#275; docs/ipad-workbench.md §6):
 // at the foot of the document's pane while the question waits, who asks
-// and what, the pages drawn on, and the answer field, always open. Return
-// (or Approve, or Send) answers, Dismiss is quiet beside it; either takes
-// the field's words and the drawings with it: each page with ink, whole,
+// and what, the pages drawn on, and the answer field, always open. With
+// nothing typed, Approve (or Send, for a question that wants words), and
+// Dismiss quiet beside it; once a comment is typed, one Submit (Return
+// too) sends it as a reply, never a yes or a no (#370). Each takes the
+// drawings with it: each page with ink, whole,
 // as a PNG with the ink on it, uploaded to the agent and named in the
 // answer (AnswerAsk.attachments), so they reach the agent only when the
 // person answers. Answered, the pane closes and the person is back where
@@ -22,7 +24,7 @@ import 'package:flutter/widgets.dart';
 import '../backend.dart';
 import '../characters/character.dart';
 import '../controls.dart';
-import '../decision.dart' show decisionCommentLimit;
+import '../decision.dart' show SubmitButton, commentTyped, decisionCommentLimit;
 import '../identity.dart';
 import '../markdown.dart' show Markdown;
 import '../mobile/metrics.dart' show Metrics, TypeScale;
@@ -257,7 +259,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
   /// Uploads each drawn page to the agent: what to name in the answer.
   Future<List<Attachment>> _drawings(Backend backend, int seq) async {
     final surface = widget.surface;
-    final pages = surface.drawnPages;
+    final pages = surface.drawn;
     final attachments = <Attachment>[];
     final stem = _stem(surface.path);
     final tag = Random().nextInt(1 << 32).toRadixString(36);
@@ -267,11 +269,13 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
       }
       final composite = await surface.exportPage(page);
       final bytes = await readComposite(composite.file);
-      final id = 'review-$seq-p$page-$tag';
+      // An image's one drawing has no page.
+      final at = page == null ? 'drawing' : 'p$page';
+      final id = 'review-$seq-$at-$tag';
       var received = await backend.startUpload(
         id,
         widget.watch.agentId,
-        name: '$stem-p$page.png',
+        name: '$stem-$at.png',
         size: bytes.length,
         mime: 'image/png',
       );
@@ -301,11 +305,15 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
     });
     try {
       final attachments = await _drawings(backend, ask.seq);
+      final text = _comment.text.trim();
       await backend.answerAsk(
         widget.watch.agentId,
         ask.seq,
-        text: _comment.text.trim(),
+        text: text,
         dismiss: dismiss,
+        // A comment typed on a question that doesn't want words is a
+        // reply (#370), the drawings with it; it carries out nothing.
+        reply: !dismiss && !ask.ask.wantsText && text.isNotEmpty,
         attachments: attachments,
       );
       _comment.clear();
@@ -346,8 +354,9 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
     }
   }
 
-  /// Return in the field: answers with what's typed; nothing when it's
-  /// empty, so a stray Return never approves.
+  /// Return in the field: Submit, the typed comment as a reply (or the
+  /// words a question asked for); nothing when it's empty, so a stray
+  /// Return never approves.
   void _submit(PendingReview ask) {
     if (_busy || _comment.text.trim().isEmpty) return;
     unawaited(_answer(ask));
@@ -366,8 +375,10 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
     _restore(ask.seq);
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final drawn = widget.surface.drawnPages.length;
-    final typed = _comment.text.trim().isNotEmpty;
+    final drawn = widget.surface.drawn.length;
+    final typed = commentTyped(_comment);
+    // A comment on a question that doesn't want words: Submit alone.
+    final replying = typed && !ask.ask.wantsText;
     final sending = _sending;
     final String? line = sending != null
         ? (sending.of == 1
@@ -375,6 +386,8 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
               : 'Sending your drawings… ${sending.sent + 1} of ${sending.of}')
         : switch (drawn) {
             0 => null,
+            1 when widget.surface.image =>
+              'Your drawing goes with your answer.',
             1 => 'Your drawing on 1 page goes with your answer.',
             _ => 'Your drawings on $drawn pages go with your answer.',
           };
@@ -482,7 +495,9 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
             ),
             const SizedBox(height: Space.xs),
             Text(
-              '${agent.name} gets it with your answer.',
+              replying
+                  ? '${agent.name} gets your comment and carries on from it.'
+                  : '${agent.name} gets it with your answer.',
               style: type.caption.copyWith(color: palette.textFaint),
             ),
             if (_error case final error?) ...[
@@ -494,31 +509,39 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
             ],
             const SizedBox(height: Space.s),
             // The answer at the end, as a pane's other actions; Dismiss
-            // quiet before it. Under each other when the pane is narrow
-            // or the text large.
+            // quiet before it, gone while a reply is typed. Under each
+            // other when the pane is narrow or the text large.
             Align(
               alignment: AlignmentDirectional.centerEnd,
               child: Wrap(
                 spacing: Space.s,
                 runSpacing: Space.s,
                 children: [
-                  Button(
-                    key: const ValueKey('review-dismiss'),
-                    label: 'Dismiss',
-                    onPressed: _busy
-                        ? null
-                        : () => unawaited(_answer(ask, dismiss: true)),
-                  ),
-                  Button(
-                    key: const ValueKey('review-send'),
-                    // No Approve when the agent wants words: they're the answer.
-                    label: typed || ask.ask.wantsText ? 'Send' : 'Approve',
-                    primary: true,
-                    // Words are the answer when the agent wants them.
-                    onPressed: _busy || (ask.ask.wantsText && !typed)
-                        ? null
-                        : () => unawaited(_answer(ask)),
-                  ),
+                  if (replying)
+                    SubmitButton(
+                      key: const ValueKey('review-send'),
+                      onPressed: _busy ? null : () => unawaited(_answer(ask)),
+                    )
+                  else ...[
+                    Button(
+                      key: const ValueKey('review-dismiss'),
+                      label: 'Dismiss',
+                      onPressed: _busy
+                          ? null
+                          : () => unawaited(_answer(ask, dismiss: true)),
+                    ),
+                    Button(
+                      key: const ValueKey('review-send'),
+                      // No Approve when the agent wants words: they're
+                      // the answer.
+                      label: ask.ask.wantsText ? 'Send' : 'Approve',
+                      primary: true,
+                      // Words are the answer when the agent wants them.
+                      onPressed: _busy || (ask.ask.wantsText && !typed)
+                          ? null
+                          : () => unawaited(_answer(ask)),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -538,7 +561,7 @@ extension on _DocumentReviewBarState {
     final surface = widget.surface;
     final selected = surface.strokeSelection != null;
     if (!surface.handwriting.available ||
-        (!selected && surface.inkedPages.isEmpty && !_reading)) {
+        (!selected && surface.inked.isEmpty && !_reading)) {
       return const [];
     }
     final palette = Palette.of(context);

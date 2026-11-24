@@ -53,6 +53,8 @@ void main() {
       'up',
       'attempt',
       'welcomed',
+      // #388: why the relay can't be reached, a word from RelayTrouble.
+      'err',
     ]);
     expect(ConnectionKind.values.map((kind) => kind.name), [
       'lifecycle',

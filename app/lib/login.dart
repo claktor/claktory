@@ -14,10 +14,12 @@ import 'mobile/input.dart' show InputKind;
 import 'mobile/lines.dart';
 import 'loopback_forward.dart';
 import 'protocol/factory/v1/factory.pb.dart';
+import 'provider_models.dart' show ProviderModels;
 import 'scope.dart';
 import 'state.dart';
 import 'tell_rivet.dart';
 import 'usage.dart';
+import 'usage_wait.dart' show UsageWaitOffer;
 
 /// Opens a sign-in page in the browser for flows this window started.
 ///
@@ -690,6 +692,18 @@ class _ProviderCardState extends State<ProviderCard> {
               ),
             ],
           ],
+          // Signed in isn't in use: none of its models run yet, so the
+          // agents are still where they were (#343 U1).
+          if (signedIn && provider.agents == 0) ...[
+            const SizedBox(height: Space.s),
+            Text(
+              noAgentsOnProvider(provider),
+              style: TypeScale.of(context).caption
+                  .copyWith(color: palette.textMuted),
+            ),
+          ],
+          // Agents waiting on another provider's limit can carry on here.
+          if (signedIn) UsageWaitOffer(provider: provider),
           // How long the provider keeps a conversation ready: a choice
           // where Claktory can make it, else a line saying how long.
           if (cacheChoices(provider).isNotEmpty) ...[
@@ -745,6 +759,11 @@ class _ProviderCardState extends State<ProviderCard> {
               style: TypeScale.of(context).caption
                   .copyWith(color: palette.textMuted),
             ),
+          ],
+          // Where its models come from, and Refresh models (friend bug #14).
+          if (signedIn) ...[
+            const SizedBox(height: Space.m),
+            ProviderModels(provider: provider),
           ],
           if (flow != null) ...[
             const SizedBox(height: Space.l),
@@ -946,7 +965,7 @@ class _AccountRowState extends State<_AccountRow> {
     final name = _name;
     return Ticking(
       // Its state changes on its own when a limit's time comes.
-      active: account.exhaustedUntil > 0,
+      active: account.exhaustedUntil > 0 || account.fableExhaustedUntil > 0,
       builder: (context, now) {
         final state = accountState(provider, account, now);
         final caption = TypeScale.of(context).caption.copyWith(

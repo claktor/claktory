@@ -12,7 +12,7 @@ use std::sync::Arc;
 use factory_agent::{Tool, ToolResult};
 use serde_json::json;
 
-use super::{Extension, Manifest, PromptKind, PromptSection};
+use super::{Extension, Manifest, PromptSection};
 use crate::config::AgentConfig;
 use crate::factory::{Factory, Inner};
 use crate::home::Home;
@@ -42,7 +42,7 @@ impl Extension for Tree {
 
     fn prompt(&self, factory: &Factory, inner: &Inner, agent: &AgentConfig) -> Vec<PromptSection> {
         let source = crate::runner::source_folder(&factory.home, &inner.config, agent);
-        vec![PromptSection { kind: PromptKind::Static, text: section(&factory.home, &agent.id, &source) }]
+        vec![PromptSection::static_text(section(&factory.home, &agent.id, &source))]
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {

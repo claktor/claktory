@@ -46,6 +46,14 @@ const SHIPPED_RIVET_PROMPTS: &[&str] = &[
     "19152eda56fc949cadf3208f1ca9e1e723423ed2bc2a191737884ab84512808f",
     // One thing per card; a procedure as steps.
     "e8d474fd24e29bf2ef91b6aa0926e5fe60bd43a770e1b04f5b46b84a747d2090",
+    // Scheduled jobs are monitors (friend bug #10).
+    "8dd135c2d9aeda619d89a35ddcbc3567248d1d194a1f5e0297fb4b7049976968",
+    // A recurring check reports each new finding; reminders notify (friend bug #10).
+    "aab8aa841149c90ec196fc25f6b0db696284a703d130d420ce61997a74e05cfd",
+    // Rivet owns the machine's health (friend bug #13).
+    "7601e81140d2bbdf3b77c2847d1987e69eb0833c830f9941727d1dca2f5676b3",
+    // Newer models (#404).
+    "4e315740e5d8c4014539d2972757bf68675bd12488859aca14aa025555bf346f",
 ];
 /// Rivet is interactive, so it gets medium effort, the Opus 5.5 default.
 const RIVET_EFFORT: &str = "medium";
@@ -419,7 +427,7 @@ pub struct RemoteConfig {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub listen: String,
     /// The relays devices reach Factory through when there's no direct path,
-    /// as URLs; empty for the default ones (n0's).
+    /// as URLs; empty for the default one (Claktory's own, `remote::DEFAULT_RELAY`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relays: Vec<String>,
     /// Settings this version doesn't know, kept and written back as they
@@ -1066,7 +1074,7 @@ fn check_entry(id: &str, name: &str, seen: &mut HashSet<String>) -> Result<(), I
 fn shipped_default(prompt: &str) -> bool {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(prompt.trim_end().as_bytes());
-    let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex: String = crate::encoding::hex(&hash);
     SHIPPED_RIVET_PROMPTS.contains(&hex.as_str())
 }
 

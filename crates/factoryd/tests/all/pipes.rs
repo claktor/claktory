@@ -150,6 +150,16 @@ async fn what_an_agent_sends_waits_for_review_and_a_secret_never_goes() {
     let last = pipes::messages_for_test(&factory, &pipe).pop().expect("it");
     assert_eq!((last.state(), last.note.as_str()), (v1::PipeMessageState::Refused, "It contains your secret AWS."));
     assert!(!last.text.contains("wJalrXUtnFEMI"), "{}", last.text);
+
+    // A value already hidden still names the secret: refused too (Fugo's
+    // LOW). A marker for a name the vault doesn't have is just text.
+    let named = call(&mut client, &mut view, "lea", "pipe_send", r#"{"text": "It's [secret AWS/AWS_SECRET]."}"#).await;
+    assert!(named.starts_with("Refused: it contains the secret AWS."), "{named}");
+    std::fs::write(outbox.join("env.txt"), "AWS_SECRET=[secret AWS/AWS_SECRET]").expect("file");
+    let in_file = call(&mut client, &mut view, "lea", "pipe_send", r#"{"text": "The env.", "files": ["env.txt"]}"#).await;
+    assert!(in_file.starts_with("Refused: it contains the secret AWS."), "{in_file}");
+    let other = call(&mut client, &mut view, "lea", "pipe_send", r#"{"text": "Logs show [secret GITHUB/TOKEN] where it was."}"#).await;
+    assert!(!other.starts_with("Refused"), "{other}");
 }
 
 #[tokio::test]
@@ -370,7 +380,7 @@ async fn hostile_a_held_file_changed_after_review_isnt_rescanned() {
     apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(send)).await;
     let last = pipes::messages_for_test(&factory, &pipe).into_iter().find(|m| m.seq == seq).expect("it");
     assert_eq!(last.state(), v1::PipeMessageState::Refused);
-    assert!(last.note.starts_with("report.txt changed after it was written in, so it wasn't sent"), "{:?}", last.note);
+    assert_eq!(last.note, "report.txt changed after the message was written.");
 
     // Gone is refused too, and the agent hears why.
     std::fs::write(outbox.join("plan.txt"), "plan").expect("file");
@@ -380,10 +390,10 @@ async fn hostile_a_held_file_changed_after_review_isnt_rescanned() {
     let send = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq, allow: true, ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(send)).await;
     let last = pipes::messages_for_test(&factory, &pipe).into_iter().find(|m| m.seq == seq).expect("it");
-    assert!(last.note.starts_with("plan.txt is gone"), "{:?}", last.note);
+    assert_eq!(last.note, "plan.txt is gone.");
     view.follow(&mut client, |view| {
         view.entries.iter().any(|entry| {
-            matches!(&entry.kind, Some(Kind::Event(event)) if event.text.contains("Claktory didn't send your message: plan.txt is gone"))
+            matches!(&entry.kind, Some(Kind::Event(event)) if event.text.contains("Claktory didn't send your message on the pipe \"") && event.text.contains("\". plan.txt is gone.\n\nYour message:\nPlan."))
         })
     })
     .await;

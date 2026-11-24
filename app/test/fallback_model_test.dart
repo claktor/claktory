@@ -1,8 +1,9 @@
 // The fallback model (#225): what a step a model declines is tried again
 // on, an agent's own in its settings and the Claktory-wide default in
 // Settings → Defaults.
-import 'package:factory_app/controls.dart' show Field, Select, showModal;
+import 'package:factory_app/controls.dart' show Field, showModal;
 import 'package:factory_app/forms.dart';
+import 'package:factory_app/model_select.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/settings_view.dart';
@@ -41,10 +42,10 @@ Workspace _workspace({String defaultFallback = '', String own = ''}) =>
       ),
     );
 
-/// The select in the field labeled [label].
+/// The model field in the field labeled [label].
 Finder _select(String label) => find.descendant(
   of: find.ancestor(of: find.text(label), matching: find.byType(Field)),
-  matching: find.byType(Select<String>),
+  matching: find.byType(ModelSelect),
 );
 
 Future<Harness> _agentSettings(
@@ -71,12 +72,13 @@ void main() {
       tester,
       _workspace(defaultFallback: 'openai-codex/gpt-5.5'),
     );
-    final select = tester.widget<Select<String>>(_select('Fallback model'));
+    final select = tester.widget<ModelSelect>(_select('Fallback model'));
     expect(select.value, '');
     expect(
-      [for (final option in select.options) option.label],
-      ['Default (GPT-5.5)', 'Claude Opus 5.5', 'GPT-5.5'],
+      [for (final option in select.extra) option.label],
+      ['Default (GPT-5.5)'],
     );
+    expect(find.text('Default (GPT-5.5)', findRichText: true), findsOneWidget);
     expect(
       find.text(
         'If its model declines a step for safety reasons, Claktory tries it '
@@ -99,9 +101,9 @@ void main() {
       tester,
       _workspace(own: 'openai-codex/gpt-5.5'),
     );
-    final select = tester.widget<Select<String>>(_select('Fallback model'));
+    final select = tester.widget<ModelSelect>(_select('Fallback model'));
     expect(select.value, 'openai-codex/gpt-5.5');
-    expect(select.options.first.label, 'Default (none)');
+    expect(select.extra.first.label, 'Default (none)');
     select.onChanged('');
     await pumpFrames(tester);
     await tester.tap(find.text('Save'));
@@ -113,9 +115,15 @@ void main() {
 
   testWidgets('one that is no longer available says so', (tester) async {
     await _agentSettings(tester, _workspace(own: 'gone/model'));
-    final select = tester.widget<Select<String>>(_select('Fallback model'));
+    final select = tester.widget<ModelSelect>(_select('Fallback model'));
     expect(select.value, 'gone/model');
-    expect(select.options.last.label, 'No model available');
+    expect(
+      find.descendant(
+        of: _select('Fallback model'),
+        matching: find.text('No model available', findRichText: true),
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets('Settings → Defaults sets the default fallback, or none', (
@@ -142,14 +150,11 @@ void main() {
       of: find.text('Default fallback model'),
       matching: find.byType(SettingRow),
     );
-    final select = tester.widget<Select<String>>(
-      find.descendant(of: row, matching: find.byType(Select<String>)),
+    final select = tester.widget<ModelSelect>(
+      find.descendant(of: row, matching: find.byType(ModelSelect)),
     );
     expect(select.value, 'openai-codex/gpt-5.5');
-    expect(
-      [for (final option in select.options) option.label],
-      ['None', 'Claude Opus 5.5', 'GPT-5.5'],
-    );
+    expect([for (final option in select.extra) option.label], ['None']);
     select.onChanged('');
     await pumpFrames(tester);
     final update = harness.backend.sent.lastWhere((m) => m.hasUpdateSettings());

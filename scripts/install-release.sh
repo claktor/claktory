@@ -86,6 +86,12 @@ if [[ -f "$RELEASE/claktory-speech" ]]; then
   chmod 755 "$HOME_DIR/bin/claktory-speech.new"
   mv -f "$HOME_DIR/bin/claktory-speech.new" "$HOME_DIR/bin/claktory-speech"
 fi
+# The video preview helper (#379), beside them on a Mac (releases before it have none).
+if [[ -f "$RELEASE/claktory-video-preview" ]]; then
+  cp "$RELEASE/claktory-video-preview" "$HOME_DIR/bin/claktory-video-preview.new"
+  chmod 755 "$HOME_DIR/bin/claktory-video-preview.new"
+  mv -f "$HOME_DIR/bin/claktory-video-preview.new" "$HOME_DIR/bin/claktory-video-preview"
+fi
 SUPERVISOR_APP="$HOME_DIR/bin/Claktory Agents.app"
 if [[ -d "$RELEASE/supervisor/Claktory Agents.app" ]]; then
   rm -rf "$SUPERVISOR_APP.new"

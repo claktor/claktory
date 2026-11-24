@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use super::db::Unusual;
+
 /// One email, in plain text and HTML.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mail {
@@ -103,25 +105,40 @@ fn sign_in_mail(domain: &str, to: &str, code: &str, intro: &str) -> Mail {
     Mail { from, to: to.to_owned(), subject: format!("Your Claktory code: {code}"), text, html }
 }
 
-/// A Claktory got its share after a restart: so its owner learns if anyone
+/// A Claktory got its share after a restart in a way that doesn't look
+/// like it restarting where it runs (#412): so its owner learns if anyone
 /// else did, with a copy of its disk.
-pub fn unlock_mail(domain: &str, to: &str, name: &str, when: i64, ip: &str, account_page: &str) -> Mail {
+pub fn unlock_mail(domain: &str, to: &str, name: &str, unusual: Unusual, when: i64, ip: &str, account_page: &str) -> Mail {
     let when = format_time(when);
+    let what = |name: &str| match unusual {
+        Unusual::NewNetwork => format!("{name} unlocked its secrets from a network it hasn't used in the last 30 days."),
+        Unusual::OlderCopy => format!("An older copy of {name}, from before it last signed in to your account, unlocked its secrets."),
+    };
+    let why = |name: &str| {
+        format!(
+            "Claktory emails you only when this looks unusual, not each time {name} restarts. \
+             If you took {name} somewhere new or restored it from a backup, there's nothing to do."
+        )
+    };
     let text = format!(
-        "{name} unlocked its secrets after starting up.\n\n\
+        "{what}\n\n\
          When: {when}\nFrom: {ip}\n\n\
-         This happens each time {name} restarts, such as after an update. If you restarted it, there's nothing to do.\n\n\
+         {why}\n\n\
          If you didn't, someone may have a copy of its disk. Remove {name} from your account at {account_page} so it can't unlock again. \
-         Then change the keys kept in its secrets at each service they're for.\n"
+         Then change the keys kept in its secrets at each service they're for.\n",
+        what = what(name),
+        why = why(name),
     );
     let subject = format!("{name} unlocked its secrets");
     let (name, ip, account_page) = (escape(name), escape(ip), escape(account_page));
     let html = page(&format!(
-        "<p>{name} unlocked its secrets after starting up.</p>\
+        "<p>{what}</p>\
          <p>When: {when}<br>From: {ip}</p>\
-         <p>This happens each time {name} restarts, such as after an update. If you restarted it, there's nothing to do.</p>\
+         <p>{why}</p>\
          <p>If you didn't, someone may have a copy of its disk. Remove {name} from your account at {account_page} so it can't unlock again. \
-         Then change the keys kept in its secrets at each service they're for.</p>"
+         Then change the keys kept in its secrets at each service they're for.</p>",
+        what = what(&name),
+        why = why(&name),
     ));
     Mail { from: format!("Claktory <notices@{domain}>"), to: to.to_owned(), subject, text, html }
 }
@@ -449,7 +466,15 @@ mod tests {
         assert!(mail.text.starts_with("Your code to sign in to Claktory on Matt's <iPhone>:\n\n482913\n"));
         assert!(mail.html.contains("on Matt&#39;s &lt;iPhone&gt;:") && !mail.html.contains("<iPhone>"));
 
-        let mail = unlock_mail("auth.claktory.com", "matt@example.com", "Mac <mini>", 1_795_183_320, "203.0.113.7", "claktory.com/account");
+        let mail = unlock_mail(
+            "auth.claktory.com",
+            "matt@example.com",
+            "Mac <mini>",
+            Unusual::NewNetwork,
+            1_795_183_320,
+            "203.0.113.7",
+            "claktory.com/account",
+        );
         assert_eq!(mail.from, "Claktory <notices@auth.claktory.com>");
         assert_eq!(mail.subject, "Mac <mini> unlocked its secrets");
         assert!(mail.text.contains("When: 20 Nov 2026, 14:02 UTC\nFrom: 203.0.113.7\n"), "{}", mail.text);

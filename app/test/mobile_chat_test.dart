@@ -7,6 +7,7 @@ import 'package:cupertino_ui/cupertino_ui.dart'
     show
         cupertinoTextSelectionHandleControls,
         CupertinoAdaptiveTextSelectionToolbar;
+import 'package:factory_app/scope.dart' show AppPage;
 import 'package:factory_app/agent_view.dart';
 import 'package:factory_app/controls.dart' show GlyphButton;
 import 'package:factory_app/inbox.dart' show NeedsYouChip, NeedsYouList;
@@ -761,8 +762,7 @@ void main() {
   });
 
   testWidgets('Needs you: a button beside "…" in the header, clear of the '
-      'conversation, opens what waits in a sheet; opening a conversation '
-      'closes it', (tester) async {
+      'conversation, opens the Needs you page', (tester) async {
     sheetsPresented.value = 0;
     Workspace waiting(List<int> seqs, {String selected = 'mike'}) =>
         _workspace()
@@ -797,32 +797,26 @@ void main() {
     await tester.tap(chip);
     await pumpFrames(tester);
     await pumpFrames(tester);
-    expect(find.byType(PhoneSheet), findsOneWidget);
-    expect(
-      find.descendant(
-        of: find.byType(PhoneSheet),
-        matching: find.text('Needs you'),
-      ),
-      findsOneWidget,
-    );
-    expect(
-      find.descendant(
-        of: find.byType(PhoneSheet),
-        matching: find.byType(NeedsYouList),
-      ),
-      findsOneWidget,
-    );
+    // The Needs you page, as the drawer opens it: what a card opens
+    // (Review) comes over it, and Back returns to it.
+    expect(find.byType(PhoneSheet), findsNothing);
+    expect(harness.page.value, AppPage.inbox);
+    expect(find.byType(NeedsYouList), findsOneWidget);
     expect(
       find.text('Proposes to Rivet: Add a designer agent'),
       findsOneWidget,
     );
 
-    // Answered elsewhere: the sheet stays, saying so, for the person to close.
+    // Answered elsewhere: the page stays, saying so, for the person to close.
     await harness.apply(tester, waiting([]));
     await pumpFrames(tester);
-    expect(find.byType(PhoneSheet), findsOneWidget);
+    expect(harness.page.value, AppPage.inbox);
     expect(find.text('Nothing is waiting for your answer.'), findsOneWidget);
-    // With nothing waiting, the header has no such button.
+
+    // Back: the conversation, whose header has no such button now.
+    await tester.tap(find.bySemanticsLabel('Back').last);
+    await pumpFrames(tester);
+    expect(harness.page.value, AppPage.agent);
     expect(
       find.descendant(
         of: find.byType(PhoneNeedsYouButton),
@@ -830,12 +824,6 @@ void main() {
       ),
       findsNothing,
     );
-
-    // Another conversation opened: the sheet goes with it.
-    await harness.apply(tester, waiting([], selected: 'rivet'));
-    await pumpFrames(tester);
-    await pumpFrames(tester);
-    expect(find.byType(PhoneSheet), findsNothing);
     expect(sheetsPresented.value, 0);
   });
 

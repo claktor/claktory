@@ -54,6 +54,9 @@ class MainFlutterWindow: NSWindow {
     AudioPlayer.register(with: flutterViewController.engine.binaryMessenger)
     // The network path, to reconnect the moment it changes (NetworkPath.swift).
     NetworkPath.register(with: flutterViewController.engine.binaryMessenger)
+    // Keeping agents working with a laptop's lid closed: its helper,
+    // registered and removed at the person's word (LidHelper.swift).
+    LidHelper.register(with: flutterViewController.engine.binaryMessenger)
     // Copying a secret, such as a device's add code, hidden from clipboard
     // managers (SecretClipboard.swift).
     SecretClipboard.register(with: flutterViewController.engine.binaryMessenger)
@@ -86,6 +89,28 @@ class MainFlutterWindow: NSWindow {
       }
       result(nil)
     }
+
+    // Whether anyone can see the window, and the person's Reduce motion
+    // (app/lib/sight.dart): nothing in the window moves while it's covered,
+    // minimized or hidden, and Flutter's macOS embedder doesn't pass Reduce
+    // motion on.
+    sightChannel = FlutterMethodChannel(
+      name: "factory/sight", binaryMessenger: flutterViewController.engine.binaryMessenger)
+    sightChannel?.setMethodCallHandler { [weak self] call, result in
+      guard let self, call.method == "state" else { return result(FlutterMethodNotImplemented) }
+      self.lastSight = self.sight
+      result(self.lastSight)
+    }
+    for name in [
+      NSWindow.didChangeOcclusionStateNotification, NSWindow.didBecomeKeyNotification,
+      NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+    ] {
+      NotificationCenter.default.addObserver(
+        self, selector: #selector(sightChanged), name: name, object: self)
+    }
+    NSWorkspace.shared.notificationCenter.addObserver(
+      self, selector: #selector(sightChanged),
+      name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
 
     // The View menu's zoom items, done by the app (app/lib/zoom.dart).
     menuChannel = FlutterMethodChannel(
@@ -167,6 +192,7 @@ class MainFlutterWindow: NSWindow {
 
   deinit {
     if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
+    NSWorkspace.shared.notificationCenter.removeObserver(self)
   }
 
   /// Height of the band at the top of the window: the sidebar's top row and
@@ -200,6 +226,25 @@ class MainFlutterWindow: NSWindow {
   }
 
   private var menuChannel: FlutterMethodChannel?
+
+  private var sightChannel: FlutterMethodChannel?
+  private var lastSight: [String: Bool] = [:]
+
+  /// Shown while any of the window is on screen; the key window counts as
+  /// shown too, in case its occlusion state is stale (flutter#155977).
+  private var sight: [String: Bool] {
+    [
+      "shown": !isMiniaturized && (occlusionState.contains(.visible) || isKeyWindow),
+      "reduceMotion": NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+    ]
+  }
+
+  @objc private func sightChanged(_ notification: Notification) {
+    let now = sight
+    guard now != lastSight else { return }
+    lastSight = now
+    sightChannel?.invokeMethod("sight", arguments: now)
+  }
 
   /// Actual Size, Zoom In and Zoom Out at the top of the View menu, as in
   /// Safari (added by AppDelegate once the menu is loaded). The app's own keys (app/lib/zoom.dart) get ⌘+, ⌘− and ⌘0

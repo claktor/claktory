@@ -198,6 +198,28 @@ async fn two_claktories_pair_approve_and_their_agents_talk() {
     assert!(matches!(a.request(action(&knocked.id, v1::PipeAction::Resume)).await, Body::Ack(_)));
     b.until(|pipe| pipe.state() == v1::PipeState::Open).await;
 
+    // A's lead waits on a usage limit (#343 U18): B's pipe says it's waiting
+    // until a quarter of an hour, in B's own words, and B's lead isn't told;
+    // once A's is awake again, B's pipe says so.
+    factoryd::pipe_link::set_liaison_every(Duration::from_millis(300));
+    let until = factoryd::transcript::now_ms() + 2 * 3_600_000 + 1;
+    let quarter = 15 * 60 * 1000;
+    pipes::set_usage_wait_for_test(&a.factory, "lea", Some(until));
+    pipes::tell_liaisons_for_test(&a.factory);
+    let waiting = b.until(|pipe| pipe.peer_waiting).await;
+    assert_eq!(waiting.peer_waiting_until_ms, (until / quarter + 1) * quarter);
+    let lines = pipes::messages_for_test(&b.factory, &joined.id);
+    assert!(lines.iter().any(|line| line.text.starts_with("Launch is waiting until ")), "{lines:?}");
+    assert!(lines.iter().all(|line| !line.text.contains("Claude")), "never why");
+    assert!(!a.pipe().expect("pipe").peer_waiting, "A's own isn't its peer's");
+    b.request(Request::SelectAgent(v1::SelectAgent { agent_id: "max".into() })).await;
+    assert!(idle(&b.view, "max"));
+    assert!(!b.view.entries.iter().any(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.text.contains("waiting"))));
+    pipes::set_usage_wait_for_test(&a.factory, "lea", None);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    pipes::tell_liaisons_for_test(&a.factory);
+    b.until(|pipe| !pipe.peer_waiting).await;
+
     // A closes it: closed on both sides.
     assert!(matches!(a.request(action(&knocked.id, v1::PipeAction::Close)).await, Body::Ack(_)));
     b.until(|pipe| pipe.state() == v1::PipeState::Closed).await;
@@ -444,7 +466,7 @@ async fn the_persons_comments_reach_their_own_agents_and_never_the_other_side() 
 
     // Held outgoing: sent with a comment, then one discarded with one.
     let decide = |pipe: &str, seq: u64, allow: bool, comment: &str| {
-        Request::DecidePipeMessage(v1::DecidePipeMessage { pipe_id: pipe.into(), seq, allow, comment: comment.into() })
+        Request::DecidePipeMessage(v1::DecidePipeMessage { pipe_id: pipe.into(), seq, allow, comment: comment.into(), ..Default::default() })
     };
     a.call("lea", "pipe_send", r#"{"text": "Launch is Friday."}"#).await;
     let held = a.message(&knocked.id, "Launch is Friday.").await;
@@ -458,6 +480,35 @@ async fn the_persons_comments_reach_their_own_agents_and_never_the_other_side() 
     assert!(matches!(a.request(decide(&knocked.id, held.seq, false, &format!("{MARKER} discard"))).await, Body::Ack(_)));
     let told = a.told("lea", "discarded your message").await;
     assert!(told.contains(&format!("\n\nThe person's note: {MARKER} discard")), "{told}");
+    // Submit (#370): one sent back to Lea with a reply, never sent; the
+    // reply is kept apart from the pipe tables, and the card shows it.
+    a.call("lea", "pipe_send", r#"{"text": "Launch moved to Monday."}"#).await;
+    let held = a.message(&knocked.id, "Launch moved to Monday.").await;
+    let back = v1::DecidePipeMessage {
+        pipe_id: knocked.id.clone(),
+        seq: held.seq,
+        allow: true,
+        comment: format!("{MARKER} back"),
+        reply: true,
+    };
+    assert!(matches!(a.request(Request::DecidePipeMessage(back)).await, Body::Ack(_)));
+    let told = a.told("lea", "sent your message back").await;
+    assert!(
+        told.ends_with(&format!(
+            "It wasn't sent. They say:\n\n{MARKER} back\n\nWrite it again with that in mind, and send it again.\n\nYour message:\nLaunch moved to Monday."
+        )),
+        "{told}"
+    );
+    let returned = a.message(&knocked.id, "Launch moved to Monday.").await;
+    assert_eq!(
+        (returned.state(), returned.replied, returned.note.as_str()),
+        (v1::PipeMessageState::Discarded, true, format!("{MARKER} back").as_str())
+    );
+    // Its history says Replied, never Denied (Abbacchio's #370 row).
+    let list = v1::ListNeedsYouHistory { query: String::new(), before_ms: 0, limit: 0 };
+    let Body::NeedsYouHistory(history) = a.request(Request::ListNeedsYouHistory(list)).await else { panic!("history") };
+    let record = history.records.iter().find(|record| record.pipe_id == knocked.id && record.seq == held.seq).expect("its record");
+    assert_eq!((record.outcome(), record.reply.as_str()), (v1::NeedsYouOutcome::Replied, format!("{MARKER} back").as_str()));
 
     // Held incoming: let in with a comment, and one discarded with one.
     let in_ok = v1::SendPipeMessage { pipe_id: joined.id.clone(), text: "Monday works.".into() };
@@ -483,6 +534,18 @@ async fn the_persons_comments_reach_their_own_agents_and_never_the_other_side() 
         view.workspace.pipes.iter().any(|pipe| pipe.id == second.pipe_id && pipe.state() == v1::PipeState::Approval)
     });
     tokio::time::timeout(Duration::from_secs(20), wait).await.expect("knocked");
+    // Submit (#370) first: a reply leaves it waiting, and tells that agent,
+    // whom the pipe names for the card.
+    let waiting = a.view.workspace.pipes.iter().find(|pipe| pipe.id == second.pipe_id).expect("the pipe").clone();
+    assert_eq!(waiting.reply_agent_id, "rivet");
+    let reply = v1::ApprovePipe { pipe_id: second.pipe_id.clone(), approve: true, comment: format!("{MARKER} later"), reply: true, ..Default::default() };
+    assert!(matches!(a.request(Request::ApprovePipe(reply)).await, Body::Ack(_)));
+    let told = a.told("rivet", "replied about").await;
+    assert!(
+        told.ends_with(&format!("replied about the pipe \"Second\"; it still waits for their approval. They say:\n\n{MARKER} later")),
+        "{told}"
+    );
+    assert!(a.view.workspace.pipes.iter().any(|pipe| pipe.id == second.pipe_id && pipe.state() == v1::PipeState::Approval));
     let down = v1::ApprovePipe { pipe_id: second.pipe_id.clone(), approve: false, comment: format!("{MARKER} no"), ..Default::default() };
     assert!(matches!(a.request(Request::ApprovePipe(down)).await, Body::Ack(_)));
     let told = a.told("rivet", "turned down").await;
@@ -495,6 +558,7 @@ async fn the_persons_comments_reach_their_own_agents_and_never_the_other_side() 
     tokio::time::timeout(Duration::from_secs(20), wait).await.expect("turned down there too");
     let theirs = b.stored(false);
     assert!(theirs.contains("Launch is Friday.") && !theirs.contains(MARKER), "{theirs}");
+    assert!(!theirs.contains("Launch moved to Monday."), "a message sent back never went: {theirs}");
     b.request(Request::SelectAgent(v1::SelectAgent { agent_id: "max".into() })).await;
     assert!(!format!("{:?}", b.view.entries).contains(MARKER));
     let ours = a.stored(true);
@@ -510,6 +574,6 @@ async fn the_persons_comments_reach_their_own_agents_and_never_the_other_side() 
         .collect::<Result<_, _>>()
         .expect("notes");
     notes.sort();
-    let want = ["discard", "drop", "let in", "send"].map(|note| format!("{MARKER} {note}"));
+    let want = ["back", "discard", "drop", "let in", "send"].map(|note| format!("{MARKER} {note}"));
     assert_eq!(notes, want, "the history keeps each held message's note");
 }

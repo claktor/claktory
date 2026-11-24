@@ -346,14 +346,24 @@ impl App {
                     view.confirm_delete = false;
                 }
             }
+            "menu" => {
+                let which = text("which");
+                view.menu = if view.menu.as_deref() == Some(which.as_str()) { None } else { Some(which) };
+            }
             "range" => {
                 let from = text("from");
-                if sql::time(&from, 0x7fff_ffff_ffff).is_some() {
+                view.menu = None;
+                if from.is_empty() {
+                    // Back to the dashboard's own range.
+                    view.range = None;
+                    rerun = true;
+                } else if sql::time(&from, 0x7fff_ffff_ffff).is_some() {
                     view.range = Some(from);
                     rerun = true;
                 }
             }
             "variable" => {
+                view.menu = None;
                 view.values.insert(text("name"), text("value"));
                 rerun = true;
             }
@@ -378,7 +388,7 @@ impl App {
                     .map(|source| source.id.clone())
                     .min_by_key(|id| *id != ACTIVITY)
                     .unwrap_or_default();
-                let draft = Draft { source, kind: "timeseries".into(), width: 6, height: 4, ..Draft::default() };
+                let draft = Draft { source, kind: "timeseries".into(), width: 6, ..Draft::default() };
                 data.push(("/editor".to_owned(), draft.data()));
                 view.editor = Some(Editor { panel: None, draft, message: String::new(), preview: None });
                 view.form = None;

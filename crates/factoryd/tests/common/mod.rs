@@ -40,7 +40,6 @@ pub const LONG_MODEL: &str = "anthropic/long";
 /// should fail.
 const WAIT: Duration = Duration::from_secs(60);
 
-/// A fresh directory for one test.
 /// Lets this process open as many files as the tests need: every test of
 /// the crate runs in it (tests/all), each with a Factory of its own, and
 /// macOS starts a process at 256.
@@ -59,13 +58,185 @@ pub fn raise_open_files() {
     });
 }
 
+/// A fresh directory for one test: `$TMPDIR/factoryd-test-<pid>-<n>`.
+/// Removed when the thread that made it ends, which for a test is when the
+/// test does (libtest runs each in a thread of its own), and anything left
+/// when the process exits; folders of test processes that are gone (killed,
+/// crashed) are swept by the next one (#369: they held hundreds of GB).
+/// FACTORYD_TEST_KEEP=1 keeps them all, to look at a failing test's.
 pub fn temp_dir() -> PathBuf {
     raise_open_files();
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!("factoryd-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let dir = std::env::temp_dir().join(format!("{TEST_DIRS}{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
+    if std::env::var_os("FACTORYD_TEST_KEEP").is_none() {
+        cleanup::track(&dir);
+    }
     dir
+}
+
+/// Ends the background tasks agents started under `dir`, as its cleanup
+/// does when its test ends.
+pub fn end_tasks_under(dir: &Path) {
+    cleanup::end_tasks(&[dir.to_owned()]);
+}
+
+/// What the test folders' names start with.
+const TEST_DIRS: &str = "factoryd-test-";
+
+mod cleanup {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, Once};
+
+    /// Every folder this process made and hasn't removed yet: removed at
+    /// exit, whatever thread made it.
+    static LEFT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// The folders a thread made, removed when it ends.
+    struct Made(Vec<PathBuf>);
+
+    impl Drop for Made {
+        fn drop(&mut self) {
+            for dir in self.0.drain(..) {
+                remove(&dir);
+            }
+        }
+    }
+
+    thread_local! {
+        static MADE: std::cell::RefCell<Made> = const { std::cell::RefCell::new(Made(Vec::new())) };
+    }
+
+    fn remove(dir: &Path) {
+        if has_tasks(dir, 0) {
+            end_tasks(&[dir.to_owned()]);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        LEFT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|left| left != dir);
+    }
+
+    extern "C" fn at_exit() {
+        let left = std::mem::take(&mut *LEFT.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        end_tasks(&left);
+        for dir in left {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// `dir` goes when this thread ends (the main thread's only at exit,
+    /// since it outlives every test), and at exit in any case.
+    pub(super) fn track(dir: &Path) {
+        static FIRST: Once = Once::new();
+        FIRST.call_once(|| {
+            // SAFETY: at_exit is a plain function that only removes folders.
+            unsafe { libc::atexit(at_exit) };
+            std::thread::spawn(sweep);
+        });
+        LEFT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(dir.to_owned());
+        if std::thread::current().name() != Some("main") {
+            // A thread already ending has no MADE: exit removes it then.
+            let _ = MADE.try_with(|made| made.borrow_mut().0.push(dir.to_owned()));
+        }
+    }
+
+    /// Removes the folders of test processes no longer running; never
+    /// those of one that is (other suites run beside this one).
+    fn sweep() {
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+        let me = std::process::id();
+        let mut found: Vec<(u32, PathBuf)> = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let pid = name
+                .to_str()
+                .and_then(|name| name.strip_prefix(super::TEST_DIRS))
+                .and_then(|rest| rest.split_once('-'))
+                .and_then(|(pid, _)| pid.parse::<u32>().ok());
+            if let Some(pid) = pid.filter(|pid| *pid != me) {
+                found.push((pid, entry.path()));
+            }
+        }
+        let mut pids: Vec<u32> = found.iter().map(|(pid, _)| *pid).collect();
+        pids.sort_unstable();
+        pids.dedup();
+        let Some(tests) = test_processes(&pids) else { return };
+        let gone: Vec<PathBuf> = found.into_iter().filter(|(pid, _)| !tests.contains(pid)).map(|(_, dir)| dir).collect();
+        end_tasks(&gone);
+        for dir in gone {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// Whether an agent under `dir` started background tasks (an
+    /// `agents/<id>/tasks` folder, a few levels down at most).
+    fn has_tasks(dir: &Path, depth: usize) -> bool {
+        if dir.file_name().is_some_and(|name| name == "tasks")
+            && dir.parent().and_then(Path::parent).is_some_and(|up| up.ends_with("agents"))
+        {
+            return true;
+        }
+        depth < 5
+            && std::fs::read_dir(dir).is_ok_and(|entries| {
+                entries.flatten().any(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()) && has_tasks(&entry.path(), depth + 1))
+            })
+    }
+
+    /// Ends the process groups of background tasks started under `dirs`
+    /// (Bruno: a test's bash loop outlived it by 28 hours). A task's shell
+    /// leads its group and names its status file, under the test's home
+    /// (factory-agent's bash `factory-task`); never this process's group.
+    pub(crate) fn end_tasks(dirs: &[PathBuf]) {
+        if dirs.is_empty() {
+            return;
+        }
+        let Ok(output) = std::process::Command::new("ps").args(["-axo", "pgid=,command="]).output() else { return };
+        // The folders as given and as the system names them (/private/var…).
+        let mut under: Vec<String> = Vec::new();
+        for dir in dirs {
+            under.push(format!("{}/", dir.display()));
+            if let Ok(real) = dir.canonicalize() {
+                under.push(format!("{}/", real.display()));
+            }
+        }
+        // SAFETY: getpgrp only reads this process's group.
+        let own = unsafe { libc::getpgrp() };
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let Some((group, command)) = line.trim_start().split_once(char::is_whitespace) else { continue };
+            if !command.contains("factory-task") || !under.iter().any(|dir| command.contains(dir.as_str())) {
+                continue;
+            }
+            let Ok(group) = group.parse::<libc::pid_t>() else { continue };
+            if group > 1 && group != own {
+                // SAFETY: signals only that task's own process group.
+                unsafe { libc::kill(-group, libc::SIGKILL) };
+            }
+        }
+    }
+
+    /// Which of `pids` are test binaries running now (cargo puts them in
+    /// target/…/deps/): a pid since reused by another program doesn't keep
+    /// a dead test's folders. None when `ps` can't say, to remove nothing.
+    fn test_processes(pids: &[u32]) -> Option<Vec<u32>> {
+        if pids.is_empty() {
+            return Some(Vec::new());
+        }
+        let list: Vec<String> = pids.iter().map(u32::to_string).collect();
+        let output = std::process::Command::new("ps").args(["-o", "pid=,command=", "-p", &list.join(",")]).output().ok()?;
+        // ps exits 1 when none of them runs.
+        if !output.status.success() && !output.stdout.is_empty() {
+            return None;
+        }
+        let listed = String::from_utf8_lossy(&output.stdout);
+        Some(
+            listed
+                .lines()
+                .filter_map(|line| line.trim_start().split_once(char::is_whitespace))
+                .filter(|(_, command)| command.contains("/deps/"))
+                .filter_map(|(pid, _)| pid.parse().ok())
+                .collect(),
+        )
+    }
 }
 
 pub fn home(dir: &Path) -> Home {
@@ -234,6 +405,7 @@ impl Models for Scripted {
                     context_window: 10_000,
                     efforts: vec!["off".into()],
                     image_input: false,
+                    added: false,
                 },
                 v1::Model {
                     id: OTHER_MODEL.into(),
@@ -241,6 +413,7 @@ impl Models for Scripted {
                     context_window: 10_000,
                     efforts: vec!["off".into()],
                     image_input: false,
+                    added: false,
                 },
             ],
             None => Vec::new(),
@@ -252,6 +425,7 @@ impl Models for Scripted {
                 context_window: 200_000,
                 efforts: vec!["off".into()],
                 image_input: false,
+                added: false,
             });
         }
         Box::pin(async move { models })
@@ -898,8 +1072,12 @@ impl View {
             Body::Delta(delta) => {
                 use v1::entry::Kind;
                 self.deltas += 1;
-                let at = delta.seq as usize - self.first_seq();
-                match self.entries[at].kind.as_mut() {
+                // As for entries: one not held yet comes whole with the
+                // transcript (a run already going as it's selected).
+                let Some(entry) = (delta.seq as usize).checked_sub(self.first_seq()).and_then(|at| self.entries.get_mut(at)) else {
+                    return;
+                };
+                match entry.kind.as_mut() {
                     Some(Kind::Assistant(v1::AssistantText { text })) | Some(Kind::Thinking(v1::Thinking { text })) => {
                         text.push_str(&delta.text)
                     }

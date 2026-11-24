@@ -51,7 +51,7 @@ async fn finished(client: &mut Client, body: client_message::Body) -> Result<v1:
 }
 
 /// Uploads `data` whole, in one go.
-async fn upload(client: &mut Client, id: &str, agent: &str, name: &str, data: &[u8], mime: &str) -> v1::Attachment {
+pub(crate) async fn upload(client: &mut Client, id: &str, agent: &str, name: &str, data: &[u8], mime: &str) -> v1::Attachment {
     assert_eq!(progress(client, start(id, agent, name, data.len() as u64, mime)).await, Ok(0));
     let mut offset = 0;
     for part in data.chunks(MIB) {
@@ -102,6 +102,15 @@ async fn files_upload_in_chunks_resume_after_a_reconnect_and_never_overwrite() {
     assert_eq!(partials(&dir, "ops"), 0, "nothing left half done");
     // It's done: more of it is refused.
     assert!(progress(&mut client, chunk("u1", 0, b"x")).await.is_err());
+    // Its answer lost on a weak connection (#401): started again, it's all
+    // there, and finishing it again answers as it did, storing nothing twice.
+    assert_eq!(progress(&mut client, start("u1", "ops", "../../report.bin", size, "")).await, Ok(size));
+    assert_eq!(finished(&mut client, finish("u1", "")).await, Ok(stored.clone()));
+    assert_eq!(std::fs::read_dir(uploads.join(&day)).expect("the day").count(), 1, "stored once");
+    // The same id for another file is a new upload.
+    assert_eq!(progress(&mut client, start("u1", "ops", "other.bin", 3, "")).await, Ok(0));
+    let cancel = client_message::Body::CancelUpload(v1::CancelUpload { upload_id: "u1".into() });
+    assert!(matches!(client.request(cancel).await.body, Body::Ack(_)));
 
     // The same name again doesn't overwrite it.
     let again = upload(&mut client, "u2", "ops", "report.bin", b"second", "").await;

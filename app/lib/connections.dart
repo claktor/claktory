@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'device_account.dart';
 import 'ipad/ink_bridge.dart' show InkJournal;
 import 'tunnel_client.dart' show newDeviceKey;
+import 'voice_keep.dart' show forgetKeptVoices, keptClaktoryKey;
 
 /// A Factory on another machine, as its pairing code describes it. Since
 /// the private tunnel: `factory://?t=<token>&name=<name>&e=<endpoint>`
@@ -143,6 +144,38 @@ final _socketAddress = RegExp(
 /// ahead of the backend writing it so the apps out by then follow it.
 const pairingSchemes = {'factory', 'claktory'};
 
+/// The page a pairing code's QR code may open (#352 P6): the code's query,
+/// unchanged, after its `#`, so a phone's camera opens Claktory, or the
+/// page with where to get it. The fragment never reaches the page's server.
+const pairPage = 'https://claktory.com/pair';
+
+/// The pairing code in [link], a [pairPage] link, as `factory://?…`; null
+/// when [link] isn't exactly one: https, claktory.com, the path /pair, no
+/// port, user or query, and a fragment. What it holds is then read exactly
+/// as a `factory://` code's query is (Fugo's rule 1).
+String? pairLinkCode(String link) {
+  final at = link.indexOf('#');
+  if (at < 0) return null;
+  final Uri page;
+  try {
+    page = Uri.parse(link.substring(0, at));
+  } on FormatException {
+    return null;
+  }
+  final payload = link.substring(at + 1);
+  if (page.scheme != 'https' ||
+      page.host != 'claktory.com' ||
+      page.hasPort ||
+      page.userInfo.isNotEmpty ||
+      page.path != '/pair' ||
+      page.hasQuery ||
+      payload.isEmpty ||
+      payload.contains('#')) {
+    return null;
+  }
+  return 'factory://?$payload';
+}
+
 /// The Factory a pairing code points at; null if [text] isn't one. A
 /// code this app made for a Claktory found through the account is one
 /// only when [fromAccount] (as kept on this device), never as pasted.
@@ -187,13 +220,21 @@ Iterable<String> _pastedCodes(String text) sync* {
   if (code != word && code != spaced) yield code;
 }
 
-final _codeStart = RegExp(r'\b(factory|claktory)://', caseSensitive: false);
+final _codeStart = RegExp(
+  r'\b((factory|claktory)://|https://claktory\.com/pair#)',
+  caseSensitive: false,
+);
 final _invisible = RegExp('[\u00AD\u200B-\u200D\u2060\uFEFF]');
 final _lineBreak = RegExp('\r\n|[\r\n\u2028\u2029]');
 final _space = RegExp(r'\s+');
 final _trailing = RegExp('[.,;:!?)\\]>"\'\u201D\u2019\u00BB]+\$');
 
-RemoteFactory? _parsePairingCode(String code, bool fromAccount) {
+RemoteFactory? _parsePairingCode(String text, bool fromAccount) {
+  // A pairing page's link holds the code after its `#`; it's kept as the
+  // code itself, and never one of the account's.
+  final linked = pairLinkCode(text);
+  final code = linked ?? text;
+  if (linked != null) fromAccount = false;
   final Uri uri;
   final Map<String, String> query;
   final Map<String, List<String>> queryAll;
@@ -404,6 +445,8 @@ class Connections extends ChangeNotifier {
         ),
       );
     }
+    // Its recordings kept until sent (#401): they can never go now.
+    unawaited(forgetKeptVoices(keptClaktoryKey(target)));
     if (_current == target) _current = null;
     _changed();
   }

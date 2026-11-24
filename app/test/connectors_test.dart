@@ -695,10 +695,6 @@ void main() {
       findsOneWidget,
     );
 
-    // A comment goes with Connect too.
-    await tester.tap(find.text('Add a comment'));
-    await tester.pump();
-    await tester.enterText(find.byType(EditableText).last, 'Only DNS');
     await tester.tap(find.text('Connect Cloudflare'));
     await tester.pump();
     await tester.pump();
@@ -707,23 +703,90 @@ void main() {
       (m) => m.hasStartConnect() ? m.startConnect : null,
     ).single;
     expect(start.proposalId, 'p1');
-    expect(start.comment, 'Only DNS');
+    expect(start.comment, isEmpty);
     expect(start.accessId, 'deploy');
     expect(opened, hasLength(1));
     await tester.tap(find.text('Cancel'));
     await tester.pump();
     await tester.pump();
 
-    expect(find.textContaining('gets it with your answer.'), findsOneWidget);
-    await tester.enterText(find.byType(EditableText).last, 'Not yet');
+    // A typed comment is a reply (#370): one Submit, nothing connected.
+    await tester.tap(find.text('Add a comment'));
+    await tester.pump();
+    await tester.enterText(find.byType(EditableText).last, 'Only DNS, please');
+    await tester.pump();
+    expect(find.text('Connect Cloudflare'), findsNothing);
+    expect(find.text('Dismiss'), findsNothing);
+    expect(
+      find.text(
+        'Nothing is connected. June gets your comment and can ask again.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Submit'));
+    await tester.pump();
+    final reply = _sent(
+      harness,
+      (m) => m.hasDismissConnectProposal() ? m.dismissConnectProposal : null,
+    ).single;
+    expect(reply.proposalId, 'p1');
+    expect(reply.reply, isTrue);
+    expect(reply.comment, 'Only DNS, please');
+    // Nothing else went: no second connect.
+    expect(
+      _sent(harness, (m) => m.hasStartConnect() ? m.startConnect : null),
+      hasLength(1),
+    );
+  });
+
+  testWidgets('Dismiss with no comment dismisses; Return in a comment is '
+      'Submit', (tester) async {
+    final harness = Harness(_workspace(proposals: [_proposal()]));
+    await _show(tester, harness, const SecretsSettings());
     await tester.tap(find.text('Dismiss'));
     await tester.pump();
     final dismiss = _sent(
       harness,
       (m) => m.hasDismissConnectProposal() ? m.dismissConnectProposal : null,
     ).single;
-    expect(dismiss.proposalId, 'p1');
-    expect(dismiss.comment, 'Not yet');
+    expect(dismiss.reply, isFalse);
+    expect(dismiss.comment, isEmpty);
+
+    await tester.tap(find.text('Add a comment'));
+    await tester.pump();
+    await tester.enterText(find.byType(EditableText).last, 'Not yet');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    final sent = _sent(
+      harness,
+      (m) => m.hasDismissConnectProposal() ? m.dismissConnectProposal : null,
+    );
+    expect(sent, hasLength(2));
+    expect(sent.last.reply, isTrue);
+    expect(sent.last.comment, 'Not yet');
+    expect(
+      _sent(harness, (m) => m.hasStartConnect() ? m.startConnect : null),
+      isEmpty,
+    );
+  });
+
+  testWidgets('a replied proposal says Replied, with the reply', (
+    tester,
+  ) async {
+    final harness = Harness(_workspace());
+    await _show(
+      tester,
+      harness,
+      ConnectProposalCard(
+        _proposal(state: ConnectProposalState.CONNECT_PROPOSAL_STATE_DISMISSED)
+          ..replied = true
+          ..comment = 'Only DNS, please'
+          ..decidedMs = Int64(2000),
+      ),
+    );
+    expect(find.textContaining('Replied'), findsOneWidget);
+    expect(find.textContaining('Dismissed'), findsNothing);
+    expect(find.textContaining('Only DNS, please'), findsOneWidget);
   });
 
   testWidgets('a decided proposal says what was connected', (tester) async {

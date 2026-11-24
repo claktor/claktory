@@ -2,6 +2,7 @@ package com.claktory.app
 
 import android.app.Activity
 import android.content.Intent
+import android.content.res.Configuration
 import io.flutter.embedding.engine.FlutterEngine
 
 /**
@@ -11,9 +12,15 @@ import io.flutter.embedding.engine.FlutterEngine
 interface HostLifecycle {
     fun onResume() {}
 
+    /** After the activity and Flutter have both resumed (Flutter resets its system UI flags then). */
+    fun onPostResume() {}
+
     fun onPause() {}
 
     fun onFocus(focused: Boolean) {}
+
+    /** A configuration change the activity handles itself (configChanges), such as light to dark. */
+    fun onConfiguration(config: Configuration) {}
 
     /** True when it asked for these permissions and has handled the answer. */
     fun onPermissionResult(requestCode: Int, permissions: Array<out String>, grants: IntArray): Boolean = false
@@ -36,9 +43,13 @@ class Adapters private constructor(private val all: List<AutoCloseable>) : AutoC
 
     fun onResume() = lifecycles.forEach { it.onResume() }
 
+    fun onPostResume() = lifecycles.forEach { it.onPostResume() }
+
     fun onPause() = lifecycles.forEach { it.onPause() }
 
     fun onFocus(focused: Boolean) = lifecycles.forEach { it.onFocus(focused) }
+
+    fun onConfiguration(config: Configuration) = lifecycles.forEach { it.onConfiguration(config) }
 
     fun onPermissionResult(requestCode: Int, permissions: Array<out String>, grants: IntArray): Boolean =
         lifecycles.any { it.onPermissionResult(requestCode, permissions, grants) }
@@ -68,6 +79,8 @@ class Adapters private constructor(private val all: List<AutoCloseable>) : AutoC
             val share = ShareSheet(activity)
             return Adapters(
                 listOf(
+                    // No channel: the system bars' icons, dark on light and light on dark.
+                    SystemBars(activity),
                     // factory/network: iroh can't see network moves on Android.
                     NetworkPath(messenger, context),
                     // factory/device: what this phone keeps and what it is.
@@ -80,6 +93,8 @@ class Adapters private constructor(private val all: List<AutoCloseable>) : AutoC
                     share,
                     // factory/links: claktory://add?code=… opens the app.
                     LinksChannel(messenger, activity),
+                    // factory/shared: what other apps share to Claktory.
+                    SharedChannel(messenger, activity),
                     attachments,
                     camera,
                     scanner,

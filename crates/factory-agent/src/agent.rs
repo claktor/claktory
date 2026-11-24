@@ -63,6 +63,22 @@ pub struct Settings {
 /// agent shouldn't wait: the request fails as it is.
 pub type WaitOut = Arc<dyn Fn(Option<u64>, String) -> BoxFuture<bool> + Send + Sync>;
 
+/// How an agent waits for the network when its model calls keep failing to
+/// connect, after the quick retries (#364 O2); the text is the error. Ok
+/// once it should ask again; Err to let the failure stand, with what to say
+/// in place of the error when there's something better.
+pub type WaitNetwork = Arc<dyn Fn(String) -> BoxFuture<Result<(), Option<String>>> + Send + Sync>;
+
+/// Whether a failed response is the connection rather than the provider's
+/// answer: no network, a dropped connection, a request that timed out.
+fn connection_lost(error: &str) -> bool {
+    static LOST: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)^connection error\.?$|^request timed out\.?$|connection (reset|closed|refused|error)|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|network is unreachable|fetch failed|error sending request|dns error|websocket (error|closed)")
+            .unwrap_or_else(|_| unreachable!())
+    });
+    LOST.is_match(error.trim())
+}
+
 /// What a new context starts with: its system prompt and tools.
 pub struct NewContext {
     pub system_prompt: String,
@@ -202,6 +218,7 @@ pub struct Agent {
     after_compaction: Option<AfterCompaction>,
     secrets: Option<Secrets>,
     wait_out: Option<WaitOut>,
+    wait_network: Option<WaitNetwork>,
     listeners: Vec<Listener>,
     active: AbortHandle,
     detaching: DetachHandle,
@@ -256,6 +273,7 @@ impl Agent {
             after_compaction: options.after_compaction,
             secrets: options.secrets,
             wait_out: None,
+            wait_network: None,
             listeners: Vec::new(),
             active: AbortHandle::default(),
             detaching: DetachHandle::default(),
@@ -273,6 +291,12 @@ impl Agent {
     /// Lets the agent wait out its accounts' usage limits instead of failing.
     pub fn wait_out_with(&mut self, wait: WaitOut) {
         self.wait_out = Some(wait);
+    }
+
+    /// Lets the agent wait for the network when it can't connect, instead
+    /// of failing after the quick retries.
+    pub fn wait_network_with(&mut self, wait: WaitNetwork) {
+        self.wait_network = Some(wait);
     }
 
     pub fn abort_handle(&self) -> AbortHandle {
@@ -554,8 +578,12 @@ impl Agent {
     ) -> Result<AssistantMessage, Error> {
         let mut attempt = 0;
         let mut model = self.state.model.clone();
+        // It waited for the network this step: a request that still can't
+        // connect goes back to waiting without the quick retries, which
+        // were tried before the first wait.
+        let mut offline = false;
         loop {
-            let message = self.stream_assistant_response(&model, context, token).await?;
+            let mut message = self.stream_assistant_response(&model, context, token).await?;
             attempt += 1;
             // Limits are waited out only on the agent's own model: a
             // fallback attempt without capacity lets the refusal stand.
@@ -600,7 +628,39 @@ impl Agent {
                 attempt = 0;
                 continue;
             }
-            let Some(delay) = self.retry_delay(&message, attempt, token) else {
+            let lost = message.stop_reason == StopReason::Error && message.error_message.as_deref().is_some_and(connection_lost);
+            let retry = if offline && lost { None } else { self.retry_delay(&message, attempt, token) };
+            let Some(delay) = retry else {
+                // Still no connection after the quick retries: wait for the
+                // network, then ask again (#364 O2).
+                if let Some(wait) = self.wait_network.clone()
+                    && model.id == self.state.model.id
+                    && lost
+                    && !token.is_cancelled()
+                {
+                    context.pop();
+                    self.emit(AgentEvent::Waiting { message: assistant(message.clone()), until_ms: None }).await?;
+                    let why = message.error_message.clone().unwrap_or_default();
+                    let waited = tokio::select! {
+                        waited = wait(why) => waited,
+                        () = token.cancelled() => return Err(Error::Aborted),
+                    };
+                    match waited {
+                        Ok(()) => {
+                            tracing::info!("waited for the network");
+                            offline = true;
+                            attempt = 0;
+                            self.take_inbox(context, produced).await?;
+                            model = self.state.model.clone();
+                            continue;
+                        }
+                        // One notice for the stop: why it stopped, not
+                        // the last connection error as well.
+                        Err(Some(why)) => message.error_message = Some(why),
+                        Err(None) => {}
+                    }
+                    context.push(assistant(message.clone()));
+                }
                 if crate::refusal::of(&message).is_some() || matches!(message.stop_reason, StopReason::Error | StopReason::Aborted) {
                     // The step ends on a failure: a note about an answer
                     // that never came would mislead.

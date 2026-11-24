@@ -123,6 +123,11 @@ class _ChecklistReplyState extends State<ChecklistReply> {
           controller: _text,
           focusNode: _focus,
           enabled: !_busy,
+          // A recording not sent yet comes back here after a relaunch.
+          keep: DictationFor(
+            'checklist/${widget.checklistAgentId}/${widget.itemId}',
+            'Your reply to $name on item ${widget.itemId}',
+          ),
           child: CallbackShortcuts(
             bindings: {const SingleActivator(LogicalKeyboardKey.enter): _send},
             // Its placeholder isn't copied with the words around it.

@@ -2,6 +2,8 @@ import 'package:cupertino_ui/cupertino_ui.dart'
     show DefaultCupertinoLocalizations;
 import 'package:factory_app/app_update.dart';
 import 'package:factory_app/backend.dart';
+import 'package:factory_app/paced.dart'
+    show PreviewBox, ReadFirst, ReadOnward, ReadProgress;
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/device_account.dart' show DeviceAccount;
 import 'package:factory_app/drafts.dart';
@@ -17,6 +19,7 @@ import 'package:factory_app/state.dart';
 import 'package:factory_app/update.dart';
 import 'package:factory_app/zoom.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -87,6 +90,11 @@ class RecordingBackend extends Backend {
   @override
   Future<void> selectAgent(String agentId) =>
       _record(ClientMessage(selectAgent: SelectAgent(agentId: agentId)));
+
+  @override
+  Future<void> paneOpened(String agentId, String paneId) => _record(
+    ClientMessage(paneOpened: PaneOpened(agentId: agentId, paneId: paneId)),
+  );
 
   @override
   Future<void> sendMessage(
@@ -218,6 +226,18 @@ class RecordingBackend extends Backend {
   );
 
   @override
+  Future<void> setChatModel(String chatId, String model) => _record(
+    ClientMessage(
+      setChatModel: SetChatModel(chatId: chatId, model: model),
+    ),
+  );
+
+  @override
+  Future<void> setUsageAutoContinue(bool on) => _record(
+    ClientMessage(setUsageAutoContinue: SetUsageAutoContinue(on: on)),
+  );
+
+  @override
   Future<void> switchBack(
     String agentId, {
     bool all = false,
@@ -239,14 +259,16 @@ class RecordingBackend extends Backend {
     required bool approve,
     String comment = '',
     String chatId = '',
+    bool reply = false,
   }) => _record(
     ClientMessage(
       decideProposal: DecideProposal(
         agentId: agentId,
         chatId: chatId,
         proposalId: proposalId,
-        approve: approve,
+        approve: approve && !reply,
         comment: comment,
+        reply: reply,
       ),
     ),
   );
@@ -273,11 +295,50 @@ class RecordingBackend extends Backend {
     ),
   );
 
+  @override
+  Future<void> forkConversation(String agentId, Int64 seq, Int64 timestampMs) =>
+      _record(
+        ClientMessage(
+          forkConversation: ForkConversation(
+            agentId: agentId,
+            seq: seq,
+            timestampMs: timestampMs,
+          ),
+        ),
+      );
+
+  /// What [listBranches] answers: an agent's other versions, by its id.
+  final branches = <String, List<Branch>>{};
+
+  @override
+  Future<Branches> listBranches(String agentId) async {
+    await _record(ClientMessage(listBranches: ListBranches(agentId: agentId)));
+    return Branches(agentId: agentId, branches: branches[agentId] ?? const []);
+  }
+
+  @override
+  Future<void> switchBranch(String agentId, String branchId) => _record(
+    ClientMessage(
+      switchBranch: SwitchBranch(agentId: agentId, branchId: branchId),
+    ),
+  );
+
+  @override
+  Future<void> deleteBranch(String agentId, String branchId) => _record(
+    ClientMessage(
+      deleteBranch: DeleteBranch(agentId: agentId, branchId: branchId),
+    ),
+  );
+
   /// The pieces of release archives asked for: (version, offset).
   final fetched = <(String, int)>[];
 
   @override
-  Future<AppPiece> fetchApp(String version, int offset) async {
+  Future<AppPiece> fetchApp(
+    String version,
+    int offset, {
+    int maxBytes = 0,
+  }) async {
     fetched.add((version, offset));
     final reason = refuse;
     if (reason != null) throw RequestFailure(reason);
@@ -306,8 +367,56 @@ class RecordingBackend extends Backend {
   /// What [readFile] answers, by path; any other path can't be read.
   final files = <String, FileContent>{};
 
+  /// How long this link takes for so many bytes (#379); as the real
+  /// backend measures it when unset (nothing, here).
+  Duration Function(int bytes)? linkTime;
+
+  @override
+  Duration? readTime(int bytes) =>
+      linkTime?.call(bytes) ?? super.readTime(bytes);
+
+  /// Awaited before [readFile] answers (to keep a file coming, say).
+  Future<void> Function(ReadFile request)? holdRead;
+
+  /// The files whose reads stopped after their first piece, as told
+  /// ([Backend.readFile]'s onFirst).
+  final stoppedAtFirst = <String>[];
+
+  /// What [readFile] answers when asked for a preview, by path (#379);
+  /// [files]' when there's none.
+  final previews = <String, FileContent>{};
+
   /// Whether [readFile] reads from an offset, as backends since videos do.
   var rangedReads = true;
+
+  /// Each file's ink layers (ListInkLayers): none unless a test adds some.
+  final inkLayers = <String, List<InkLayer>>{};
+
+  /// Ink blobs by their SHA-256 (ReadInkBlob).
+  final inkBlobs = <String, List<int>>{};
+
+  @override
+  Future<InkLayerList> listInkLayers(String path) async {
+    await _record(ClientMessage(listInkLayers: ListInkLayers(path: path)));
+    return InkLayerList(path: path, layers: inkLayers[path] ?? const []);
+  }
+
+  @override
+  Future<InkBlobData> readInkBlob(String sha256, {int offset = 0}) async {
+    await _record(
+      ClientMessage(
+        readInkBlob: ReadInkBlob(sha256: sha256, offset: Int64(offset)),
+      ),
+    );
+    final bytes = inkBlobs[sha256];
+    if (bytes == null) return InkBlobData(sha256: sha256, error: 'unknown');
+    return InkBlobData(
+      sha256: sha256,
+      offset: Int64(offset),
+      size: Int64(bytes.length),
+      data: bytes.sublist(offset),
+    );
+  }
 
   @override
   Future<FileContent> readFile(
@@ -315,18 +424,72 @@ class RecordingBackend extends Backend {
     int maxBytes = 0,
     int offset = 0,
     String expectedSha256 = '',
+    ReadProgress? onProgress,
+    ReadOnward? carryOn,
+    ReadFirst? onFirst,
+    PreviewBox? preview,
+    int previewPage = 0,
   }) async {
-    await _record(
-      ClientMessage(
-        readFile: ReadFile(
-          path: path,
-          maxBytes: Int64(maxBytes),
-          offset: Int64(offset),
-          expectedSha256: expectedSha256,
-        ),
-      ),
+    final read = await _readFile(
+      path,
+      maxBytes: maxBytes,
+      offset: offset,
+      expectedSha256: expectedSha256,
+      preview: preview,
+      previewPage: previewPage,
     );
-    final file = files[path];
+    // Told to stop after its first piece (a link too slow, #379): only
+    // that piece, as the backend's paced read would answer.
+    const piece = 64 * 1024;
+    // Told whether to go on past the first piece, and not to: that piece.
+    if (onFirst != null &&
+        read.error.isEmpty &&
+        read.data.length > piece &&
+        !onFirst(read)) {
+      stoppedAtFirst.add(path);
+      onProgress?.call(offset + piece, read.size.toInt());
+      return read.deepCopy()
+        ..data = read.data.sublist(0, piece)
+        ..truncated = true;
+    }
+    if (carryOn != null &&
+        read.error.isEmpty &&
+        read.data.length > piece &&
+        !carryOn(offset + piece, read.size.toInt())) {
+      onProgress?.call(offset + piece, read.size.toInt());
+      return read.deepCopy()
+        ..data = read.data.sublist(0, piece)
+        ..truncated = true;
+    }
+    // In one piece here.
+    if (read.error.isEmpty) {
+      onProgress?.call(offset + read.data.length, read.size.toInt());
+    }
+    return read;
+  }
+
+  Future<FileContent> _readFile(
+    String path, {
+    required int maxBytes,
+    required int offset,
+    required String expectedSha256,
+    PreviewBox? preview,
+    int previewPage = 0,
+  }) async {
+    final request = ReadFile(
+      path: path,
+      maxBytes: Int64(maxBytes),
+      offset: Int64(offset),
+      expectedSha256: expectedSha256,
+      previewWidth: preview?.width,
+      previewHeight: preview?.height,
+      previewPage: previewPage == 0 ? null : previewPage,
+    );
+    await _record(ClientMessage(readFile: request));
+    await holdRead?.call(request);
+    // Asked for a preview, and the backend has one (#379): it, as the
+    // file.
+    final file = (preview == null ? null : previews[path]) ?? files[path];
     if (file == null) {
       return FileContent(path: path, error: 'No such file: $path');
     }
@@ -523,8 +686,11 @@ class RecordingBackend extends Backend {
   );
 
   @override
-  Future<void> approveDevice(String deviceId) =>
-      _record(ClientMessage(approveDevice: ApproveDevice(deviceId: deviceId)));
+  Future<void> approveDevice(String deviceId, String number) => _record(
+    ClientMessage(
+      approveDevice: ApproveDevice(deviceId: deviceId, number: number),
+    ),
+  );
 
   @override
   Future<void> denyDevice(String deviceId) =>
@@ -617,12 +783,15 @@ class RecordingBackend extends Backend {
     String threadId, {
     required bool accept,
     String comment = '',
+    bool reply = false,
   }) => _record(
     ClientMessage(
       decideSuggestion: DecideSuggestion(
         threadId: threadId,
-        accept: accept,
+        // A reply (#370) is never an accept, to an older Claktory too.
+        accept: accept && !reply,
         comment: comment,
+        reply: reply,
       ),
     ),
   );
@@ -654,6 +823,15 @@ class RecordingBackend extends Backend {
   @override
   Future<void> cancelLogin() =>
       _record(ClientMessage(cancelLogin: CancelLogin()));
+
+  @override
+  Future<void> refreshModels([String providerId = '']) => _record(
+    ClientMessage(refreshModels: RefreshModels(providerId: providerId)),
+  );
+
+  @override
+  Future<void> addModel(String model) =>
+      _record(ClientMessage(addModel: AddModel(model: model)));
 
   @override
   Future<void> signOut(String providerId, {String accountId = ''}) => _record(
@@ -760,6 +938,26 @@ class RecordingBackend extends Backend {
   @override
   Future<void> setHighlights(bool on) =>
       _record(ClientMessage(setHighlights: SetHighlights(on: on)));
+
+  @override
+  Future<void> setKeepAwake(bool on) =>
+      _record(ClientMessage(setKeepAwake: SetKeepAwake(on: on)));
+
+  @override
+  Future<void> setLidClosed({
+    required bool on,
+    LidClosedRegistration registration =
+        LidClosedRegistration.LID_CLOSED_REGISTRATION_UNKNOWN,
+    String error = '',
+  }) => _record(
+    ClientMessage(
+      setLidClosed: SetLidClosed(
+        on: on,
+        registration: registration,
+        error: error,
+      ),
+    ),
+  );
 
   @override
   Future<void> screenOpened(String id, bool opened) => _record(
@@ -956,6 +1154,16 @@ class RecordingBackend extends Backend {
   );
 
   @override
+  Future<void> secretRequestDone(String agentId, String requestId) => _record(
+    ClientMessage(
+      secretRequestDone: SecretRequestDone(
+        agentId: agentId,
+        requestId: requestId,
+      ),
+    ),
+  );
+
+  @override
   Future<void> decideSecretRequest(
     String agentId,
     String requestId, {
@@ -972,6 +1180,7 @@ class RecordingBackend extends Backend {
     int passwordLength = 0,
     bool deleteOriginals = false,
     bool grantToAsker = false,
+    bool reply = false,
   }) => _record(
     ClientMessage(
       decideSecretRequest: DecideSecretRequest(
@@ -990,6 +1199,7 @@ class RecordingBackend extends Backend {
         passwordLength: passwordLength,
         deleteOriginals: deleteOriginals,
         grantToAsker: grantToAsker,
+        reply: reply,
       ),
     ),
   );
@@ -1091,11 +1301,13 @@ class RecordingBackend extends Backend {
   Future<void> dismissConnectProposal(
     String proposalId, {
     String comment = '',
+    bool reply = false,
   }) => _record(
     ClientMessage(
       dismissConnectProposal: DismissConnectProposal(
         proposalId: proposalId,
         comment: comment,
+        reply: reply,
       ),
     ),
   );
@@ -1265,6 +1477,75 @@ class RecordingBackend extends Backend {
           if (words.every(file.label.toLowerCase().contains)) file,
       ],
       truncated: appFilesTruncated,
+    );
+  }
+
+  /// Every agent's monitors, as ListMonitors answers: filtered here by
+  /// agent, project (from the workspace) and state, as the backend does.
+  final monitorList = <AgentMonitor>[];
+
+  @override
+  Future<MonitorList> listMonitors({
+    String agentId = '',
+    String projectId = '',
+    List<MonitorState> states = const [],
+  }) async {
+    await _record(
+      ClientMessage(
+        listMonitors: ListMonitors(
+          agentId: agentId,
+          projectId: projectId,
+          states: states,
+        ),
+      ),
+    );
+    String projectOf(String id) =>
+        workspace.workspace.agents
+            .where((agent) => agent.id == id)
+            .firstOrNull
+            ?.projectId ??
+        '';
+    return MonitorList(
+      monitors: [
+        for (final item in monitorList)
+          if ((agentId.isEmpty || item.agentId == agentId) &&
+              (projectId.isEmpty || projectOf(item.agentId) == projectId) &&
+              (states.isEmpty || states.contains(item.monitor.state)))
+            item,
+      ],
+    );
+  }
+
+  /// Each monitor's history by 'agent/number', newest first; pages of
+  /// [monitorHistoryPage].
+  final monitorHistories = <String, List<MonitorEvent>>{};
+  var monitorHistoryPage = 50;
+
+  @override
+  Future<MonitorHistory> monitorHistory(
+    String agentId,
+    int monitorId, {
+    Int64 beforeSeq = Int64.ZERO,
+  }) async {
+    await _record(
+      ClientMessage(
+        listMonitorHistory: ListMonitorHistory(
+          agentId: agentId,
+          monitorId: monitorId,
+          beforeSeq: beforeSeq,
+        ),
+      ),
+    );
+    final events = [
+      for (final event
+          in monitorHistories['$agentId/$monitorId'] ?? const <MonitorEvent>[])
+        if (beforeSeq == 0 || event.seq < beforeSeq) event,
+    ];
+    return MonitorHistory(
+      agentId: agentId,
+      monitorId: monitorId,
+      events: events.take(monitorHistoryPage),
+      more: events.length > monitorHistoryPage,
     );
   }
 
@@ -1537,6 +1818,51 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(updatePipe: update));
 
   @override
+  Future<void> createPipeGroup(
+    String projectId,
+    String name, {
+    String pipeId = '',
+  }) => _record(
+    ClientMessage(
+      createPipeGroup: CreatePipeGroup(
+        projectId: projectId,
+        name: name,
+        pipeId: pipeId,
+      ),
+    ),
+  );
+
+  @override
+  Future<void> renamePipeGroup(String groupId, String name) => _record(
+    ClientMessage(
+      renamePipeGroup: RenamePipeGroup(groupId: groupId, name: name),
+    ),
+  );
+
+  @override
+  Future<void> deletePipeGroup(String groupId) => _record(
+    ClientMessage(deletePipeGroup: DeletePipeGroup(groupId: groupId)),
+  );
+
+  @override
+  Future<void> setPipeGroup(String pipeId, String groupId) => _record(
+    ClientMessage(
+      setPipeGroup: SetPipeGroup(pipeId: pipeId, groupId: groupId),
+    ),
+  );
+
+  @override
+  Future<void> setPipeGroupCollapsed(String groupId, bool collapsed) =>
+      _record(
+        ClientMessage(
+          setPipeGroupCollapsed: SetPipeGroupCollapsed(
+            groupId: groupId,
+            collapsed: collapsed,
+          ),
+        ),
+      );
+
+  @override
   Future<void> setPipeState(String pipeId, PipeAction action) => _record(
     ClientMessage(
       setPipeState: SetPipeState(pipeId: pipeId, action: action),
@@ -1565,13 +1891,16 @@ class RecordingBackend extends Backend {
     int seq,
     bool allow, {
     String comment = '',
+    bool reply = false,
   }) => _record(
     ClientMessage(
       decidePipeMessage: DecidePipeMessage(
         pipeId: pipeId,
         seq: Int64(seq),
-        allow: allow,
+        // A reply (#370) is never a yes, to an older Claktory too.
+        allow: allow && !reply,
         comment: comment,
+        reply: reply,
       ),
     ),
   );
@@ -1645,6 +1974,7 @@ class RecordingBackend extends Backend {
     int seq, {
     String text = '',
     bool dismiss = false,
+    bool reply = false,
     List<Attachment> attachments = const [],
     int? step,
   }) => _record(
@@ -1653,7 +1983,8 @@ class RecordingBackend extends Backend {
         agentId: agentId,
         seq: Int64(seq),
         text: text,
-        dismiss: dismiss,
+        dismiss: dismiss || reply,
+        reply: reply,
         attachments: attachments,
         step: step,
       ),
@@ -1666,13 +1997,16 @@ class RecordingBackend extends Backend {
     int seq,
     bool allow, {
     String comment = '',
+    bool reply = false,
   }) => _record(
     ClientMessage(
       decideSecretApproval: DecideSecretApproval(
         agentId: agentId,
         seq: Int64(seq),
-        allow: allow,
+        // A reply (#370) is never a yes, to an older Claktory too.
+        allow: allow && !reply,
         comment: comment,
+        reply: reply,
       ),
     ),
   );
@@ -1686,6 +2020,7 @@ class RecordingBackend extends Backend {
     int seq, {
     required bool approve,
     String comment = '',
+    bool reply = false,
   }) => _record(
     ClientMessage(
       decideAppGrant: DecideAppGrant(
@@ -1693,6 +2028,7 @@ class RecordingBackend extends Backend {
         seq: Int64(seq),
         approve: approve,
         comment: comment,
+        reply: reply,
       ),
     ),
   );
@@ -1704,6 +2040,7 @@ class RecordingBackend extends Backend {
     required bool approve,
     required String digest,
     String comment = '',
+    bool reply = false,
   }) => _record(
     ClientMessage(
       decideAppAccess: DecideAppAccess(
@@ -1712,6 +2049,7 @@ class RecordingBackend extends Backend {
         approve: approve,
         comment: comment,
         digest: approve ? digest : '',
+        reply: reply,
       ),
     ),
   );
@@ -1734,12 +2072,16 @@ class RecordingBackend extends Backend {
     String chatId,
     String text, {
     String clientId = '',
+    List<Attachment> attachments = const [],
+    bool voice = false,
   }) => _record(
     ClientMessage(
       sendChatMessage: SendChatMessage(
         chatId: chatId,
         text: text,
         clientId: clientId,
+        attachments: attachments,
+        voice: voice,
       ),
     ),
   );
@@ -1783,6 +2125,7 @@ class FakeUpdater extends AppUpdater {
   var steps = const [
     UpdateProgress(UpdateStage.preparing),
     UpdateProgress(UpdateStage.downloading, received: 12300000, size: 48000000),
+    UpdateProgress(UpdateStage.waiting, received: 12300000, size: 48000000),
     UpdateProgress(UpdateStage.checking),
   ];
 
@@ -1797,6 +2140,7 @@ class FakeUpdater extends AppUpdater {
     required FetchAppPiece fetch,
     required String version,
     required String bundlePath,
+    ValueListenable<bool>? connected,
     void Function(UpdateProgress progress)? onProgress,
   }) async {
     await fetch(version, 0);

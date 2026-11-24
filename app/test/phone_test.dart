@@ -11,6 +11,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+import 'pair_start.dart';
 
 const phone = Size(390, 844);
 
@@ -138,6 +139,7 @@ void main() {
     await pumpFrames(tester);
     expect(find.byType(PairScreen), findsOneWidget);
     expect(find.byType(Sidebar), findsNothing);
+    await pastPairStart(tester, paste: true);
 
     final field = find.byType(EditableText);
     await tester.enterText(
@@ -172,7 +174,7 @@ void main() {
     await harness.show(tester, size: phone);
     await pumpFrames(tester);
     expect(harness.camera.asked, 0, reason: 'not before the person asks');
-    await tester.tap(find.text('Scan code'));
+    await tester.tap(find.text('Scan code instead'));
     await pumpFrames(tester);
     expect(harness.camera.asked, 1);
     expect(find.byKey(const ValueKey('camera')), findsOneWidget);
@@ -227,6 +229,7 @@ void main() {
     harness.camera.state = CameraAccess.granted;
     await harness.show(tester, size: phone);
     await pumpFrames(tester);
+    await pastPairStart(tester);
     expect(find.byKey(const ValueKey('camera')), findsOneWidget);
     harness.camera.scan(code);
     await pumpFrames(tester);
@@ -277,7 +280,7 @@ void main() {
       ..granting = false;
     await harness.show(tester, size: phone);
     await pumpFrames(tester);
-    await tester.tap(find.text('Scan code'));
+    await tester.tap(find.text('Scan code instead'));
     await pumpFrames(tester);
     expect(
       find.text('To scan, allow camera access in Settings → Claktory.'),
@@ -335,7 +338,7 @@ void main() {
     expect(find.text('Scan code instead'), findsNothing);
   });
 
-  testWidgets('a restricted camera says to paste instead, with no Settings', (
+  testWidgets('a restricted camera offers only pasting, with no Settings', (
     tester,
   ) async {
     // The iPhone's words (tests run as Android unless told).
@@ -344,6 +347,14 @@ void main() {
     final harness = Harness(Workspace(), localBackend: false);
     harness.camera.state = CameraAccess.restricted;
     await harness.show(tester, size: phone);
+    await pumpFrames(tester);
+    // The first screen offers no scanning, only pasting.
+    expect(find.text('Scan code instead'), findsNothing);
+    expect(find.text('Open Settings'), findsNothing);
+    // From signing in, Use a code instead: it says why there's no
+    // scanning.
+    await pastPairStart(tester, email: true);
+    await tester.tap(find.text('Use a code instead'));
     await pumpFrames(tester);
     expect(
       find.text(

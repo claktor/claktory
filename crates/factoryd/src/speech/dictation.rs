@@ -2,9 +2,14 @@
 //! answer, an Ask, a checklist reply, an approval's comment), Claktory
 //! transcribes it, and the words fill the field to edit and send as text.
 //! Unlike a voice message nothing is delivered to an agent, and nothing is
-//! kept: the recording is deleted once it's transcribed or refused, and the
-//! words go only to the connection that asked (TranscribeAudio,
+//! kept on disk: the recording is deleted once it's transcribed or refused,
+//! and the words go only to the connections that asked (TranscribeAudio,
 //! AudioTranscribed).
+//!
+//! On a weak connection the app asks again, from its next connection, with
+//! the same request and upload ids (#401): a repeat waits with the first
+//! for the words, or gets them at once once they're there, without sending
+//! the recording again. So the answer is kept, in memory only, for an hour.
 //!
 //! The recording comes as an upload for no agent (UPLOAD_PURPOSE_DICTATION),
 //! kept in `<home>/speech/dictation/` (0700) until a TranscribeAudio takes
@@ -26,8 +31,13 @@ use crate::speech::model::ModelState;
 pub(crate) const MAX_SIZE: u64 = 16 * 1024 * 1024;
 /// The longest recording transcribed.
 pub(crate) const MAX_MS: u64 = 10 * 60 * 1000;
-/// How long a finished upload waits for its TranscribeAudio.
+/// How long a finished upload waits for its TranscribeAudio, and a
+/// dictation's answer for the same request asked again.
 const KEPT: Duration = Duration::from_secs(3600);
+/// AudioTranscribed.error when the recording isn't here (never uploaded,
+/// over an hour old, or from before a restart) and nothing was heard for
+/// this request: the app uploads it again.
+const NO_RECORDING: &str = "no_recording";
 /// Dictations waiting at once, across connections.
 const WAITING: usize = 16;
 
@@ -37,33 +47,60 @@ pub(crate) struct Dictations {
     /// Finished uploads by upload id: where, and since when.
     ready: Mutex<HashMap<String, (PathBuf, Instant)>>,
     waiting: Mutex<VecDeque<Job>>,
+    asked: Asked,
+}
+
+/// Each TranscribeAudio by its request and upload ids: the connections
+/// waiting for its words, or its answer, for `KEPT`.
+type Asked = Arc<Mutex<HashMap<(String, String), Heard>>>;
+
+/// Where an answer goes: a connection's `Port`.
+type Answer = tokio::sync::mpsc::UnboundedSender<v1::AudioTranscribed>;
+
+enum Heard {
+    Waiting(Vec<Answer>),
+    Answered(v1::AudioTranscribed, Instant),
 }
 
 /// One dictation to transcribe, and where its answer goes.
 pub(crate) struct Job {
-    pub(crate) request_id: String,
+    key: (String, String),
     pub(crate) recording: PathBuf,
-    answer: tokio::sync::mpsc::UnboundedSender<v1::AudioTranscribed>,
+    asked: Asked,
+    answered: bool,
 }
 
 impl Job {
-    /// Answers the connection that asked, if it's still there, and deletes
-    /// the recording.
+    /// Answers every connection waiting for it, keeps the answer for a
+    /// repeat, and deletes the recording.
     pub(crate) fn answer(mut self, text: String, error: &str, duration_ms: u64) {
         remove(&self.recording);
         if !error.is_empty() {
             tracing::info!(error, "a dictation wasn't transcribed");
         }
-        let request_id = std::mem::take(&mut self.request_id);
-        let _ = self.answer.send(v1::AudioTranscribed { request_id, text, error: error.to_owned(), duration_ms });
+        self.answered = true;
+        self.deliver(v1::AudioTranscribed { request_id: self.key.0.clone(), text, error: error.to_owned(), duration_ms });
+    }
+
+    fn deliver(&self, answer: v1::AudioTranscribed) {
+        let mut asked = self.asked.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(heard) = asked.get_mut(&self.key) else { return };
+        if let Heard::Waiting(waiting) = std::mem::replace(heard, Heard::Answered(answer.clone(), Instant::now())) {
+            for connection in waiting {
+                let _ = connection.send(answer.clone());
+            }
+        }
     }
 }
 
 /// One dropped without an answer (the worker gone mid-run, say) deletes its
-/// recording all the same, at once.
+/// recording all the same, at once, and says it failed.
 impl Drop for Job {
     fn drop(&mut self) {
         remove(&self.recording);
+        if !self.answered {
+            self.deliver(v1::AudioTranscribed { request_id: self.key.0.clone(), error: "failed".to_owned(), ..Default::default() });
+        }
     }
 }
 
@@ -181,12 +218,34 @@ pub(crate) fn request(factory: &Arc<Factory>, request: &v1::TranscribeAudio, por
     }
     let dictations = &factory.voices.dictations;
     let answer = port.sender.clone();
-    let Some(recording) = dictations.take(&request.upload_id) else {
-        let _ =
-            answer.send(v1::AudioTranscribed { request_id: request.request_id.clone(), error: "failed".to_owned(), ..Default::default() });
-        return Ok(());
+    let key = (request.request_id.clone(), request.upload_id.clone());
+    let job = {
+        let mut asked = dictations.asked.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        asked.retain(|_, heard| !matches!(heard, Heard::Answered(_, at) if at.elapsed() >= KEPT));
+        // Asked again (from the next connection, after a drop): with the
+        // first, or answered as it was.
+        match asked.get_mut(&key) {
+            Some(Heard::Waiting(waiting)) => {
+                waiting.retain(|connection| !connection.is_closed());
+                waiting.push(answer);
+                return Ok(());
+            }
+            Some(Heard::Answered(heard, _)) => {
+                let _ = answer.send(heard.clone());
+                return Ok(());
+            }
+            None => {}
+        }
+        // Gone (or never sent): to upload again.
+        let Some(recording) = dictations.take(&request.upload_id) else {
+            drop(asked);
+            let error = NO_RECORDING.to_owned();
+            let _ = answer.send(v1::AudioTranscribed { request_id: request.request_id.clone(), error, ..Default::default() });
+            return Ok(());
+        };
+        asked.insert(key.clone(), Heard::Waiting(vec![answer]));
+        Job { key, recording, asked: dictations.asked.clone(), answered: false }
     };
-    let job = Job { request_id: request.request_id.clone(), recording, answer };
     if let Some(error) = unusable(&factory.speech.state()) {
         job.answer(String::new(), error, 0);
         return Ok(());
@@ -256,9 +315,13 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("dir");
         let recording = dir.join("said.audio");
         std::fs::write(&recording, "words").expect("recording");
-        let (answer, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        drop(Job { request_id: "r".into(), recording: recording.clone(), answer });
+        let (answer, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let asked = Asked::default();
+        let key = ("r".to_owned(), "u".to_owned());
+        asked.lock().unwrap().insert(key.clone(), Heard::Waiting(vec![answer]));
+        drop(Job { key, recording: recording.clone(), asked, answered: false });
         assert!(!recording.exists());
+        assert_eq!(receiver.try_recv().expect("an answer").error, "failed", "the connection waiting hears it failed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

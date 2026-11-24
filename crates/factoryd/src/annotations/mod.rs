@@ -826,6 +826,26 @@ impl Factory {
     /// The person's comment reaches the agent told, as theirs.
     pub(crate) fn decide_suggestion(self: &Arc<Self>, request: &v1::DecideSuggestion) -> Result<(), RequestError> {
         let comment = crate::decisions::comment(&request.comment)?;
+        // A reply (#370 Submit): a reply on the thread, sent now; the
+        // suggestion stays open, neither accepted nor rejected.
+        if request.reply {
+            if comment.is_empty() {
+                return Err(RequestError::Comments("Write a reply, or accept or reject the change.".to_owned()));
+            }
+            {
+                let _work = self.comments_lock();
+                let db = self.store.db();
+                let found = find_thread(&db, &request.thread_id)?;
+                let Some(suggestion) = found.suggestion else {
+                    return Err(RequestError::Comments("This comment doesn't suggest a change.".to_owned()));
+                };
+                if suggestion.decision != v1::SuggestionDecision::Unspecified {
+                    return Err(RequestError::Comments("This change was already accepted or rejected.".to_owned()));
+                }
+            }
+            let reply = v1::ReplyThread { thread_id: request.thread_id.clone(), body: comment.to_owned(), send_now: true, ink: None };
+            return self.reply_thread(&reply);
+        }
         let person = self.person_capitalized();
         let tell = {
             let _work = self.comments_lock();

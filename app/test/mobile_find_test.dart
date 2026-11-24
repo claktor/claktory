@@ -273,7 +273,7 @@ void main() {
     });
   }
 
-  testWidgets('a pipe with no liaison: Search in its header; its composer '
+  testWidgets('a pipe with no liaison: Search in its header\'s …; its composer '
       'steps aside for the bar, keeping what was typed', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -304,9 +304,10 @@ void main() {
       ),
       'Half written',
     );
-    final search = find.byKey(const ValueKey('phone-search'));
-    expect(search, findsOneWidget);
-    await tester.tap(search);
+    // Its "…" (Move to group…, #359) leads with Search, as an agent's.
+    await tester.tap(find.bySemanticsLabel('Bugs: more'));
+    await pumpFrames(tester);
+    await tester.tap(find.text('Search'));
     await pumpFrames(tester);
     expect(find.byKey(const ValueKey('phone-find-bar')), findsOneWidget);
     expect(find.text('Half written'), findsNothing);

@@ -423,19 +423,7 @@ fn progress(factory: &Weak<Factory>, generation: u64, state: ModelState) {
 }
 
 fn hash_file(path: &Path) -> std::io::Result<String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read as _;
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1 << 20];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+    crate::encoding::sha256_file(path, 1 << 20)
 }
 
 /// "huggingface.co", for messages.

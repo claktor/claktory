@@ -45,6 +45,13 @@ async fn setup() -> (std::path::PathBuf, std::sync::Arc<factoryd::Factory>, Clie
     factory.set_resources_every(Duration::from_millis(50), Duration::from_millis(300));
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
+    // Lines no machine crosses, whatever its real load (no memory is above
+    // 100%, no disk has less than 0 bytes free, and the processors' line is
+    // off), set before the first sample: an alert comes only from a line a
+    // test lowers itself.
+    let lines = v1::UpdateSettings { ram_percent: Some(100), disk_free_gb: Some(0), cpu_percent: Some(0), ..Default::default() };
+    let reply = apply_request(&mut client, &mut view, settings(lines)).await;
+    assert!(matches!(reply, Body::Ack(_)), "{reply:?}");
     let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(rivet)).await;
     apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
@@ -148,4 +155,57 @@ async fn admin_agents_are_told_once_when_memory_or_disk_runs_low() {
     // Thresholds out of range are refused.
     let refused = apply_request(&mut client, &mut view, settings(v1::UpdateSettings { ram_percent: Some(0), ..Default::default() })).await;
     assert!(matches!(&refused, Body::Error(error) if error.message.contains("ram_percent must be from 1 to 100")), "{refused:?}");
+}
+
+/// Friend bug #13: the machine's health is Rivet's. An agent with Resources
+/// on that isn't an admin agent can look, but isn't told; with no admin
+/// agent to take it, Claktory notifies the person itself, once per crossing.
+#[tokio::test]
+async fn the_machine_is_rivets_and_without_rivet_claktory_tells_the_person() {
+    let (_dir, _factory, mut client, mut view) = setup().await;
+    let resources = |on: bool, agent: &str| {
+        let change = v1::ExtensionChange { id: "resources".into(), enabled: Some(on), ..Default::default() };
+        client_message::Body::UpdateAgent(v1::UpdateAgent { agent_id: agent.into(), extension: Some(change), ..Default::default() })
+    };
+    assert!(matches!(apply_request(&mut client, &mut view, resources(true, "scout")).await, Body::Ack(_)));
+    let low_memory = "This machine is running low on memory";
+    apply_request(&mut client, &mut view, select("rivet")).await;
+    apply_request(&mut client, &mut view, settings(v1::UpdateSettings { ram_percent: Some(1), ..Default::default() })).await;
+    view.follow(&mut client, |view| told(view, low_memory) == 1).await;
+    // Scout has the tool, and wasn't told.
+    let looked = call(&mut client, &mut view, "scout", "resources", "{}").await;
+    assert!(looked.starts_with("Machine: CPU "), "{looked}");
+    assert_eq!(told(&view, low_memory), 0);
+
+    // With Resources off for Rivet, no admin agent can take it: once memory
+    // recovers and runs low again, Claktory tells the person itself.
+    apply_request(&mut client, &mut view, resources(false, "rivet")).await;
+    let open = v1::OpenPanel { extension_id: "resources".into(), agent_id: "scout".into() };
+    apply_request(&mut client, &mut view, client_message::Body::OpenPanel(open)).await;
+    let alerts = |view: &View| match view.extension_view.as_ref().and_then(|view| view.body.as_ref()) {
+        Some(v1::extension_view::Body::Resources(resources)) => resources.alerts.len(),
+        _ => usize::MAX,
+    };
+    apply_request(&mut client, &mut view, settings(v1::UpdateSettings { ram_percent: Some(100), ..Default::default() })).await;
+    view.follow(&mut client, |view| alerts(view) == 0).await;
+    apply_request(&mut client, &mut view, settings(v1::UpdateSettings { ram_percent: Some(1), ..Default::default() })).await;
+    let mut notified = Vec::new();
+    while notified.is_empty() {
+        let message = client.receive().await;
+        let body = message.body.expect("body");
+        if let Body::Notify(notify) = &body {
+            notified.push(notify.clone());
+        }
+        view.apply(&body);
+    }
+    let notify = &notified[0];
+    assert_eq!(notify.kind(), v1::NotifyKind::Alert);
+    assert!(notify.body.starts_with("This computer is running low on memory: "), "{notify:?}");
+    assert!(notify.agent_id.is_empty());
+    // Once per crossing, and still no agent is told.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    view.follow(&mut client, |view| alerts(view) == 1 && idle(view, "scout")).await;
+    assert_eq!(told(&view, low_memory), 0);
+    apply_request(&mut client, &mut view, select("rivet")).await;
+    assert_eq!(told(&view, low_memory), 1, "Rivet heard only the first");
 }

@@ -17,14 +17,16 @@ import 'identity.dart';
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/lines.dart';
 import 'mobile/metrics.dart' show TypeScale;
-import 'mobile/presentation.dart' show showPanel;
+import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'mobile/input.dart' show InputKind;
+import 'loopback_forward.dart' show openLink;
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart';
 import 'resources.dart' show formatBytes;
 import 'usage.dart' show formatAge;
+import 'usage_wait.dart' show atWork, usageWaitLine;
 import 'visible_codes.dart' show hiddenRune, proseCodes, runeCode;
 
 /// How long a value shown stays on screen.
@@ -2096,6 +2098,36 @@ String secretRequestSummary(
       : 'Asks for a secret: $name';
 }
 
+/// Whether the agent's link (SecretRequest.link) can be offered: https,
+/// and going where its button says, the backend's ASCII host (Fugo).
+bool opensLink(SecretRequest request) {
+  final uri = Uri.tryParse(request.link);
+  return uri != null &&
+      uri.scheme == 'https' &&
+      request.linkHost.isNotEmpty &&
+      uri.host == request.linkHost;
+}
+
+/// What the admin agent's taking on a request waits for (#360 K5): its
+/// usage limits ("Rivet is waiting for your Claude usage to reset at
+/// 18:00."), what it's doing now, or nothing (it's finding it).
+String adminWaitLine(SecretRequest request, Agent? admin, String adminName) {
+  if (request.collecting) {
+    return "Waiting for you to add it in $adminName's conversation.";
+  }
+  if (admin != null && admin.usageWait.isNotEmpty) {
+    final line = usageWaitLine(admin);
+    final said = line.startsWith('Waiting ')
+        ? '$adminName is waiting ${line.substring('Waiting '.length)}'
+        : '$adminName: $line';
+    return said.endsWith('.') ? said : '$said.';
+  }
+  if (admin != null && atWork(admin)) {
+    return "$adminName will do this when it finishes what it's doing.";
+  }
+  return 'Approved. $adminName is finding it.';
+}
+
 /// What an import request (SecretRequest.imports) brings into the vault:
 /// "a file", "2 files".
 String importKind(SecretRequest request) =>
@@ -2121,6 +2153,7 @@ String? importSensitive(String kind) => switch (kind) {
   'docker' => 'This is in your Docker credentials folder.',
   'keychains' => "This is in your Mac's keychains folder.",
   'browser' => "This is in a web browser's profile folder.",
+  'netrc' => 'This is your .netrc file, which holds passwords for other sites.',
   'claktory' => "This is in Claktory's own folder.",
   _ => 'This is in a folder that holds credentials.',
 };
@@ -2261,7 +2294,6 @@ class _SecretRequestCardState extends State<SecretRequestCard>
         ]);
       _aliases.clear();
       // A choice made for what it asked before isn't one for this.
-      _grantToAsker = false;
       _deleteOriginals = false;
     }
   }
@@ -2294,9 +2326,7 @@ class _SecretRequestCardState extends State<SecretRequestCard>
   /// a values form or the admin agent.
   bool get _imports => request.imports.isNotEmpty;
 
-  /// An import goes to no one unless the person gives it to the agent
-  /// that asked (Fugo), and deletes nothing unless they say so.
-  var _grantToAsker = false;
+  /// An import deletes nothing unless the person says so.
   var _deleteOriginals = false;
 
   /// A generated key doesn't ask each time it's used, unless the person
@@ -2309,6 +2339,17 @@ class _SecretRequestCardState extends State<SecretRequestCard>
   bool get _password => request.generate == 'password';
   int? _length;
   int get _passwordLength => _length ?? request.password.length;
+
+  /// The admin agent took it on, and the person does it here instead (Do
+  /// it here, #360 K5).
+  var _here = false;
+
+  /// The request answered on its own card (#360 K2, K4): give the secret
+  /// that fits, or add the one asked for, or let the admin agent choose.
+  /// Not the admin agent's add-secret card, a request naming a secret, a
+  /// key to make or files to import.
+  bool get _answers =>
+      !widget.direct && !_collect && !_names && !_generates && !_imports;
 
   /// The admin agent's add-secret card for the request it collects.
   bool get _collect =>
@@ -2400,7 +2441,10 @@ class _SecretRequestCardState extends State<SecretRequestCard>
     );
   }
 
-  Future<void> _import() async {
+  /// Imports the files; [give] gives them to the agent that asked (Import
+  /// and give to…), a choice of its own, never a switch left on (#360
+  /// K7, Fugo).
+  Future<void> _import({required bool give}) async {
     final name = _name.text.trim();
     if (name.isEmpty) {
       setState(() => _error = 'Enter a name for the secret.');
@@ -2414,7 +2458,7 @@ class _SecretRequestCardState extends State<SecretRequestCard>
         name: name,
         askEachTime: _askEach,
         comment: _comment.text.trim(),
-        grantToAsker: _grantToAsker,
+        grantToAsker: give && !request.grantToNobody,
         deleteOriginals: _deleteOriginals,
       ),
     );
@@ -2447,12 +2491,16 @@ class _SecretRequestCardState extends State<SecretRequestCard>
     return '';
   }
 
-  Future<void> _dismiss() => _decide(
+  /// [reply]: Submit (#370), the comment going to the agent as the
+  /// person's reply, and nothing given; it can ask again. A backend that
+  /// doesn't know replies dismisses it with the comment.
+  Future<void> _dismiss({bool reply = false}) => _decide(
     () => AppScope.of(context).decideSecretRequest(
       request.agentId,
       request.id,
       approve: false,
       comment: _comment.text.trim(),
+      reply: reply,
     ),
   );
 
@@ -2539,7 +2587,7 @@ class _SecretRequestCardState extends State<SecretRequestCard>
         !_generates &&
         !_imports &&
         _adding == null &&
-        !_approves) {
+        !_answers) {
       // Chooses the secret that looks like the one asked for, if any;
       // otherwise adds the one it describes.
       final closest = closestSecret(request.newSecret, secrets);
@@ -2606,8 +2654,8 @@ class _SecretRequestCardState extends State<SecretRequestCard>
             ..._importing(context, palette, name)
           else if (pending && _generates)
             ..._generating(context, palette, name)
-          else if (pending && _approves)
-            ..._approval(context, palette, name, adminName)
+          else if (pending && _answers)
+            ..._answer(context, palette, name, admin, adminName, secrets)
           else if (pending)
             ..._pending(context, palette, name, secrets)
           else
@@ -2693,85 +2741,24 @@ class _SecretRequestCardState extends State<SecretRequestCard>
           if (secrets.where((s) => s.id == _chosen).firstOrNull
               case final secret? when _missing(secret).isNotEmpty)
             _mismatch(palette, agent, secret),
-        if (adding) ...[
-          Padding(
-            padding: const EdgeInsets.only(bottom: Space.m),
-            child: Text(
-              "Filled in from $agent's request. Change anything you need.",
-              style: TypeScale.of(context).caption
-                  .copyWith(color: palette.textFaint),
-            ),
-          ),
-          // Each field carries its own name to a screen reader: the
-          // label above it may have scrolled away.
-          Field(
-            label: 'Name',
-            child: TextField(
-              controller: _name,
-              kind: InputKind.text,
-              semanticsLabel: 'Name',
-            ),
-          ),
-          Field(
-            label: secretGrantsLabel,
-            note: secretGrantsNote,
-            child: TextField(
-              controller: _description,
-              placeholder: secretGrantsExample,
-              kind: InputKind.multiline,
-              maxLines: 3,
-              semanticsLabel: secretGrantsLabel,
-            ),
-          ),
-          for (final value in _values)
-            Padding(
-              padding: const EdgeInsets.only(bottom: Space.s),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    value.file ? '${value.name.text} (file)' : value.name.text,
-                    style: TypeScale.of(context).caption.copyWith(
-                      fontFamily: TextStyles.mono,
-                      color: palette.textMuted,
-                    ),
-                  ),
-                  const SizedBox(height: Space.xs),
-                  value.file
-                      ? TextField(
-                          controller: value.value,
-                          placeholder: 'Paste the file’s contents',
-                          kind: InputKind.multiline,
-                          autocorrect: false,
-                          textCapitalization: TextCapitalization.none,
-                          maxLines: 6,
-                          minLines: 3,
-                          semanticsLabel: '${value.name.text} (file)',
-                        )
-                      : TextField(
-                          controller: value.value,
-                          placeholder: 'Paste the value',
-                          kind: InputKind.secret,
-                          semanticsLabel: value.name.text,
-                        ),
-                ],
-              ),
-            ),
-        ],
+        if (adding) ..._newSecretFields(context, palette, agent),
       ],
-      ActionLine(
-        lead: Text(
-          _error ?? '$agent never sees the value.',
-          style: TypeScale.of(context).caption.copyWith(
-            color: _error == null ? palette.textFaint : palette.danger,
+      _orReply(
+        agent,
+        ActionLine(
+          lead: Text(
+            _error ?? '$agent never sees the value.',
+            style: TypeScale.of(context).caption.copyWith(
+              color: _error == null ? palette.textFaint : palette.danger,
+            ),
           ),
-        ),
-        action: Button(
-          label: give,
-          primary: true,
-          onPressed: _deciding || (!_names && !adding && secrets.isEmpty)
-              ? null
-              : () => _give(secrets),
+          action: Button(
+            label: give,
+            primary: true,
+            onPressed: _deciding || (!_names && !adding && secrets.isEmpty)
+                ? null
+                : () => _give(secrets),
+          ),
         ),
       ),
       const SizedBox(height: Space.m),
@@ -2779,15 +2766,123 @@ class _SecretRequestCardState extends State<SecretRequestCard>
     ];
   }
 
-  /// A comment for the agent, sent with whatever the person decides, and
-  /// Dismiss. Enter sends nothing: the comment may be for giving.
-  Widget _noteAndDismiss(String agent) => ActionLine(
-    lead: DecisionComment(
-      controller: _comment,
-      agent: agent,
-      enabled: !_deciding,
+  /// The new secret's fields, filled in from the request: its name, what
+  /// it grants, and a value to paste for each variable (never one the
+  /// agent filled in, Fugo).
+  List<Widget> _newSecretFields(
+    BuildContext context,
+    Palette palette,
+    String agent, {
+    String paste = 'Paste the value',
+  }) => [
+    Padding(
+      padding: const EdgeInsets.only(bottom: Space.m),
+      child: Text(
+        "Filled in from $agent's request. Change anything you need.",
+        style: TypeScale.of(context).caption.copyWith(color: palette.textFaint),
+      ),
     ),
-    action: Button(label: 'Dismiss', onPressed: _deciding ? null : _dismiss),
+    // Each field carries its own name to a screen reader: the
+    // label above it may have scrolled away.
+    Field(
+      label: 'Name',
+      child: TextField(
+        controller: _name,
+        kind: InputKind.text,
+        semanticsLabel: 'Name',
+      ),
+    ),
+    Field(
+      label: secretGrantsLabel,
+      note: secretGrantsNote,
+      child: TextField(
+        controller: _description,
+        placeholder: secretGrantsExample,
+        kind: InputKind.multiline,
+        maxLines: 3,
+        semanticsLabel: secretGrantsLabel,
+      ),
+    ),
+    for (final value in _values)
+      Padding(
+        padding: const EdgeInsets.only(bottom: Space.s),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              value.file ? '${value.name.text} (file)' : value.name.text,
+              style: TypeScale.of(context).caption.copyWith(
+                fontFamily: TextStyles.mono,
+                color: palette.textMuted,
+              ),
+            ),
+            const SizedBox(height: Space.xs),
+            value.file
+                ? TextField(
+                    controller: value.value,
+                    placeholder: 'Paste the file’s contents',
+                    kind: InputKind.multiline,
+                    autocorrect: false,
+                    textCapitalization: TextCapitalization.none,
+                    maxLines: 6,
+                    minLines: 3,
+                    semanticsLabel: '${value.name.text} (file)',
+                  )
+                : TextField(
+                    controller: value.value,
+                    placeholder: paste,
+                    kind: InputKind.secret,
+                    semanticsLabel: value.name.text,
+                  ),
+          ],
+        ),
+      ),
+  ];
+
+  /// A comment for the agent, and Dismiss; once something is typed, Submit
+  /// in its place (Return too), the comment going as a reply (#370).
+  Widget _noteAndDismiss(String agent) => CommentTyped(
+    controller: _comment,
+    builder: (context, typed) => ActionLine(
+      lead: DecisionComment(
+        controller: _comment,
+        agent: agent,
+        enabled: !_deciding,
+        onSubmit: () => _dismiss(reply: true),
+      ),
+      action: typed
+          ? SubmitButton(
+              onPressed: _deciding ? null : () => _dismiss(reply: true),
+            )
+          : Button(label: 'Dismiss', onPressed: _deciding ? null : _dismiss),
+    ),
+  );
+
+  /// The card's main action ([action]: Give, Generate, Import…) while no
+  /// comment is typed; once one is, Submit replies instead (#370), and
+  /// this says what that does: [nothing], and the agent gets the comment.
+  Widget _orReply(
+    String agent,
+    Widget action, {
+    String nothing = 'Nothing is given',
+  }) => CommentTyped(
+    controller: _comment,
+    builder: (context, typed) => typed
+        ? Text(
+            _error ?? '$nothing. $agent gets your comment and can ask again.',
+            style: TypeScale.of(context).caption.copyWith(
+              color: _error == null
+                  ? Palette.of(context).textFaint
+                  : Palette.of(context).danger,
+            ),
+          )
+        : action,
+  );
+
+  /// Something only for giving ([child]), gone while a comment is typed.
+  Widget _untilTyped(Widget child) => CommentTyped(
+    controller: _comment,
+    builder: (context, typed) => typed ? const SizedBox.shrink() : child,
   );
 
   /// A key for Claktory to make: its name (also the key's comment), whom
@@ -2831,20 +2926,23 @@ class _SecretRequestCardState extends State<SecretRequestCard>
         onChanged: (on) => setState(() => _askEach = on),
       ),
       const SizedBox(height: Space.m),
-      ActionLine(
-        lead: Text(
-          _error ??
-              (_password
-                  ? 'No agent ever sees it, $agent included.'
-                  : 'No one ever sees its private half, $agent included.'),
-          style: type.caption.copyWith(
-            color: _error == null ? palette.textFaint : palette.danger,
+      _orReply(
+        agent,
+        ActionLine(
+          lead: Text(
+            _error ??
+                (_password
+                    ? 'No agent ever sees it, $agent included.'
+                    : 'No one ever sees its private half, $agent included.'),
+            style: type.caption.copyWith(
+              color: _error == null ? palette.textFaint : palette.danger,
+            ),
           ),
-        ),
-        action: Button(
-          label: 'Generate',
-          primary: true,
-          onPressed: _deciding ? null : _generate,
+          action: Button(
+            label: 'Generate',
+            primary: true,
+            onPressed: _deciding ? null : _generate,
+          ),
         ),
       ),
       const SizedBox(height: Space.m),
@@ -2884,17 +2982,6 @@ class _SecretRequestCardState extends State<SecretRequestCard>
         ),
       ),
       _ToggleRow(
-        label: 'Give it to $agent',
-        note: _grantToAsker
-            ? null
-            : 'Off: no agent gets it until you give it to one.',
-        value: _grantToAsker,
-        onChanged: _deciding
-            ? null
-            : (on) => setState(() => _grantToAsker = on),
-      ),
-      const SizedBox(height: Space.m),
-      _ToggleRow(
         label: askEachTimeLabel,
         note: askEachTimeNote,
         value: _askEach,
@@ -2912,67 +2999,165 @@ class _SecretRequestCardState extends State<SecretRequestCard>
             : (on) => setState(() => _deleteOriginals = on),
       ),
       const SizedBox(height: Space.m),
-      ActionLine(
-        lead: Text(
-          _error ??
-              (blocked
-                  ? "It can't be imported as it is."
-                  : _grantToAsker
-                  ? 'No one sees the contents here. $agent can use them in '
-                        'commands.'
-                  : 'No one sees the contents here, $agent included.'),
-          style: type.caption.copyWith(
-            color: _error == null && !blocked
-                ? palette.textFaint
-                : palette.danger,
+      // Two deliberate choices (#360 K7, Fugo): give it to the agent that
+      // asked, or import it for no one; only the latter when the agent
+      // asked for it to go to no one.
+      _orReply(
+        agent,
+        ActionLine(
+          lead: Text(
+            _error ??
+                (blocked
+                    ? "It can't be imported as it is."
+                    : request.grantToNobody
+                    // Asked for no one: Import only, given to no agent.
+                    ? "No one sees what's in it. No agent gets it until you "
+                          'give it to one.'
+                    : "No one sees what's in it. Given to $agent, $agent can use it "
+                          'in commands.'),
+            style: type.caption.copyWith(
+              color: _error == null && !blocked
+                  ? palette.textFaint
+                  : palette.danger,
+            ),
+          ),
+          action: Wrap(
+            spacing: Space.s,
+            runSpacing: Space.s,
+            alignment: WrapAlignment.end,
+            children: [
+              Button(
+                label: 'Import only',
+                primary: request.grantToNobody,
+                onPressed: _deciding || blocked
+                    ? null
+                    : () => _import(give: false),
+              ),
+              if (!request.grantToNobody)
+                Button(
+                  label: 'Import and give to $agent',
+                  primary: true,
+                  onPressed: _deciding || blocked
+                      ? null
+                      : () => _import(give: true),
+                ),
+            ],
           ),
         ),
-        action: Button(
-          label: 'Import',
-          primary: true,
-          onPressed: _deciding || blocked ? null : _import,
-        ),
+        nothing: 'Nothing is imported',
       ),
       const SizedBox(height: Space.m),
       _noteAndDismiss(agent),
     ];
   }
 
-  /// The need, to approve: what it needs as fine print, Approve, Dismiss
-  /// with a word why, and Choose a secret… to give or add one directly.
-  /// Approved, who's on it instead of Approve.
-  List<Widget> _approval(
+  /// The request, answered here (#360): one main action, chosen by what
+  /// the vault holds (fitting_secret, the backend's choice). A secret that
+  /// fits: Give it, with Give another… for the rest (and Let Rivet
+  /// choose). A connected service that can make it: Approve, and the admin
+  /// agent makes one. None: the form the agent filled in, to paste the
+  /// value and Add and give, under Get it on {host} where the agent gave a
+  /// link. Once the admin agent has it, its wait instead, and Do it here.
+  List<Widget> _answer(
     BuildContext context,
     Palette palette,
     String agent,
-    String admin,
+    Agent? admin,
+    String adminName,
+    List<SecretInfo> secrets,
   ) {
     final type = TypeScale.of(context);
+    final hasAdmin = request.adminAgentId.isNotEmpty;
     final approved =
         request.state == SecretRequestState.SECRET_REQUEST_STATE_APPROVED;
+    if (approved && !_here) {
+      return [
+        _orReply(
+          agent,
+          ActionLine(
+            lead: Text(
+              _error ?? adminWaitLine(request, admin, adminName),
+              style: type.caption.copyWith(
+                color: _error == null ? palette.textMuted : palette.danger,
+              ),
+            ),
+            action: Button(
+              label: 'Do it here',
+              onPressed: _deciding
+                  ? null
+                  : () => setState(() {
+                      _here = true;
+                      _error = null;
+                    }),
+            ),
+          ),
+        ),
+        const SizedBox(height: Space.m),
+        _noteAndDismiss(agent),
+      ];
+    }
+    if (_adding == null) {
+      final fitting = secrets
+          .where((secret) => secret.id == request.fittingSecretId)
+          .firstOrNull;
+      _adding = fitting == null;
+      _chosen = fitting?.id ?? '';
+    }
+    final chosen = secrets.where((secret) => secret.id == _chosen).firstOrNull;
+    final adding = _adding! || chosen == null;
+    // A connected service makes one: the admin agent does it.
+    final derives = !adding && chosen.hasConnection() && hasAdmin;
+    // What can be given instead: the person's own secrets (a connected
+    // service is given to no one), a new one, or the admin agent's choice.
+    final others = [
+      for (final secret in secrets)
+        if (!secret.hasConnection() && (adding || secret.id != _chosen)) secret,
+    ];
     final variables = [
       for (final variable in request.newSecret.variables) variable.name,
     ];
+    final link = request.link;
+    final showsLink = adding && opensLink(request);
+    final String label;
+    final VoidCallback? onPressed;
     final String status;
-    if (!approved) {
-      status = _error ?? '$admin finds the right one, or asks you to add it.';
-    } else if (request.collecting) {
-      status = _error ?? "Waiting for you to add it in $admin's conversation.";
+    if (derives) {
+      label = 'Approve';
+      onPressed = _approve;
+      status = '$adminName finds the right one, or asks you to add it.';
+    } else if (adding) {
+      label = 'Add and give to $agent';
+      onPressed = () => _give(secrets);
+      status = '$agent never sees the value.';
     } else {
-      status = _error ?? 'Approved. $admin is finding it.';
+      label = 'Give ${chosen.name} to $agent';
+      onPressed = () => _give(secrets);
+      status = '$agent never sees the value.';
     }
-    final statusLine = Text(
-      status,
-      style: type.caption.copyWith(
-        color: _error != null
-            ? palette.danger
-            : approved
-            ? palette.textMuted
-            : palette.textFaint,
-      ),
-    );
     return [
-      if (variables.isNotEmpty) ...[
+      if (showsLink) ...[
+        Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: Button(
+            label: 'Get it on ${request.linkHost}',
+            onPressed: () => unawaited(openLink(context, Uri.parse(link))),
+          ),
+        ),
+        // The agent's words, quoted as its own, never as Claktory's
+        // (Fugo).
+        if (request.steps.isNotEmpty) ...[
+          const SizedBox(height: Space.xs),
+          Text(
+            proseCodes('$agent: “${request.steps}”'),
+            style: type.caption.copyWith(
+              color: palette.textMuted,
+              fontStyle: FontStyle.italic,
+            ),
+          ),
+        ],
+        const SizedBox(height: Space.m),
+      ],
+      if (!adding && variables.isNotEmpty) ...[
         Text(
           variables.length == 1
               ? 'Sets ${variables.single}'
@@ -2984,28 +3169,83 @@ class _SecretRequestCardState extends State<SecretRequestCard>
         ),
         const SizedBox(height: Space.m),
       ],
-      if (approved)
-        statusLine
-      else
+      if (!adding && !derives && _missing(chosen).isNotEmpty)
+        _mismatch(palette, agent, chosen),
+      if (adding)
+        ..._newSecretFields(context, palette, agent, paste: 'Paste it here'),
+      _orReply(
+        agent,
         ActionLine(
-          lead: statusLine,
+          lead: Text(
+            _error ?? status,
+            style: type.caption.copyWith(
+              color: _error == null ? palette.textFaint : palette.danger,
+            ),
+          ),
           action: Button(
-            label: 'Approve',
+            label: label,
             primary: true,
-            onPressed: _deciding ? null : _approve,
+            onPressed: _deciding ? null : onPressed,
           ),
         ),
+      ),
+      if (others.isNotEmpty || !adding) ...[
+        const SizedBox(height: Space.s),
+        _untilTyped(
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: Builder(
+              builder: (context) => Button(
+                label: adding ? 'Give one of yours…' : 'Give another…',
+                onPressed: _deciding
+                    ? null
+                    : () =>
+                          _another(context, others, adding, derives, adminName),
+              ),
+            ),
+          ),
+        ),
+      ],
       const SizedBox(height: Space.m),
       _noteAndDismiss(agent),
-      const SizedBox(height: Space.s),
-      Align(
-        alignment: AlignmentDirectional.centerStart,
-        child: Button(
-          label: 'Choose a secret…',
-          onPressed: _deciding ? null : () => _chooseDirectly(agent),
-        ),
-      ),
     ];
+  }
+
+  /// Give another…: one of the person's other secrets, a new one, or the
+  /// admin agent's choice (approve_only).
+  Future<void> _another(
+    BuildContext context,
+    List<SecretInfo> others,
+    bool adding,
+    bool derives,
+    String adminName,
+  ) async {
+    const add = '\u0000add';
+    const admin = '\u0000admin';
+    final chosen = await showActions<String>(
+      context,
+      actions: [
+        for (final secret in others) SheetAction(secret.name, secret.id),
+        if (!adding) const SheetAction('Add a new one', add),
+        if (request.adminAgentId.isNotEmpty && !derives)
+          SheetAction('Let $adminName choose', admin),
+      ],
+    );
+    if (!mounted || chosen == null) return;
+    if (chosen == admin) {
+      await _approve();
+      return;
+    }
+    setState(() {
+      _error = null;
+      _aliases.clear();
+      if (chosen == add) {
+        _adding = true;
+      } else {
+        _adding = false;
+        _chosen = chosen;
+      }
+    });
   }
 
   Future<void> _approve() => _decide(
@@ -3015,17 +3255,6 @@ class _SecretRequestCardState extends State<SecretRequestCard>
       approve: true,
       approveOnly: true,
       comment: _comment.text.trim(),
-    ),
-  );
-
-  /// Today's card in a dialog: give one of the person's secrets or add a
-  /// new one, without the admin agent.
-  Future<void> _chooseDirectly(String agent) => showPanel(
-    context,
-    title: 'Choose a secret for $agent',
-    tall: true,
-    builder: (context, close) => SingleChildScrollView(
-      child: SecretRequestCard(request, direct: true, onDecided: close),
     ),
   );
 
@@ -3158,18 +3387,23 @@ class _SecretRequestCardState extends State<SecretRequestCard>
                         ? '$agent withdrew it'
                         : expired
                         ? 'Expired'
+                        : dismissed && request.replied
+                        // Answered with a comment (#370).
+                        ? 'Replied'
                         : dismissed
                         ? 'Dismissed'
                         : generated
                         ? _imports
-                              ? 'Imported, given to no one'
+                              ? 'Imported. No agent has it yet'
                               : 'Given to no one'
                         : _imports
-                        ? 'Imported, given to $agent'
+                        ? 'Imported and given to $agent'
                         : _generates
                         ? 'Given to $agent'
                         : byAdmin
                         ? '$agent got $given'
+                        : request.added
+                        ? 'Added and given to $agent'
                         : 'Gave $given to $agent',
                     style: TextStyle(
                       color: dismissed || expired || withdrawn
@@ -3213,7 +3447,19 @@ class _SecretRequestCardState extends State<SecretRequestCard>
         ],
       if (request.publicKey.isNotEmpty) ...[
         const SizedBox(height: Space.m),
-        _PublicKey(request.publicKey),
+        // An SSH key is no use until its public half is where the agent
+        // will use it: that's the person's next step, then Done (#360 K6).
+        if (request.generate.startsWith('ssh-') && request.doneMs == 0)
+          _KeyNext(request: request, agent: agent)
+        else
+          _PublicKey(request.publicKey),
+        if (request.doneMs > 0) ...[
+          const SizedBox(height: Space.s),
+          Text(
+            'Done. $agent knows the key is in place.',
+            style: TypeScale.of(context).caption.copyWith(color: color),
+          ),
+        ],
       ],
     ];
   }
@@ -3416,6 +3662,103 @@ class _ReadOutside extends StatelessWidget {
 }
 
 /// A generated key's public half, with Copy, and that it's safe to share.
+/// After Generate, an SSH key's next step, the person's (#360 K6): add its
+/// public half where the agent will use it ([SecretRequest.place]'s deploy
+/// keys), with Copy key, the request's link and Done, which tells the
+/// agent it's in place.
+class _KeyNext extends StatefulWidget {
+  const _KeyNext({required this.request, required this.agent});
+
+  final SecretRequest request;
+  final String agent;
+
+  @override
+  State<_KeyNext> createState() => _KeyNextState();
+}
+
+class _KeyNextState extends State<_KeyNext> {
+  var _copied = false;
+  var _busy = false;
+  String? _error;
+
+  Future<void> _done() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await AppScope.of(context)
+          .secretRequestDone(widget.request.agentId, widget.request.id);
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final request = widget.request;
+    final agent = widget.agent;
+    final link = request.link;
+    final opens = opensLink(request);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          proseCodes(
+            request.place.isNotEmpty
+                ? "Next, add it to ${request.place}'s deploy keys"
+                : 'Next, add it where $agent will use it',
+          ),
+          style: type.body.copyWith(
+            color: palette.text,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: Space.xs),
+        Text(
+          "$agent can't use the key until it's added there.",
+          style: type.caption.copyWith(color: palette.textMuted),
+        ),
+        const SizedBox(height: Space.s),
+        CodeBlock(request.publicKey),
+        const SizedBox(height: Space.s),
+        Wrap(
+          spacing: Space.s,
+          runSpacing: Space.s,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Button(
+              label: _copied ? 'Copied' : 'Copy key',
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: request.publicKey));
+                if (mounted) setState(() => _copied = true);
+              },
+            ),
+            if (opens)
+              Button(
+                label: 'Open ${request.linkHost}',
+                onPressed: () => unawaited(openLink(context, Uri.parse(link))),
+              ),
+            Button(
+              label: 'Done',
+              primary: true,
+              onPressed: _busy ? null : _done,
+            ),
+          ],
+        ),
+        if (_error case final error?) ...[
+          const SizedBox(height: Space.s),
+          Text(error, style: type.caption.copyWith(color: palette.danger)),
+        ],
+      ],
+    );
+  }
+}
+
 class _PublicKey extends StatefulWidget {
   const _PublicKey(this.line);
 

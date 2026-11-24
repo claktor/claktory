@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform;
+    show TargetPlatform, defaultTargetPlatform, protected;
 import 'package:flutter/widgets.dart';
 
 import '../annotations.dart';
@@ -15,7 +15,11 @@ import '../resources.dart' show formatBytes;
 import '../scope.dart';
 import '../selection.dart';
 import 'image.dart';
+import 'loading_progress.dart';
 import 'pdf.dart';
+import 'preview_badge.dart';
+import 'previews.dart';
+import '../paced.dart' show FilePreviews;
 import 'text.dart';
 import 'video.dart';
 
@@ -250,27 +254,154 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
     return usual;
   }
 
+  /// How far the read on its way has got, while it's on its way (#375).
+  ({int through, int size})? _progress;
+
+  /// What [waiting] says is loading: "Loading image…".
+  String get loadingLabel => 'Loading…';
+
+  /// Whether this viewer's file may come as a preview made for this
+  /// screen (#379; previews.dart says when).
+  bool get previews => false;
+
+  /// The original was asked for, by Show original or by zooming past the
+  /// preview's sharpness: this pane reads it from then on.
+  @protected
+  var wantOriginal = false;
+
+  /// Where loading the original in place of the preview has got.
+  OriginalLoad originalLoad = const OriginalNotLoaded();
+
   Future<void> reload() async {
     try {
-      final read = await AppScope.of(context).readFile(path);
+      final backend = AppScope.of(context);
+      void progress(int through, int size) {
+        if (!mounted) return;
+        setState(() => _progress = (through: through, size: size));
+      }
+
+      // A phone or tablet asks for a preview made for its screen; a Mac
+      // reads the original, and asks for one only once it's clear the
+      // original would be slow to come (previews.dart).
+      // An image too big to open whole comes as a preview too, rather
+      // than its first 20 MB to no use (Zucchero, #375).
+      final ask = previews && !wantOriginal;
+      bool tooBig(int size) => size > wholeImageLimit;
+      final slow = stopWhenSlow(backend);
+      var read = await backend.readFile(
+        path,
+        preview: ask && touchDevice ? previewScreen() : null,
+        carryOn: !ask
+            ? null
+            : touchDevice
+            ? (through, size) => !tooBig(size)
+            : (through, size) => !tooBig(size) && slow(through, size),
+        onProgress: progress,
+      );
       if (!mounted) return;
+      final size = read.size.toInt();
+      if (ask &&
+          !touchDevice &&
+          read.error.isEmpty &&
+          read.truncated &&
+          (tooBig(size) ||
+              size >= previewFrom &&
+                  slowFor(backend, size - read.data.length))) {
+        read = await backend.readFile(
+          path,
+          preview: previewScreen(),
+          onProgress: progress,
+        );
+        if (!mounted) return;
+      }
       setState(() {
         file = read;
         failure = null;
+        _progress = null;
+        if (!read.isPreview) originalLoad = const OriginalNotLoaded();
       });
       loaded(read);
     } on RequestFailure catch (error) {
-      if (mounted) setState(() => failure = error.message);
+      if (mounted) {
+        setState(() {
+          failure = error.message;
+          _progress = null;
+        });
+      }
     }
   }
 
   /// After a read, for what the viewer works out from the bytes.
   void loaded(FileContent file) {}
 
+  /// The original in place of the preview shown, with how much has come;
+  /// the preview stays until it's here, and if it can't come, says so.
+  Future<void> loadOriginal() async {
+    if (originalLoad is OriginalLoading) return;
+    wantOriginal = true;
+    setState(() => originalLoad = const OriginalLoading(0, 0));
+    try {
+      final read = await AppScope.of(context).readFile(
+        path,
+        onProgress: (through, size) {
+          if (!mounted || originalLoad is! OriginalLoading) return;
+          setState(() => originalLoad = OriginalLoading(through, size));
+        },
+      );
+      if (!mounted) return;
+      // Not all of it can come (an image over the 20 MB a plain read
+      // takes): the preview stays.
+      if (read.error.isNotEmpty || read.truncated) {
+        throw RequestFailure(read.error);
+      }
+      setState(() {
+        file = read;
+        originalLoad = const OriginalNotLoaded();
+      });
+      loaded(read);
+    } on RequestFailure {
+      wantOriginal = false;
+      if (mounted) setState(() => originalLoad = const OriginalFailed());
+    }
+  }
+
+  /// "Preview · Show original · 3.3 MB" while [file] is a preview; null
+  /// while it's the file itself.
+  Widget? previewBadge() {
+    final file = this.file;
+    if (file == null || !file.isPreview) return null;
+    return PreviewBadge(
+      originalSize: file.originalSize.toInt(),
+      load: originalLoad,
+      onShowOriginal: () => unawaited(loadOriginal()),
+    );
+  }
+
   /// The body while there's nothing to show yet, or why there's nothing.
   Widget? waiting() {
     final file = this.file;
+    final connected = _backend?.connected;
+    // Lost with the connection: read again once it's back (#375), so it
+    // waits for it rather than saying it failed.
+    if (failure != null && connected != null && !connected.value) {
+      return LoadingProgress(
+        label: loadingLabel,
+        received: 0,
+        size: 0,
+        connected: connected,
+      );
+    }
     if (failure != null) return ViewerProblem(failure!, path: path);
+    // Coming over the link: how much has, once more than a piece is due.
+    final progress = _progress;
+    if (file == null && progress != null && connected != null) {
+      return LoadingProgress(
+        label: loadingLabel,
+        received: progress.through,
+        size: progress.size,
+        connected: connected,
+      );
+    }
     if (file == null) return const SizedBox.shrink();
     if (file.error.isNotEmpty) return ViewerProblem(file.error, path: path);
     return null;

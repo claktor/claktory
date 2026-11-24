@@ -10,7 +10,7 @@ import 'controls.dart';
 import 'devices.dart' show PairingInstructions, PairingWay, pairingWayOf;
 import 'extensions.dart' show logTime;
 import 'identity.dart';
-import 'pairing.dart' show PairingDigits;
+import 'pairing.dart' show DeviceNumberField, isDeviceNumber;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 
@@ -45,6 +45,9 @@ class _DevicePairingCardState extends State<DevicePairingCard> {
   var _deciding = false;
   String? _error;
 
+  /// The number typed off the device's screen to allow it (#352 P4).
+  final _number = TextEditingController();
+
   DevicePairing get pairing => widget.pairing;
 
   bool get _waiting =>
@@ -72,6 +75,7 @@ class _DevicePairingCardState extends State<DevicePairingCard> {
 
   @override
   void dispose() {
+    _number.dispose();
     _backend?.connected.removeListener(_connectedChanged);
     _tick?.cancel();
     super.dispose();
@@ -138,7 +142,13 @@ class _DevicePairingCardState extends State<DevicePairingCard> {
     try {
       await send(backend);
     } on RequestFailure catch (failure) {
-      if (mounted) setState(() => _error = failure.message);
+      if (mounted) {
+        setState(() {
+          _error = failure.message;
+          // A wrong number: typed again from the start.
+          _number.clear();
+        });
+      }
     } finally {
       if (mounted) setState(() => _deciding = false);
     }
@@ -148,7 +158,7 @@ class _DevicePairingCardState extends State<DevicePairingCard> {
   Widget build(BuildContext context) {
     final store = AppScope.of(context).workspace;
     return ListenableBuilder(
-      listenable: store,
+      listenable: Listenable.merge([store, _number]),
       builder: (context, _) => _card(
         context,
         store.agent(pairing.agentId),
@@ -230,6 +240,7 @@ class _DevicePairingCardState extends State<DevicePairingCard> {
     return [
       PairingInstructions(
         code: code?.code,
+        link: code?.link ?? '',
         device: device,
         way: way,
         qrSize: _qrSize,
@@ -258,18 +269,31 @@ class _DevicePairingCardState extends State<DevicePairingCard> {
     String device,
     PendingDevice? asking,
   ) {
+    final ready = !_deciding && asking != null && isDeviceNumber(_number.text);
+    void allow() => _decide(
+      (backend) => backend.approveDevice(asking!.deviceId, _number.text),
+    );
     return [
+      // Typed off its screen, never shown here (#352 P4): only someone
+      // who can see the device lets it in.
       Text(
-        asking == null || asking.number.isEmpty
-            ? '$device used the code.'
-            : '$device used the code. Allow it only if its screen shows '
-                  'the same number.',
+        '$device used the code. To allow it, type the number its screen '
+        'shows.',
         style: TextStyles.body.copyWith(color: palette.textMuted),
       ),
-      if (asking != null && asking.number.isNotEmpty) ...[
-        const SizedBox(height: Space.l),
-        PairingDigits(asking.number),
-      ],
+      const SizedBox(height: Space.m),
+      Align(
+        alignment: AlignmentDirectional.centerStart,
+        child: SizedBox(
+          width: DeviceNumberField.widthFor(context, least: 120),
+          child: DeviceNumberField(
+            controller: _number,
+            onSubmitted: (_) {
+              if (ready) allow();
+            },
+          ),
+        ),
+      ),
       const SizedBox(height: Space.l),
       Row(
         children: [
@@ -291,11 +315,7 @@ class _DevicePairingCardState extends State<DevicePairingCard> {
           Button(
             label: 'Allow',
             primary: true,
-            onPressed: _deciding || asking == null
-                ? null
-                : () => _decide(
-                    (backend) => backend.approveDevice(asking.deviceId),
-                  ),
+            onPressed: ready ? allow : null,
           ),
         ],
       ),

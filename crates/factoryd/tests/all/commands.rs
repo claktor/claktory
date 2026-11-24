@@ -70,14 +70,14 @@ async fn clear_starts_a_new_conversation_and_compact_summarizes_now() {
     let archived: Vec<_> = std::fs::read_dir(agent_dir.join("archive")).expect("archive").collect();
     assert_eq!(archived.len(), 1);
     let old = archived[0].as_ref().expect("entry").path();
-    assert!(old.join("segment-0001.json").exists() && old.join("segment-0002.json").exists());
+    let segment = |dir: &std::path::Path, number| factoryd::transcript::segment_file_for_test(dir, number);
+    assert!(segment(&old, 1).is_some() && segment(&old, 2).is_some());
 
     // The new one starts empty: the model sees only what comes after.
     apply_request(&mut client, &mut view, send_message("ops", "again")).await;
     view.follow(&mut client, |view| view.entries.len() == 3 && idle(view)).await;
     assert_eq!(describe(&view.entries), ["notice: Conversation cleared", "user: again", "assistant: echo: again"]);
-    let segment: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(agent_dir.join("segment-0001.json")).expect("segment")).expect("json");
+    let segment = factoryd::transcript::segment_for_test(&agent_dir, 1).expect("segment");
     assert_eq!(segment["messages"].as_array().map(Vec::len), Some(2));
 
     // And so it reads after a restart.

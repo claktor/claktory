@@ -277,7 +277,50 @@ pub(crate) async fn grant_secret(
 ) -> Result<v1::VaultSession, RequestError> {
     open(factory, request.proof.as_ref()).await?;
     give(factory, &request.id, &request.agent_id, "")?;
+    answer_waiting(factory, &request.id, &request.agent_id)?;
     Ok(session.answer())
+}
+
+/// The person gave `agent` a secret from Settings → Secrets (#358, K1):
+/// a request of its that waits for that secret (by its id or name, or for
+/// variables it sets) is answered as if they had given it on the card,
+/// which closes the card and wakes the agent. With others waiting and none
+/// of them for it, the agent is woken and told, so it can withdraw any it
+/// no longer needs; nothing is closed for it.
+fn answer_waiting(factory: &Arc<Factory>, secret: &str, agent: &str) -> Result<(), RequestError> {
+    let state = factory.vault.state(|_, _| false);
+    let Some(given) = state.secrets.iter().find(|found| found.id == secret || found.name == secret) else { return Ok(()) };
+    let waiting: Vec<v1::SecretRequest> = factory
+        .vault
+        .requests_of(agent)?
+        .into_iter()
+        .filter(|asked| matches!(asked.state(), v1::SecretRequestState::Pending | v1::SecretRequestState::Approved))
+        .filter(|asked| asked.imports.is_empty() && asked.generate.is_empty())
+        .collect();
+    let sets: Vec<&str> = given.variables.iter().map(|variable| variable.name.as_str()).collect();
+    let (answered, others): (Vec<_>, Vec<_>) = waiting.into_iter().partition(|asked| {
+        let wanted: Vec<&str> =
+            asked.new_secret.iter().flat_map(|wanted| wanted.variables.iter().map(|variable| variable.name.as_str())).collect();
+        asked.secret_id == given.id
+            || asked.secret_name.trim().eq_ignore_ascii_case(given.name.trim())
+            || (!wanted.is_empty() && wanted.iter().all(|name| sets.contains(name)))
+    });
+    for asked in &answered {
+        settle_request(factory, asked, Some((given.id.clone(), given.name.clone())), "", false)?;
+    }
+    if answered.is_empty() && !others.is_empty() {
+        let person = factory.person_capitalized();
+        let label = factory.vault.granted(agent).remove(&given.id).unwrap_or_else(|| given.name.clone());
+        let names: Vec<String> = others.iter().map(|asked| format!("\"{}\"", asked.secret_name)).collect();
+        let summary = format!("{person} gave you {}: pass it in bash's `secrets`", given.name);
+        let text = format!(
+            "{summary}.\n\nIt's {label}. They gave it in Settings, not on your request for {}, which still waits: if this covers it, withdraw it with secrets_request_cancel.",
+            names.join(", ")
+        );
+        factory.told_secret(agent, &given.id);
+        factory.deliver_event(agent, text, host_event(summary));
+    }
+    Ok(())
 }
 
 pub(crate) async fn reveal_secret(
@@ -423,6 +466,14 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
             reshow(factory, &request.request_id);
         }
     })?;
+    // A reply (#370 Submit): nothing is given; the agent gets the person's
+    // words, and asks again with them in mind if it still needs it.
+    if request.reply {
+        if request.comment.trim().is_empty() {
+            return Err(VaultError::Invalid("Write a reply, or give a secret or dismiss the request.".to_owned()).into());
+        }
+        return settle_request(factory, &asked, None, &request.comment, true);
+    }
     if !asked.imports.is_empty() && request.approve {
         if request.approve_only {
             return Err(
@@ -451,6 +502,7 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
         }
         return approve_to_admin(factory, &asked, &request.comment);
     }
+    let mut added = false;
     let given = if request.approve {
         let mut aliases = std::collections::BTreeMap::new();
         let secret = if !request.secret_id.is_empty() {
@@ -461,6 +513,7 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
             let pick = |chosen: &str, asked: &str| if chosen.trim().is_empty() { asked.to_owned() } else { chosen.to_owned() };
             let name = pick(&request.name, if wanted.name.is_empty() { &asked.secret_name } else { &wanted.name });
             let description = pick(&request.description, &wanted.description);
+            added = true;
             factory.vault.create_secret(&name, &description, &values(&request.entries), "")?
         } else if !asked.secret_id.is_empty() {
             asked.secret_id.clone()
@@ -473,8 +526,32 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
     } else {
         None
     };
-    let decided =
-        factory.vault.decide_request(agent, &asked.id, given.as_ref().map(|(id, name)| (id.as_str(), name.as_str())), &request.comment)?;
+    if added {
+        factory.vault.mark_added(&asked.id)?;
+    }
+    settle_request(factory, &asked, given, &request.comment, false)
+}
+
+/// The person gave `asked`'s agent `given` (the secret's id and name) for
+/// it, or dismissed it, or replied to it (`replied`, #370: nothing given):
+/// its entry shows the decision, an admin agent that was working it hears,
+/// and the agent is told, which wakes it.
+fn settle_request(
+    factory: &Arc<Factory>,
+    asked: &v1::SecretRequest,
+    given: Option<(String, String)>,
+    comment: &str,
+    replied: bool,
+) -> Result<(), RequestError> {
+    let agent = asked.agent_id.as_str();
+    let replied = replied && given.is_none();
+    let decided = factory.vault.decide_request(
+        agent,
+        &asked.id,
+        given.as_ref().map(|(id, name)| (id.as_str(), name.as_str())),
+        comment,
+        replied,
+    )?;
     factory.vault_changed();
     // Its entry shows the decision, the admin agent's card too.
     show_everywhere(factory, decided);
@@ -487,6 +564,9 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
         };
         let summary = match &given {
             Some((_, name)) => format!("{person} gave {asker_name} {name} for its request themselves; nothing more to do"),
+            None if replied => {
+                format!("{person} replied to {asker_name}'s request for {} themselves; nothing more to do", asked.secret_name)
+            }
             None => format!("{person} dismissed {asker_name}'s request for {} themselves; nothing more to do", asked.secret_name),
         };
         let event = factory_agent::Event {
@@ -500,19 +580,32 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
         };
         factory.deliver_event(&asked.admin_agent_id, format!("{summary}."), event);
     }
-    let person = factory.lock().config.person_capitalized().to_owned();
+    let person = factory.person_capitalized();
     // What it got, and nothing else of the vault.
     let (mut summary, what) = match &given {
         Some((id, name)) => {
             let label = factory.vault.granted(agent).remove(id).unwrap_or_else(|| name.clone());
+            // This answer says it; the note of what changed needn't too.
+            factory.told_secret(agent, id);
             (format!("{person} gave you {name}: pass it in bash's `secrets`"), format!("\n\nIt's {label}."))
         }
+        None if replied => (format!("{person} replied to your request for {}", asked.secret_name), String::new()),
         None => (format!("{person} dismissed your request for {}", asked.secret_name), String::new()),
     };
     summary.push('.');
-    let about = crate::extensions::checklist::card_decided(factory, &Card::Secret(asked.id.clone()), given.is_none());
+    // A reply counts as answered: the item isn't asked about again.
+    let about = crate::extensions::checklist::card_decided(factory, &Card::Secret(asked.id.clone()), given.is_none() && !replied);
     // Each note says whose it is (#253).
-    let text = format!("{summary}{what}{}\n\nYou asked because: {}{about}", note(&person, &request.comment), asked.reason);
+    let text = if replied {
+        format!(
+            "{person} replied to your request for {}; nothing was given. They say:\n\n{}\n\nIf you still need it, ask again with that in mind.\n\nYou asked because: {}{about}",
+            asked.secret_name,
+            comment.trim(),
+            asked.reason
+        )
+    } else {
+        format!("{summary}{what}{}\n\nYou asked because: {}{about}", note(&person, comment), asked.reason)
+    };
     let event = host_event(summary);
     factory.deliver_event(agent, text, event);
     Ok(())
@@ -592,7 +685,7 @@ pub(crate) fn fulfil_request(
     let (secret_id, aliases) = alias_plan(factory, &asked, secret_ref, aliases, as_is)?;
     let name = factory.vault.grant_as(&secret_id, &agent, admin, &aliases)?;
     // The person's approval comment stays with the decided request.
-    let decided = factory.vault.decide_request(&agent, &asked.id, Some((secret_id.as_str(), name.as_str())), &asked.comment)?;
+    let decided = factory.vault.decide_request(&agent, &asked.id, Some((secret_id.as_str(), name.as_str())), &asked.comment, false)?;
     factory.vault_changed();
     show_everywhere(factory, decided);
     let (person, admin_name) = {
@@ -615,6 +708,7 @@ pub(crate) fn fulfil_request(
         pipe_seqs: Vec::new(),
         provenance: None,
     };
+    factory.told_secret(&agent, &secret_id);
     factory.deliver_event(&agent, text, event);
     Ok((name, agent))
 }
@@ -676,7 +770,7 @@ fn generate(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::Dec
         factory.vault.decide_generated(asked, (&id, &given), (&public_key, spec.as_ref()), asked.grant_to_nobody, &request.comment)?;
     factory.vault_changed();
     show_everywhere(factory, decided);
-    let person = factory.lock().config.person_capitalized().to_owned();
+    let person = factory.person_capitalized();
     let variable = variable.name;
     let (summary, how) = if asked.grant_to_nobody {
         (format!("{person} approved your request: the vault generated {name}, {kind}, and gave it to no one, as you asked"), String::new())
@@ -700,6 +794,10 @@ fn generate(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::Dec
     let public = if password { String::new() } else { format!("\n\nIts public key:\n{public_key}") };
     let about = crate::extensions::checklist::card_decided(factory, &Card::Secret(asked.id.clone()), false);
     let text = format!("{summary}.{how}{public}{}\n\nYou asked because: {}{about}", note(&person, &request.comment), asked.reason);
+    // This answer says it; the note of what changed needn't too.
+    if !asked.grant_to_nobody {
+        factory.told_secret(agent, &id);
+    }
     factory.deliver_event(agent, text, host_event(format!("{summary}.")));
     Ok(())
 }
@@ -713,6 +811,10 @@ fn generate(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::Dec
 /// what was imported.
 fn import(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::DecideSecretRequest) -> Result<(), RequestError> {
     let agent = asked.agent_id.as_str();
+    // The agent asked for it to go to no one: the card offers Import only.
+    if asked.grant_to_nobody && request.grant_to_asker {
+        return Err(VaultError::Invalid(format!("{} asked for this to go to no one; import it only.", asked.secret_name)).into());
+    }
     let kept = factory.vault.wanted(&asked.id)?;
     let homes = super::import::homes(factory.home.root());
     let opened = factory.vault.approved_imports(&kept.imports, &homes)?;
@@ -780,7 +882,7 @@ fn import(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::Decid
         format!("originals deleted: {}", if deleted.is_empty() { "none".to_owned() } else { deleted.join(", ") })
     };
     factory.vault.log_import(&id, agent, &format!("{}; given to {gave}; {originals}", lines.join("; ")))?;
-    let person = factory.lock().config.person_capitalized().to_owned();
+    let person = factory.person_capitalized();
     let summary = if nobody {
         format!("{person} approved your request: the vault imported {name} and gave it to no one")
     } else {
@@ -799,12 +901,16 @@ fn import(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::Decid
         asked.reason,
         crate::extensions::checklist::card_decided(factory, &Card::Secret(asked.id.clone()), false)
     );
+    if !nobody {
+        factory.told_secret(agent, &id);
+    }
     factory.deliver_event(agent, text, host_event(format!("{summary}.")));
     Ok(())
 }
 
 /// Shows a request as it is now in its agent's conversation.
 pub(crate) fn show(factory: &Factory, request: v1::SecretRequest) {
+    let request = fitted(factory, request);
     let agent = request.agent_id.clone();
     let mut inner = factory.lock();
     let entry = inner
@@ -844,8 +950,7 @@ const ASKER_DELETED: &str = "The agent was deleted.";
 /// an agent deletes its requests). The entries that changed.
 fn close_shown(transcript: &mut crate::transcript::Transcript, closes: impl Fn(&v1::SecretRequest) -> bool) -> Vec<v1::Entry> {
     let open: Vec<v1::SecretRequest> = transcript
-        .entries()
-        .iter()
+        .in_memory()
         .filter_map(|entry| match &entry.kind {
             Some(v1::entry::Kind::SecretRequest(request))
                 if matches!(request.state(), v1::SecretRequestState::Pending | v1::SecretRequestState::Approved) && closes(request) =>
@@ -903,6 +1008,85 @@ pub(crate) fn reshow(factory: &Factory, id: &str) {
         Ok(None) => {}
         Err(error) => tracing::warn!(request = %id, %error, "could not read a secret request to show it again"),
     }
+}
+
+/// `request` with the vault's secret that fits it (SecretRequest's
+/// fitting_secret_id, #360 K4), while it waits; decided, none.
+pub(crate) fn fitted(factory: &Factory, mut request: v1::SecretRequest) -> v1::SecretRequest {
+    let open = matches!(request.state(), v1::SecretRequestState::Pending | v1::SecretRequestState::Approved);
+    let (id, name) = if open && request.imports.is_empty() && request.generate.is_empty() {
+        fitting(&factory.vault.state(|_, _| false).secrets, &request).unwrap_or_default()
+    } else {
+        Default::default()
+    };
+    request.fitting_secret_id = id;
+    request.fitting_secret_name = name;
+    request
+}
+
+/// The secret in `secrets` that fits `asked`: the one it named, else one
+/// named what it asks for (ignoring case), else one that sets every
+/// variable it asks for; else a connected service whose connector or name
+/// it names, which an admin agent makes one from. Its id and name.
+fn fitting(secrets: &[v1::SecretInfo], asked: &v1::SecretRequest) -> Option<(String, String)> {
+    let wanted: Vec<&str> =
+        asked.new_secret.iter().flat_map(|wanted| wanted.variables.iter().map(|variable| variable.name.as_str())).collect();
+    let plain = || secrets.iter().filter(|secret| secret.connection.is_none());
+    let found = plain()
+        .find(|secret| !asked.secret_id.is_empty() && secret.id == asked.secret_id)
+        .or_else(|| plain().find(|secret| secret.name.trim().eq_ignore_ascii_case(asked.secret_name.trim())))
+        .or_else(|| {
+            (!wanted.is_empty())
+                .then(|| plain().find(|secret| wanted.iter().all(|name| secret.variables.iter().any(|variable| variable.name == *name))))
+                .flatten()
+        })
+        .or_else(|| {
+            let words = format!("{} {}", asked.secret_name, asked.new_secret.as_ref().map_or("", |wanted| wanted.description.as_str()))
+                .to_lowercase();
+            secrets.iter().find(|secret| {
+                secret.connection.as_ref().is_some_and(|connection| {
+                    let connector = connection.connector_id.to_lowercase();
+                    (!connector.is_empty() && words.contains(&connector)) || words.contains(&secret.name.to_lowercase())
+                })
+            })
+        })?;
+    Some((found.id.clone(), found.name.clone()))
+}
+
+/// The vault changed: each request waiting shows the secret that fits it
+/// now, where that changed.
+pub(crate) fn refresh_fitting(factory: &Factory) {
+    let Ok(waiting) = factory.vault.waiting_requests() else { return };
+    for (asked, _) in waiting {
+        let now = fitted(factory, asked);
+        let shown = {
+            let inner = factory.lock();
+            inner.agents.get(&now.agent_id).and_then(|runtime| runtime.transcript.as_ref()).and_then(|transcript| {
+                transcript.in_memory().rev().find_map(|entry| match &entry.kind {
+                    Some(v1::entry::Kind::SecretRequest(shown)) if shown.id == now.id => Some(shown.fitting_secret_id.clone()),
+                    _ => None,
+                })
+            })
+        };
+        if shown.is_some_and(|shown| shown != now.fitting_secret_id) {
+            show(factory, now);
+        }
+    }
+}
+
+/// SecretRequestDone: the person put a generated key where it goes (K6);
+/// the agent is told, once.
+pub(crate) fn key_in_place(factory: &Arc<Factory>, request: &v1::SecretRequestDone) -> Result<(), RequestError> {
+    let agent = request.agent_id.as_str();
+    factory.known_agent(agent)?;
+    let Some(done) = factory.vault.mark_done(agent, &request.request_id)? else { return Ok(()) };
+    let place = if done.place.is_empty() { "where you asked".to_owned() } else { format!("to {}", done.place) };
+    show_everywhere(factory, done.clone());
+    let person = factory.person_capitalized();
+    let name = if done.given_secret_name.is_empty() { done.secret_name.clone() } else { done.given_secret_name.clone() };
+    let summary = format!("{person} added the public key of {name} {place}: it's in place");
+    factory.deliver_event(agent, format!("{summary}."), host_event(summary));
+    Ok(())
 }
 
 /// Shows a request in its asker's conversation and, when an admin agent's
@@ -979,7 +1163,7 @@ pub(crate) fn refresh_imports(factory: &Arc<Factory>) {
         let shown = {
             let inner = factory.lock();
             inner.agents.get(&asked.agent_id).and_then(|runtime| runtime.transcript.as_ref()).and_then(|transcript| {
-                transcript.entries().iter().rev().find_map(|entry| match &entry.kind {
+                transcript.in_memory().rev().find_map(|entry| match &entry.kind {
                     Some(v1::entry::Kind::SecretRequest(shown)) if shown.id == asked.id => Some(problems(shown)),
                     _ => None,
                 })

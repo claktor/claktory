@@ -4,8 +4,16 @@ import 'package:factory_app/agent_view.dart' show AgentView;
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/controls.dart' show Button, showModal;
-import 'package:factory_app/devices.dart' show FactoryChooser, QrCode;
+import 'package:factory_app/devices.dart'
+    show
+        FactoryChooser,
+        QrCode,
+        androidAppUrl,
+        iosAppUrl,
+        openAppPage,
+        pairingQrText;
 import 'package:factory_app/links.dart' show pairingFingerprint;
+import 'package:factory_app/pairing.dart' show DeviceNumberField;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scanner.dart' show CameraAccess;
 import 'package:factory_app/scope.dart';
@@ -16,6 +24,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:url_launcher/url_launcher.dart' show launchUrl;
 
 import 'harness.dart';
 
@@ -242,6 +251,21 @@ void main() {
       findsOneWidget,
     );
     expect(find.byType(QrCode), findsOneWidget);
+    // Where to get the app, above the code (#352 P6).
+    final opened = <Uri>[];
+    openAppPage = (url) async {
+      opened.add(url);
+      return true;
+    };
+    addTearDown(() => openAppPage = launchUrl);
+    expect(find.text("Don't have the app?"), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text("Don't have the app?")).dy,
+      lessThan(tester.getTopLeft(find.byType(QrCode)).dy),
+    );
+    await tester.tap(find.text('iPhone and iPad'));
+    await tester.tap(find.text('Android'));
+    expect(opened, [iosAppUrl, androidAppUrl]);
     expect(_primaryButton(tester), isNull, reason: 'Copy code is secondary');
     expect(
       find.text(harness.backend.pairingCode.code),
@@ -282,6 +306,10 @@ void main() {
       findsOneWidget,
     );
     expect(find.byType(QrCode), findsNothing);
+    // A computer gets the Mac app (#352 P6).
+    expect(find.text("Don't have the app?"), findsOneWidget);
+    expect(find.text('Get it for Mac'), findsOneWidget);
+    expect(find.text('Android'), findsNothing);
     expect(_primaryButton(tester), 'Copy code');
     final copied = _clipboard(tester);
     await tester.tap(find.text('Copy code'));
@@ -294,6 +322,47 @@ void main() {
     await tester.tap(find.text('Cancel').last);
     await pumpFrames(tester);
     expect(harness.last.cancelPairing.deviceId, 'd9');
+  });
+
+  testWidgets("a code with a link puts the link in its QR code, so a "
+      "phone's camera opens Claktory or its store; Copy code copies the "
+      'code (#352 P6)', (tester) async {
+    final harness = await showSettings(tester, workspace());
+    const payload = 't=abc&name=mac-mini&e=ff';
+    harness.backend.pairingCode = PairingCode(
+      code: 'factory://?$payload',
+      link: 'https://claktory.com/pair#$payload',
+      deviceId: 'd9',
+    );
+    await tester.ensureVisible(find.text('Add a device…'));
+    await tester.tap(find.text('Add a device…'));
+    await pumpFrames(tester);
+    await tester.enterText(find.byType(EditableText).last, 'iPhone');
+    await tester.pump();
+    await tester.tap(find.text('Show code'));
+    await pumpFrames(tester);
+    expect(
+      tester.widget<QrCode>(find.byType(QrCode)).text,
+      'https://claktory.com/pair#$payload',
+    );
+    final copied = _clipboard(tester);
+    await tester.tap(find.text('Copy code'));
+    await tester.pump();
+    expect(copied, ['factory://?$payload']);
+
+    // A link that isn't exactly the code, or none: the code itself.
+    expect(
+      pairingQrText('factory://?$payload', 'https://claktory.com/pair#t=x'),
+      'factory://?$payload',
+    );
+    expect(
+      pairingQrText(
+        'factory://?$payload',
+        'https://evil.example/pair#$payload',
+      ),
+      'factory://?$payload',
+    );
+    expect(pairingQrText('factory://?$payload', ''), 'factory://?$payload');
   });
 
   Future<Harness> showCode(WidgetTester tester) async {
@@ -328,10 +397,32 @@ void main() {
     await deviceUsesCode(tester, harness);
     await pumpFrames(tester);
     expect(find.text('Allow iPhone to connect?'), findsOneWidget);
-    expect(find.text('Check that its screen shows 0427.'), findsOneWidget);
-    await tester.tap(find.text('Allow'));
+    // Typed off its screen, never shown here (#352 P4).
+    expect(
+      find.text('To allow it, type the number its screen shows.'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('0427'), findsNothing);
+    final allow = find.widgetWithText(Button, 'Allow');
+    expect(tester.widget<Button>(allow).onPressed, isNull);
+    // A wrong number: the backend's words, and the form stays.
+    harness.backend.refuse = "That's not the number iPhone shows. 1 try left.";
+    await tester.enterText(_numberField, '1234');
+    await pumpFrames(tester);
+    await tester.tap(allow);
+    await pumpFrames(tester);
+    expect(
+      find.text("That's not the number iPhone shows. 1 try left."),
+      findsOneWidget,
+    );
+    expect(find.text('Allow iPhone to connect?'), findsOneWidget);
+    harness.backend.refuse = null;
+    await tester.enterText(_numberField, '0427');
+    await pumpFrames(tester);
+    await tester.tap(allow);
     await pumpFrames(tester);
     expect(harness.last.approveDevice.deviceId, 'd9');
+    expect(harness.last.approveDevice.number, '0427');
     expect(find.text('Allow iPhone to connect?'), findsNothing);
     // Let in: nothing to cancel.
     expect(harness.backend.sent.where((m) => m.hasCancelPairing()), isEmpty);
@@ -366,6 +457,8 @@ void main() {
         );
       }
     };
+    await tester.enterText(_numberField, '0427');
+    await pumpFrames(tester);
     await tester.tap(find.text('Allow'));
     await pumpFrames(tester);
     expect(
@@ -665,3 +758,9 @@ List<String> _clipboard(WidgetTester tester) {
   );
   return copied;
 }
+
+/// The field a waiting device's number is typed in.
+Finder get _numberField => find.descendant(
+  of: find.byType(DeviceNumberField),
+  matching: find.byType(EditableText),
+);

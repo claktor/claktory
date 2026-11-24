@@ -93,6 +93,7 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "ask",
             "checklist",
             "comments",
+            "conversations",
             "database",
             "database:factory",
             "devices",
@@ -113,27 +114,27 @@ async fn agents_see_and_message_their_own_project_plus_whom_they_are_granted() {
             "web"
         ]
     );
-    let manual = &view.workspace.extensions[11];
+    let manual = &view.workspace.extensions[12];
     assert_eq!((manual.name.as_str(), manual.base.as_str(), manual.admin_default), ("Claktory manual", "memory", true));
-    let records = &view.workspace.extensions[6];
+    let records = &view.workspace.extensions[7];
     assert_eq!((records.name.as_str(), records.base.as_str(), records.admin_default), ("Claktory's records", "database", true));
     let builder = view.agent("builder").extensions.clone();
     assert_eq!((builder[0].id.as_str(), builder[0].enabled, builder[3].enabled), ("agents", true, false));
     assert!(builder[0].options["reachable"].on && !builder[0].options["admin"].on && builder[0].options["also"].agent_ids.is_empty());
     let rivet = &view.agent("rivet").extensions[0];
     assert!(rivet.options["admin"].on && !rivet.options["reachable"].on, "Rivet is the admin agent, and no one messages it");
-    assert!(view.agent("rivet").extensions[9].enabled && !builder[9].enabled, "a new Factory's Rivet points at things");
-    assert!(view.agent("rivet").extensions[7].enabled && !builder[7].enabled, "admins add the person's devices");
-    assert!(view.agent("rivet").extensions[12].enabled && !builder[12].enabled, "admins put agents on models for the person");
-    assert!(view.agent("rivet").extensions[14].enabled && !builder[14].enabled, "admins move Claktory for the person");
-    assert!(view.agent("rivet").extensions[15].enabled && !builder[15].enabled, "admins start pipes for the person");
+    assert!(view.agent("rivet").extensions[10].enabled && !builder[10].enabled, "a new Factory's Rivet points at things");
+    assert!(view.agent("rivet").extensions[8].enabled && !builder[8].enabled, "admins add the person's devices");
+    assert!(view.agent("rivet").extensions[13].enabled && !builder[13].enabled, "admins put agents on models for the person");
+    assert!(view.agent("rivet").extensions[15].enabled && !builder[15].enabled, "admins move Claktory for the person");
+    assert!(view.agent("rivet").extensions[16].enabled && !builder[16].enabled, "admins start pipes for the person");
     assert!(view.agent("rivet").extensions[1].enabled && !builder[1].enabled, "admins propose app access for the person");
     assert!(builder[4].enabled, "comments on unless turned off");
     assert!(
-        !builder[5].enabled
-            && !view.agent("rivet").extensions[5].enabled
-            && !builder[6].enabled
-            && view.agent("rivet").extensions[6].enabled,
+        !builder[6].enabled
+            && !view.agent("rivet").extensions[6].enabled
+            && !builder[7].enabled
+            && view.agent("rivet").extensions[7].enabled,
         "a database of its own only when turned on; admins Factory's records"
     );
 
@@ -465,8 +466,7 @@ async fn memory_is_the_agents_own_and_its_prompt_holds_still_until_the_next_comp
     let after = prompt();
     assert!(after.contains("Preferences:\n#1 Don't propose paid CI. Why: everything runs locally ("), "{after}");
     assert!(after.contains("Knowledge notes:\n- deploy: How releases ship\n"), "{after}");
-    let segment: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(dir.join("home/agents/ops/segment-0002.json")).expect("segment")).expect("json");
+    let segment = factoryd::transcript::segment_for_test(&dir.join("home/agents/ops"), 2).expect("segment");
     assert!(segment["pinned"]["memory"].as_str().expect("kept with the segment").contains("#1 Don't propose paid CI"));
 
     // Kept with the segment, it's the same after a restart, though memory changed since.

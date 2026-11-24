@@ -23,7 +23,7 @@ use std::time::Duration;
 use factory_agent::compaction::{Reason, latest_context_tokens};
 use factory_agent::{Message, StopReason};
 
-use crate::factory::Factory;
+use crate::factory::{Factory, Runtime};
 use crate::transcript::now_ms;
 
 /// A conversation must hold at least this many tokens…
@@ -120,7 +120,43 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
         }
         let Some(factory) = factory.upgrade() else { return };
         check(&factory);
+        crate::unload::sweep(&factory);
     }
+}
+
+/// When an agent's conversation compacts while idle, from its last
+/// response; None when it never will for that response.
+struct Due {
+    /// The response's timestamp.
+    stamp: u64,
+    /// The moment, on the idle clock.
+    at: u64,
+    /// How late after it a check may still compact.
+    late: u64,
+    /// Its conversation's size, and whether that's enough to.
+    tokens: u64,
+    long: bool,
+}
+
+/// When `agent`'s conversation compacts while idle, if it hasn't been
+/// tried for its last response yet.
+fn due(config: &crate::config::Config, windows: &[(String, u64)], agent: &crate::config::AgentConfig, runtime: &Runtime) -> Option<Due> {
+    let transcript = runtime.transcript.as_ref()?;
+    // Its last response, on the model it has now; a failed or stopped
+    // one may not have cached anything.
+    let Some(Message::Assistant(last)) = transcript.messages().last() else { return None };
+    if matches!(last.stop_reason, StopReason::Error | StopReason::Aborted)
+        || format!("{}/{}", last.provider, last.model) != agent.model
+        || runtime.idle_tried == last.timestamp
+    {
+        return None;
+    }
+    let (stamp, tokens) = (last.timestamp, latest_context_tokens(transcript.messages()).unwrap_or(0));
+    let window = windows.iter().find(|(id, _)| *id == agent.model).map(|(_, window)| *window)?;
+    let (Some(ttl), Some(floor)) = (config.cache_ttl(&agent.model), floor(window)) else { return None };
+    let lifetime = ttl.millis();
+    let delay = delay(lifetime, config.compaction.idle_short_cache)?;
+    Some(Due { stamp, at: stamp + delay, late: late(lifetime), tokens, long: tokens >= floor })
 }
 
 /// Starts compacting every agent that's due to now.
@@ -138,30 +174,16 @@ fn check(factory: &Arc<Factory>) {
         if runtime.running || runtime.has_ready() || runtime.compact.is_some() {
             continue;
         }
-        let Some(transcript) = runtime.transcript.as_ref() else { continue };
-        // Its last response, on the model it has now; a failed or stopped
-        // one may not have cached anything.
-        let Some(Message::Assistant(last)) = transcript.messages().last() else { continue };
-        if matches!(last.stop_reason, StopReason::Error | StopReason::Aborted)
-            || format!("{}/{}", last.provider, last.model) != agent.model
-            || runtime.idle_tried == last.timestamp
-        {
+        let Some(due) = due(&config, &windows, agent, runtime) else { continue };
+        if now < due.at {
             continue;
         }
-        let (stamp, tokens) = (last.timestamp, latest_context_tokens(transcript.messages()).unwrap_or(0));
-        let Some(window) = windows.iter().find(|(id, _)| *id == agent.model).map(|(_, window)| *window) else { continue };
-        let (Some(ttl), Some(floor)) = (config.cache_ttl(&agent.model), floor(window)) else { continue };
-        let lifetime = ttl.millis();
-        let Some(delay) = delay(lifetime, config.compaction.idle_short_cache) else { continue };
-        let due = stamp + delay;
-        if now < due {
+        runtime.idle_tried = due.stamp;
+        if now > due.at + due.late || !due.long {
             continue;
         }
-        runtime.idle_tried = stamp;
-        if now > due + late(lifetime) || tokens < floor {
-            continue;
-        }
-        tracing::info!(agent = %agent.id, tokens, ttl = ttl.as_str(), "compacting while idle, before the prompt cache expires");
+        let ttl = config.cache_ttl(&agent.model).map(|ttl| ttl.as_str()).unwrap_or_default();
+        tracing::info!(agent = %agent.id, tokens = due.tokens, ttl, "compacting while idle, before the prompt cache expires");
         runtime.compact = Some(Reason::Idle);
         runtime.running = true;
         tokio::spawn(factory.clone().run(agent.id.clone()));
@@ -170,6 +192,18 @@ fn check(factory: &Arc<Factory>) {
     if started {
         factory.broadcast_workspace(&inner);
     }
+}
+
+/// Whether `agent`'s conversation may still compact while idle: it's
+/// long enough and the moment hasn't passed. It stays in memory until
+/// then (`crate::unload`).
+pub(crate) fn may_compact(factory: &Factory, inner: &crate::factory::Inner, agent: &crate::config::AgentConfig) -> bool {
+    if !inner.config.compaction.idle {
+        return false;
+    }
+    let Some(runtime) = inner.agents.get(&agent.id) else { return false };
+    let windows: Vec<(String, u64)> = inner.models.iter().map(|model| (model.id.clone(), model.context_window)).collect();
+    due(&inner.config, &windows, agent, runtime).is_some_and(|due| due.long && factory.idle.now() <= due.at + due.late)
 }
 
 #[cfg(test)]

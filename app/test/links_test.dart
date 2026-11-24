@@ -163,6 +163,64 @@ void main() {
     });
   });
 
+  // #352 P6: a QR code may hold the pairing page's link, the code's query
+  // after its `#`, so a phone's camera opens Claktory (Fugo's rules).
+  group('the pairing page link', () {
+    final query = 't=${'a' * 64}&name=box&e=${'c' * 64}&r=https%3A%2F%2Frelay';
+    final page = 'https://claktory.com/pair#$query';
+
+    test('read as the factory:// code its fragment holds, and only so', () {
+      final target = parsePairingCode(page)!;
+      expect(target.code, 'factory://?$query', reason: 'kept as the code');
+      expect(target.name, 'box');
+      expect(target.endpointId, 'c' * 64);
+      expect(target.relays, ['https://relay']);
+      expect(parseLink(Uri.parse(page))!.target!.code, 'factory://?$query');
+      // Pasted from a messenger, among words.
+      expect(parsePairingCode('Scan or tap: $page.')!.name, 'box');
+      // Validated as the code is: a bad token isn't one.
+      expect(parsePairingCode(page.replaceFirst('a' * 64, 'a' * 63)), isNull);
+      // Never the account's, even asked as kept codes are.
+      expect(
+        parsePairingCode(
+          'https://claktory.com/pair#account=mini&e=${'c' * 64}',
+          fromAccount: true,
+        ),
+        isNull,
+      );
+      // Exactly that page: no other host, path, scheme, port, user or
+      // query, and the code after the `#`, never in the query.
+      for (final other in [
+        'http://claktory.com/pair#$query',
+        'https://claktory.com.evil.test/pair#$query',
+        'https://evil.test/pair#$query',
+        'https://www.claktory.com/pair#$query',
+        'https://claktory.com/pair/#$query',
+        'https://claktory.com/pairing#$query',
+        'https://claktory.com:8443/pair#$query',
+        'https://x@claktory.com/pair#$query',
+        'https://claktory.com/pair?$query',
+        'https://claktory.com/pair?x=1#$query',
+        'https://claktory.com/pair#',
+        'https://claktory.com/pair',
+      ]) {
+        expect(parsePairingCode(other), isNull, reason: other);
+        expect(parseLink(Uri.parse(other))?.target, isNull, reason: other);
+      }
+    });
+
+    testWidgets('opened as a Universal Link, it asks the same', (tester) async {
+      final harness = Harness(Workspace());
+      await harness.show(tester);
+      appLinks.receive(page);
+      await settle(tester);
+      expect(find.text('Connect to this Claktory?'), findsOneWidget);
+      await tester.tap(find.text('Connect'));
+      await settle(tester);
+      expect(harness.connections.current?.code, 'factory://?$query');
+    });
+  });
+
   testWidgets('a name never stands as the title', (tester) async {
     final harness = Harness(Workspace());
     await harness.show(tester);

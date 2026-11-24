@@ -50,7 +50,7 @@ async fn wait(within: Duration) {
 }
 
 /// Whether any of the probes resolves, within a couple of seconds.
-async fn resolves() -> bool {
+pub(crate) async fn resolves() -> bool {
     for probe in PROBES {
         let looked_up = tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host(probe)).await;
         if let Ok(Ok(mut addresses)) = looked_up

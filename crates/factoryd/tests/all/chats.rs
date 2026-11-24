@@ -1,7 +1,7 @@
 //! Chats (#213): the person's one-off conversations beside their agents,
 //! with web search and a way to propose to Rivet, and nothing else.
 
-use crate::common::{Client, MODEL, Scripted, start, start_with, temp_dir};
+use crate::common::{Client, MODEL, OTHER_MODEL, Scripted, start, start_with, temp_dir};
 use factory_protocol::v1::{self, AgentStatus, ProposalState, client_message, entry::Kind, server_message::Body};
 
 /// What a client shows of the chats: the Workspace, and the shown chat's
@@ -104,7 +104,7 @@ fn create(text: &str) -> client_message::Body {
 }
 
 fn send(chat: &str, text: &str) -> client_message::Body {
-    client_message::Body::SendChatMessage(v1::SendChatMessage { chat_id: chat.into(), text: text.into(), client_id: String::new() })
+    client_message::Body::SendChatMessage(v1::SendChatMessage { chat_id: chat.into(), text: text.into(), ..Default::default() })
 }
 
 fn select(chat: &str) -> client_message::Body {
@@ -113,6 +113,10 @@ fn select(chat: &str) -> client_message::Body {
 
 fn rename(chat: &str, title: &str) -> client_message::Body {
     client_message::Body::RenameChat(v1::RenameChat { chat_id: chat.into(), title: title.into() })
+}
+
+fn set_model(chat: &str, model: &str) -> client_message::Body {
+    client_message::Body::SetChatModel(v1::SetChatModel { chat_id: chat.into(), model: model.into() })
 }
 
 fn select_agent(agent: &str) -> client_message::Body {
@@ -189,6 +193,36 @@ async fn a_renamed_chat_keeps_its_name_and_an_empty_one_goes_back_to_the_automat
 
     let unknown = chats.request(&mut client, rename("chat:99", "Nope")).await;
     assert!(matches!(unknown, Body::Error(_)), "{unknown:?}");
+}
+
+#[tokio::test]
+async fn the_person_puts_a_chat_on_another_model_and_it_answers_on_it_from_then_on() {
+    let dir = temp_dir();
+    let models = Scripted::signed_in();
+    let requests = models.requests.clone();
+    let (addr, _factory) = start_with(&dir, models).await;
+    let (mut client, mut chats) = connect(addr).await;
+    chats.ok(&mut client, create(ASKED)).await;
+    let id = chats.only().id.clone();
+    chats.follow(&mut client, |chats| chats.settled(&id) && chats.only().title.starts_with("echo")).await;
+
+    chats.ok(&mut client, set_model(&id, OTHER_MODEL)).await;
+    assert_eq!(chats.only().model, OTHER_MODEL);
+    assert!(chats.only().model_available);
+    chats.ok(&mut client, set_model(&id, OTHER_MODEL)).await;
+    chats.ok(&mut client, send(&id, "and in Korea?")).await;
+    chats.follow(&mut client, |chats| chats.texts().len() == 4 && chats.settled(&id)).await;
+    let asked = requests.lock().expect("lock").iter().rfind(|request| request.prompt.contains("and in Korea?")).cloned().expect("asked");
+    assert!(asked.model.ends_with("parrot"), "{}", asked.model);
+    assert_eq!(asked.effort, "off", "medium isn't one of its efforts");
+
+    for (chat, model, why) in [(id.as_str(), "scripted/nope", "That model isn't available."), ("chat:99", MODEL, "No chat \"chat:99\".")] {
+        match chats.request(&mut client, set_model(chat, model)).await {
+            Body::Error(error) => assert_eq!(error.message, why),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(chats.only().model, OTHER_MODEL);
 }
 
 #[tokio::test]

@@ -159,7 +159,7 @@ fn told(view: &View, text: &str) -> bool {
 }
 
 pub(crate) async fn decide(client: &mut Client, view: &mut View, seq: u64, approve: bool, digest: &str) -> Body {
-    let decision = v1::DecideAppAccess { agent_id: "rivet".into(), seq, approve, comment: String::new(), digest: digest.into() };
+    let decision = v1::DecideAppAccess { agent_id: "rivet".into(), seq, approve, comment: String::new(), digest: digest.into(), ..Default::default() };
     apply_request(client, view, Request::DecideAppAccess(decision)).await
 }
 
@@ -355,6 +355,30 @@ async fn what_needs_the_person_goes_on_a_card_and_what_takes_away_is_applied() {
     assert_eq!((records[0].outcome(), records[0].app_change_id.as_str()), (v1::NeedsYouOutcome::Denied, ""));
     assert_eq!(records[0].title, "Let Charts read Conversations");
     assert_eq!(records[0].agent_reason, "Who talks most.");
+
+    // Submit (#370): a comment instead of Approve gives nothing; Rivet gets
+    // it, to propose again with it in mind.
+    set(&mut client, &mut view, &json!({"app": "charts", "sources": {"conversations": true}, "reason": "Who talks most."})).await;
+    let (seq, shown) = card(&view);
+    let reply = v1::DecideAppAccess {
+        agent_id: "rivet".into(),
+        seq,
+        approve: true,
+        comment: "Only this week's, please.".into(),
+        digest: shown.digest.clone(),
+        reply: true,
+    };
+    assert!(matches!(apply_request(&mut client, &mut view, Request::DecideAppAccess(reply)).await, Body::Ack(_)));
+    view.follow(&mut client, |view| told(view, "Only this week's, please.")).await;
+    let shown = card_at(&view, seq);
+    assert_eq!((shown.state(), shown.replied, shown.comment.as_str()), (State::Declined, true, "Only this week's, please."));
+    assert!(told(
+        &view,
+        "The person replied to your proposal for Charts; nothing was given yet. They say:\n\nOnly this week's, please.\n\nIf it still fits, propose it again with that in mind."
+    ));
+    assert!(!app(&view).sources.iter().any(|source| source.id == "conversations" && source.granted), "a reply gives nothing");
+    let records = history(&mut client, &mut view).await;
+    assert_eq!(records[0].outcome(), v1::NeedsYouOutcome::Replied);
 
     // An app changed between filing and approval: refused, nothing given.
     set(&mut client, &mut view, &json!({"app": "charts", "sources": {"conversations": true}, "reason": "Who talks most."})).await;

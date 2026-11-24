@@ -109,6 +109,15 @@ void main() {
         outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_DENIED,
         ago: const Duration(days: 4),
       ),
+      // A comment sent back with Submit (#370).
+      _record(
+        'june',
+        'Ship the migration tonight?',
+        kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PROPOSAL,
+        outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_REPLIED,
+        reply: 'Only after the backup',
+        ago: const Duration(days: 5),
+      ),
     ]);
     final ask = harness.last.listNeedsYouHistory;
     expect(ask.query, '');
@@ -129,6 +138,10 @@ void main() {
     expect(find.text('June · 2 h ago', findRichText: true), findsOneWidget);
     expect(find.text('Dismissed', findRichText: true), findsOneWidget);
     expect(find.text('Not allowed', findRichText: true), findsOneWidget);
+    expect(
+      find.text('Replied · “Only after the backup”', findRichText: true),
+      findsOneWidget,
+    );
     expect(
       tester.getTopLeft(find.text('AWS')).dy,
       lessThan(tester.getTopLeft(find.text('Run aws s3 ls with AWS')).dy),
@@ -288,6 +301,27 @@ void main() {
     await settle(tester);
     expect(front.value, isTrue);
     expect(harness.backend.reveal.value?.seq, 12);
+  });
+
+  testWidgets('on an SE at the largest text, each word stays inside its '
+      'segment', (tester) async {
+    tester.platformDispatcher.textScaleFactorTestValue = 3.1;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await _openHistory(tester, const [], size: const Size(320, 568));
+    expect(tester.takeException(), isNull);
+    for (final label in ['Waiting', 'History']) {
+      final segment = tester.getRect(
+        find
+            .ancestor(
+              of: find.text(label),
+              matching: find.byType(AnimatedContainer),
+            )
+            .first,
+      );
+      final word = tester.getRect(find.text(label));
+      expect(word.left, greaterThanOrEqualTo(segment.left + 4), reason: label);
+      expect(word.right, lessThanOrEqualTo(segment.right - 4), reason: label);
+    }
   });
 
   testWidgets("a pipe's held messages and loop pauses: by this side's name "
@@ -679,6 +713,19 @@ void main() {
       expect(find.text('Undo'), findsNothing);
     });
 
+    testWidgets('changed again since: no Undo, it says so (row 684)', (
+      tester,
+    ) async {
+      await _openHistory(tester, [
+        change()..superseded = true,
+      ], workspace: withRivet());
+      expect(find.text('Undo'), findsNothing);
+      expect(
+        find.textContaining('Changed since', findRichText: true),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('a refused undo says why under it', (tester) async {
       final harness = await _openHistory(tester, [
         change(),
@@ -713,6 +760,27 @@ void main() {
       expect(asked(), before + 1);
     });
 
+    testWidgets('a row opened, Needs you comes back on History; then on '
+        'Waiting again (row 684)', (tester) async {
+      final harness = await _openHistory(tester, [
+        change(),
+      ], workspace: withRivet());
+      await tester.tap(find.text('Rivet put June on Claude Opus 4.8, high'));
+      await settle(tester);
+      expect(harness.page.value, AppPage.agent);
+      expect(harness.last.selectAgent.agentId, 'rivet');
+      harness.page.value = AppPage.inbox;
+      await settle(tester);
+      await settle(tester);
+      expect(find.byType(NeedsYouHistoryList), findsOneWidget);
+      // Only once: the next opening starts at what waits.
+      harness.page.value = AppPage.agent;
+      await settle(tester);
+      harness.page.value = AppPage.inbox;
+      await settle(tester);
+      expect(find.byType(NeedsYouHistoryList), findsNothing);
+    });
+
     testWidgets('with no entry to show, a click opens the agent\'s settings', (
       tester,
     ) async {
@@ -720,6 +788,60 @@ void main() {
       await tester.tap(find.text('Rivet put June on Claude Opus 4.8, high'));
       await settle(tester);
       expect(find.byType(AgentSettingsForm), findsOneWidget);
+    });
+  });
+
+  group('conversations taken back (friend bug #9)', () {
+    Workspace withRivet() => _workspace()
+      ..agents.addAll([
+        Agent(id: 'rivet', name: 'Rivet', modelAvailable: true),
+        Agent(id: 'mike', name: 'Mike', modelAvailable: true),
+      ]);
+
+    NeedsYouRecord taken({int seq = 30}) =>
+        _record(
+            'rivet',
+            "Rivet took Mike's conversation back to 14:02",
+            kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_CONVERSATION,
+            outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_CHANGED,
+            seq: seq,
+          )
+          ..agentName = 'Rivet'
+          ..subjectAgentId = 'mike'
+          ..agentReason = 'It went down the wrong path after your message.';
+
+    testWidgets("Rivet's sentence and reason, no Undo; a click opens Rivet "
+        'at its call', (tester) async {
+      final harness = await _openHistory(tester, [
+        taken(),
+      ], workspace: withRivet());
+      expect(
+        find.text("Rivet took Mike's conversation back to 14:02"),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Rivet: “It went down the wrong path after your message.”'),
+        findsOneWidget,
+      );
+      expect(find.text('Undo'), findsNothing);
+      await tester.tap(
+        find.text("Rivet took Mike's conversation back to 14:02"),
+      );
+      await settle(tester);
+      expect(harness.last.selectAgent.agentId, 'rivet');
+      expect(harness.backend.reveal.value?.seq, 30);
+    });
+
+    testWidgets('with no call to show, a click opens the conversation it '
+        'took back', (tester) async {
+      final harness = await _openHistory(tester, [
+        taken(seq: 0),
+      ], workspace: withRivet());
+      await tester.tap(
+        find.text("Rivet took Mike's conversation back to 14:02"),
+      );
+      await settle(tester);
+      expect(harness.last.selectAgent.agentId, 'mike');
     });
   });
 }

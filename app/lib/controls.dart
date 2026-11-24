@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'identity.dart';
+import 'mobile/back.dart';
 import 'mobile/input.dart';
 import 'mobile/metrics.dart';
 import 'mobile/presentation.dart';
@@ -685,6 +686,10 @@ class _TextFieldState extends State<TextField>
       backgroundCursorColor: palette.textFaint,
       selectionColor: palette.signal.withValues(alpha: 0.28),
       cursorWidth: 1.5,
+      // The caret blinks on and off, two frames a second, as macOS's own
+      // fields do; a fade would draw at the display's rate while a field
+      // is focused, which the message box is most of the day (#384).
+      cursorOpacityAnimates: false,
       showCursor: _active,
       maxLines: widget.maxLines,
       minLines: widget.minLines,
@@ -1270,8 +1275,11 @@ Future<void> showModal(
   final overlay = Overlay.of(context);
   final done = Completer<void>();
   late final OverlayEntry entry;
+  BackHandle? back;
   void close() {
     if (done.isCompleted) return;
+    back?.release();
+    back = null;
     entry.remove();
     entry.dispose();
     done.complete();
@@ -1281,6 +1289,10 @@ Future<void> showModal(
     builder: (context) => _Modal(close: close, child: builder(context, close)),
   );
   overlay.insert(entry);
+  // Android's Back closes it as Esc does, before anything under it; a
+  // Claktory replaced under it takes it away without closing anything.
+  back = PhoneBack.maybeOf(context)
+      ?.register(CallbackBackToken(onBack: close, onRetired: close));
   return done.future;
 }
 
@@ -1852,6 +1864,11 @@ enum LiveBeat { waves, dots }
 /// at the display's full rate. It runs only while something subscribes
 /// and the app is showing; [now] is the time of its last tick, which every
 /// painter reads so they stay in step.
+///
+/// While it runs, the window's other clocks (the characters' faces, the
+/// clocks that count seconds) move on its ticks ([beat]) rather than on
+/// timers of their own: each frame on a Mac redraws the whole window, so
+/// frames from clocks out of step with each other would add up.
 class LiveClock with WidgetsBindingObserver {
   LiveClock._();
 
@@ -1863,6 +1880,13 @@ class LiveClock with WidgetsBindingObserver {
   /// Ticks for waves, and every other one for dots.
   final waves = _Beat();
   final dots = _Beat();
+
+  /// Every tick, for other clocks to move on while it runs ([running]).
+  final beat = _Beat();
+
+  /// Whether it's ticking: other clocks move on [beat] while it is, and on
+  /// their own timers while it isn't.
+  final running = ValueNotifier(false);
 
   /// When the last tick was.
   DateTime get now => _now ?? DateTime.now();
@@ -1904,12 +1928,14 @@ class LiveClock with WidgetsBindingObserver {
     if (!wanted) {
       _timer?.cancel();
       _timer = null;
+      running.value = false;
       return;
     }
     _timer ??= Timer.periodic(
       const Duration(microseconds: 1000000 ~/ waveFps),
       (_) => _beat(),
     );
+    running.value = true;
   }
 
   void _beat() {
@@ -1917,6 +1943,7 @@ class LiveClock with WidgetsBindingObserver {
     _now = DateTime.now();
     if (_counts[LiveBeat.waves]! > 0) waves._notify();
     if (_tick.isEven && _counts[LiveBeat.dots]! > 0) dots._notify();
+    beat._notify();
   }
 }
 
@@ -1952,8 +1979,69 @@ mixin LiveClockSubscriber<T extends StatefulWidget> on State<T> {
   }
 }
 
+/// The window's one clock for what counts seconds ([Ticking]): every
+/// second, all of them together, from one timer while nothing else ticks,
+/// and on every [LiveClock.waveFps]th of [LiveClock]'s ticks while it
+/// runs, so counting clocks never ask for frames of their own. It runs only
+/// while something listens.
+class Seconds extends ChangeNotifier {
+  Seconds._();
+
+  static final instance = Seconds._();
+
+  Timer? _timer;
+  var _riding = false;
+  var _watching = false;
+  var _beats = 0;
+
+  @override
+  void addListener(VoidCallback listener) {
+    super.addListener(listener);
+    _schedule();
+  }
+
+  @override
+  void removeListener(VoidCallback listener) {
+    super.removeListener(listener);
+    _schedule();
+  }
+
+  void _schedule() {
+    final live = LiveClock.instance;
+    final wanted = hasListeners;
+    if (wanted != _watching) {
+      _watching = wanted;
+      wanted
+          ? live.running.addListener(_schedule)
+          : live.running.removeListener(_schedule);
+    }
+    final ride = wanted && live.running.value;
+    if (ride != _riding) {
+      _riding = ride;
+      _beats = 0;
+      ride ? live.beat.addListener(_beat) : live.beat.removeListener(_beat);
+    }
+    if (wanted && !ride) {
+      _timer ??= Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => notifyListeners(),
+      );
+    } else {
+      _timer?.cancel();
+      _timer = null;
+    }
+  }
+
+  void _beat() {
+    if (++_beats < LiveClock.waveFps) return;
+    _beats = 0;
+    notifyListeners();
+  }
+}
+
 /// Rebuilds [builder] with the time every second while [active], for clocks
-/// that count up (or down) between the backend's updates.
+/// that count up (or down) between the backend's updates. They all tick
+/// together ([Seconds]).
 class Ticking extends StatefulWidget {
   const Ticking({super.key, required this.active, required this.builder});
 
@@ -1965,11 +2053,15 @@ class Ticking extends StatefulWidget {
 }
 
 class _TickingState extends State<Ticking> {
-  Timer? _timer;
+  var _listening = false;
+
+  /// Not muted ([TickerMode]): a window no one can see counts nothing.
+  var _moving = true;
 
   @override
-  void initState() {
-    super.initState();
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _moving = TickerMode.valuesOf(context).enabled;
     _schedule();
   }
 
@@ -1980,15 +2072,19 @@ class _TickingState extends State<Ticking> {
   }
 
   void _schedule() {
-    _timer?.cancel();
-    _timer = widget.active
-        ? Timer.periodic(const Duration(seconds: 1), (_) => setState(() {}))
-        : null;
+    final listen = widget.active && _moving;
+    if (listen == _listening) return;
+    _listening = listen;
+    _listening
+        ? Seconds.instance.addListener(_tick)
+        : Seconds.instance.removeListener(_tick);
   }
+
+  void _tick() => setState(() {});
 
   @override
   void dispose() {
-    _timer?.cancel();
+    if (_listening) Seconds.instance.removeListener(_tick);
     super.dispose();
   }
 
@@ -2490,6 +2586,9 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'arrow-down': _drawArrowDown,
   'arrow-left': _drawArrowLeft,
   'chevron-left': _drawChevronLeft,
+  'chevron-right': _drawChevronRight,
+  'chevron-up': _drawChevronUp,
+  'chevron-down': _drawChevronDown,
   'menu': _drawMenu,
   'search': _drawSearch,
   'list-filter': _drawListFilter,
@@ -2503,6 +2602,7 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'terminal': _drawTerminal,
   'sparkles': _drawSparkles,
   'git-branch': _drawGitBranch,
+  'history': _drawHistory,
   'scroll-text': _drawScrollText,
   'alarm-clock': _drawAlarmClock,
   'book-open': _drawBookOpen,
@@ -2593,6 +2693,9 @@ final _drawEllipsis = _paths(const [
 ]);
 
 final _drawChevronLeft = _paths(const ['m15 18-6-6 6-6']);
+final _drawChevronRight = _paths(const ['m9 18 6-6-6-6']);
+final _drawChevronUp = _paths(const ['m18 15-6-6-6 6']);
+final _drawChevronDown = _paths(const ['m6 9 6 6 6-6']);
 
 final _drawMessageCircleQuestion = _paths(const [
   'M7.9 20A9 9 0 1 0 4 16.1L2 22Z',
@@ -2806,6 +2909,12 @@ final _drawTerminal = _paths(const ['m4 17 6-6-6-6', 'M12 19h8']);
 final _drawPlus = _paths(const ['M5 12h14', 'M12 5v14']);
 
 final _drawArrowDown = _paths(const ['M12 5v14', 'm19 12-7 7-7-7']);
+
+final _drawHistory = _paths(const [
+  'M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8',
+  'M3 3v5h5',
+  'M12 7v5l4 2',
+]);
 
 final _drawUpload = _paths(const [
   'M12 3v12',

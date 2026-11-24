@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS claktories (
     secrets INTEGER,
     monitors INTEGER,
     model_connected INTEGER,
-    first_run INTEGER
+    first_run INTEGER,
+    registered_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS claktories_account ON claktories (account_id);
 CREATE TABLE IF NOT EXISTS endpoints (
@@ -55,7 +56,9 @@ CREATE TABLE IF NOT EXISTS share_releases (
     claktory_id TEXT NOT NULL,
     time INTEGER NOT NULL,
     ip TEXT NOT NULL,
-    epoch INTEGER NOT NULL
+    epoch INTEGER NOT NULL,
+    -- 1 when the account was emailed about it (#412); 0 when not.
+    mailed INTEGER
 );
 CREATE INDEX IF NOT EXISTS share_releases_claktory ON share_releases (claktory_id, time);
 CREATE TABLE IF NOT EXISTS requests (
@@ -280,12 +283,21 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             "monitors INTEGER",
             "model_connected INTEGER",
             "first_run INTEGER",
+            // When it last signed in (#412): NULL for those that signed in
+            // before it was kept.
+            "registered_at INTEGER",
         ] {
             let name = column.split(' ').next().unwrap_or(column);
             if !have.contains(name) {
                 tx.execute_batch(&format!("ALTER TABLE claktories ADD COLUMN {column}"))?;
             }
         }
+    }
+    // Whether each unlock was emailed (#412): every one was before.
+    let mailed: bool =
+        tx.query_row("SELECT COUNT(*) > 0 FROM pragma_table_info('share_releases') WHERE name = 'mailed'", [], |row| row.get(0))?;
+    if !mailed {
+        tx.execute_batch("ALTER TABLE share_releases ADD COLUMN mailed INTEGER; UPDATE share_releases SET mailed = 1;")?;
     }
     // When a device last signed in with a code (row 630): added in place,
     // NULL for devices signed in before, which counts as long ago.
@@ -593,6 +605,13 @@ fn row2<A: rusqlite::types::FromSql, B: rusqlite::types::FromSql>(row: &rusqlite
     Ok((row.get(0)?, row.get(1)?))
 }
 
+/// Reads three columns in order, returning the first conversion error.
+fn row3<A: rusqlite::types::FromSql, B: rusqlite::types::FromSql, C: rusqlite::types::FromSql>(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(A, B, C)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+}
+
 /// Collects an already prepared query, returning the first row error.
 fn query<T>(
     mut statement: rusqlite::Statement<'_>,
@@ -667,15 +686,15 @@ pub fn register(conn: &mut Connection, request: &Request, token: &str, now: i64,
             let epoch = existing.epoch + 1;
             tx.execute(
                 "UPDATE claktories SET account_id = ?2, name = ?3, backend_key = ?4, token_hash = ?5, epoch = ?6,
-                 last_seen = ?7, version = ?8, platform = ?9, revoked_at = NULL WHERE id = ?1",
+                 last_seen = ?7, version = ?8, platform = ?9, revoked_at = NULL, registered_at = ?7 WHERE id = ?1",
                 params![id, account_id, name, backend_key, hash(token), epoch as i64, now, version, platform],
             )?;
             epoch
         }
         None => {
             tx.execute(
-                "INSERT INTO claktories (id, account_id, name, backend_key, token_hash, epoch, created, last_seen, version, platform)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6, ?7, ?8)",
+                "INSERT INTO claktories (id, account_id, name, backend_key, token_hash, epoch, created, last_seen, version, platform,
+                 registered_at) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6, ?7, ?8, ?6)",
                 params![id, account_id, name, backend_key, hash(token), now, version, platform],
             )?;
             1
@@ -954,14 +973,87 @@ pub fn last_release(conn: &Connection, id: &str) -> rusqlite::Result<Option<i64>
     conn.query_row("SELECT max(time) FROM share_releases WHERE claktory_id = ?1", params![id], |row| row.get(0))
 }
 
-pub fn record_release(conn: &Connection, id: &str, now: i64, ip: &str, epoch: u64) -> rusqlite::Result<()> {
-    conn.execute("INSERT INTO share_releases (claktory_id, time, ip, epoch) VALUES (?1, ?2, ?3, ?4)", params![id, now, ip, epoch as i64])?;
+pub fn record_release(conn: &Connection, id: &str, now: i64, ip: &str, epoch: u64, mailed: bool) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO share_releases (claktory_id, time, ip, epoch, mailed) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, now, ip, epoch as i64, mailed],
+    )?;
     Ok(())
 }
 
-/// A Claktory's kept releases, newest first: (time, IP).
-pub fn releases(conn: &Connection, id: &str, most: u32) -> rusqlite::Result<Vec<(i64, String)>> {
-    query(conn.prepare("SELECT time, ip FROM share_releases WHERE claktory_id = ?1 ORDER BY time DESC LIMIT ?2")?, params![id, most], row2)
+/// A Claktory's kept releases, newest first: (time, IP, whether the
+/// account was emailed about it).
+pub fn releases(conn: &Connection, id: &str, most: u32) -> rusqlite::Result<Vec<(i64, String, bool)>> {
+    query(
+        conn.prepare("SELECT time, ip, coalesce(mailed, 1) FROM share_releases WHERE claktory_id = ?1 ORDER BY time DESC LIMIT ?2")?,
+        params![id, most],
+        row3,
+    )
+}
+
+/// The first unlock after a sign-in this soon after it is the person's,
+/// who has just proved their email (#412).
+pub const SIGN_IN_UNLOCK: i64 = 15 * 60;
+
+/// Why a share release is mailed to the account (#412, Fugo's rule): when
+/// it doesn't look like the Claktory restarting where it always runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unusual {
+    /// From a network none of its unlocks in the last 30 days came from.
+    NewNetwork,
+    /// Asking for the epoch before the current one after the current one's
+    /// share was released: a copy of its disk from before it last signed in.
+    OlderCopy,
+}
+
+/// Whether releasing `claktory`'s share now, to `ip` at `epoch`, is
+/// unusual, from its releases kept (the last 30 days) and when it last
+/// signed in; None when it isn't, and nothing is mailed. Before the release
+/// is recorded.
+pub fn unusual_release(conn: &Connection, claktory: &Claktory, ip: &str, epoch: u64, now: i64) -> rusqlite::Result<Option<Unusual>> {
+    let kept: Vec<(i64, String, i64)> = query(
+        conn.prepare("SELECT time, ip, epoch FROM share_releases WHERE claktory_id = ?1 AND time > ?2")?,
+        params![claktory.id, now - RELEASES_KEPT],
+        row3,
+    )?;
+    if epoch < claktory.epoch && kept.iter().any(|(_, _, released)| *released as u64 == claktory.epoch) {
+        return Ok(Some(Unusual::OlderCopy));
+    }
+    let registered: Option<i64> =
+        conn.query_row("SELECT registered_at FROM claktories WHERE id = ?1", params![claktory.id], |row| row.get(0)).optional()?.flatten();
+    if let Some(registered) = registered
+        && now - registered <= SIGN_IN_UNLOCK
+        && !kept.iter().any(|(time, _, _)| *time >= registered)
+    {
+        return Ok(None);
+    }
+    let here = network(ip);
+    if kept.iter().any(|(_, released, _)| network(released) == here) {
+        return Ok(None);
+    }
+    Ok(Some(Unusual::NewNetwork))
+}
+
+/// The network an IP is on, as the rule compares them: its IPv4 /24 or its
+/// IPv6 /48 (an IPv4 address mapped into IPv6 as the IPv4 one); the text
+/// itself when it isn't an IP.
+pub fn network(ip: &str) -> String {
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4_network(v4),
+        Ok(std::net::IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4_network(v4),
+            None => {
+                let [a, b, c, ..] = v6.segments();
+                format!("{a:x}:{b:x}:{c:x}::/48")
+            }
+        },
+        Err(_) => ip.to_owned(),
+    }
+}
+
+fn v4_network(ip: std::net::Ipv4Addr) -> String {
+    let [a, b, c, _] = ip.octets();
+    format!("{a}.{b}.{c}.0/24")
 }
 
 /// Replaces a Claktory's endpoints; whether they changed.
@@ -1124,7 +1216,10 @@ pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Va
             |row| Ok(json!({"endpoint": row.get::<_, String>(0)?, "kind": row.get::<_, String>(1)?, "added": row.get::<_, i64>(2)?})),
         )?;
         let unlocks: Vec<Value> =
-            releases(conn, &claktory.id, u32::MAX)?.into_iter().map(|(time, ip)| json!({"time": time, "ip": ip})).collect();
+            releases(conn, &claktory.id, u32::MAX)?
+                .into_iter()
+                .map(|(time, ip, mailed)| json!({"time": time, "ip": ip, "emailed": mailed}))
+                .collect();
         let usage: Vec<Value> = query(
             conn.prepare(
                 "SELECT day, provider, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens

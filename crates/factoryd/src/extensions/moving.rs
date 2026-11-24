@@ -21,7 +21,7 @@ use factory_protocol::v1::{self, MovePhase as Phase};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{Extension, Manifest, PromptKind, PromptSection, async_tool};
+use super::{Extension, Manifest, PromptSection, async_tool};
 use crate::config::AgentConfig;
 use crate::factory::{Factory, Inner};
 
@@ -75,7 +75,7 @@ impl Extension for Move {
     fn prompt(&self, _factory: &Factory, inner: &Inner, _agent: &AgentConfig) -> Vec<PromptSection> {
         let person = inner.config.person();
         let text = format!("## Moving this Claktory\n\n{}", RECIPE.replace("{person}", person));
-        vec![PromptSection { kind: PromptKind::Static, text }]
+        vec![PromptSection::static_text(text)]
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
@@ -110,20 +110,6 @@ fn only_rivet(factory: &Factory, agent: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err("Only Rivet, the admin agent, moves this Claktory. Nothing was done.".to_owned())
-    }
-}
-
-/// An agent that has read a web page doesn't start a move: what it read may be
-/// someone else's instructions, and a move hands over everything.
-fn untainted(factory: &Factory, agent: &str) -> Result<(), String> {
-    if factory.pipes.tainted(agent).is_empty() {
-        Ok(())
-    } else {
-        let person = factory.person_capitalized();
-        let read = crate::pipes::agents::what_was_read(factory, agent);
-        Err(format!(
-            "You've read {read}, so you can't start a move: what you read there may be someone else's instructions. {person} can start the move from Settings → Move. Nothing was done."
-        ))
     }
 }
 
@@ -187,7 +173,12 @@ struct NoArgs {}
 /// answers (or why not).
 async fn start(factory: Arc<Factory>, agent: String, args: StartArgs) -> Result<ToolResult, String> {
     only_rivet(&factory, &agent)?;
-    untainted(&factory, &agent)?;
+    super::untainted(
+        &factory,
+        &agent,
+        "start a move",
+        "start the move from Settings → Move. Nothing was done.",
+    )?;
     let skip = skipped(&factory, &args.skip)?;
     crate::move_run::start_by(&factory, args.code.trim(), &agent, skip.clone()).map_err(|error| error.to_string())?;
     let until = Instant::now() + CONNECT_WAIT;

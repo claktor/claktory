@@ -110,7 +110,9 @@ void main() {
     expect(harness.backend.sent.any((m) => m.hasSetLayout()), isFalse);
   });
 
-  testWidgets('Approve sends the note to the agent that asked', (tester) async {
+  testWidgets('a typed note is sent as a reply to the agent that asked', (
+    tester,
+  ) async {
     final harness = await _inNeedsYou(tester, Harness(_workspace()));
     await tester.tap(find.text('Add a comment'));
     await settle(tester);
@@ -122,32 +124,27 @@ void main() {
       'Looks right',
     );
     await tester.pump();
-    await tester.tap(find.text('Approve'));
+    expect(find.text('Approve'), findsNothing);
+    expect(find.text('Dismiss'), findsNothing);
+    await tester.tap(find.text('Submit'));
     await settle(tester);
     final answer = harness.last.answerAsk;
     expect(answer.agentId, 'fugo');
     expect(answer.seq.toInt(), 7);
     expect(answer.text, 'Looks right');
-    expect(answer.dismiss, isFalse);
+    expect(answer.reply, isTrue);
+    expect(answer.dismiss, isTrue);
   });
 
-  testWidgets('Dismiss sends the comment too', (tester) async {
+  testWidgets('Approve with no comment approves', (tester) async {
     final harness = await _inNeedsYou(tester, Harness(_workspace()));
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
-    await tester.enterText(
-      find.descendant(
-        of: find.byType(AskPersonCard),
-        matching: find.byType(EditableText),
-      ),
-      'Not this week',
-    );
-    await tester.pump();
-    await tester.tap(find.text('Dismiss'));
+    await tester.tap(find.text('Approve'));
     await settle(tester);
     final answer = harness.last.answerAsk;
-    expect(answer.text, 'Not this week');
-    expect(answer.dismiss, isTrue);
+    expect(answer.agentId, 'fugo');
+    expect(answer.text, '');
+    expect(answer.dismiss, isFalse);
+    expect(answer.reply, isFalse);
   });
 
   testWidgets('an ordinary question has no file', (tester) async {

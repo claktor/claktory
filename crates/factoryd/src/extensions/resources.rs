@@ -7,8 +7,11 @@
 //! and projects take on disk is measured in the background every 20 minutes
 //! (`disk`). When memory stays above `resources.ram_percent`, a volume
 //! Factory uses runs short of space, or (if set) the processors stay busier
-//! than `cpu_percent`, every agent with the extension on hears it once, as a
-//! Factory event; it's said again only after the machine recovered.
+//! than `cpu_percent`, the admin agents with the extension on hear it once,
+//! as a Factory event; it's said again only after the machine recovered.
+//! Other agents with it on can look, but aren't told (friend bug #13: one
+//! owner for the machine's health). When no admin agent can take it,
+//! Claktory notifies the person itself.
 
 mod disk;
 mod sample;
@@ -24,7 +27,7 @@ use factory_protocol::v1;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Extension, Manifest, PromptKind, PromptSection, enabled, factory_tool};
+use super::{Extension, Manifest, PromptSection, enabled, factory_tool};
 use crate::config::{AgentConfig, Config, ResourcesConfig};
 use crate::factory::{Factory, Inner, host_event};
 use crate::transcript::now_ms;
@@ -35,7 +38,7 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Resources",
     icon: "gauge",
-    description: "Shows how this computer's processor, memory and disk are used, and how much Claktory takes. It hears when memory or disk runs low, and tells you. Rivet has it.",
+    description: "Shows how this computer's processors, memory and disk are used, and how much of them Claktory takes. Rivet hears when memory or disk runs low and tells you.",
     default_enabled: false,
     options: &[],
 };
@@ -43,6 +46,12 @@ static MANIFEST: Manifest = Manifest {
 const PROMPT: &str = "## Resources
 
 The resources tool shows how this machine and Claktory use its processors, memory and disk: the whole machine, Claktory's own processes (its backend and app, agents' background tasks and monitors' watches), the other programs using the most memory, and what Claktory's data and projects take on disk. Claktory samples it every minute and tells you when memory or disk runs low. Then look into it with the tool and tell the person what you found and what they could do. Never stop, kill or delete anything yourself unless the person asks you to.
+";
+
+/// Its prompt for an agent that isn't an admin agent: it isn't told.
+const PROMPT_LOOK: &str = "## Resources
+
+The resources tool shows how this machine and Claktory use its processors, memory and disk: the whole machine, Claktory's own processes (its backend and app, agents' background tasks and monitors' watches), the other programs using the most memory, and what Claktory's data and projects take on disk. Use it when the machine matters to your task. Rivet watches the machine's health and tells the person when memory or disk runs short, so you aren't told; raise it only when it blocks your own work or you caused it. Never stop, kill or delete anything yourself unless the person asks you to.
 ";
 
 const ABOUT: &str = "How this machine and Claktory use its resources, in a few lines: processors, memory, swap and free disk; Claktory's processes; the other programs using the most memory; alerts in effect. `detail`: \"processes\" (every process group of Claktory's and the top others), \"disk\" (each volume, and what Claktory's data, agents and projects take) or \"history\" (the last hour, every 5 minutes). `clear_cache`: the path of a build cache (shown under detail \"disk\") to clear now, only when the person asks: it's moved aside and deleted, and the next build there is cold.";
@@ -235,9 +244,27 @@ fn plan(factory: &Factory) -> disk::Plan {
     }
 }
 
-/// Checks a new sample against the lines; returns what to tell, by what
-/// it's about. Each is said once per crossing.
-fn check(now: &mut Now, lines: &ResourcesConfig, config: &Config) -> Vec<(String, String)> {
+/// A disk as the person knows it: the startup disk, or the name the Mac
+/// shows for another (its folder in /Volumes), never a bare path.
+fn disk_name(mount: &str) -> String {
+    match std::path::Path::new(mount).file_name() {
+        Some(name) if mount != "/" => format!("The disk \u{201c}{}\u{201d}", name.to_string_lossy()),
+        _ => "This computer's disk".to_owned(),
+    }
+}
+
+/// An alert to tell: what it's about ("ram", "cpu", "disk:<mount>"), what
+/// an admin agent is told, and Claktory's own sentence for the person when
+/// no admin agent can take it.
+struct Said {
+    about: String,
+    text: String,
+    person: String,
+}
+
+/// Checks a new sample against the lines; returns what to tell. Each is
+/// said once per crossing.
+fn check(now: &mut Now, lines: &ResourcesConfig, config: &Config) -> Vec<Said> {
     let mut said = Vec::new();
     let advice = format!(
         "Look into it with the resources tool and tell {} what you find and what they could do. Don't stop, kill or delete anything yourself.",
@@ -273,23 +300,34 @@ fn check(now: &mut Now, lines: &ResourcesConfig, config: &Config) -> Vec<(String
             few(config, &now.factory, 3),
             few(config, &now.others, 3)
         );
-        said.push(("ram".to_owned(), text));
+        let person = format!(
+            "This computer is running low on memory: {} of {} used ({memory:.0}%).",
+            gb(machine.memory_used),
+            gb(machine.memory_total)
+        );
+        said.push(Said { about: "ram".to_owned(), text, person });
     }
     if lines.cpu_percent > 0 && busy(&mut now.cpu, machine.cpu_percent > f64::from(lines.cpu_percent), CPU_SAMPLES) {
         let mut busiest: Vec<&v1::ResourceProcess> = now.factory.iter().chain(&now.others).collect();
         busiest.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
         let busiest: Vec<String> =
             busiest.iter().take(3).map(|process| format!("{} {:.0}%", named(config, process), process.cpu_percent)).collect();
-        said.push((
-            "cpu".to_owned(),
-            format!(
+        said.push(Said {
+            about: "cpu".to_owned(),
+            text: format!(
                 "This machine's processors have been busy: {:.0}% of {} cores (above {}%) for the last {CPU_SAMPLES} minutes. Busiest: {}. {advice}",
                 machine.cpu_percent,
                 machine.cores,
                 lines.cpu_percent,
                 busiest.join(", ")
             ),
-        ));
+            person: format!(
+                "This computer's processors have been busy for {CPU_SAMPLES} minutes: {:.0}% of {} cores. Busiest: {}.",
+                machine.cpu_percent,
+                machine.cores,
+                busiest.join(", ")
+            ),
+        });
     }
     for volume in &machine.volumes {
         let limit = (volume.total / 100 * u64::from(lines.disk_free_percent)).min(u64::from(lines.disk_free_gb) * 1_000_000_000);
@@ -311,7 +349,8 @@ fn check(now: &mut Now, lines: &ResourcesConfig, config: &Config) -> Vec<(String
             let _ = write!(text, " Of Claktory's, the most ({}): {}.", ago(now.measured), biggest.join(", "));
         }
         let _ = write!(text, " {advice}");
-        said.push((format!("disk:{}", volume.mount), text));
+        let person = format!("{} is running out of space: {} free of {}.", disk_name(&volume.mount), gb(volume.available), gb(volume.total));
+        said.push(Said { about: format!("disk:{}", volume.mount), text, person });
     }
     // What's no longer over its line is over.
     let holding = |about: &str| match about {
@@ -320,13 +359,15 @@ fn check(now: &mut Now, lines: &ResourcesConfig, config: &Config) -> Vec<(String
         disk => now.disks.get(disk.trim_start_matches("disk:")).is_some_and(|crossing| crossing.told),
     };
     let mut alerts: Vec<(String, String)> = now.alerts.drain(..).filter(|(about, _)| holding(about)).collect();
-    alerts.extend(said.iter().cloned());
+    alerts.extend(said.iter().map(|said| (said.about.clone(), said.text.clone())));
     now.alerts = alerts;
     said
 }
 
-/// Takes a sample in: history, alerts (told to every agent with the
-/// extension on) and the panel.
+/// Takes a sample in: history, alerts and the panel. An alert goes to the
+/// admin agents with the extension on that can run (friend bug #13: Rivet
+/// looks after the machine, not every agent); with none, Claktory tells
+/// the person itself.
 fn record(factory: &Arc<Factory>, sampled: sample::Sample) {
     let time = now_ms();
     let (lines, config) = {
@@ -352,15 +393,63 @@ fn record(factory: &Arc<Factory>, sampled: sample::Sample) {
         now.others = sampled.others;
         check(&mut now, &lines, &config)
     };
-    let told: Vec<String> =
-        config.agents.iter().filter(|agent| enabled(agent, ID) && !config.archived(agent)).map(|agent| agent.id.clone()).collect();
-    for (_, text) in said {
+    if said.is_empty() {
+        return refresh_panel(factory);
+    }
+    let told = keepers(factory);
+    for said in said {
+        if told.is_empty() {
+            tell_person(factory, &config, said.person);
+            continue;
+        }
         for agent in &told {
             let event = host_event(String::new());
-            factory.deliver_event(agent, text.clone(), event);
+            factory.deliver_event(agent, said.text.clone(), event);
         }
     }
     refresh_panel(factory);
+}
+
+/// The agents that look after the machine: admin agents (such as Rivet)
+/// with the extension on, in no archived project, whose model can run.
+fn keepers(factory: &Factory) -> Vec<String> {
+    let inner = factory.lock();
+    let config = &inner.config;
+    config
+        .agents
+        .iter()
+        .filter(|agent| {
+            enabled(agent, ID)
+                && super::switch(agent, super::agents::ID, "admin")
+                && !config.archived(agent)
+                && inner.models.iter().any(|model| model.id == agent.model)
+        })
+        .map(|agent| agent.id.clone())
+        .collect()
+}
+
+/// No agent can take an alert: Claktory notifies the person itself, as an
+/// alert, in its own words.
+fn tell_person(factory: &Factory, config: &Config, what: String) {
+    let settings = crate::notify::settings(factory);
+    let note = crate::notify::Note {
+        kind: v1::NotifyKind::Alert,
+        source: "host".to_owned(),
+        who: config.claktory_name(),
+        what,
+        tainted: false,
+        urgent: false,
+        mode: crate::notify::Mode::Default,
+        from_phone: false,
+        agent_id: String::new(),
+        pipe_id: String::new(),
+        chat_id: String::new(),
+        seq: 0,
+        device_id: String::new(),
+        waits: String::new(),
+    };
+    let delivered = crate::notify::deliver(factory, config, &settings, note);
+    tracing::info!(?delivered, "told the person about the machine itself: no admin agent can take it");
 }
 
 /// The selected agent's panel, if it's this one.
@@ -617,8 +706,9 @@ impl Extension for Resources {
         true
     }
 
-    fn prompt(&self, _factory: &Factory, _inner: &Inner, _agent: &AgentConfig) -> Vec<PromptSection> {
-        vec![PromptSection { kind: PromptKind::Static, text: PROMPT.to_owned() }]
+    fn prompt(&self, _factory: &Factory, _inner: &Inner, agent: &AgentConfig) -> Vec<PromptSection> {
+        let text = if super::switch(agent, super::agents::ID, "admin") { PROMPT } else { PROMPT_LOOK };
+        vec![PromptSection::static_text(text)]
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
@@ -651,5 +741,17 @@ impl Extension for Resources {
             title: MANIFEST.name.to_owned(),
             body: Some(v1::extension_view::Body::Resources(resources)),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::disk_name;
+
+    #[test]
+    fn a_disk_is_named_as_the_mac_shows_it_never_by_its_path() {
+        assert_eq!(disk_name("/"), "This computer's disk");
+        assert_eq!(disk_name("/Volumes/Backup"), "The disk \u{201c}Backup\u{201d}");
+        assert_eq!(disk_name("/mnt/data"), "The disk \u{201c}data\u{201d}");
     }
 }

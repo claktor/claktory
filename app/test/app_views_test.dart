@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:factory_app/app_views/app_view.dart';
+import 'package:factory_app/app_views/catalog.dart' show AppSurfaceView;
 import 'package:factory_app/app_views/surface.dart';
 import 'package:factory_app/app_views/transport.dart';
 import 'package:factory_app/backend.dart' show RequestFailure;
@@ -303,6 +304,32 @@ void main() {
             params: '{"id":"d1"}',
           ),
         );
+
+    testWidgets("on a phone its panels sit on the page, 16pt in, under the "
+        "app's name, with no card around them; elsewhere a hairline frames "
+        'them', (tester) async {
+      Finder frame() => find.byWidgetPredicate(
+        (widget) =>
+            widget is Container &&
+            widget.decoration is BoxDecoration &&
+            (widget.decoration! as BoxDecoration).border != null &&
+            widget.child is AppSurfaceView,
+      );
+      await show(tester);
+      await tester.pump();
+      expect(find.text('From Charts'), findsOneWidget);
+      expect(frame(), findsOneWidget);
+
+      await show(tester, size: const Size(393, 852));
+      await tester.pump();
+      expect(find.text('From Charts'), findsOneWidget);
+      expect(frame(), findsNothing);
+      final page = tester.getRect(find.byType(AppView));
+      final drawn = tester.getRect(find.byType(AppSurfaceView));
+      expect(drawn.left - page.left, 16);
+      expect(page.right - drawn.right, 16);
+      expect(tester.getTopLeft(find.text('From Charts')).dx - page.left, 16);
+    });
 
     testWidgets('opens with this app\'s catalog and draws it: text from the '
         'data model, a template for each run, inputs, tabs', (tester) async {

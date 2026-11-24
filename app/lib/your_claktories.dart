@@ -11,7 +11,7 @@ import 'account.dart'
         codeLength,
         looksLikeEmail,
         openDeleteAccountPage;
-import 'backend.dart' show Backend, RequestFailure;
+import 'backend.dart' show Backend;
 import 'claktory_identity.dart' show claktoryName;
 import 'connections.dart';
 import 'controls.dart';
@@ -20,16 +20,22 @@ import 'device_kind.dart' show thisDeviceName;
 import 'devices.dart' show thisDeviceKind;
 import 'forms.dart' show FormFrame;
 import 'identity.dart';
+import 'markdown.dart' show Markdown;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/input.dart' show InputKind;
 import 'mobile/metrics.dart' show Touch, TypeScale;
 import 'name_step.dart' show StepButtons, stepFieldScrollPadding;
+import 'pairing.dart'
+    show DeviceNumberField, decideDevice, deviceCallingItself, isDeviceNumber;
 import 'people/e2ee.dart' show DmSignOut, E2ee, e2eeFor, e2eeOf, startedE2ee;
 import 'people/people_view.dart' show peopleAvailable;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart' show Claktories, ClaktoriesScope, claktoryInitials;
 import 'scope.dart';
 import 'usage.dart' show formatAge;
+
+/// Where to get Claktory for a Mac or a Linux server.
+const downloadUrl = 'https://claktory.com/download';
 
 /// Signing this device in to the person's Claktory account, and "Your
 /// Claktories": the ones on their account, each connected to with one
@@ -708,10 +714,12 @@ class _YourClaktoriesState extends State<YourClaktories> {
             style: type.body.copyWith(color: palette.textMuted),
           )
         else if (listed.isEmpty)
-          Text(
-            'No Claktories on this account yet. Sign in to it on the Mac or '
-            'server that runs Claktory, in Settings → Account.',
-            style: type.body.copyWith(color: palette.textMuted),
+          Markdown(
+            'No Claktories on this account yet. Claktory runs on a Mac or a '
+            'Linux server: install it there from '
+            '[claktory.com/download]($downloadUrl) and sign in with this '
+            'email, and it shows up here.',
+            color: palette.textMuted,
           )
         else
           for (final claktory in listed)
@@ -1194,41 +1202,8 @@ class _SignInRequiredViewState extends State<SignInRequiredView> {
 /// waits to be let in (PendingDevice.discovered): its name, whether it's
 /// signed in as them, the number to compare, and Allow or Don't allow.
 /// Nothing while none waits.
-class DiscoveredDeviceBanner extends StatefulWidget {
+class DiscoveredDeviceBanner extends StatelessWidget {
   const DiscoveredDeviceBanner({super.key});
-
-  @override
-  State<DiscoveredDeviceBanner> createState() => _DiscoveredDeviceBannerState();
-}
-
-class _DiscoveredDeviceBannerState extends State<DiscoveredDeviceBanner> {
-  var _deciding = false;
-  String? _error;
-
-  Future<void> _decide(PendingDevice device, {required bool allow}) async {
-    final backend = AppScope.of(context);
-    setState(() {
-      _deciding = true;
-      _error = null;
-    });
-    try {
-      if (allow) {
-        await backend.approveDevice(device.deviceId);
-      } else {
-        await backend.denyDevice(device.deviceId);
-      }
-    } on RequestFailure catch (failure) {
-      if (mounted) {
-        setState(
-          () => _error = failure.code == ErrorCode.ERROR_CODE_NOT_FOUND
-              ? '${device.name} stopped waiting.'
-              : failure.message,
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _deciding = false);
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1240,57 +1215,125 @@ class _DiscoveredDeviceBannerState extends State<DiscoveredDeviceBanner> {
             .where((device) => device.discovered)
             .firstOrNull;
         if (device == null) return const SizedBox.shrink();
-        final palette = Palette.of(context);
-        final type = TypeScale.of(context);
-        final name = device.name.isEmpty ? 'A device' : device.name;
-        return Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: Space.l,
-            vertical: Space.s,
+        // Each request afresh, even from the same device asking again:
+        // nothing typed for the last one carries over (Zucchero's row 264).
+        return _DiscoveredDevice(
+          key: ValueKey(
+            '${device.deviceId}/${device.number}/${device.requestedMs}',
           ),
-          decoration: BoxDecoration(
-            border: Border(bottom: BorderSide(color: palette.hairline)),
-          ),
-          child: _BannerLine(
-            words: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  device.signedIn
-                      ? '$name, signed in as you, wants to connect.'
-                      : '$name wants to connect.',
-                  style: type.body.copyWith(color: palette.text),
-                ),
-                if (device.number.isNotEmpty)
-                  Text(
-                    'Allow it only if its screen shows ${device.number}.',
-                    style: type.caption.copyWith(color: palette.textMuted),
-                  ),
-                if (_error != null)
-                  Text(
-                    _error!,
-                    style: type.caption.copyWith(color: palette.danger),
-                  ),
-              ],
-            ),
-            actions: [
-              Button(
-                label: "Don't allow",
-                onPressed: _deciding
-                    ? null
-                    : () => _decide(device, allow: false),
-              ),
-              Button(
-                label: 'Allow',
-                primary: true,
-                onPressed: _deciding
-                    ? null
-                    : () => _decide(device, allow: true),
-              ),
-            ],
-          ),
+          device: device,
         );
       },
+    );
+  }
+}
+
+/// One request of [DiscoveredDeviceBanner]'s.
+class _DiscoveredDevice extends StatefulWidget {
+  const _DiscoveredDevice({super.key, required this.device});
+
+  final PendingDevice device;
+
+  @override
+  State<_DiscoveredDevice> createState() => _DiscoveredDeviceState();
+}
+
+class _DiscoveredDeviceState extends State<_DiscoveredDevice> {
+  /// The number typed off its screen (#352 P4).
+  final _number = TextEditingController();
+  var _deciding = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _number.addListener(() => setState(() {}));
+  }
+
+  @override
+  void dispose() {
+    _number.dispose();
+    super.dispose();
+  }
+
+  Future<void> _decide(PendingDevice device, {required bool allow}) async {
+    setState(() {
+      _deciding = true;
+      _error = null;
+    });
+    final error = await decideDevice(
+      AppScope.of(context),
+      device,
+      allow: allow,
+      number: _number.text,
+    );
+    if (!mounted) return;
+    setState(() {
+      _deciding = false;
+      _error = error;
+      _number.clear();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final device = widget.device;
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final ready = !_deciding && isDeviceNumber(_number.text);
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: Space.l,
+        vertical: Space.s,
+      ),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: palette.hairline)),
+      ),
+      child: _BannerLine(
+        words: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              device.signedIn
+                  ? '${deviceCallingItself(device)}, signed in as you, '
+                        'wants to connect.'
+                  : '${deviceCallingItself(device)} wants to connect.',
+              style: type.body.copyWith(color: palette.text),
+            ),
+            Text(
+              'To allow it, type the number its screen shows. If you '
+              "didn't just set up a new device, don't allow it. Someone "
+              'may be using your email: secure it.',
+              style: type.caption.copyWith(color: palette.textMuted),
+            ),
+            if (_error != null)
+              Text(
+                _error!,
+                style: type.caption.copyWith(color: palette.danger),
+              ),
+          ],
+        ),
+        actions: [
+          SizedBox(
+            width: DeviceNumberField.widthFor(context),
+            child: DeviceNumberField(
+              controller: _number,
+              onSubmitted: (_) {
+                if (ready) _decide(device, allow: true);
+              },
+            ),
+          ),
+          Button(
+            label: "Don't allow",
+            onPressed: _deciding ? null : () => _decide(device, allow: false),
+          ),
+          Button(
+            label: 'Allow',
+            primary: true,
+            onPressed: ready ? () => _decide(device, allow: true) : null,
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1340,6 +1383,11 @@ bool _bannersShow(Backend backend, DeviceAccount account) =>
       (device) => device.discovered,
     );
 
+/// While the keyboard is up, the device banners step aside when it leaves
+/// less than this above it: room for a header, some of the conversation
+/// and the message box.
+const bannersNeedAbove = 480.0;
+
 /// [child] under what this device's account needs from the person now:
 /// a device to let in ([DiscoveredDeviceBanner]) and this device to confirm
 /// ([ConfirmDeviceBanner]). The banners take the screen's top inset (a
@@ -1362,7 +1410,16 @@ class DeviceBanners extends StatelessWidget {
       // The same tree whether they show or not, so what's under them
       // keeps its state as one comes and goes.
       builder: (context, _) {
-        final shown = _bannersShow(backend, account);
+        // Typing where the keyboard leaves little room (a phone on its
+        // side, a small one upright): they step aside until it's down, so
+        // the message box and what's above it stay in sight (Sale, row 22).
+        final size = MediaQuery.sizeOf(context);
+        final keyboard = MediaQuery.viewInsetsOf(context).bottom;
+        final aside =
+            keyboard > 0 &&
+            size.height - keyboard < bannersNeedAbove &&
+            isPhoneLayout(context);
+        final shown = _bannersShow(backend, account) && !aside;
         final safe = MediaQuery.paddingOf(context);
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1378,9 +1435,13 @@ class DeviceBanners extends StatelessWidget {
                       right: safe.right,
                     )
                   : EdgeInsets.zero,
-              child: const Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [DiscoveredDeviceBanner(), ConfirmDeviceBanner()],
+              child: Visibility(
+                visible: !aside,
+                maintainState: true,
+                child: const Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [DiscoveredDeviceBanner(), ConfirmDeviceBanner()],
+                ),
               ),
             ),
             Expanded(

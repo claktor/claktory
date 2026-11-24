@@ -193,8 +193,11 @@ SUPERVISOR_DIR=()
 # Claktory's own apps (apps/), in releases that ship them.
 APPS_DIR=()
 [[ -d "$RELEASE/apps" ]] && APPS_DIR=(apps)
-COPYFILE_DISABLE=1 tar --no-xattrs -czf "$STAGE/$NAME" \
-  -C "$RELEASE" "$APP_NAME" factoryd claktory-apps claktory-speech backend-version CHANGELOG.md ${SUPERVISOR_DIR[@]+"${SUPERVISOR_DIR[@]}"} ${APPS_DIR[@]+"${APPS_DIR[@]}"} \
+# The video preview helper (#379), in Mac releases that have it.
+VIDEO_PREVIEW=()
+[[ -f "$RELEASE/claktory-video-preview" ]] && VIDEO_PREVIEW=(claktory-video-preview)
+COPYFILE_DISABLE=1 tar --no-xattrs --uid 0 --gid 0 --uname "" --gname "" -czf "$STAGE/$NAME" \
+  -C "$RELEASE" "$APP_NAME" factoryd claktory-apps claktory-speech ${VIDEO_PREVIEW[@]+"${VIDEO_PREVIEW[@]}"} backend-version CHANGELOG.md ${SUPERVISOR_DIR[@]+"${SUPERVISOR_DIR[@]}"} ${APPS_DIR[@]+"${APPS_DIR[@]}"} \
   -C "$SRC" LICENSE.md \
   -C "$SRC/scripts" install-release.sh
 
@@ -227,7 +230,7 @@ for arch in ${LINUX[@]+"${LINUX[@]}"}; do
   cp "$RELEASE/backend-version" "$RELEASE/CHANGELOG.md" "$build/"
   [[ ! -d "$RELEASE/apps" ]] || cp -R "$RELEASE/apps" "$build/apps"
   linux_name="factory-$VERSION-linux-$arch.tar.gz"
-  COPYFILE_DISABLE=1 tar --no-xattrs -czf "$STAGE/$linux_name" \
+  COPYFILE_DISABLE=1 tar --no-xattrs --uid 0 --gid 0 --uname "" --gname "" -czf "$STAGE/$linux_name" \
     -C "$build" factoryd claktory-apps claktory-speech backend-version CHANGELOG.md ${APPS_DIR[@]+"${APPS_DIR[@]}"} \
     -C "$SRC" LICENSE.md \
     -C "$SRC/scripts" install-linux.sh
@@ -257,6 +260,10 @@ fi
 # host name (check_no_traces in lib.sh; release.sh checks the same before
 # signing).
 check_no_traces "$RELEASE" "$STAGE"
+# The same for the archives' headers (owner, group, names), and those of
+# every .clapp inside them: gitleaks and the byte search above don't see
+# them compressed (check_tar_headers in lib.sh).
+check_tar_headers "$STAGE"/*.tar.gz
 
 # The top-level url is the Mac's, as every backend so far reads it; Linux
 # backends read theirs under "linux".

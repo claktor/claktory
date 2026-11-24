@@ -1,5 +1,6 @@
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -243,12 +244,13 @@ void main() {
     }
 
     testWidgets(
-      "on another machine's Factory, an older app fetches the release's app, "
-      'shows how far it is, has it swapped in and quits',
+      "on another machine's Factory, the Claktory updates first, then an "
+      "older app fetches the release's app, shows how far it is, has it "
+      'swapped in and quits (#408)',
       (tester) async {
         final harness = await showRemote(
           tester,
-          version: '2026.11.18-1700',
+          version: '2026.11.18-1600',
           app: '2026.11.18-1600',
         );
         expect(
@@ -257,6 +259,13 @@ void main() {
         );
         await tester.tap(find.text('Update'));
         await tester.pump();
+        expect(
+          harness.last.installUpdate.appPath,
+          '',
+          reason:
+              'the Claktory has the release already; the other machine '
+              'has no say over this bundle',
+        );
         expect(harness.backend.fetched, [('2026.11.18-1700', 0)]);
         expect(find.text('Getting the app ready on mac-mini…'), findsOneWidget);
         expect(find.text('Updating…'), findsOneWidget);
@@ -266,22 +275,87 @@ void main() {
           findsOneWidget,
         );
         await tester.pump(const Duration(milliseconds: 100));
-        expect(find.text('Checking the new app…'), findsOneWidget);
-        expect(harness.quits, 0);
         expect(
-          harness.backend.sent.where((m) => m.hasInstallUpdate()),
-          isEmpty,
+          find.text(
+            'Waiting for the connection to mac-mini to carry on: 12.3 of '
+            '48.0 MB so far',
+          ),
+          findsOneWidget,
         );
         await tester.pump(const Duration(milliseconds: 100));
+        expect(find.text('Checking the new app…'), findsOneWidget);
+        expect(harness.quits, 0);
+        await tester.pump(const Duration(milliseconds: 100));
         expect(
-          harness.last.installUpdate.appPath,
-          '',
-          reason: 'the other machine has no say over this bundle',
+          harness.backend.sent.where((m) => m.hasInstallUpdate()),
+          hasLength(1),
         );
         expect(harness.updater.replaced, [
           '/Applications/Factory.app.staged -> /Applications/Factory.app',
         ]);
         expect(harness.quits, 1);
+      },
+    );
+
+    testWidgets(
+      'a banner made again while the update is under way shows it, and '
+      'starts no second download',
+      (tester) async {
+        final harness = await showRemote(
+          tester,
+          version: '2026.11.18-1600',
+          app: '2026.11.18-1600',
+        );
+        await tester.tap(find.text('Update'));
+        await tester.pump(const Duration(milliseconds: 50));
+        // The window rebuilt without the banner, then with it.
+        final workspace = harness.backend.workspace.workspace;
+        harness.backend.workspace.apply(
+          workspace.deepCopy()..latestRelease = '',
+        );
+        await tester.pump();
+        expect(find.text('Updating…'), findsNothing);
+        harness.backend.workspace.apply(workspace);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(find.text('Updating…'), findsOneWidget);
+        expect(
+          find.text('Downloading the app from mac-mini: 12.3 of 48.0 MB'),
+          findsOneWidget,
+        );
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(harness.backend.fetched, hasLength(1));
+        expect(harness.updater.replaced, hasLength(1));
+        expect(harness.quits, greaterThanOrEqualTo(1));
+      },
+    );
+
+    testWidgets(
+      "on another machine's Factory, a release this app can't work with is "
+      'downloaded before the Claktory updates',
+      (tester) async {
+        // A Mac's app, which replaces itself: a phone's can't follow.
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+        final harness = await showRemote(
+          tester,
+          version: 'v0.1.9',
+          app: 'v0.1.9',
+          latest: 'v0.2.0',
+        );
+        await tester.tap(find.text('Update'));
+        await tester.pump();
+        expect(harness.backend.fetched, [('v0.2.0', 0)]);
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.text('Checking the new app…'), findsOneWidget);
+        expect(
+          harness.backend.sent.where((m) => m.hasInstallUpdate()),
+          isEmpty,
+          reason: 'the app it would face is not yet here',
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(harness.last.installUpdate.appPath, '');
+        expect(harness.quits, 1);
+        debugDefaultTargetPlatformOverride = null;
       },
     );
 
@@ -296,40 +370,31 @@ void main() {
         );
         harness.updater.fails = "the download is damaged";
         await tester.tap(find.text('Update'));
-        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pump(const Duration(milliseconds: 500));
         expect(
           find.text("Couldn't update: the download is damaged"),
           findsOneWidget,
         );
         expect(find.textContaining('Checking'), findsNothing);
-        expect(
-          harness.backend.sent.where((m) => m.hasInstallUpdate()),
-          isEmpty,
-        );
         expect(harness.quits, 0);
 
         harness.updater.fails = null;
         await tester.tap(find.text('Try again'));
-        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pump(const Duration(milliseconds: 500));
         expect(harness.quits, 1);
       },
     );
 
     testWidgets(
-      "on another machine's Factory, a refused install leaves the app as it "
-      'is',
+      "on another machine's Factory, a refused install fetches nothing and "
+      'leaves the app as it is',
       (tester) async {
         final harness = await showRemote(
           tester,
-          version: '2026.11.18-1700',
+          version: '2026.11.18-1600',
           app: '2026.11.18-1600',
         );
-        harness.updater.steps = const [];
-        harness.backend.onSend = (message) {
-          if (message.hasInstallUpdate()) {
-            harness.backend.refuse = 'no release has been published';
-          }
-        };
+        harness.backend.refuse = 'no release has been published';
         await tester.tap(find.text('Update'));
         await tester.pump();
         await tester.pump();
@@ -337,7 +402,7 @@ void main() {
           find.text("Couldn't update: no release has been published"),
           findsOneWidget,
         );
-        expect(harness.updater.discarded, ['/Applications/Factory.app.staged']);
+        expect(harness.backend.fetched, isEmpty);
         expect(harness.updater.replaced, isEmpty);
         expect(harness.quits, 0);
       },

@@ -27,6 +27,12 @@ abstract interface class BackToken {
   void back();
 }
 
+/// Optional cleanup for a surface belonging to a window that was replaced.
+/// This is not Back and never runs for gesture cancellation or ordinary release.
+abstract interface class RetirableBackToken implements BackToken {
+  void retired();
+}
+
 /// A [BackToken]'s registration.
 abstract interface class BackHandle {
   /// Its [BackToken.canClose] changed.
@@ -124,8 +130,8 @@ final class PageTarget extends BackTarget {
 
 /// A phone's Back: what it would close now ([target]), in order, and
 /// closing it ([commit]). Listen to it to hear when [target] (or its
-/// [BackTarget.canClose]) changes. The phone's drawer owns it
-/// ([PhoneBackScope]); sheets register with it.
+/// [BackTarget.canClose]) changes. Android's window owns its root; a standalone
+/// phone drawer owns a local one. [PhoneBackScope] lends it to surfaces.
 class PhoneBack extends ChangeNotifier {
   PhoneBack({
     required this._drawerOpen,
@@ -139,6 +145,101 @@ class PhoneBack extends ChangeNotifier {
   final PageTarget? Function() _topPage;
   final VoidCallback _popPage;
 
+  /// A persistent window registry. Drawer/page providers attach while their
+  /// owner is visible; the platform dispatcher itself survives layout changes.
+  factory PhoneBack.root() => PhoneBack(
+    drawerOpen: () => false,
+    closeDrawer: () {},
+    topPage: () => null,
+    popPage: () {},
+  );
+
+  late final _owners = _BackOwner(this);
+  final _navigations = <_BackNavigation>[];
+  _BackNavigation? _lastNavigation;
+
+  /// Selects one visible child region, returning a borrowed view of this SAME
+  /// registry. Its outgoing sibling's navigation leases stop participating
+  /// even while AnimatedSwitcher keeps it alive. Overlays belong to the whole
+  /// window and survive its resize; changing the root window retires them.
+  /// No second stack/dispatcher is created. Readers must not dispose the view.
+  PhoneBack branch(Object key) => _branch(_owners, key);
+
+  PhoneBack _branch(_BackOwner parent, Object key) {
+    if (parent.child?.key == key) return parent.child!.view;
+    final outgoing = parent.child;
+    final next = _BackOwner(this, parent: parent, key: key);
+    parent.child = next;
+    if (outgoing != null) {
+      final retired = [
+        ..._tokens.where((entry) => entry.scope.within(outgoing)),
+        ..._navigationTokens.where((entry) => entry.scope.within(outgoing)),
+      ];
+      _tokens.removeWhere((entry) => entry.scope.within(outgoing));
+      _navigationTokens.removeWhere((entry) => entry.scope.within(outgoing));
+      _navigations.removeWhere((entry) => entry.scope.within(outgoing));
+      for (final entry in retired) {
+        entry.retire();
+      }
+    }
+    if (parent.active) update();
+    return next.view;
+  }
+
+  /// A drawer supplies its existing state to a lifted registry. Release when
+  /// it leaves; a new active owner replaces the going window's callbacks.
+  BackHandle attachNavigation({
+    required bool Function() drawerOpen,
+    required VoidCallback closeDrawer,
+    required PageTarget? Function() topPage,
+    required VoidCallback popPage,
+  }) => _attachNavigation(
+    _owners,
+    drawerOpen: drawerOpen,
+    closeDrawer: closeDrawer,
+    topPage: topPage,
+    popPage: popPage,
+  );
+
+  BackHandle _attachNavigation(
+    _BackOwner scope, {
+    required bool Function() drawerOpen,
+    required VoidCallback closeDrawer,
+    required PageTarget? Function() topPage,
+    required VoidCallback popPage,
+  }) {
+    if (!scope.active) return const _ReleasedBackHandle();
+    final navigation = _BackNavigation(
+      this,
+      scope,
+      drawerOpen,
+      closeDrawer,
+      topPage,
+      popPage,
+    );
+    _navigations.add(navigation);
+    update();
+    return navigation;
+  }
+
+  _BackNavigation? get _navigation {
+    for (final navigation in _navigations.reversed) {
+      if (navigation.scope.active) return navigation;
+    }
+    return null;
+  }
+
+  bool get _open => _navigation?.drawerOpen() ?? _drawerOpen();
+
+  void _syncNavigation() {
+    final navigation = _navigation;
+    if (identical(navigation, _lastNavigation)) return;
+    _lastNavigation = navigation;
+    // A new provider whose drawer is already open is not the old drawer.
+    _generation++;
+    _wasOpen = false;
+  }
+
   /// The phone's Back above [context], if it's on a phone. It doesn't make
   /// [context] depend on it: listen to it.
   static PhoneBack? maybeOf(BuildContext context) =>
@@ -146,6 +247,7 @@ class PhoneBack extends ChangeNotifier {
 
   /// What's registered, oldest first.
   final _tokens = <_Registration>[];
+  final _navigationTokens = <_Registration>[];
   var _serial = 0;
 
   /// How many times the drawer has opened; the one open now.
@@ -160,21 +262,41 @@ class PhoneBack extends ChangeNotifier {
   /// Registers [token] over everything registered before it, until the
   /// handle's released.
   BackHandle register(BackToken token) {
-    final registration = _Registration(this, token, ++_serial);
-    _tokens.add(registration);
+    return _register(token, _owners);
+  }
+
+  /// Structural surfaces below overlays: wide expanded panes/open pages and
+  /// the Claktories list/add route. A rebuilt page must not cover a surviving
+  /// dialog's Back target just because the window changed size.
+  BackHandle registerNavigation(BackToken token) =>
+      _register(token, _owners, navigation: true);
+
+  BackHandle _register(
+    BackToken token,
+    _BackOwner scope, {
+    bool navigation = false,
+  }) {
+    if (!scope.active) return const _ReleasedBackHandle();
+    final registration = _Registration(this, token, ++_serial, scope);
+    (navigation ? _navigationTokens : _tokens).add(registration);
     _changed();
     return registration;
   }
 
-  /// What Back would close now: the newest token, else the open drawer,
-  /// else the page on top; null at the root.
+  /// What Back closes: newest overlay, then newest structural navigation
+  /// surface, then the open drawer, then its top page; null at the root.
   BackTarget? get target {
     if (_tokens.isNotEmpty) {
       final top = _tokens.last;
       return TokenTarget._(top.token, top.serial);
     }
-    if (_drawerOpen()) return DrawerTarget(_generation);
-    return _topPage();
+    if (_navigationTokens.isNotEmpty) {
+      final top = _navigationTokens.last;
+      return TokenTarget._(top.token, top.serial);
+    }
+    if (_open) return DrawerTarget(_generation);
+    final navigation = _navigation;
+    return navigation == null ? _topPage() : navigation.pageTarget;
   }
 
   /// Closes [target] if it's still what Back would close ([target] now),
@@ -188,23 +310,28 @@ class PhoneBack extends ChangeNotifier {
       case TokenTarget(:final token):
         token.back();
       case DrawerTarget():
-        _closeDrawer();
+        final navigation = _navigation;
+        navigation == null ? _closeDrawer() : navigation.closeDrawer();
       case PageTarget():
-        _popPage();
+        final navigation = _navigation;
+        navigation == null ? _popPage() : navigation.popPage();
     }
     return true;
   }
 
   /// The drawer or the pages changed: tells listeners if [target] did.
   void update() {
-    final open = _drawerOpen();
+    _syncNavigation();
+    final open = _open;
     if (open && !_wasOpen) _generation++;
     _wasOpen = open;
     _changed();
   }
 
   void _release(_Registration registration) {
-    if (_tokens.remove(registration)) _changed();
+    final removed = _tokens.remove(registration);
+    final navigationRemoved = _navigationTokens.remove(registration);
+    if (removed || navigationRemoved) _changed();
   }
 
   /// Tells listeners when what [target] says changed, after the frame when
@@ -226,7 +353,8 @@ class PhoneBack extends ChangeNotifier {
 
   void _tell() {
     if (_disposed) return;
-    final open = _drawerOpen();
+    _syncNavigation();
+    final open = _open;
     if (open && !_wasOpen) _generation++;
     _wasOpen = open;
     final now = target;
@@ -241,22 +369,181 @@ class PhoneBack extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _tokens.clear();
+    _navigationTokens.clear();
+    _navigations.clear();
+    _owners.child = null;
     super.dispose();
   }
 }
 
 class _Registration implements BackHandle {
-  _Registration(this.owner, this.token, this.serial);
+  _Registration(this.owner, this.token, this.serial, this.scope);
 
   final PhoneBack owner;
   final BackToken token;
   final int serial;
+  final _BackOwner scope;
+  var _released = false;
+  var _retired = false;
+
+  void retire() {
+    if (_released || _retired) return;
+    _retired = true;
+    final surface = token;
+    if (surface is! RetirableBackToken) return;
+    SchedulerBinding.instance
+      ..addPostFrameCallback((_) {
+        if (!_released) surface.retired();
+      })
+      ..ensureVisualUpdate();
+  }
 
   @override
-  void changed() => owner._changed();
+  void changed() {
+    if (!_released && scope.active) owner._changed();
+  }
 
   @override
-  void release() => owner._release(this);
+  void release() {
+    _released = true;
+    owner._release(this);
+  }
+}
+
+/// An owner is only a lifetime/visibility lease, never navigation state.
+class _BackOwner {
+  _BackOwner(this.root, {this.parent, this.key});
+  final PhoneBack root;
+  final _BackOwner? parent;
+  final Object? key;
+  _BackOwner? child;
+  late final PhoneBack view = _ScopedPhoneBack(this);
+
+  bool get active =>
+      !root._disposed &&
+      (parent == null || (parent!.active && identical(parent!.child, this)));
+
+  // Overlay leases belong to the window, not its phone/list/add region. A
+  // modal above the window remains the same surface while it resizes.
+  _BackOwner get window {
+    var owner = this;
+    while (owner.parent?.parent != null) {
+      owner = owner.parent!;
+    }
+    return owner;
+  }
+
+  bool within(_BackOwner ancestor) {
+    for (_BackOwner? owner = this; owner != null; owner = owner.parent) {
+      if (identical(owner, ancestor)) return true;
+    }
+    return false;
+  }
+}
+
+class _ScopedPhoneBack extends PhoneBack {
+  _ScopedPhoneBack(this.scope)
+    : super(
+        drawerOpen: () => false,
+        closeDrawer: () {},
+        topPage: () => null,
+        popPage: () {},
+      );
+  final _BackOwner scope;
+  PhoneBack get root => scope.root;
+
+  @override
+  PhoneBack branch(Object key) => root._branch(scope, key);
+  @override
+  BackTarget? get target => scope.active ? root.target : null;
+  @override
+  BackHandle register(BackToken token) => scope.active
+      ? root._register(token, scope.window)
+      : const _ReleasedBackHandle();
+  @override
+  BackHandle registerNavigation(BackToken token) =>
+      root._register(token, scope, navigation: true);
+  @override
+  bool commit(BackTarget target) => scope.active && root.commit(target);
+  @override
+  void update() {
+    if (scope.active) root.update();
+  }
+
+  @override
+  void addListener(VoidCallback listener) => root.addListener(listener);
+  @override
+  void removeListener(VoidCallback listener) => root.removeListener(listener);
+  @override
+  bool get hasListeners => root.hasListeners;
+  @override
+  BackHandle attachNavigation({
+    required bool Function() drawerOpen,
+    required VoidCallback closeDrawer,
+    required PageTarget? Function() topPage,
+    required VoidCallback popPage,
+  }) => root._attachNavigation(
+    scope,
+    drawerOpen: drawerOpen,
+    closeDrawer: closeDrawer,
+    topPage: topPage,
+    popPage: popPage,
+  );
+}
+
+class _BackNavigation implements BackHandle {
+  _BackNavigation(
+    this.root,
+    this.scope,
+    this.drawerOpen,
+    this.closeDrawer,
+    this.topPage,
+    this.popPage,
+  );
+  final PhoneBack root;
+  final _BackOwner scope;
+  final bool Function() drawerOpen;
+  final VoidCallback closeDrawer;
+  final PageTarget? Function() topPage;
+  final VoidCallback popPage;
+  PageTarget? _readPage;
+  PageTarget? _mappedPage;
+
+  PageTarget? get pageTarget {
+    final page = topPage();
+    if (page == null) {
+      _readPage = null;
+      _mappedPage = null;
+    } else if (page != _readPage) {
+      _readPage = page;
+      // Local page serials can restart in another window/provider. The root
+      // serial prevents a captured old page from popping a new identical id.
+      _mappedPage = PageTarget(
+        id: page.id,
+        serial: ++root._serial,
+        fullscreenDialog: page.fullscreenDialog,
+      );
+    }
+    return _mappedPage;
+  }
+
+  @override
+  void changed() {
+    if (scope.active) root.update();
+  }
+
+  @override
+  void release() {
+    if (root._navigations.remove(this)) root.update();
+  }
+}
+
+class _ReleasedBackHandle implements BackHandle {
+  const _ReleasedBackHandle();
+  @override
+  void changed() {}
+  @override
+  void release() {}
 }
 
 /// Gives the widgets below a phone's [PhoneBack].
@@ -270,11 +557,18 @@ class PhoneBackScope extends InheritedWidget {
 }
 
 /// A [BackToken] from two functions.
-class CallbackBackToken implements BackToken {
-  CallbackBackToken({required this.onBack, this._canClose});
+class CallbackBackToken implements RetirableBackToken {
+  CallbackBackToken({required this.onBack, this._canClose, this.onRetired});
 
   final VoidCallback onBack;
   final bool Function()? _canClose;
+
+  /// Remove the going window's overlay without committing Back or a form.
+  /// Deferred until after the frame; normal close/release cancels it.
+  final VoidCallback? onRetired;
+
+  @override
+  void retired() => onRetired?.call();
 
   @override
   bool get canClose => _canClose?.call() ?? true;

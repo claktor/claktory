@@ -4943,17 +4943,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  TunnelRelayTrouble dco_decode_tunnel_relay_trouble(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return TunnelRelayTrouble.values[raw as int];
+  }
+
+  @protected
   TunnelStatus dco_decode_tunnel_status(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return TunnelStatus(
       phase: dco_decode_tunnel_phase(arr[0]),
       path: dco_decode_tunnel_path(arr[1]),
       error: dco_decode_String(arr[2]),
       failure: dco_decode_tunnel_failure(arr[3]),
       relayConnected: dco_decode_bool(arr[4]),
+      relayUpMs: dco_decode_u_32(arr[5]),
+      relayTrouble: dco_decode_tunnel_relay_trouble(arr[6]),
     );
   }
 
@@ -6058,6 +6066,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  TunnelRelayTrouble sse_decode_tunnel_relay_trouble(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return TunnelRelayTrouble.values[inner];
+  }
+
+  @protected
   TunnelStatus sse_decode_tunnel_status(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_phase = sse_decode_tunnel_phase(deserializer);
@@ -6065,12 +6082,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_error = sse_decode_String(deserializer);
     var var_failure = sse_decode_tunnel_failure(deserializer);
     var var_relayConnected = sse_decode_bool(deserializer);
+    var var_relayUpMs = sse_decode_u_32(deserializer);
+    var var_relayTrouble = sse_decode_tunnel_relay_trouble(deserializer);
     return TunnelStatus(
       phase: var_phase,
       path: var_path,
       error: var_error,
       failure: var_failure,
       relayConnected: var_relayConnected,
+      relayUpMs: var_relayUpMs,
+      relayTrouble: var_relayTrouble,
     );
   }
 
@@ -7098,6 +7119,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_tunnel_relay_trouble(
+    TunnelRelayTrouble self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
   void sse_encode_tunnel_status(TunnelStatus self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_tunnel_phase(self.phase, serializer);
@@ -7105,6 +7135,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.error, serializer);
     sse_encode_tunnel_failure(self.failure, serializer);
     sse_encode_bool(self.relayConnected, serializer);
+    sse_encode_u_32(self.relayUpMs, serializer);
+    sse_encode_tunnel_relay_trouble(self.relayTrouble, serializer);
   }
 
   @protected

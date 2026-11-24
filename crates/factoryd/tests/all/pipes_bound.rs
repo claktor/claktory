@@ -15,6 +15,12 @@ use factoryd::pipes;
 /// A project "Site" with Lea and Bo and an open pipe, Lea its lead; a new
 /// liaison is made on the scripted model.
 async fn site() -> (PathBuf, Arc<Factory>, Client, View, String) {
+    let (dir, _, factory, client, view, pipe) = site_at().await;
+    (dir, factory, client, view, pipe)
+}
+
+/// `site`, and the address clients connect at.
+async fn site_at() -> (PathBuf, std::net::SocketAddr, Arc<Factory>, Client, View, String) {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
@@ -27,7 +33,7 @@ async fn site() -> (PathBuf, Arc<Factory>, Client, View, String) {
     pipes::set_wake_every(&factory, std::time::Duration::ZERO);
     let pipe = pipes::open_for_test(&factory, "site", "Website ⇄ Marketing", &["lea", "bo"], "lea", false);
     view.follow(&mut client, |view| shown(view, &pipe).is_some()).await;
-    (dir, factory, client, view, pipe)
+    (dir, addr, factory, client, view, pipe)
 }
 
 fn agent_named<'a>(view: &'a View, name: &str) -> Option<&'a v1::Agent> {
@@ -137,4 +143,66 @@ async fn a_deleted_pipe_takes_its_liaison_and_keeps_its_conversation() {
         .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
         .collect();
     assert!(kept.iter().any(|name| name.starts_with("segment-")), "{kept:?}");
+}
+
+/// The PipeTranscript a client connecting now gets right after the
+/// Workspace (and the selected agent's Transcript).
+async fn connected_with_pipe(addr: std::net::SocketAddr, pipe: &str) -> (v1::Workspace, Option<v1::Transcript>, v1::PipeTranscript) {
+    let (mut client, workspace, transcript) = Client::connect(addr).await;
+    assert_eq!(workspace.selected_pipe_id, pipe);
+    match client.receive().await.body {
+        Some(v1::server_message::Body::PipeTranscript(messages)) => (workspace, transcript, messages),
+        other => panic!("expected the shown pipe's messages, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_client_connecting_while_a_pipe_is_shown_gets_its_messages() {
+    let (_dir, addr, factory, mut client, mut view, pipe) = site_at().await;
+    pipes::receive_for_test(&factory, &pipe, incoming("m1", "Hello")).expect("received");
+    // A pipe of its own, shown: the app relaunched, a Claktory just added,
+    // or a reconnect after a drop all start from what's shown.
+    let select = v1::SelectPipe { pipe_id: pipe.clone() };
+    apply_request(&mut client, &mut view, client_message::Body::SelectPipe(select.clone())).await;
+    view.follow(&mut client, |view| view.workspace.selected_pipe_id == pipe).await;
+    let (_, _, messages) = connected_with_pipe(addr, &pipe).await;
+    assert_eq!(messages.pipe_id, pipe);
+    assert!(messages.messages.iter().any(|message| message.text == "Hello"), "{messages:?}");
+
+    // With its liaison, shown with the liaison's conversation: both come.
+    let add = v1::AddPipeLiaison { pipe_id: pipe.clone(), name: "Max".into() };
+    apply_request(&mut client, &mut view, client_message::Body::AddPipeLiaison(add)).await;
+    view.follow(&mut client, |view| agent_named(view, "Max").is_some_and(|agent| agent.pipe_id == pipe)).await;
+    let liaison = agent_named(&view, "Max").expect("it").id.clone();
+    apply_request(&mut client, &mut view, client_message::Body::SelectPipe(select)).await;
+    view.follow(&mut client, |view| view.workspace.selected_pipe_id == pipe && view.workspace.selected_agent_id == liaison).await;
+    let (workspace, transcript, messages) = connected_with_pipe(addr, &pipe).await;
+    assert_eq!(workspace.selected_agent_id, liaison);
+    assert_eq!(transcript.expect("the liaison's conversation").agent_id, liaison);
+    assert!(messages.messages.iter().any(|message| message.text == "Hello"), "{messages:?}");
+}
+
+#[tokio::test]
+async fn the_pipe_shown_is_still_shown_after_a_restart() {
+    let (dir, _, factory, mut client, mut view, pipe) = site_at().await;
+    let select = v1::SelectPipe { pipe_id: pipe.clone() };
+    apply_request(&mut client, &mut view, client_message::Body::SelectPipe(select)).await;
+    view.follow(&mut client, |view| view.workspace.selected_pipe_id == pipe).await;
+
+    // A restart, as an update makes: the same pipe is shown, its messages
+    // with it.
+    drop((client, factory));
+    let (addr, factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    assert_eq!(workspace.selected_pipe_id, pipe, "the pipe shown before the restart");
+    assert!(matches!(client.receive().await.body, Some(v1::server_message::Body::PipeTranscript(shown)) if shown.pipe_id == pipe));
+
+    // An agent shown instead: after a restart no pipe is.
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, crate::pipes::select("bo")).await;
+    view.follow(&mut client, |view| view.workspace.selected_pipe_id.is_empty()).await;
+    drop((client, factory));
+    let (addr, _factory) = start(&dir).await;
+    let (_client, workspace, _) = Client::connect(addr).await;
+    assert_eq!((workspace.selected_pipe_id.as_str(), workspace.selected_agent_id.as_str()), ("", "bo"));
 }

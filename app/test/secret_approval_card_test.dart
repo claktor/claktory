@@ -5,6 +5,7 @@ import 'package:factory_app/decision.dart';
 import 'package:factory_app/pipes.dart' show SecretApprovalCard;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -185,24 +186,69 @@ void main() {
     expect(find.textContaining('keeps running'), findsNothing);
   });
 
-  testWidgets("Don't allow (or Allow once) takes a comment for the agent", (
-    tester,
-  ) async {
+  testWidgets("a comment typed is one Submit, which doesn't allow it "
+      '(#370); decided, the card shows the comment', (tester) async {
     final harness = await _card(tester, _approval());
     await tester.tap(find.text('Add a comment'));
     await settle(tester);
     expect(find.text('June gets it with your answer.'), findsOneWidget);
-    await tester.enterText(
-      find.descendant(
-        of: find.byType(DecisionComment),
-        matching: find.byType(EditableText),
-      ),
-      'Use the staging bucket.',
+    final field = find.descendant(
+      of: find.byType(DecisionComment),
+      matching: find.byType(EditableText),
     );
-    await tester.tap(find.text("Don't allow"));
+    await tester.enterText(field, 'Use the staging bucket.');
+    await tester.pump();
+    expect(find.text("Don't allow"), findsNothing);
+    expect(find.text('Allow once'), findsNothing);
+    expect(
+      find.text('Not allowed this time. June gets your comment.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Submit'));
     await settle(tester);
-    final decided = harness.last.decideSecretApproval;
+    var decided = harness.last.decideSecretApproval;
+    expect(decided.reply, isTrue);
     expect(decided.allow, isFalse);
     expect(decided.comment, 'Use the staging bucket.');
+
+    // Return is Submit too; cleared, the choices are back.
+    final before = harness.backend.sent.length;
+    await tester.enterText(field, 'Try again tomorrow.');
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await settle(tester);
+    decided = harness.backend.sent
+        .skip(before)
+        .singleWhere((m) => m.hasDecideSecretApproval())
+        .decideSecretApproval;
+    expect(decided.reply, isTrue);
+    expect(decided.allow, isFalse);
+    await tester.enterText(field, '');
+    await tester.pump();
+    expect(find.text('Allow once'), findsOneWidget);
+
+    // Not allowed, with the comment.
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'june',
+        entries: [
+          Entry(
+            seq: Int64(7),
+            secretApproval: _approval()
+              ..state = SecretApprovalState.SECRET_APPROVAL_STATE_DENIED
+              ..replied = true
+              ..comment = 'Use the staging bucket.',
+          ),
+        ],
+      ),
+    );
+    await settle(tester);
+    expect(
+      find.textContaining(
+        'Not allowed · “Use the staging bucket.”',
+        findRichText: true,
+      ),
+      findsOneWidget,
+    );
   });
 }

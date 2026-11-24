@@ -1,0 +1,355 @@
+{
+  "dashboard/claktory": {
+    "_rev": 1,
+    "id": "claktory",
+    "name": "Claktory",
+    "panels": [
+      {
+        "grid": {
+          "h": 2,
+          "w": 3,
+          "x": 0,
+          "y": 0
+        },
+        "id": "runs",
+        "query": {
+          "source": "activity",
+          "sql": "WITH RECURSIVE t(at) AS (SELECT ($from / $step) * $step UNION ALL SELECT at + $step FROM t WHERE at + $step < $to), c AS (SELECT (started / $step) * $step AS at, COUNT(*) AS n FROM runs WHERE started >= $from AND started < $to AND ($agent = '' OR agent = $agent) GROUP BY 1) SELECT t.at AS time, COALESCE(c.n, 0) AS runs FROM t LEFT JOIN c USING (at) ORDER BY t.at"
+        },
+        "title": "Runs",
+        "viz": {
+          "kind": "stat"
+        }
+      },
+      {
+        "grid": {
+          "h": 2,
+          "w": 3,
+          "x": 3,
+          "y": 0
+        },
+        "id": "messages",
+        "query": {
+          "source": "activity",
+          "sql": "WITH RECURSIVE t(at) AS (SELECT ($from / $step) * $step UNION ALL SELECT at + $step FROM t WHERE at + $step < $to), c AS (SELECT (created / $step) * $step AS at, COUNT(*) AS n FROM messages WHERE created >= $from AND created < $to AND ($agent = '' OR agent = $agent) GROUP BY 1) SELECT t.at AS time, COALESCE(c.n, 0) AS messages FROM t LEFT JOIN c USING (at) ORDER BY t.at"
+        },
+        "title": "Messages",
+        "viz": {
+          "kind": "stat"
+        }
+      },
+      {
+        "grid": {
+          "h": 2,
+          "w": 3,
+          "x": 6,
+          "y": 0
+        },
+        "id": "done",
+        "query": {
+          "source": "activity",
+          "sql": "WITH RECURSIVE t(at) AS (SELECT ($from / $step) * $step UNION ALL SELECT at + $step FROM t WHERE at + $step < $to), c AS (SELECT (updated / $step) * $step AS at, COUNT(*) AS n FROM checklist_items WHERE updated >= $from AND updated < $to AND ($agent = '' OR agent = $agent) AND status = 'done' GROUP BY 1) SELECT t.at AS time, COALESCE(c.n, 0) AS done FROM t LEFT JOIN c USING (at) ORDER BY t.at"
+        },
+        "title": "Checklist items done",
+        "viz": {
+          "kind": "stat"
+        }
+      },
+      {
+        "grid": {
+          "h": 2,
+          "w": 3,
+          "x": 9,
+          "y": 0
+        },
+        "id": "tokens",
+        "query": {
+          "source": "activity",
+          "sql": "WITH RECURSIVE t(at) AS (SELECT ($from / $step) * $step UNION ALL SELECT at + $step FROM t WHERE at + $step < $to), c AS (SELECT MAX(((hour * 1000) / $step) * $step, ($from / $step) * $step) AS at, SUM(input + output) AS n FROM agent_usage WHERE hour >= $from_s - 3599 AND hour < $to_s AND ($agent = '' OR agent = $agent) GROUP BY 1) SELECT t.at AS time, COALESCE(c.n, 0) AS tokens FROM t LEFT JOIN c USING (at) ORDER BY t.at"
+        },
+        "title": "Tokens",
+        "viz": {
+          "kind": "stat"
+        }
+      },
+      {
+        "grid": {
+          "h": 5,
+          "w": 12,
+          "x": 0,
+          "y": 1
+        },
+        "id": "tokens_by_agent",
+        "query": {
+          "source": "activity",
+          "sql": "SELECT strftime('%Y-%m-%d %H:%M', (hour / MAX($step_s, 3600)) * MAX($step_s, 3600), 'unixepoch', 'localtime') AS time, agent, SUM(input + output) AS tokens FROM agent_usage WHERE hour >= $from_s - 3599 AND hour < $to_s AND agent != '' AND agent NOT LIKE 'chat:%' AND ($agent = '' OR agent = $agent) GROUP BY 1, 2 ORDER BY 1"
+        },
+        "title": "Tokens by agent",
+        "viz": {
+          "color": "agent",
+          "kind": "stackedBars",
+          "series_by": "agent",
+          "unit": "tokens",
+          "x": "time"
+        }
+      },
+      {
+        "grid": {
+          "h": 4,
+          "w": 6,
+          "x": 0,
+          "y": 2
+        },
+        "id": "runs_by_agent",
+        "query": {
+          "source": "activity",
+          "sql": "SELECT strftime('%Y-%m-%d %H:%M', (started / $step) * $step / 1000, 'unixepoch', 'localtime') AS time, agent, COUNT(*) AS runs FROM runs WHERE started >= $from AND started < $to AND agent != '' AND agent NOT LIKE 'chat:%' AND ($agent = '' OR agent = $agent) GROUP BY 1, 2 ORDER BY 1"
+        },
+        "title": "Runs by agent",
+        "viz": {
+          "color": "agent",
+          "kind": "stackedBars",
+          "series_by": "agent",
+          "unit": "runs",
+          "x": "time"
+        }
+      },
+      {
+        "grid": {
+          "h": 4,
+          "w": 6,
+          "x": 6,
+          "y": 2
+        },
+        "id": "running_tasks",
+        "query": {
+          "source": "activity",
+          "sql": "SELECT agent, task, started FROM tasks WHERE ended IS NULL AND ($agent = '' OR agent = $agent) ORDER BY started DESC"
+        },
+        "title": "Background tasks running now",
+        "viz": {
+          "columns": [
+            {
+              "name": "agent",
+              "title": "Agent"
+            },
+            {
+              "name": "task",
+              "title": "Task"
+            },
+            {
+              "format": "time",
+              "name": "started",
+              "title": "Started"
+            }
+          ],
+          "kind": "table"
+        }
+      }
+    ],
+    "refresh_s": 30,
+    "time": {
+      "from": "now-7d",
+      "to": "now"
+    },
+    "variables": [
+      {
+        "label": "Agent",
+        "name": "agent",
+        "query": {
+          "source": "activity",
+          "sql": "SELECT agent, MAX(agent_name) AS name FROM agent_usage WHERE hour >= $from_s - 3600 AND agent != '' AND agent NOT LIKE 'chat:%' GROUP BY agent ORDER BY name"
+        }
+      }
+    ]
+  },
+  "dashboard/every-kind": {
+    "_by": "rivet",
+    "_rev": 1,
+    "id": "every-kind",
+    "name": "Every kind",
+    "panels": [
+      {
+        "grid": {
+          "h": 2,
+          "w": 4,
+          "x": 0,
+          "y": 0
+        },
+        "id": "total",
+        "query": {
+          "source": "activity",
+          "sql": "SELECT (started / $step) * $step AS time, COUNT(*) AS runs, COUNT(*) * 2 AS doubled FROM runs WHERE started >= $from AND started < $to GROUP BY 1 ORDER BY 1"
+        },
+        "title": "Runs",
+        "viz": {
+          "kind": "stat",
+          "unit": "runs"
+        }
+      },
+      {
+        "grid": {
+          "h": 2,
+          "w": 4,
+          "x": 4,
+          "y": 0
+        },
+        "id": "muted",
+        "query": {
+          "source": "activity",
+          "sql": "SELECT (started / $step) * $step AS time, COUNT(*) AS runs, COUNT(*) * 2 AS doubled FROM runs WHERE started >= $from AND started < $to GROUP BY 1 ORDER BY 1"
+        },
+        "title": "Quiet",
+        "viz": {
+          "color": "muted",
+          "kind": "stat"
+        }
+      },
+      {
+        "grid": {
+          "h": 5,
+          "w": 12,
+          "x": 0,
+          "y": 1
+        },
+        "id": "line",
+        "query": {
+          "source": "activity",
+          "sql": "SELECT (started / $step) * $step AS time, COUNT(*) AS runs, COUNT(*) * 2 AS doubled FROM runs WHERE started >= $from AND started < $to GROUP BY 1 ORDER BY 1"
+        },
+        "title": "Runs over time",
+        "viz": {
+          "kind": "timeseries",
+          "unit": "runs",
+          "x": "time",
+          "y": [
+            "runs"
+          ]
+        }
+      },
+      {
+        "grid": {
+          "h": 4,
+          "w": 6,
+          "x": 0,
+          "y": 2
+        },
+        "id": "lines",
+        "query": {
+          "source": "activity",
+          "sql": "SELECT (started / $step) * $step AS time, agent, COUNT(*) AS runs FROM runs WHERE started >= $from AND started < $to GROUP BY 1, 2 ORDER BY 1"
+        },
+        "title": "Runs by agent",
+        "viz": {
+          "color": "agent",
+          "kind": "timeseries",
+          "series_by": "agent"
+        }
+      },
+      {
+        "grid": {
+          "h": 4,
+          "w": 6,
+          "x": 6,
+          "y": 2
+        },
+        "id": "scatter",
+        "query": {
+          "source": "activity",
+          "sql": "SELECT (started / $step) * $step AS time, COUNT(*) AS runs, COUNT(*) * 2 AS doubled FROM runs WHERE started >= $from AND started < $to GROUP BY 1 ORDER BY 1"
+        },
+        "title": "Doubled",
+        "viz": {
+          "kind": "scatter",
+          "x": "runs"
+        }
+      },
+      {
+        "grid": {
+          "h": 3,
+          "w": 4,
+          "x": 0,
+          "y": 3
+        },
+        "id": "bars",
+        "query": {
+          "source": "activity",
+          "sql": "SELECT agent, COUNT(*) AS runs FROM runs WHERE started >= $from AND started < $to GROUP BY 1 ORDER BY 1"
+        },
+        "title": "Per agent",
+        "viz": {
+          "kind": "bars"
+        }
+      },
+      {
+        "grid": {
+          "h": 3,
+          "w": 4,
+          "x": 4,
+          "y": 3
+        },
+        "id": "stacked",
+        "query": {
+          "source": "activity",
+          "sql": "SELECT (started / $step) * $step AS time, agent, COUNT(*) AS runs FROM runs WHERE started >= $from AND started < $to GROUP BY 1, 2 ORDER BY 1"
+        },
+        "title": "Stacked",
+        "viz": {
+          "kind": "stackedBars",
+          "series_by": "agent"
+        }
+      },
+      {
+        "grid": {
+          "h": 3,
+          "w": 4,
+          "x": 8,
+          "y": 3
+        },
+        "id": "pie",
+        "query": {
+          "source": "activity",
+          "sql": "SELECT agent, COUNT(*) AS runs FROM runs WHERE started >= $from AND started < $to GROUP BY 1 ORDER BY 1"
+        },
+        "title": "Share",
+        "viz": {
+          "color": "palette",
+          "kind": "pie"
+        }
+      },
+      {
+        "grid": {
+          "h": 4,
+          "w": 6,
+          "x": 3,
+          "y": 4
+        },
+        "id": "table",
+        "query": {
+          "source": "activity",
+          "sql": "SELECT agent, COUNT(*) AS runs FROM runs WHERE started >= $from AND started < $to GROUP BY 1 ORDER BY 1"
+        },
+        "title": "Runs table",
+        "viz": {
+          "columns": [
+            {
+              "format": "text",
+              "name": "agent",
+              "title": "Agent"
+            }
+          ],
+          "kind": "table"
+        }
+      }
+    ],
+    "refresh_s": 60,
+    "time": {
+      "from": "now-30d",
+      "to": "now"
+    }
+  },
+  "dashboards": [
+    "claktory",
+    "every-kind"
+  ]
+}

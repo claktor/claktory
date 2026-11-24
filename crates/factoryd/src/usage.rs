@@ -100,6 +100,8 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
     loop {
         let Some(strong) = factory.upgrade() else { return };
         strong.check_usage(&mut tracked).await;
+        // Switches whose provider has room again go back (friend bug #8 A1).
+        crate::usage_switch::come_back(&strong).await;
         drop(strong);
         // A sign-in wakes it early.
         tokio::select! {
@@ -193,6 +195,13 @@ impl Factory {
                 self.forget_usage(&id);
                 continue;
             }
+            // Locked away with the person's secrets (just after a start,
+            // until the vault opens): nothing can be read yet, and nothing
+            // is recorded, so it's read as soon as they open. Read as "no
+            // limits", it would never have been read again.
+            if self.models.sign_ins_locked(&id).await {
+                continue;
+            }
             // Requests go to the account in use; the others wait.
             let in_use = provider.accounts.iter().find(|account| account.in_use).map_or_else(String::new, |account| account.id.clone());
             for account in account_ids(&provider) {
@@ -237,15 +246,25 @@ impl Factory {
                         entry.failed = false;
                         let resets = usage.windows.iter().map(|window| window.resets_at).filter(|at| *at > now);
                         entry.next_reset = resets.min().unwrap_or(0);
-                        // The provider says the account has room in every
-                        // window: one still marked spent (a reset claimed on
+                        // The provider says the account has room for a
+                        // pool's models (each window of their limits under
+                        // 100%): its mark still there (a reset claimed on
                         // the provider's own site, or applied late) is
-                        // forgotten, and waiting agents ask again.
-                        let room = !usage.windows.is_empty() && usage.windows.iter().all(|window| window.used_percent < 100.0);
+                        // forgotten, and waiting agents ask again. A model's
+                        // own weekly limit at 100% (Opus's, U11) holds back
+                        // only its own models.
+                        let read = !usage.windows.is_empty();
+                        let full: Vec<String> =
+                            usage.windows.iter().filter(|window| window.used_percent >= 100.0).map(|window| window.id.clone()).collect();
                         self.set_usage(&key, Some(v1::ProviderUsage { updated: now, error: String::new(), ..usage }));
-                        if room {
-                            match self.models.forget_spent(&id, &account).await {
-                                Ok(true) => self.capacity_changed(),
+                        if read {
+                            match self.models.forget_spent_with_room(&id, &account, &full).await {
+                                Ok(true) => {
+                                    // Shown at once, not at the old reset time:
+                                    // agents switched away (#341) can go back.
+                                    self.refresh_models().await;
+                                    self.capacity_changed();
+                                }
                                 Ok(false) => {}
                                 Err(error) => {
                                     tracing::warn!(provider = %id, %account, %error, "could not mark the account as having room");

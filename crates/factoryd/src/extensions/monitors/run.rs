@@ -64,6 +64,9 @@ pub(crate) struct State {
     /// Held while a watch's process is started and recorded, or stopped
     /// and its monitor changed, so neither happens halfway through the other.
     processes: Mutex<()>,
+    /// Where the monitors stood when clients were last told they changed
+    /// (`overview::signal`); None until it first looks.
+    signalled: Mutex<Option<u64>>,
 }
 
 impl Default for State {
@@ -74,6 +77,7 @@ impl Default for State {
             started: now_ms(),
             live: Mutex::default(),
             processes: Mutex::default(),
+            signalled: Mutex::default(),
         }
     }
 }
@@ -94,6 +98,10 @@ impl State {
 
     pub(crate) fn processes(&self) -> std::sync::MutexGuard<'_, ()> {
         self.processes.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn signalled(&self) -> std::sync::MutexGuard<'_, Option<u64>> {
+        self.signalled.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -214,6 +222,9 @@ struct Trigger {
     late: Option<String>,
     /// This fire is its last (an `at`, or a check that fires once).
     last: bool,
+    /// Who fired it by hand: an agent's id, '' for the person; '' too for
+    /// a fire on its own (Claktory's).
+    by: String,
 }
 
 /// Whether a watch's least gap since its last fire has passed (always, for other kinds).
@@ -271,7 +282,7 @@ fn trigger(factory: &Arc<Factory>, monitor: &mut Monitor, trigger: Trigger, now:
     monitor.last_fired = Some(now);
     monitor.carry.clear();
     monitor.cursor.last_after_carry = false;
-    save(&factory.store, monitor, now, "", Some(("fired", &trigger.cause)), true)?;
+    save(&factory.store, monitor, now, &trigger.by, Some(("fired", &trigger.cause)), true)?;
     if last {
         let reason = if monitor.max_fires.is_some_and(|max| monitor.fires >= max) { "it fired max_fires times" } else { "it fired" };
         end(factory, monitor, Status::Done, reason, now)?;
@@ -283,7 +294,7 @@ fn trigger(factory: &Arc<Factory>, monitor: &mut Monitor, trigger: Trigger, now:
 fn flush(factory: &Arc<Factory>, monitor: &mut Monitor, now: i64) -> rusqlite::Result<()> {
     let what = std::mem::take(&mut monitor.carry);
     let last = monitor.cursor.last_after_carry;
-    trigger(factory, monitor, Trigger { cause: "while your last fire waited".to_owned(), what, late: None, last }, now)
+    trigger(factory, monitor, Trigger { cause: "while your last fire waited".to_owned(), what, late: None, last, by: String::new() }, now)
 }
 
 /// The event's text: what fired, why, what happened, and the agent's prompt.
@@ -374,7 +385,7 @@ fn time(factory: &Arc<Factory>, monitor: &mut Monitor, agent: &Agent, now: i64) 
     // Counted from this fire, so missed times fire once, not once each.
     monitor.next_due = monitor.when.next(now);
     let last = matches!(monitor.when, When::At { .. });
-    trigger(factory, monitor, Trigger { cause, what: String::new(), late, last }, now)
+    trigger(factory, monitor, Trigger { cause, what: String::new(), late, last, by: String::new() }, now)
 }
 
 /// The result of running a check's command.
@@ -500,12 +511,12 @@ fn checked(factory: &Arc<Factory>, agent: &str, id: u32, run: CheckRun) -> rusql
     }
     let what = if output.trim().is_empty() { String::new() } else { format!("Output (end):\n{}", tail(output.trim_end(), WHAT_CHARS)) };
     let last = repeat == Repeat::Once;
-    trigger(factory, &mut monitor, Trigger { cause, what, late: None, last }, now)
+    trigger(factory, &mut monitor, Trigger { cause, what, late: None, last, by: String::new() }, now)
 }
 
 fn hash(text: &str) -> String {
     use sha2::{Digest, Sha256};
-    Sha256::digest(text.as_bytes()).iter().take(16).map(|byte| format!("{byte:02x}")).collect()
+    crate::encoding::hex(&Sha256::digest(text.as_bytes())[..16])
 }
 
 /// Where a files monitor keeps the files as it last fired on them.
@@ -641,7 +652,7 @@ async fn files(factory: &Arc<Factory>, monitor: &mut Monitor, paths: &[String], 
     }
     write_baseline(&path, &current);
     let what = differences(&baseline, &current);
-    trigger(factory, monitor, Trigger { cause: "files changed".to_owned(), what, late: None, last: false }, now)
+    trigger(factory, monitor, Trigger { cause: "files changed".to_owned(), what, late: None, last: false, by: String::new() }, now)
 }
 
 /// Where a watch's process writes its output.
@@ -755,7 +766,7 @@ fn watch(
         None => format!("{count} new line{}", if count == 1 { "" } else { "s" }),
     };
     let what = format!("{}\nFull log: {}", tail(&lines.join("\n"), WHAT_CHARS), log.display());
-    trigger(factory, monitor, Trigger { cause, what, late: None, last: false }, now)
+    trigger(factory, monitor, Trigger { cause, what, late: None, last: false, by: String::new() }, now)
 }
 
 /// The whole lines of `log` from byte `from`, at most `READ_CHUNK` bytes,
@@ -797,7 +808,7 @@ pub(super) fn added(factory: &Factory, agent: &str, id: u32) {
 /// Fires the monitor now, as asked (`monitors_change` fire), without ending it.
 pub(super) fn fire_by_hand(factory: &Arc<Factory>, monitor: &mut Monitor, actor: &str, now: i64) -> rusqlite::Result<()> {
     let by = if actor.is_empty() { factory.lock().config.person().to_owned() } else { actor.to_owned() };
-    trigger(factory, monitor, Trigger { cause: format!("fired by {by}"), what: String::new(), late: None, last: false }, now)
+    trigger(factory, monitor, Trigger { cause: format!("fired by {by}"), what: String::new(), late: None, last: false, by: actor.to_owned() }, now)
 }
 
 /// Stops a watch's process, if it has one running (one from before the

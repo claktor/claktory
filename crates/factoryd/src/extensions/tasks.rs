@@ -12,7 +12,7 @@ use factory_protocol::v1;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{Extension, Manifest, OptionKind, OptionSpec, PromptKind, PromptSection, factory_tool, switch};
+use super::{Extension, Manifest, OptionKind, OptionSpec, PromptSection, factory_tool, switch};
 use crate::config::{AgentConfig, Config};
 use crate::factory::{Factory, Inner, host_event};
 use crate::store::TaskRow;
@@ -71,7 +71,7 @@ impl Extension for Tasks {
 
     fn prompt(&self, _factory: &Factory, _inner: &Inner, agent: &AgentConfig) -> Vec<PromptSection> {
         let text = if sees_all(agent) { format!("{PROMPT}{SEE_ALL}") } else { PROMPT.to_owned() };
-        vec![PromptSection { kind: PromptKind::Static, text }]
+        vec![PromptSection::static_text(text)]
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {

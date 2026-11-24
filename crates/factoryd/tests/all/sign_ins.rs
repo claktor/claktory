@@ -255,3 +255,19 @@ async fn a_sign_in_while_the_vault_is_locked_works_and_goes_into_it_once_it_open
     view.follow(&mut client, |view| order(view) == ["a", "b"]).await;
     assert_eq!(tokens_in_plaintext(&dir), Vec::<String>::new());
 }
+
+/// Row 697: a subscription's usage isn't read while its sign-in is locked
+/// in the vault (a restart, until the vault opens), and is read as soon as
+/// it opens, not taken for one with no limits and never read again.
+#[tokio::test]
+async fn usage_is_read_once_the_vault_opens() {
+    let dir = temp_dir();
+    let (base_url, _seen) = anthropic().await;
+    let (_factory, mut client, mut view, recovery) = locked_after_restart(&dir, &base_url).await;
+    view.follow(&mut client, |view| order(view) == ["a"]).await;
+    let unread = |view: &View| claude(view).accounts[0].usage.as_ref().is_none_or(|usage| usage.updated == 0);
+    assert!(unread(&view), "nothing to read while locked: {:?}", claude(&view).accounts[0].usage);
+    assert!(matches!(client.request(unlock(&recovery)).await.body, Body::VaultSession(_)), "the recovery key opens it");
+    view.follow(&mut client, |view| !unread(view)).await;
+    assert!(claude(&view).accounts[0].usage.as_ref().is_some_and(|usage| usage.error.is_empty() && !usage.windows.is_empty()));
+}

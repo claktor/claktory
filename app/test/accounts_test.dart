@@ -16,6 +16,8 @@ Provider claude({List<Account>? accounts}) =>
     anthropic(signedInWith: 'Anthropic (Claude Pro/Max)', canSignOut: true)
       ..plan = 'Claude Max 20x'
       ..usage = weekly(100)
+      // Agents run on it (one account is in use).
+      ..agents = 2
       ..accounts.addAll(
         accounts ??
             [
@@ -49,8 +51,8 @@ Future<Harness> showSettings(
   WidgetTester tester,
   Provider provider, {
   LoginFlow? login,
-  // Tall enough for Profile and every account.
-  Size size = const Size(1200, 1100),
+  // Tall enough for Profile, every account and where the models come from.
+  Size size = const Size(1200, 1200),
 }) async {
   final snapshot = workspace(login: login)
     ..providers.clear()

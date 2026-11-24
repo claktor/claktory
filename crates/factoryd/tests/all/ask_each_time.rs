@@ -101,9 +101,45 @@ async fn the_persons_comment_reaches_the_agent_with_the_decision() {
     let (_dir, mut client, mut view, _id) = setup().await;
     call(&mut client, &mut view, "bo", "bash", r#"{"command": "echo deployed", "secrets": ["AWS"]}"#).await;
     let (seq, _) = approvals(&view).pop().expect("a card");
-    let deny = v1::DecideSecretApproval { agent_id: "bo".into(), seq, allow: false, comment: " Use staging first. ".into() };
+    let deny = v1::DecideSecretApproval { agent_id: "bo".into(), seq, allow: false, comment: " Use staging first. ".into(), ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::DecideSecretApproval(deny)).await;
     let told = "The person didn't allow you to use AWS.\n\nThe person's note: Use staging first.";
     view.follow(&mut client, |view| view.entries.iter().any(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.text == told)))
         .await;
+}
+
+/// Submit (#370): a comment instead of Allow is a reply. Nothing runs, and
+/// the card shows the reply, kept apart from the pipe tables.
+#[tokio::test]
+async fn a_reply_runs_nothing_and_the_card_keeps_it() {
+    let (dir, mut client, mut view, _id) = setup().await;
+    call(&mut client, &mut view, "bo", "bash", r#"{"command": "echo deployed", "secrets": ["AWS"]}"#).await;
+    let (seq, _) = approvals(&view).pop().expect("a card");
+    let reply = |comment: &str| {
+        client_message::Body::DecideSecretApproval(v1::DecideSecretApproval {
+            agent_id: "bo".into(),
+            seq,
+            allow: true,
+            comment: comment.into(),
+            reply: true,
+        })
+    };
+    let empty = apply_request(&mut client, &mut view, reply("")).await;
+    assert!(matches!(empty, v1::server_message::Body::Error(_)), "{empty:?}");
+    apply_request(&mut client, &mut view, reply("Deploy to staging first.")).await;
+    let told = "The person didn't allow you to use AWS this time, and replied; nothing ran. They say:\n\nDeploy to staging first.";
+    view.follow(&mut client, |view| view.entries.iter().any(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.text == told)))
+        .await;
+    let card = approvals(&view).into_iter().find(|(at, _)| *at == seq).expect("the card").1;
+    assert_eq!(
+        (card.state(), card.replied, card.comment.as_str()),
+        (v1::SecretApprovalState::Denied, true, "Deploy to staging first.")
+    );
+    // The same command still asks: nothing was allowed.
+    let again = call(&mut client, &mut view, "bo", "bash", r#"{"command": "echo deployed", "secrets": ["AWS"]}"#).await;
+    assert!(again.starts_with("Not run"), "{again}");
+    // Kept apart from the pipe tables (Fugo): only decision_notes holds it.
+    let db = rusqlite::Connection::open(crate::common::home(&dir).db_path()).expect("factory.db");
+    let kept: String = db.query_row("SELECT comment FROM decision_notes WHERE kind = 'secret_use'", [], |row| row.get(0)).expect("kept");
+    assert_eq!(kept, "Deploy to staging first.");
 }

@@ -34,6 +34,7 @@ pub fn provider() -> Provider {
         stream_simple,
     );
     provider.check_key = Some(crate::providers::keys::openrouter);
+    provider.credit = Some(crate::providers::keys::openrouter_credit);
     provider
 }
 
@@ -218,7 +219,7 @@ fn convert_messages(model: &Model, context: &LlmContext, compat: &Compat) -> Res
                     params.push(json!({"role": "tool", "content": content, "tool_call_id": result.tool_call_id}));
                     if has_images && images_allowed {
                         images.extend(result.content.iter().filter_map(|part| match part {
-                            ToolResultPart::Image { data, mime_type } => Some(chat_image(data, mime_type)),
+                            ToolResultPart::Image { data, mime_type, .. } => Some(chat_image(data, mime_type)),
                             ToolResultPart::Text { .. } => None,
                         }));
                     }
@@ -638,8 +639,21 @@ async fn request(
     let response = send_request(builder, options).await?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
+        let retry_after_ms = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(|seconds| seconds * 1000);
         let body = response_text(response).await;
-        if crate::accounts::credit_error(status, &body) {
+        // A spending cap on the key: skipped until it resets, as a
+        // subscription at its limit is; one that never does, as out of credit.
+        if let Some(resets_at) = crate::accounts::spending_limit(status, &body, retry_after_ms) {
+            match resets_at {
+                Some(at) => crate::accounts::mark_usage_limit(&mut parser.output, Some(at)),
+                None => crate::accounts::mark_out_of_credit(&mut parser.output),
+            }
+        } else if crate::accounts::credit_error(status, &body) {
             crate::accounts::mark_out_of_credit(&mut parser.output);
         } else if crate::accounts::refused_error(status, &body) {
             crate::accounts::mark_refused(&mut parser.output, &crate::accounts::Refused::default());

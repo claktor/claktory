@@ -131,6 +131,70 @@ async fn an_approved_proposal_reaches_rivet_as_the_persons_message_with_their_co
     assert!(matches!(again, Body::Error(_)), "{again:?}");
 }
 
+/// Submit (#370): a comment instead of Approve or Dismiss is an answer.
+/// Rivet gets the proposal with the comment as what to do, and the agent
+/// is told it was answered so: neither approved nor dismissed.
+#[tokio::test]
+async fn an_answered_proposal_reaches_rivet_with_the_comment_as_what_to_do() {
+    let dir = temp_dir();
+    let (_factory, mut client, mut view) = setup(&dir).await;
+    give_rivet_a_model(&mut client, &mut view).await;
+    let (_, proposal) = propose(&mut client, &mut view, NEEDED).await;
+    let proposal = proposal.expect("proposed");
+    let answer = |comment: &str| {
+        client_message::Body::DecideProposal(v1::DecideProposal {
+            agent_id: "builder".into(),
+            proposal_id: proposal.id.clone(),
+            reply: true,
+            comment: comment.into(),
+            ..Default::default()
+        })
+    };
+
+    // An answer needs words.
+    let empty = apply_request(&mut client, &mut view, answer("  ")).await;
+    let Body::Error(error) = empty else { panic!("{empty:?}") };
+    assert_eq!(error.message, "Write an answer, or approve or dismiss the proposal.");
+    assert_eq!(proposal_entry(&view.entries, &proposal.id).state(), ProposalState::Pending);
+
+    let reply = apply_request(&mut client, &mut view, answer("Just one, on Sonnet.")).await;
+    assert!(matches!(reply, Body::Ack(_)), "{reply:?}");
+    let decided = proposal_entry(&view.entries, &proposal.id);
+    assert_eq!((decided.state(), decided.replied, decided.comment.as_str()), (ProposalState::Approved, true, "Just one, on Sonnet."));
+    view.follow(&mut client, |view| {
+        view.entries.iter().any(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.source() == v1::EventSource::Factory))
+            && idle(view, "builder")
+    })
+    .await;
+    let told = view
+        .entries
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            Some(Kind::Event(event)) if event.source() == v1::EventSource::Factory => Some(event.clone()),
+            _ => None,
+        })
+        .expect("Builder is told");
+    assert_eq!(told.summary, "The person answered your proposal to Rivet.");
+    assert_eq!(
+        told.text,
+        format!("The person answered your proposal; Rivet acts on what they said:\n\nJust one, on Sonnet.\n\nYour proposal:\n{NEEDED}")
+    );
+
+    // Rivet got it as the person's message: their words first, as what to do.
+    apply_request(&mut client, &mut view, select("rivet")).await;
+    view.follow(&mut client, |view| view.entries.len() >= 2 && idle(view, "rivet")).await;
+    let Some(Kind::User(message)) = &view.entries[0].kind else { panic!("the person's message: {:?}", view.entries[0]) };
+    assert_eq!(
+        message.text,
+        format!(
+            "The person answered Builder (Site)'s proposal:\n\nJust one, on Sonnet.\n\nDo what the person says; the proposal is for \
+             context.\n\nBuilder (Site) proposes:\n\n{NEEDED}"
+        )
+    );
+    let again = apply_request(&mut client, &mut view, answer("And another.")).await;
+    assert!(matches!(again, Body::Error(_)), "{again:?}");
+}
+
 #[tokio::test]
 async fn a_dismissed_proposal_tells_the_agent_and_rivet_gets_nothing() {
     let dir = temp_dir();

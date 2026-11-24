@@ -76,6 +76,8 @@ const MAP: &str =
     "Who can message whom, one line per agent: whom it messages, and by whom it's messaged. `agent` (an id or name) shows just that agent.";
 const STATUS: &str = "Whether agents are idle or working, one line each: every agent you can message, or only `agent`.";
 const INSPECT: &str = "How an agent on your team is set up, read only: you, the agents you lead (directly or through others), or, as an admin agent, every agent. `agent` (an id or name) gives its name, role, project and folder, model and effort, lead, extensions with their options, secrets (by name, never values), monitors, prompt and whether it's working; `agent` \"team\", or none, lists your team, one line each.";
+const COMPACT: &str = "Admin only, when the person asks: summarize another agent's conversation, as their /compact does, so it carries on from the summary with less context. Idle, it's summarized now; working, as soon as its current work ends, before it reads anything new. `agent`: its id or name.";
+const CLEAR: &str = "Admin only, when the person asks: ask them to clear another agent's conversation, as their /clear does. It never clears by itself: it opens a card in your conversation, and only their approval clears it (the agent stops, its conversation is archived and it starts on an empty one; its checklist and memory stay). You're told in an event whether they approved. `agent`: its id or name.";
 const SUGGEST: &str = "Suggest that the person talk to another agent (`agent`, by id or name, one you can message) themselves: they see a card in your conversation, with `reason`, and a button that opens that agent's conversation with `message` in its message box, drafted and not sent, for them to change or send. Write `message` as the person would send it, in their voice, saying everything that agent needs; `reason` is one line on why they should talk to it.";
 /// The prompt's line on suggesting a talk. `{person}`: the user's name, or
 /// "the person".
@@ -237,6 +239,11 @@ impl Extension for Agents {
         }
         if crate::proposals::is_admin(agent) {
             text.push_str("You lead every agent: agents_inspect shows how any of them is set up, read only.\n");
+            let _ = writeln!(
+                text,
+                "When {} asks, agents_compact summarizes an agent's conversation, as their /compact does, and agents_clear asks them to approve clearing one, as their /clear does; never on your own.",
+                config.person()
+            );
         } else {
             let team: Vec<String> = led(config, agent).into_iter().map(|other| named(config, agent, other)).collect();
             if !team.is_empty() {
@@ -263,14 +270,17 @@ impl Extension for Agents {
             provenance::tool(factory, agent),
             quiet::tool(factory, agent),
         ];
-        let (map, propose) = match factory.lock().config.agent(agent) {
-            Some(me) => (sees_map(me), !crate::proposals::is_admin(me)),
+        let (map, admin) = match factory.lock().config.agent(agent) {
+            Some(me) => (sees_map(me), crate::proposals::is_admin(me)),
             None => (false, false),
         };
         if map {
             tools.push(map_tool(factory, agent));
         }
-        if propose {
+        if admin {
+            tools.push(compact_tool(factory, agent));
+            tools.push(clear_tool(factory, agent));
+        } else {
             tools.push(crate::proposals::tool(factory, agent));
         }
         tools
@@ -872,6 +882,90 @@ fn inspect_tool(factory: &Arc<Factory>, asker: &str) -> Tool {
             }
         }),
     )
+}
+
+fn compact_tool(factory: &Arc<Factory>, admin: &str) -> Tool {
+    let parameters = json!({
+        "type": "object",
+        "required": ["agent"],
+        "properties": {"agent": {"type": "string", "minLength": 1}},
+        "additionalProperties": false,
+    });
+    super::async_tool(factory, admin, "agents_compact", "Compact a conversation", COMPACT, parameters, compact)
+}
+
+fn clear_tool(factory: &Arc<Factory>, admin: &str) -> Tool {
+    let parameters = json!({
+        "type": "object",
+        "required": ["agent"],
+        "properties": {"agent": {"type": "string", "minLength": 1}},
+        "additionalProperties": false,
+    });
+    super::tool(
+        crate::extensions::ask::CLEAR_TOOL,
+        "Ask to clear a conversation",
+        CLEAR,
+        parameters,
+        super::typed_handler(factory, admin, |factory, admin, args: TargetArgs| {
+            let (id, name) = other_agent(factory, admin, &args.agent, "clear")?;
+            crate::extensions::ask::ask_to_clear(factory, admin, &id, &name)
+        }),
+    )
+}
+
+#[derive(Deserialize)]
+struct TargetArgs {
+    agent: String,
+}
+
+/// The agent an admin agent's agents_compact or agents_clear means (its id
+/// and name), or why not: another agent, and the caller still an admin.
+/// `verb`: what it would do, for the refusals.
+fn other_agent(factory: &Factory, admin: &str, wanted: &str, verb: &str) -> Result<(String, String), String> {
+    let inner = factory.lock();
+    let config = &inner.config;
+    let me = super::caller(config, admin)?;
+    if !crate::proposals::is_admin(me) {
+        return Err(format!("Only an admin agent can {verb} another agent's conversation. Nothing was done."));
+    }
+    let others: Vec<&AgentConfig> = led(config, me);
+    let wanted = wanted.trim();
+    match find(config, me, &others, wanted)? {
+        Some(agent) => Ok((agent.id.clone(), agent.name.clone())),
+        None if wanted == me.id || wanted.eq_ignore_ascii_case(&me.name) => {
+            Err(format!("That's you: only {} can {verb} your own conversation, with /{verb}.", config.person()))
+        }
+        None => Err(format!("No agent has the id or name \"{wanted}\".")),
+    }
+}
+
+/// agents_compact: summarizes the agent's conversation as /compact does,
+/// now or, working, when its current work ends.
+async fn compact(factory: Arc<Factory>, admin: String, args: TargetArgs) -> Result<ToolResult, String> {
+    let (id, name) = other_agent(&factory, &admin, &args.agent, "compact")?;
+    factory.ensure_loaded(&id).await.map_err(|error| format!("Couldn't read {name}'s conversation: {error}"))?;
+    {
+        let inner = factory.lock();
+        if inner.config.agent(&id).is_some_and(|agent| inner.config.archived(agent)) {
+            return Err(format!("{name}'s project is archived, so it doesn't run and can't be compacted. Nothing was done."));
+        }
+        let runtime = inner.agents.get(&id);
+        if runtime.is_some_and(|runtime| runtime.running && runtime.idle) {
+            return Err(format!("{name}'s conversation is being summarized right now. Nothing more was done."));
+        }
+        // Only a summary, or one message: nothing a summary would shorten.
+        let messages = runtime.and_then(|runtime| runtime.transcript.as_ref()).map_or(0, |transcript| transcript.messages().len());
+        if messages <= 1 && !runtime.is_some_and(|runtime| runtime.running) {
+            return Err(format!("{name}'s conversation has nothing to compact yet. Nothing was done."));
+        }
+    }
+    let now = factory.compact_now(&id, &name, true).await.map_err(|error| error.to_string())?;
+    let said = if now {
+        format!("Compacting {name}'s conversation now; it carries on from the summary.")
+    } else {
+        format!("{name} is working: its conversation is compacted as soon as its current work ends, before it reads anything new.")
+    };
+    Ok(ToolResult::text(said, json!({"agent": id, "now": now})))
 }
 
 /// `asker`'s team, one line each: itself, then those it leads.

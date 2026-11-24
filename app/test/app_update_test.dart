@@ -1,43 +1,68 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart';
 import 'package:factory_app/app_update.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// A Factory's release archive served in pieces of [step] bytes, as FetchApp
-/// would, counting how many are asked for at once.
+/// A Factory's release archive served in pieces as FetchApp would: as many
+/// bytes as asked, at most [step] (a backend's 1 MiB), or always [step]
+/// from a backend from before FetchApp.max_bytes ([legacy]); counting how
+/// many are asked for at once.
 class Pieces {
-  Pieces(this.archive, {this.step = 4096, this.preparingFor = 0});
+  Pieces(
+    this.archive, {
+    this.step = 1 << 20,
+    this.preparingFor = 0,
+    this.legacy = false,
+  });
 
   final List<int> archive;
   final int step;
+  final bool legacy;
 
   /// How many times to answer `preparing` first.
   int preparingFor;
   String? sha256Override;
+
+  /// Called before each piece is answered; what it throws, the piece does.
+  void Function(int offset)? before;
   var asked = <int>[];
+  var sizes = <int>[];
   var inFlight = 0;
   var mostInFlight = 0;
 
-  Future<AppPiece> call(String version, int offset) async {
+  Future<AppPiece> call(String version, int offset, {int maxBytes = 0}) async {
     expect(version, '2026.12.01-1200');
     if (preparingFor > 0) {
       preparingFor--;
       return const AppPiece(preparing: true);
     }
     asked.add(offset);
+    sizes.add(maxBytes);
     inFlight++;
     mostInFlight = math.max(mostInFlight, inFlight);
-    await Future<void>.delayed(const Duration(milliseconds: 2));
-    inFlight--;
+    try {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+      before?.call(offset);
+    } finally {
+      inFlight--;
+    }
+    final most = legacy || maxBytes == 0 ? step : math.min(maxBytes, step);
     return AppPiece(
       size: archive.length,
       sha256: sha256Override ?? sha256.convert(archive).toString(),
       appName: 'Factory.app',
-      data: archive.sublist(offset, math.min(offset + step, archive.length)),
+      data: archive.sublist(offset, math.min(offset + most, archive.length)),
     );
   }
+}
+
+/// The connection dropping under a piece, as the backend throws it.
+class Dropped implements Exception {
+  const Dropped();
 }
 
 /// Makes an ad-hoc signed bundle at [path] with the bundle identifier [id].
@@ -105,7 +130,15 @@ void main() {
   final onMac = Platform.isMacOS;
   late Directory temp;
   late String bundle;
-  const updater = AppUpdater(pollEvery: Duration(milliseconds: 5));
+  // Pieces of 4 KiB, so an archive takes many.
+  const updater = AppUpdater(
+    pollEvery: Duration(milliseconds: 5),
+    retryEvery: Duration(milliseconds: 5),
+    firstPiece: 4096,
+    leastPiece: 1024,
+    mostPiece: 4096,
+  );
+  String stagingOf() => '${temp.path}/Applications/.Factory.app.update';
 
   setUp(() {
     temp = Directory.systemTemp.createTempSync('app-update');
@@ -128,50 +161,169 @@ void main() {
     return null;
   }
 
-  test(
-    'downloads the app in pieces, four at a time, beside this one, and '
-    'stages it once its size, hash, identity and signature check out',
-    () async {
-      final pieces = Pieces(
-        archiveOf(temp, 'dev.factory.app'),
-        preparingFor: 2,
-      );
-      final progress = <UpdateProgress>[];
-      final staged = await updater.stage(
+  test('downloads the app in pieces of the size it asks, two at a time, beside '
+      'this one, and stages it once its size, hash, identity and signature '
+      'check out', () async {
+    final pieces = Pieces(archiveOf(temp, 'dev.factory.app'), preparingFor: 2);
+    final progress = <UpdateProgress>[];
+    final staged = await updater.stage(
+      fetch: pieces.call,
+      version: '2026.12.01-1200',
+      bundlePath: bundle,
+      onProgress: progress.add,
+    );
+    expect(staged.staging, stagingOf(), reason: "on the app's volume");
+    expect(staged.app, '${staged.staging}/unpacked/Factory.app');
+    expect(File('${staged.app}/Contents/Info.plist').existsSync(), isTrue);
+    expect(Directory(staged.staging).listSync().map((e) => e.path), [
+      '${staged.staging}/unpacked',
+    ], reason: 'the archive and its note go once unpacked');
+    final size = pieces.archive.length;
+    expect(size, greaterThan(4096 * 6));
+    expect(pieces.asked.toSet().length, pieces.asked.length);
+    expect(pieces.asked.toSet(), {for (var at = 0; at < size; at += 4096) at});
+    expect(
+      pieces.sizes.take(pieces.sizes.length - 1),
+      everyElement(4096),
+      reason: 'each asks its size, the last what is left',
+    );
+    expect(pieces.mostInFlight, 2);
+    expect(progress.first.stage, UpdateStage.preparing);
+    final downloads = progress
+        .where((p) => p.stage == UpdateStage.downloading)
+        .toList();
+    expect(downloads.last.received, size);
+    expect(downloads.last.fraction, 1);
+    expect(progress.last.stage, UpdateStage.checking);
+  }, skip: !onMac);
+
+  test('a download that stops keeps what it has, and the next carries on from '
+      'there', () async {
+    final pieces = Pieces(archiveOf(temp, 'dev.factory.app'));
+    final size = pieces.archive.length;
+    pieces.before = (offset) {
+      if (offset >= 4096 * 4) throw const Dropped();
+    };
+    await expectLater(
+      updater.stage(
         fetch: pieces.call,
         version: '2026.12.01-1200',
         bundlePath: bundle,
-        onProgress: progress.add,
-      );
-      expect(
-        staged.staging,
-        '${temp.path}/Applications/.Factory.app.update',
-        reason: "on the app's volume",
-      );
-      expect(staged.app, '${staged.staging}/unpacked/Factory.app');
-      expect(File('${staged.app}/Contents/Info.plist').existsSync(), isTrue);
-      expect(
-        File('${staged.staging}/app.tar.gz').existsSync(),
-        isFalse,
-        reason: 'the archive goes once unpacked',
-      );
-      final size = pieces.archive.length;
-      expect(size, greaterThan(pieces.step * 6));
-      expect(pieces.asked.toSet().length, pieces.asked.length);
-      expect(pieces.asked.toSet(), {
-        for (var at = 0; at < size; at += pieces.step) at,
-      });
-      expect(pieces.mostInFlight, 4);
-      expect(progress.first.stage, UpdateStage.preparing);
-      final downloads = progress
-          .where((p) => p.stage == UpdateStage.downloading)
-          .toList();
-      expect(downloads.last.received, size);
-      expect(downloads.last.fraction, 1);
-      expect(progress.last.stage, UpdateStage.checking);
-    },
-    skip: !onMac,
-  );
+      ),
+      throwsA(isA<Dropped>()),
+    );
+    final part = File('${stagingOf()}/app.tar.gz.part');
+    expect(part.lengthSync(), greaterThanOrEqualTo(4096 * 4));
+    expect(File('${stagingOf()}/download.json').existsSync(), isTrue);
+
+    pieces
+      ..before = null
+      ..asked = [];
+    final progress = <UpdateProgress>[];
+    final staged = await updater.stage(
+      fetch: pieces.call,
+      version: '2026.12.01-1200',
+      bundlePath: bundle,
+      onProgress: progress.add,
+    );
+    expect(
+      pieces.asked,
+      everyElement(greaterThanOrEqualTo(4096 * 4)),
+      reason: 'what came before is kept',
+    );
+    expect(pieces.asked.toSet(), {
+      for (var at = pieces.asked.first; at < size; at += 4096) at,
+    });
+    expect(progress.first.received, greaterThanOrEqualTo(4096 * 5));
+    expect(File('${staged.app}/Contents/Info.plist').existsSync(), isTrue);
+  }, skip: !onMac);
+
+  test('a dropped connection is waited for, and the download carries on by '
+      'itself once it is back', () async {
+    final pieces = Pieces(archiveOf(temp, 'dev.factory.app'));
+    final connected = ValueNotifier(true);
+    var dropped = false;
+    pieces.before = (offset) {
+      if (offset == 4096 * 3 && !dropped) {
+        dropped = true;
+        connected.value = false;
+        Timer(const Duration(milliseconds: 50), () => connected.value = true);
+        throw const Dropped();
+      }
+    };
+    final progress = <UpdateProgress>[];
+    final staged = await updater.stage(
+      fetch: pieces.call,
+      version: '2026.12.01-1200',
+      bundlePath: bundle,
+      connected: connected,
+      onProgress: progress.add,
+    );
+    expect(dropped, isTrue);
+    final waiting = progress.firstWhere((p) => p.stage == UpdateStage.waiting);
+    expect(waiting.size, pieces.archive.length);
+    expect(waiting.received, greaterThanOrEqualTo(4096 * 3));
+    expect(pieces.asked.where((at) => at == 4096 * 3), hasLength(2));
+    expect(File('${staged.app}/Contents/Info.plist').existsSync(), isTrue);
+  }, skip: !onMac);
+
+  test('from a backend that sends 1 MiB whatever is asked, pieces go one at a '
+      'time at its size', () async {
+    final pieces = Pieces(
+      archiveOf(temp, 'dev.factory.app'),
+      step: 8192,
+      legacy: true,
+    );
+    final staged = await updater.stage(
+      fetch: pieces.call,
+      version: '2026.12.01-1200',
+      bundlePath: bundle,
+    );
+    expect(File('${staged.app}/Contents/Info.plist').existsSync(), isTrue);
+    expect(pieces.mostInFlight, 1);
+    expect(pieces.asked.skip(1), everyElement((int at) => at % 8192 == 0));
+  }, skip: !onMac);
+
+  test('a kept download of another archive (the release packed again) starts '
+      'over', () async {
+    final pieces = Pieces(archiveOf(temp, 'dev.factory.app'));
+    pieces.before = (offset) {
+      if (offset >= 4096 * 4) throw const Dropped();
+    };
+    await expectLater(
+      updater.stage(
+        fetch: pieces.call,
+        version: '2026.12.01-1200',
+        bundlePath: bundle,
+      ),
+      throwsA(isA<Dropped>()),
+    );
+    final again = Pieces(archiveOf(temp, 'dev.factory.app', linux: true));
+    final staged = await updater.stage(
+      fetch: again.call,
+      version: '2026.12.01-1200',
+      bundlePath: bundle,
+    );
+    expect(again.asked, contains(0));
+    expect(File('${staged.app}/Contents/Info.plist').existsSync(), isTrue);
+  }, skip: !onMac);
+
+  test('an archive that changes while it downloads (packed again) is '
+      'downloaded again from the start', () async {
+    final pieces = Pieces(archiveOf(temp, 'dev.factory.app'));
+    var changed = false;
+    pieces.before = (offset) {
+      pieces.sha256Override = offset == 4096 * 2 && !changed ? 'f' * 64 : null;
+      if (offset == 4096 * 2) changed = true;
+    };
+    final staged = await updater.stage(
+      fetch: pieces.call,
+      version: '2026.12.01-1200',
+      bundlePath: bundle,
+    );
+    expect(pieces.asked.where((at) => at == 0), hasLength(2));
+    expect(File('${staged.app}/Contents/Info.plist').existsSync(), isTrue);
+  }, skip: !onMac);
 
   test("from a Linux Factory, whose archive is the whole Mac release, only the "
       'app is unpacked', () async {
@@ -187,15 +339,21 @@ void main() {
     );
   }, skip: !onMac);
 
-  test('a download whose hash is off is refused and left nowhere', () async {
-    final pieces = Pieces(archiveOf(temp, 'dev.factory.app'))
-      ..sha256Override = '0' * 64;
-    expect(await failure(pieces), "the download is damaged");
-    expect(
-      Directory('${temp.path}/Applications').listSync().map((e) => e.path),
-      [bundle],
-    );
-  }, skip: !onMac);
+  test(
+    'a download whose hash is off is downloaded again once, then refused and '
+    'left nowhere',
+    () async {
+      final pieces = Pieces(archiveOf(temp, 'dev.factory.app'))
+        ..sha256Override = '0' * 64;
+      expect(await failure(pieces), 'the download is damaged');
+      expect(pieces.asked.where((at) => at == 0), hasLength(2));
+      expect(
+        Directory('${temp.path}/Applications').listSync().map((e) => e.path),
+        [bundle],
+      );
+    },
+    skip: !onMac,
+  );
 
   test('another app is refused', () async {
     final pieces = Pieces(archiveOf(temp, 'com.example.other'));

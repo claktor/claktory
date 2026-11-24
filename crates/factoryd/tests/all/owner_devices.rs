@@ -118,7 +118,12 @@ async fn the_first_device_through_the_account_is_in_at_once_and_the_next_waits_f
     assert!(asking.signed_in && asking.discovered);
     let hashed: String = sha2::Sha256::digest(said.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
     assert_eq!(asking.number, factoryd::remote::approval_number(&local.endpoint.to_string(), &second.id().to_string(), &hashed));
-    apply_request(&mut client, &mut view, Request::ApproveDevice(v1::ApproveDevice { device_id: pending.device_id.clone() })).await;
+    apply_request(
+        &mut client,
+        &mut view,
+        Request::ApproveDevice(v1::ApproveDevice { device_id: pending.device_id.clone(), number: asking.number.clone() }),
+    )
+    .await;
     let answer = laptop.receive().await.body.expect("an answer");
     assert_eq!(welcomed(&mut laptop, answer).await.device_id, pending.device_id);
     drop(laptop);
@@ -227,4 +232,76 @@ async fn a_retired_service_key_lets_no_device_in_by_its_assertion() {
     let device = new_device().await;
     let (_, answer) = knock(&local, &device, "", &assertion(&instance, &account, &device)).await;
     assert!(matches!(answer, Body::Error(_)), "turned away: {answer:?}");
+}
+
+/// Who a paired device is confirmed for, as devices.json keeps it.
+fn confirmed_as(dir: &Path, id: &str) -> String {
+    factoryd::remote::devices(&home(dir)).expect("devices").into_iter().find(|device| device.id == id).expect("the device").confirmed_as
+}
+
+/// A paired device's app through the tunnel, welcomed: paired with a code
+/// and allowed.
+async fn paired(dir: &Path, local: &Code, name: &str) -> (Client, String) {
+    let (token, made) = factoryd::remote::pair(&home(dir), name).expect("paired");
+    let device = new_device().await;
+    let (mut app, answer) = knock(local, &device, &token, "").await;
+    assert!(matches!(answer, Body::PairingPending(_)), "{answer:?}");
+    factoryd::remote::approve(&home(dir), &made.id).expect("allowed");
+    let answer = app.receive().await.body.expect("an answer");
+    welcomed(&mut app, answer).await;
+    (app, made.id)
+}
+
+/// #365 R5: signing this Claktory in on a paired device confirms that
+/// device, and only it, for the account it just signed in to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn signing_in_on_a_paired_device_confirms_that_device_alone() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let relays = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    apply_request(&mut client, &mut view, Request::SetRemoteAccess(relays)).await;
+    let local = parse(&local_pairing(&dir).await);
+    let (mut phone, phone_id) = paired(&dir, &local, "Phone").await;
+    let (mut tablet, tablet_id) = paired(&dir, &local, "Tablet").await;
+    // One waiting to be allowed.
+    let (token, waiting) = factoryd::remote::pair(&home(&dir), "Laptop").expect("paired");
+    let laptop = new_device().await;
+    let (_laptop, answer) = knock(&local, &laptop, &token, "").await;
+    assert!(matches!(answer, Body::PairingPending(_)), "{answer:?}");
+
+    // A wrong code signs in no one, and confirms no one.
+    phone.ok(Request::AccountSignIn(v1::AccountSignIn { email: "matt@example.com".into() })).await;
+    let wrong = phone.request(Request::AccountVerify(v1::AccountVerify { code: "000000".into() })).await;
+    assert!(matches!(wrong.body, Body::Error(_)), "{:?}", wrong.body);
+    assert_eq!(confirmed_as(&dir, &phone_id), "");
+
+    // The right one: the phone that typed it is confirmed, as that account;
+    // the tablet, and the laptop still waiting, aren't.
+    let code = instance.last_code("matt@example.com");
+    phone.ok(Request::AccountVerify(v1::AccountVerify { code })).await;
+    let matt = account_id(&dir);
+    assert_eq!(confirmed_as(&dir, &phone_id), matt);
+    assert_eq!(confirmed_as(&dir, &tablet_id), "");
+    assert_eq!(confirmed_as(&dir, &waiting.id), "");
+    view.follow(&mut client, |view| remote(view).devices.iter().any(|device| device.id == phone_id && device.confirmed)).await;
+    assert!(remote(&view).devices.iter().any(|device| device.id == tablet_id && !device.confirmed));
+
+    // Signed in again into another account, on the tablet: only the tablet
+    // is confirmed, as the new account; the phone stays the old one's.
+    client.ok(Request::AccountSignOut(v1::AccountSignOut {})).await;
+    tablet.ok(Request::AccountSignIn(v1::AccountSignIn { email: "fred@example.com".into() })).await;
+    let code = instance.last_code("fred@example.com");
+    tablet.ok(Request::AccountVerify(v1::AccountVerify { code })).await;
+    let fred = account_id(&dir);
+    assert_ne!(fred, matt);
+    assert_eq!((confirmed_as(&dir, &tablet_id), confirmed_as(&dir, &phone_id)), (fred, matt));
+
+    // This computer's own app signing in confirms no paired device.
+    client.ok(Request::AccountSignOut(v1::AccountSignOut {})).await;
+    let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
+    assert!(workspace.remote.expect("remote").devices.iter().all(|device| device.id != tablet_id || !device.confirmed));
+    assert_eq!(confirmed_as(&dir, &waiting.id), "");
 }

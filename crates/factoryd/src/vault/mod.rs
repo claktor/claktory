@@ -211,6 +211,12 @@ ALTER TABLE secrets ADD COLUMN ask INTEGER NOT NULL DEFAULT 0;
 -- base64; a command's file gets the bytes themselves.
 ALTER TABLE variables ADD COLUMN binary INTEGER NOT NULL DEFAULT 0;
 ",
+    "
+-- #370 Submit: the person answered a request or a proposal to connect with
+-- a comment instead (state 'dismissed': nothing was given or connected).
+ALTER TABLE requests ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE connect_proposals ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 /// How long a command's approval stays armed between the gate that passed
@@ -1138,7 +1144,9 @@ impl Vault {
     }
 
     /// The vault as clients see it: never values. `running` says whether an
-    /// agent's background task (agent, task id) runs now.
+    /// agent's background task (agent, task id) runs now, asked for each task
+    /// that got a secret lately, of each grant: the Workspace answers it from
+    /// one read of the running tasks (#402), never a lookup per task.
     pub(crate) fn state(&self, running: impl Fn(&str, &str) -> bool) -> v1::VaultState {
         let mut inner = self.lock();
         if inner.state.is_none() {

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:factory_app/backend.dart' show RequestFailure;
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/device_account.dart';
 import 'package:factory_app/pairing.dart';
@@ -336,6 +337,53 @@ void main() {
     expect(message.confirmDevice.assertion, 'assertion-for-${'b' * 64}');
     expect(message.confirmDevice.deviceId, isEmpty);
     await until(() => backend.confirmBy.value == null);
+    expect(backend.confirmBy.value, isNull);
+    await backend.close();
+    await server.close(force: true);
+  });
+
+  // #365 R5: signing the Claktory in from this device confirms this device
+  // there (the backend's), so it isn't asked to sign in a second time.
+  test('signing the Claktory in from here confirms this device: no second '
+      'sign-in', () async {
+    final by = DateTime.now().add(const Duration(days: 7));
+    final (server, _) = await answering((message) {
+      if (message.hasHello()) {
+        return ServerMessage(
+          welcome: Welcome(
+            deviceId: 'd9',
+            confirmByMs: Int64(by.millisecondsSinceEpoch),
+          ),
+        );
+      }
+      if (message.hasAccountVerify()) {
+        return message.accountVerify.code == '123456'
+            ? ServerMessage(ack: Ack())
+            : ServerMessage(
+                error: Error(
+                  code: ErrorCode.ERROR_CODE_INVALID_REQUEST,
+                  message: "That code isn't right.",
+                ),
+              );
+      }
+      return null;
+    });
+    final backend = backendWith(FakeTunnels(FakeTunnel(server.port)))
+      ..deviceKey = ((_) => 'k' * 64);
+    backend.connectTo(
+      parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=mac-mini'),
+    );
+    unawaited(backend.run());
+    await until(() => backend.connected.value);
+    expect(backend.confirmBy.value, isNotNull);
+
+    // A wrong code confirms nothing.
+    await expectLater(
+      backend.accountVerify('000000'),
+      throwsA(isA<RequestFailure>()),
+    );
+    expect(backend.confirmBy.value, isNotNull);
+    await backend.accountVerify('123456');
     expect(backend.confirmBy.value, isNull);
     await backend.close();
     await server.close(force: true);

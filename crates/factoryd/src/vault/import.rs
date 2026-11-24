@@ -255,8 +255,9 @@ pub(crate) fn shown(keyed: &str) -> String {
 pub(crate) fn sensitive(path: &Path) -> &'static str {
     let Some(home) = home_dir() else { return "" };
     let under = |relative: &str| path.starts_with(home.join(relative));
-    let places: [(&[&str], &'static str); 8] = [
+    let places: [(&[&str], &'static str); 9] = [
         (&[".ssh"], "ssh"),
+        (&[".netrc"], "netrc"),
         (&[".gnupg"], "gnupg"),
         (&[".aws"], "aws"),
         (&[".config/gcloud"], "gcloud"),

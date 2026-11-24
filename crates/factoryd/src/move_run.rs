@@ -957,7 +957,7 @@ async fn serve_clients(listener: TcpListener, arrival: Arrival, shown: watch::Re
 type Socket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
 
 async fn answer(socket: &mut Socket, reply_to: u64, body: v1::server_message::Body) -> Result<(), String> {
-    let message = v1::ServerMessage { reply_to, body: Some(body) };
+    let message = v1::ServerMessage { reply_to, body: Some(body), ..Default::default() };
     socket.send(Message::Binary(message.encode_to_vec().into())).await.map_err(|error| error.to_string())
 }
 

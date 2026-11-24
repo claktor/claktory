@@ -8,7 +8,7 @@
 //! visually before, is read and kept but no longer used, so an older
 //! Claktory (a rollback) still shows what it did.
 
-use crate::config::{AgentConfig, Config, FolderConfig};
+use crate::config::{AgentConfig, Config, FolderConfig, ProjectConfig};
 use crate::factory::RequestError;
 
 /// A drop the app wouldn't make from what it shows: the list changed under
@@ -172,18 +172,33 @@ const FOLDER_GONE: &str = "That folder no longer exists.";
 /// "" (#248): `folders` is the order the sidebar shows, config.json's.
 /// Before itself changes nothing.
 pub(crate) fn move_folder(folders: &mut Vec<FolderConfig>, id: &str, before: &str) -> Result<(), RequestError> {
-    let Some(from) = folders.iter().position(|folder| folder.id == id) else {
-        return Err(RequestError::Arrange(FOLDER_GONE.to_owned()));
+    move_before(folders, |folder| &folder.id, id, before, FOLDER_GONE)
+}
+
+/// A dragged project that's gone (deleted on another device, say).
+const PROJECT_GONE: &str = "That project no longer exists.";
+
+/// Moves the project `id` before the project `before`, or last with ""
+/// (friend bug #12): `projects` is the order the sidebar shows, config.json's.
+/// Before itself changes nothing.
+pub(crate) fn move_project(projects: &mut Vec<ProjectConfig>, id: &str, before: &str) -> Result<(), RequestError> {
+    move_before(projects, |project| &project.id, id, before, PROJECT_GONE)
+}
+
+/// Moves the item `id` of `items` before the item `before`, or last with "".
+fn move_before<T>(items: &mut Vec<T>, id_of: fn(&T) -> &String, id: &str, before: &str, gone: &str) -> Result<(), RequestError> {
+    let Some(from) = items.iter().position(|item| id_of(item) == id) else {
+        return Err(RequestError::Arrange(gone.to_owned()));
     };
     if before == id {
         return Ok(());
     }
-    if !before.is_empty() && !folders.iter().any(|folder| folder.id == before) {
+    if !before.is_empty() && !items.iter().any(|item| id_of(item) == before) {
         return Err(RequestError::Arrange(CHANGED.to_owned()));
     }
-    let folder = folders.remove(from);
-    let to = if before.is_empty() { folders.len() } else { folders.iter().position(|other| other.id == before).unwrap_or(folders.len()) };
-    folders.insert(to, folder);
+    let item = items.remove(from);
+    let to = if before.is_empty() { items.len() } else { items.iter().position(|other| id_of(other) == before).unwrap_or(items.len()) };
+    items.insert(to, item);
     Ok(())
 }
 

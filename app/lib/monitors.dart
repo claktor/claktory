@@ -159,6 +159,15 @@ String monitorStateLabel(Monitor monitor) {
   };
 }
 
+/// Why an active monitor doesn't run now (AgentMonitor.held).
+String monitorHeldLabel(MonitorHeld held) => switch (held) {
+  MonitorHeld.MONITOR_HELD_EXTENSION_OFF =>
+    'Not running: Monitors is turned off for this agent',
+  MonitorHeld.MONITOR_HELD_PROJECT_ARCHIVED =>
+    'Not running: its project is archived',
+  _ => '',
+};
+
 /// When an active monitor next fires: "next in 4m 12s", "due now"; empty
 /// when it has no time.
 String nextDueLabel(Monitor monitor, DateTime now) {
@@ -182,11 +191,20 @@ class MonitorRow extends StatefulWidget {
     required this.monitor,
     required this.agentId,
     required this.store,
+    this.held = MonitorHeld.MONITOR_HELD_UNSPECIFIED,
+    this.more,
   });
 
   final Monitor monitor;
   final String agentId;
   final WorkspaceStore store;
+
+  /// Why an active monitor doesn't run now (AgentMonitor.held), as the
+  /// Monitors page knows: it says "Not running" and why.
+  final MonitorHeld held;
+
+  /// More under the prompt once it's open: the Monitors page's history.
+  final WidgetBuilder? more;
 
   @override
   State<MonitorRow> createState() => _MonitorRowState();
@@ -250,6 +268,7 @@ class _MonitorRowState extends State<MonitorRow> {
     final monitor = widget.monitor;
     final state = monitor.state;
     final active = state == MonitorState.MONITOR_STATE_ACTIVE;
+    final held = active && widget.held != MonitorHeld.MONITOR_HELD_UNSPECIFIED;
     final failed = state == MonitorState.MONITOR_STATE_ERROR;
     final ended =
         state == MonitorState.MONITOR_STATE_DONE ||
@@ -307,7 +326,9 @@ class _MonitorRowState extends State<MonitorRow> {
                 child: Align(
                   alignment: Alignment.centerLeft,
                   child: Dot(
-                    color: active
+                    color: held
+                        ? palette.textMuted
+                        : active
                         ? palette.signal
                         : failed
                         ? palette.danger
@@ -343,6 +364,8 @@ class _MonitorRowState extends State<MonitorRow> {
                       crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
                         Text('m${monitor.id}', style: caption),
+                        if (held)
+                          Text(monitorHeldLabel(widget.held), style: muted),
                         if (!active)
                           Text(
                             monitorStateLabel(monitor),
@@ -358,7 +381,7 @@ class _MonitorRowState extends State<MonitorRow> {
                                 'agent ${widget.agentId} failed.',
                             link: true,
                           ),
-                        if (active && monitor.nextDue > 0)
+                        if (active && !held && monitor.nextDue > 0)
                           Ticking(
                             active: true,
                             builder: (context, now) =>
@@ -426,6 +449,7 @@ class _MonitorRowState extends State<MonitorRow> {
                         style: caption,
                       ),
                     ],
+                    if (_open && widget.more != null) widget.more!(context),
                     // On a phone its actions are under it once it's open:
                     // beside it they'd leave its name no room.
                     if (phone && _open && actions.isNotEmpty) ...[

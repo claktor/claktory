@@ -6,6 +6,7 @@ import 'package:factory_app/main.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/rail.dart';
 import 'package:factory_app/setup.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -71,6 +72,10 @@ void main() {
     required bool local,
     Map<String, InstallResult> results = const {},
   }) async {
+    // This fixture is the Mac's app-only first launch. Android tablets use
+    // PairScreen instead (android/tablet_pair_step_test.dart).
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final channel = FakeSetupChannel(results: Map.of(results));
     final connections = Connections(MemoryConnectionStorage());
     tester.view.physicalSize = const Size(1200, 900);
@@ -133,6 +138,29 @@ void main() {
     await pumpFrames(tester);
     expect(connections.current?.code, _box);
     expect(find.byType(ConnectStep), findsNothing);
+  });
+
+  testWidgets('the Mac connect card with an on-screen keyboard inset '
+      '(an iPad-style keyboard): Connect stays in sight', (tester) async {
+    await showApp(
+      tester,
+      local: false,
+      results: {
+        'install --check': const InstallResult(result: 'not_installed'),
+      },
+    );
+    await tester.tap(_field);
+    await pumpFrames(tester);
+    tester.view.viewInsets = const FakeViewPadding(bottom: 430);
+    addTearDown(tester.view.resetViewInsets);
+    await pumpFrames(tester);
+    expect(tester.takeException(), isNull);
+    final connect = find.descendant(
+      of: find.byType(ConnectStep),
+      matching: find.text('Connect'),
+    );
+    expect(tester.getRect(connect).bottom, lessThanOrEqualTo(900 - 430));
+    expect(tester.getRect(_field).top, greaterThanOrEqualTo(0));
   });
 
   testWidgets('a claktory:// code is taken as a factory:// one, asking '

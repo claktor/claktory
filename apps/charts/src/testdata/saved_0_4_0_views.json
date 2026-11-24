@@ -1,0 +1,1498 @@
+{
+  "claktory": {
+    "components": [
+      {
+        "children": [
+          "head",
+          "boards",
+          "ranges",
+          "var0",
+          "row0",
+          "row1",
+          "row2"
+        ],
+        "component": "Column",
+        "id": "root"
+      },
+      {
+        "align": "center",
+        "children": [
+          "name",
+          "edit"
+        ],
+        "component": "List",
+        "direction": "horizontal",
+        "id": "head"
+      },
+      {
+        "component": "Text",
+        "id": "name",
+        "text": "Claktory",
+        "variant": "heading"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "on": true
+            },
+            "name": "edit_mode"
+          }
+        },
+        "child": "edit_t",
+        "component": "Button",
+        "id": "edit",
+        "variant": "borderless"
+      },
+      {
+        "component": "Text",
+        "id": "edit_t",
+        "text": "Edit",
+        "variant": "body"
+      },
+      {
+        "children": [
+          "board0",
+          "board1"
+        ],
+        "component": "List",
+        "direction": "horizontal",
+        "id": "boards"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "id": "claktory"
+            },
+            "name": "board"
+          }
+        },
+        "child": "board0_t",
+        "component": "Button",
+        "id": "board0",
+        "variant": "primary"
+      },
+      {
+        "component": "Text",
+        "id": "board0_t",
+        "text": "Claktory",
+        "variant": "body"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "id": "every-kind"
+            },
+            "name": "board"
+          }
+        },
+        "child": "board1_t",
+        "component": "Button",
+        "id": "board1",
+        "variant": "default"
+      },
+      {
+        "component": "Text",
+        "id": "board1_t",
+        "text": "Every kind",
+        "variant": "body"
+      },
+      {
+        "children": [
+          "range0",
+          "range1",
+          "range2",
+          "range3",
+          "range4"
+        ],
+        "component": "List",
+        "direction": "horizontal",
+        "id": "ranges"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "from": "now-1h"
+            },
+            "name": "range"
+          }
+        },
+        "child": "range0_t",
+        "component": "Button",
+        "id": "range0",
+        "variant": "default"
+      },
+      {
+        "component": "Text",
+        "id": "range0_t",
+        "text": "1 hour",
+        "variant": "body"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "from": "now-24h"
+            },
+            "name": "range"
+          }
+        },
+        "child": "range1_t",
+        "component": "Button",
+        "id": "range1",
+        "variant": "default"
+      },
+      {
+        "component": "Text",
+        "id": "range1_t",
+        "text": "24 hours",
+        "variant": "body"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "from": "now-7d"
+            },
+            "name": "range"
+          }
+        },
+        "child": "range2_t",
+        "component": "Button",
+        "id": "range2",
+        "variant": "primary"
+      },
+      {
+        "component": "Text",
+        "id": "range2_t",
+        "text": "7 days",
+        "variant": "body"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "from": "now-30d"
+            },
+            "name": "range"
+          }
+        },
+        "child": "range3_t",
+        "component": "Button",
+        "id": "range3",
+        "variant": "default"
+      },
+      {
+        "component": "Text",
+        "id": "range3_t",
+        "text": "30 days",
+        "variant": "body"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "from": "now-90d"
+            },
+            "name": "range"
+          }
+        },
+        "child": "range4_t",
+        "component": "Button",
+        "id": "range4",
+        "variant": "default"
+      },
+      {
+        "component": "Text",
+        "id": "range4_t",
+        "text": "90 days",
+        "variant": "body"
+      },
+      {
+        "align": "center",
+        "children": [
+          "var0_label",
+          "var0_o0",
+          "var0_o1",
+          "var0_o2"
+        ],
+        "component": "List",
+        "direction": "horizontal",
+        "id": "var0"
+      },
+      {
+        "component": "Text",
+        "id": "var0_label",
+        "text": "Agent",
+        "variant": "caption"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "name": "agent",
+              "value": ""
+            },
+            "name": "variable"
+          }
+        },
+        "child": "var0_o0_t",
+        "component": "Button",
+        "id": "var0_o0",
+        "variant": "primary"
+      },
+      {
+        "component": "Text",
+        "id": "var0_o0_t",
+        "text": "All",
+        "variant": "body"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "name": "agent",
+              "value": "builder"
+            },
+            "name": "variable"
+          }
+        },
+        "child": "var0_o1_t",
+        "component": "Button",
+        "id": "var0_o1",
+        "variant": "default"
+      },
+      {
+        "component": "Text",
+        "id": "var0_o1_t",
+        "text": "Builder",
+        "variant": "body"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "name": "agent",
+              "value": "rivet"
+            },
+            "name": "variable"
+          }
+        },
+        "child": "var0_o2_t",
+        "component": "Button",
+        "id": "var0_o2",
+        "variant": "default"
+      },
+      {
+        "component": "Text",
+        "id": "var0_o2_t",
+        "text": "Rivet",
+        "variant": "body"
+      },
+      {
+        "align": "start",
+        "children": [
+          "p0",
+          "p1",
+          "p2",
+          "p3"
+        ],
+        "component": "Row",
+        "id": "row0"
+      },
+      {
+        "child": "p0_body",
+        "component": "Card",
+        "id": "p0",
+        "weight": 3
+      },
+      {
+        "color": "signal",
+        "component": "Stat",
+        "id": "p0_body",
+        "label": "Runs",
+        "spark": {
+          "@path": "/panels/0/spark"
+        },
+        "value": {
+          "@path": "/panels/0/value"
+        }
+      },
+      {
+        "child": "p1_body",
+        "component": "Card",
+        "id": "p1",
+        "weight": 3
+      },
+      {
+        "color": "signal",
+        "component": "Stat",
+        "id": "p1_body",
+        "label": "Messages",
+        "spark": {
+          "@path": "/panels/1/spark"
+        },
+        "value": {
+          "@path": "/panels/1/value"
+        }
+      },
+      {
+        "child": "p2_body",
+        "component": "Card",
+        "id": "p2",
+        "weight": 3
+      },
+      {
+        "color": "signal",
+        "component": "Stat",
+        "id": "p2_body",
+        "label": "Checklist items done",
+        "spark": {
+          "@path": "/panels/2/spark"
+        },
+        "value": {
+          "@path": "/panels/2/value"
+        }
+      },
+      {
+        "child": "p3_body",
+        "component": "Card",
+        "id": "p3",
+        "weight": 3
+      },
+      {
+        "color": "signal",
+        "component": "Stat",
+        "id": "p3_body",
+        "label": "Tokens",
+        "spark": {
+          "@path": "/panels/3/spark"
+        },
+        "value": {
+          "@path": "/panels/3/value"
+        }
+      },
+      {
+        "align": "start",
+        "children": [
+          "p4"
+        ],
+        "component": "Row",
+        "id": "row1"
+      },
+      {
+        "child": "p4_body",
+        "component": "Card",
+        "id": "p4",
+        "weight": 12
+      },
+      {
+        "color": "agent",
+        "component": "Chart",
+        "data": {
+          "@path": "/panels/4/data"
+        },
+        "height": 250,
+        "id": "p4_body",
+        "kind": "stackedBars",
+        "label": "Tokens by agent",
+        "seriesBy": "agent",
+        "unit": "tokens",
+        "x": "time"
+      },
+      {
+        "align": "start",
+        "children": [
+          "p5",
+          "p6"
+        ],
+        "component": "Row",
+        "id": "row2"
+      },
+      {
+        "child": "p5_body",
+        "component": "Card",
+        "id": "p5",
+        "weight": 6
+      },
+      {
+        "color": "agent",
+        "component": "Chart",
+        "data": {
+          "@path": "/panels/5/data"
+        },
+        "height": 200,
+        "id": "p5_body",
+        "kind": "stackedBars",
+        "label": "Runs by agent",
+        "seriesBy": "agent",
+        "unit": "runs",
+        "x": "time"
+      },
+      {
+        "child": "p6_body",
+        "component": "Card",
+        "id": "p6",
+        "weight": 6
+      },
+      {
+        "children": [
+          "p6_body_title",
+          "p6_body_table"
+        ],
+        "component": "Column",
+        "id": "p6_body"
+      },
+      {
+        "component": "Text",
+        "id": "p6_body_title",
+        "text": "Background tasks running now",
+        "variant": "caption"
+      },
+      {
+        "columns": [
+          {
+            "name": "agent",
+            "title": "Agent"
+          },
+          {
+            "name": "task",
+            "title": "Task"
+          },
+          {
+            "format": "time",
+            "name": "started",
+            "title": "Started"
+          }
+        ],
+        "component": "Table",
+        "data": {
+          "@path": "/panels/6/data"
+        },
+        "id": "p6_body_table"
+      }
+    ],
+    "data": {
+      "panels": [
+        {
+          "spark": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0
+          ],
+          "value": 4
+        },
+        {
+          "spark": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0
+          ],
+          "value": 4
+        },
+        {
+          "spark": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          "value": 1
+        },
+        {
+          "spark": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            120.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            120.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            120.0,
+            120.0,
+            120.0
+          ],
+          "value": 600
+        },
+        {
+          "data": {
+            "columns": [
+              "time",
+              "agent",
+              "tokens"
+            ],
+            "more": false,
+            "rows": [
+              [
+                "2026-11-19 21:00",
+                "builder",
+                120
+              ],
+              [
+                "2026-11-20 18:00",
+                "rivet",
+                120
+              ],
+              [
+                "2026-11-21 21:00",
+                "builder",
+                120
+              ],
+              [
+                "2026-11-22 00:00",
+                "rivet",
+                120
+              ]
+            ]
+          }
+        },
+        {
+          "data": {
+            "columns": [
+              "time",
+              "agent",
+              "runs"
+            ],
+            "more": false,
+            "rows": [
+              [
+                "2026-11-19 21:00",
+                "builder",
+                1
+              ],
+              [
+                "2026-11-20 18:00",
+                "rivet",
+                1
+              ],
+              [
+                "2026-11-21 21:00",
+                "builder",
+                1
+              ],
+              [
+                "2026-11-22 00:00",
+                "rivet",
+                1
+              ]
+            ]
+          }
+        },
+        {
+          "data": {
+            "columns": [
+              "agent",
+              "task",
+              "started"
+            ],
+            "more": false,
+            "rows": [
+              [
+                "builder",
+                "task-1",
+                1795308780280
+              ]
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "every-kind": {
+    "components": [
+      {
+        "children": [
+          "head",
+          "boards",
+          "ranges",
+          "row0",
+          "row1",
+          "row2",
+          "row3",
+          "row4"
+        ],
+        "component": "Column",
+        "id": "root"
+      },
+      {
+        "align": "center",
+        "children": [
+          "name",
+          "edit"
+        ],
+        "component": "List",
+        "direction": "horizontal",
+        "id": "head"
+      },
+      {
+        "component": "Text",
+        "id": "name",
+        "text": "Every kind",
+        "variant": "heading"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "on": true
+            },
+            "name": "edit_mode"
+          }
+        },
+        "child": "edit_t",
+        "component": "Button",
+        "id": "edit",
+        "variant": "borderless"
+      },
+      {
+        "component": "Text",
+        "id": "edit_t",
+        "text": "Edit",
+        "variant": "body"
+      },
+      {
+        "children": [
+          "board0",
+          "board1"
+        ],
+        "component": "List",
+        "direction": "horizontal",
+        "id": "boards"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "id": "claktory"
+            },
+            "name": "board"
+          }
+        },
+        "child": "board0_t",
+        "component": "Button",
+        "id": "board0",
+        "variant": "default"
+      },
+      {
+        "component": "Text",
+        "id": "board0_t",
+        "text": "Claktory",
+        "variant": "body"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "id": "every-kind"
+            },
+            "name": "board"
+          }
+        },
+        "child": "board1_t",
+        "component": "Button",
+        "id": "board1",
+        "variant": "primary"
+      },
+      {
+        "component": "Text",
+        "id": "board1_t",
+        "text": "Every kind",
+        "variant": "body"
+      },
+      {
+        "children": [
+          "range0",
+          "range1",
+          "range2",
+          "range3",
+          "range4"
+        ],
+        "component": "List",
+        "direction": "horizontal",
+        "id": "ranges"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "from": "now-1h"
+            },
+            "name": "range"
+          }
+        },
+        "child": "range0_t",
+        "component": "Button",
+        "id": "range0",
+        "variant": "default"
+      },
+      {
+        "component": "Text",
+        "id": "range0_t",
+        "text": "1 hour",
+        "variant": "body"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "from": "now-24h"
+            },
+            "name": "range"
+          }
+        },
+        "child": "range1_t",
+        "component": "Button",
+        "id": "range1",
+        "variant": "default"
+      },
+      {
+        "component": "Text",
+        "id": "range1_t",
+        "text": "24 hours",
+        "variant": "body"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "from": "now-7d"
+            },
+            "name": "range"
+          }
+        },
+        "child": "range2_t",
+        "component": "Button",
+        "id": "range2",
+        "variant": "default"
+      },
+      {
+        "component": "Text",
+        "id": "range2_t",
+        "text": "7 days",
+        "variant": "body"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "from": "now-30d"
+            },
+            "name": "range"
+          }
+        },
+        "child": "range3_t",
+        "component": "Button",
+        "id": "range3",
+        "variant": "primary"
+      },
+      {
+        "component": "Text",
+        "id": "range3_t",
+        "text": "30 days",
+        "variant": "body"
+      },
+      {
+        "action": {
+          "event": {
+            "context": {
+              "from": "now-90d"
+            },
+            "name": "range"
+          }
+        },
+        "child": "range4_t",
+        "component": "Button",
+        "id": "range4",
+        "variant": "default"
+      },
+      {
+        "component": "Text",
+        "id": "range4_t",
+        "text": "90 days",
+        "variant": "body"
+      },
+      {
+        "align": "start",
+        "children": [
+          "p0",
+          "p1",
+          "row0_gap2"
+        ],
+        "component": "Row",
+        "id": "row0"
+      },
+      {
+        "child": "p0_body",
+        "component": "Card",
+        "id": "p0",
+        "weight": 4
+      },
+      {
+        "color": "signal",
+        "component": "Stat",
+        "id": "p0_body",
+        "label": "Runs",
+        "spark": {
+          "@path": "/panels/0/spark"
+        },
+        "unit": "runs",
+        "value": {
+          "@path": "/panels/0/value"
+        }
+      },
+      {
+        "child": "p1_body",
+        "component": "Card",
+        "id": "p1",
+        "weight": 4
+      },
+      {
+        "color": "muted",
+        "component": "Stat",
+        "id": "p1_body",
+        "label": "Quiet",
+        "spark": {
+          "@path": "/panels/1/spark"
+        },
+        "value": {
+          "@path": "/panels/1/value"
+        }
+      },
+      {
+        "children": [],
+        "component": "Column",
+        "id": "row0_gap2",
+        "weight": 4
+      },
+      {
+        "align": "start",
+        "children": [
+          "p2"
+        ],
+        "component": "Row",
+        "id": "row1"
+      },
+      {
+        "child": "p2_body",
+        "component": "Card",
+        "id": "p2",
+        "weight": 12
+      },
+      {
+        "component": "Chart",
+        "data": {
+          "@path": "/panels/2/data"
+        },
+        "height": 250,
+        "id": "p2_body",
+        "kind": "timeseries",
+        "label": "Runs over time",
+        "unit": "runs",
+        "x": "time",
+        "y": [
+          "runs"
+        ]
+      },
+      {
+        "align": "start",
+        "children": [
+          "p3",
+          "p4"
+        ],
+        "component": "Row",
+        "id": "row2"
+      },
+      {
+        "child": "p3_body",
+        "component": "Card",
+        "id": "p3",
+        "weight": 6
+      },
+      {
+        "color": "agent",
+        "component": "Chart",
+        "data": {
+          "@path": "/panels/3/data"
+        },
+        "height": 200,
+        "id": "p3_body",
+        "kind": "timeseries",
+        "label": "Runs by agent",
+        "seriesBy": "agent"
+      },
+      {
+        "child": "p4_body",
+        "component": "Card",
+        "id": "p4",
+        "weight": 6
+      },
+      {
+        "component": "Chart",
+        "data": {
+          "@path": "/panels/4/data"
+        },
+        "height": 200,
+        "id": "p4_body",
+        "kind": "scatter",
+        "label": "Doubled",
+        "x": "runs"
+      },
+      {
+        "align": "start",
+        "children": [
+          "p5",
+          "p6",
+          "p7"
+        ],
+        "component": "Row",
+        "id": "row3"
+      },
+      {
+        "child": "p5_body",
+        "component": "Card",
+        "id": "p5",
+        "weight": 4
+      },
+      {
+        "component": "Chart",
+        "data": {
+          "@path": "/panels/5/data"
+        },
+        "height": 150,
+        "id": "p5_body",
+        "kind": "bars",
+        "label": "Per agent"
+      },
+      {
+        "child": "p6_body",
+        "component": "Card",
+        "id": "p6",
+        "weight": 4
+      },
+      {
+        "component": "Chart",
+        "data": {
+          "@path": "/panels/6/data"
+        },
+        "height": 150,
+        "id": "p6_body",
+        "kind": "stackedBars",
+        "label": "Stacked",
+        "seriesBy": "agent"
+      },
+      {
+        "child": "p7_body",
+        "component": "Card",
+        "id": "p7",
+        "weight": 4
+      },
+      {
+        "color": "palette",
+        "component": "Chart",
+        "data": {
+          "@path": "/panels/7/data"
+        },
+        "height": 150,
+        "id": "p7_body",
+        "kind": "pie",
+        "label": "Share"
+      },
+      {
+        "align": "start",
+        "children": [
+          "row4_gap0",
+          "p8",
+          "row4_gap2"
+        ],
+        "component": "Row",
+        "id": "row4"
+      },
+      {
+        "children": [],
+        "component": "Column",
+        "id": "row4_gap0",
+        "weight": 3
+      },
+      {
+        "child": "p8_body",
+        "component": "Card",
+        "id": "p8",
+        "weight": 6
+      },
+      {
+        "children": [
+          "p8_body_title",
+          "p8_body_table"
+        ],
+        "component": "Column",
+        "id": "p8_body"
+      },
+      {
+        "component": "Text",
+        "id": "p8_body_title",
+        "text": "Runs table",
+        "variant": "caption"
+      },
+      {
+        "columns": [
+          {
+            "format": "text",
+            "name": "agent",
+            "title": "Agent"
+          }
+        ],
+        "component": "Table",
+        "data": {
+          "@path": "/panels/8/data"
+        },
+        "id": "p8_body_table"
+      },
+      {
+        "children": [],
+        "component": "Column",
+        "id": "row4_gap2",
+        "weight": 3
+      }
+    ],
+    "data": {
+      "panels": [
+        {
+          "spark": [
+            2.0,
+            2.0,
+            2.0,
+            2.0,
+            2.0
+          ],
+          "value": 10
+        },
+        {
+          "spark": [
+            2.0,
+            2.0,
+            2.0,
+            2.0,
+            2.0
+          ],
+          "value": 10
+        },
+        {
+          "data": {
+            "columns": [
+              "time",
+              "runs",
+              "doubled"
+            ],
+            "more": false,
+            "rows": [
+              [
+                1794528000000,
+                1,
+                2
+              ],
+              [
+                1795089600000,
+                1,
+                2
+              ],
+              [
+                1795176000000,
+                1,
+                2
+              ],
+              [
+                1795262400000,
+                1,
+                2
+              ],
+              [
+                1795305600000,
+                1,
+                2
+              ]
+            ]
+          }
+        },
+        {
+          "data": {
+            "columns": [
+              "time",
+              "agent",
+              "runs"
+            ],
+            "more": false,
+            "rows": [
+              [
+                1794528000000,
+                "builder",
+                1
+              ],
+              [
+                1795089600000,
+                "builder",
+                1
+              ],
+              [
+                1795176000000,
+                "rivet",
+                1
+              ],
+              [
+                1795262400000,
+                "builder",
+                1
+              ],
+              [
+                1795305600000,
+                "rivet",
+                1
+              ]
+            ]
+          }
+        },
+        {
+          "data": {
+            "columns": [
+              "time",
+              "runs",
+              "doubled"
+            ],
+            "more": false,
+            "rows": [
+              [
+                1794528000000,
+                1,
+                2
+              ],
+              [
+                1795089600000,
+                1,
+                2
+              ],
+              [
+                1795176000000,
+                1,
+                2
+              ],
+              [
+                1795262400000,
+                1,
+                2
+              ],
+              [
+                1795305600000,
+                1,
+                2
+              ]
+            ]
+          }
+        },
+        {
+          "data": {
+            "columns": [
+              "agent",
+              "runs"
+            ],
+            "more": false,
+            "rows": [
+              [
+                "builder",
+                3
+              ],
+              [
+                "rivet",
+                2
+              ]
+            ]
+          }
+        },
+        {
+          "data": {
+            "columns": [
+              "time",
+              "agent",
+              "runs"
+            ],
+            "more": false,
+            "rows": [
+              [
+                1794528000000,
+                "builder",
+                1
+              ],
+              [
+                1795089600000,
+                "builder",
+                1
+              ],
+              [
+                1795176000000,
+                "rivet",
+                1
+              ],
+              [
+                1795262400000,
+                "builder",
+                1
+              ],
+              [
+                1795305600000,
+                "rivet",
+                1
+              ]
+            ]
+          }
+        },
+        {
+          "data": {
+            "columns": [
+              "agent",
+              "runs"
+            ],
+            "more": false,
+            "rows": [
+              [
+                "builder",
+                3
+              ],
+              [
+                "rivet",
+                2
+              ]
+            ]
+          }
+        },
+        {
+          "data": {
+            "columns": [
+              "agent",
+              "runs"
+            ],
+            "more": false,
+            "rows": [
+              [
+                "builder",
+                3
+              ],
+              [
+                "rivet",
+                2
+              ]
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

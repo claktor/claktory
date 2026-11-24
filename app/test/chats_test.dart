@@ -207,6 +207,51 @@ void main() {
     );
   });
 
+  testWidgets('"…" changes its model (U17): the models to choose from, '
+      'the chosen one sent', (tester) async {
+    final harness = Harness(
+      chatting([chat()])..models.add(Model(id: 'openrouter/x/y', name: 'Y')),
+    );
+    harness.backend.chatTranscript.load(Transcript(agentId: 'c1'));
+    await harness.show(
+      tester,
+      size: const Size(1200, 900),
+      home: const _Selected(),
+    );
+    await settle(tester);
+    await tester.tap(find.bySemanticsLabel('More'));
+    await settle(tester);
+    await tester.tap(find.text('Change model…'));
+    await settle(tester);
+    expect(find.text('Change model'), findsOneWidget);
+    expect(find.text('Claude Sonnet 5'), findsWidgets);
+    await tester.tap(find.text('Y'));
+    await settle(tester);
+    expect(harness.last.setChatModel.chatId, 'c1');
+    expect(harness.last.setChatModel.model, 'openrouter/x/y');
+    expect(find.text('Change model'), findsNothing, reason: 'it closed');
+  });
+
+  testWidgets('without a model, Change model… beside Sign in…', (tester) async {
+    final harness = Harness(
+      chatting([chat(available: false)])
+        ..models.add(Model(id: 'openrouter/x/y', name: 'Y')),
+    );
+    harness.backend.chatTranscript.load(Transcript(agentId: 'c1'));
+    await harness.show(
+      tester,
+      size: const Size(1200, 900),
+      home: const _Selected(),
+    );
+    await settle(tester);
+    expect(find.text('Sign in…'), findsOneWidget);
+    await tester.tap(find.text('Change model…'));
+    await settle(tester);
+    await tester.tap(find.text('Y'));
+    await settle(tester);
+    expect(harness.last.setChatModel.model, 'openrouter/x/y');
+  });
+
   testWidgets("a proposal to Rivet in a chat is decided as the chat's", (
     tester,
   ) async {

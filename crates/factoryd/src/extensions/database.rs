@@ -19,7 +19,7 @@ use factory_protocol::v1;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Extension, InstanceDefault, InstanceSpec, Manifest, PromptKind, PromptSection, enabled};
+use super::{Extension, InstanceDefault, InstanceSpec, Manifest, PromptSection, enabled};
 use crate::config::AgentConfig;
 use crate::factory::{Factory, Inner};
 use sql::Target;
@@ -217,11 +217,11 @@ impl Extension for Database {
         let own = curator || enabled(agent, ID);
         let mut sections = Vec::new();
         if own {
-            sections.push(PromptSection { kind: PromptKind::Static, text: PROMPT.to_owned() });
+            sections.push(PromptSection::static_text(PROMPT));
         }
         if !curator && enabled(agent, FACTORY.key) {
             let instance = if own { ", with instance: \"factory\"" } else { "" };
-            sections.push(PromptSection { kind: PromptKind::Static, text: RECORDS_PROMPT.replace("{instance}", instance) });
+            sections.push(PromptSection::static_text(RECORDS_PROMPT.replace("{instance}", instance)));
         }
         sections
     }

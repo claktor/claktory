@@ -115,6 +115,32 @@ struct PushTests {
     #expect(keys.keys["e1"]?.shown.count == 4)
   }
 
+  /// A device waiting to be allowed (#352 P4): a tap opens Needs you, as
+  /// the app reads "deviceId"; an older Claktory's push names no device.
+  @Test func aWaitingDevicesPushNamesItForNeedsYou() throws {
+    var json = Self.notice(ctr: 1, sentAt: 0)
+    json["target"] = ["agent": "", "pipe": "", "chat": "", "seq": 0, "device": "d1"]
+    let notice = try #require(PushOpener.notice(json))
+    #expect(notice.target.device == "d1")
+    #expect(notice.target.map(claktory: "e1")["deviceId"] as? String == "d1")
+    let older = try #require(PushOpener.notice(Self.notice(ctr: 1, sentAt: 0)))
+    #expect(older.target.device == "")
+    #expect(older.target.map(claktory: "e1")["deviceId"] as? String == "")
+  }
+
+  /// What waited out quiet hours (#364 O3): a Needs-you push about no one
+  /// thing; the app opens Needs you, as it reads "kind".
+  @Test func aNeedsYouPushAboutNoOneThingSaysItsKind() throws {
+    var json = Self.notice(ctr: 1, sentAt: 0)
+    json["kind"] = "needs_you"
+    json["target"] = ["agent": "", "pipe": "", "chat": "", "seq": 0]
+    let notice = try #require(PushOpener.notice(json))
+    let map = notice.target.map(claktory: "e1")
+    #expect(map["kind"] as? String == "needs_you")
+    #expect(map["agentId"] as? String == "")
+    #expect(map["deviceId"] as? String == "")
+  }
+
   @Test func aPushNoKeyOpensShowsTheGenericLineAndItsTapOnlyOpensTheApp() throws {
     let keys = MemoryPushKeys()
     keys.keys["e1"] = PushKey(key: Data(repeating: 7, count: 32))

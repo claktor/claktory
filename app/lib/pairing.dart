@@ -1,15 +1,20 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'backend.dart' show Backend, RequestFailure;
 import 'controls.dart';
 import 'devices.dart' show thisDeviceKind;
 import 'identity.dart';
 import 'markdown.dart' show CodeBlock;
+import 'mobile/input.dart' show InputKind;
+import 'mobile/metrics.dart' show TypeScale;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'visible_codes.dart' show proseCodes;
 
 /// The four digits a new device shows while it waits to be allowed, and
 /// the Claktory it asks shows too (PendingDevice.number): worked out on
@@ -106,10 +111,20 @@ class _AllowCommandState extends State<AllowCommand> {
 /// This device used a pairing code and waits for the person to allow it
 /// on that Claktory: the number to compare with the one it shows, and
 /// Cancel; turned away, why, and Use a new code. [onCancel] gives up on it.
-class PairingWaitView extends StatelessWidget {
+class PairingWaitView extends StatefulWidget {
   const PairingWaitView({super.key, required this.onCancel});
 
   final VoidCallback onCancel;
+
+  @override
+  State<PairingWaitView> createState() => _PairingWaitViewState();
+}
+
+class _PairingWaitViewState extends State<PairingWaitView> {
+  /// Whether the person asked for the command that allows this device on
+  /// a Claktory without a screen. Folded away at first: most Claktories
+  /// have their app open, and the number is what they compare.
+  var _commandShown = false;
 
   @override
   Widget build(BuildContext context) {
@@ -154,17 +169,28 @@ class PairingWaitView extends StatelessWidget {
                       const SizedBox(height: Space.xl),
                       PairingDigits(wait.number),
                       // A server has no screen: it's allowed from its
-                      // terminal, with the number checked there.
+                      // terminal, with the number checked there. Folded
+                      // away until asked for.
                       if (wait.pending.deviceId.isNotEmpty) ...[
                         const SizedBox(height: Space.xl),
-                        Text(
-                          'No screen on $machine? Run this there:',
-                          style: TextStyles.body.copyWith(
-                            color: palette.textMuted,
+                        if (_commandShown) ...[
+                          Text(
+                            'No screen on $machine? Run this there:',
+                            style: TextStyles.body.copyWith(
+                              color: palette.textMuted,
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: Space.s),
-                        AllowCommand(allowCommand(wait)),
+                          const SizedBox(height: Space.s),
+                          AllowCommand(allowCommand(wait)),
+                        ] else
+                          Align(
+                            alignment: AlignmentDirectional.centerStart,
+                            child: Button(
+                              label: 'No screen on $machine?',
+                              onPressed: () =>
+                                  setState(() => _commandShown = true),
+                            ),
+                          ),
                       ],
                     ],
                   ],
@@ -174,7 +200,7 @@ class PairingWaitView extends StatelessWidget {
                     child: Button(
                       label: refused != null ? 'Use a new code' : 'Cancel',
                       primary: refused != null,
-                      onPressed: onCancel,
+                      onPressed: widget.onCancel,
                     ),
                   ),
                 ],
@@ -183,6 +209,237 @@ class PairingWaitView extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Whether [number] is a waiting device's number in full: four digits.
+bool isDeviceNumber(String number) => RegExp(r'^\d{4}$').hasMatch(number);
+
+/// How a waiting device is named (Fugo's rule 3): the name it gave itself,
+/// quoted as its own words, never as Claktory's ("A device that calls
+/// itself “Ana's iPhone”").
+String deviceCallingItself(PendingDevice device) => device.name.isEmpty
+    ? 'A device'
+    : 'A device that calls itself “${proseCodes(device.name)}”';
+
+/// The four digits a waiting device shows, typed here to allow it (#352
+/// P4): the backend compares them with the device's own, so only someone
+/// who can see the device lets it in. Digits only, at most four.
+class DeviceNumberField extends StatelessWidget {
+  const DeviceNumberField({
+    super.key,
+    required this.controller,
+    this.onSubmitted,
+    this.autofocus = false,
+  });
+
+  final TextEditingController controller;
+  final ValueChanged<String>? onSubmitted;
+  final bool autofocus;
+
+  /// How wide the field is where it sits beside or under other things:
+  /// room for all four digits and the caret at the text size it shows
+  /// (Zucchero's row 265: at the largest, a fixed width hid one), and never
+  /// narrower than [least].
+  static double widthFor(BuildContext context, {double least = 96}) {
+    final style = TypeScale.of(context).body;
+    final digits = TextPainter(
+      text: TextSpan(text: '00000', style: style),
+      textDirection: TextDirection.ltr,
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    // The field's own padding and border, a phone's being the wider.
+    final width = digits.width + 2 * Space.m + 2;
+    digits.dispose();
+    return math.max(least, width.ceilToDouble());
+  }
+
+  @override
+  Widget build(BuildContext context) => TextField(
+    controller: controller,
+    placeholder: '0000',
+    kind: InputKind.number,
+    autofocus: autofocus,
+    semanticsLabel: 'Number on its screen',
+    inputFormatters: [
+      FilteringTextInputFormatter.digitsOnly,
+      LengthLimitingTextInputFormatter(4),
+    ],
+    // A number pad has no Done key: scrolled into view, the field brings
+    // Allow under it into sight too.
+    scrollPadding: const EdgeInsets.fromLTRB(20, 20, 20, 160),
+    onSubmitted: onSubmitted,
+  );
+}
+
+/// Whether [a] and [b] are the same request to be allowed: the same
+/// device asking the same time, with the same number.
+bool sameDeviceRequest(PendingDevice? a, PendingDevice? b) =>
+    a != null &&
+    b != null &&
+    a.deviceId == b.deviceId &&
+    a.number == b.number &&
+    a.requestedMs == b.requestedMs;
+
+/// Allows [device] with the [number] typed, or turns it away ([allow]
+/// false); null when that went through, else why not, in the backend's
+/// words (a wrong number, with the tries left) or, once it no longer
+/// waits, [stoppedWaiting] ("… stopped waiting.").
+Future<String?> decideDevice(
+  Backend backend,
+  PendingDevice device, {
+  required bool allow,
+  String number = '',
+  String? stoppedWaiting,
+}) async {
+  try {
+    if (allow) {
+      await backend.approveDevice(device.deviceId, number);
+    } else {
+      await backend.denyDevice(device.deviceId);
+    }
+    return null;
+  } on RequestFailure catch (failure) {
+    return failure.code == ErrorCode.ERROR_CODE_NOT_FOUND
+        ? stoppedWaiting ?? '${deviceCallingItself(device)} stopped waiting.'
+        : failure.message;
+  }
+}
+
+/// A device waiting to be allowed on this Claktory, as Needs you shows it
+/// (#352 P4): the name it gave itself, what to do if it isn't the
+/// person's, the number its screen shows to type, and Allow or Don't
+/// allow. [device] null once it no longer waits: how it ended here.
+class AllowDeviceCard extends StatefulWidget {
+  const AllowDeviceCard({super.key, required this.device});
+
+  final PendingDevice? device;
+
+  @override
+  State<AllowDeviceCard> createState() => _AllowDeviceCardState();
+}
+
+class _AllowDeviceCardState extends State<AllowDeviceCard> {
+  final _number = TextEditingController();
+  var _deciding = false;
+  String? _error;
+
+  /// How it ended here: Allowed, or Not allowed.
+  String? _ended;
+
+  @override
+  void initState() {
+    super.initState();
+    _number.addListener(() => setState(() {}));
+  }
+
+  @override
+  void didUpdateWidget(AllowDeviceCard old) {
+    super.didUpdateWidget(old);
+    // Another request, even from the same device (its id kept when it
+    // pairs again): it starts afresh, with nothing typed for the last one
+    // (Zucchero's row 264).
+    final device = widget.device;
+    if (device != null && !sameDeviceRequest(old.device, device)) {
+      _number.clear();
+      _error = null;
+      _ended = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _number.dispose();
+    super.dispose();
+  }
+
+  Future<void> _decide(PendingDevice device, {required bool allow}) async {
+    setState(() {
+      _deciding = true;
+      _error = null;
+    });
+    final error = await decideDevice(
+      AppScope.of(context),
+      device,
+      allow: allow,
+      number: _number.text,
+    );
+    if (!mounted) return;
+    setState(() {
+      _deciding = false;
+      _error = error;
+      if (error == null) _ended = allow ? 'Allowed.' : 'Not allowed.';
+      // A wrong number: typed again from the start.
+      if (error != null && allow) _number.clear();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final device = widget.device;
+    if (device == null) {
+      return Text(
+        _error ?? _ended ?? 'It stopped waiting.',
+        style: type.caption.copyWith(
+          color: _error == null ? palette.textFaint : palette.danger,
+        ),
+      );
+    }
+    final ready = !_deciding && isDeviceNumber(_number.text);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      spacing: Space.s,
+      children: [
+        Text(
+          device.signedIn
+              ? '${deviceCallingItself(device)}, signed in as you, wants to '
+                    'connect.'
+              : '${deviceCallingItself(device)} wants to connect.',
+          style: type.body.copyWith(color: palette.text),
+        ),
+        Text(
+          "If you didn't just set up a new device, don't allow it. Someone "
+          'may be using your email: secure it.',
+          style: type.body.copyWith(color: palette.textMuted),
+        ),
+        Field(
+          label: 'Number on its screen',
+          child: Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: SizedBox(
+              width: DeviceNumberField.widthFor(context, least: 120),
+              child: DeviceNumberField(
+                controller: _number,
+                onSubmitted: (_) {
+                  if (ready) _decide(device, allow: true);
+                },
+              ),
+            ),
+          ),
+        ),
+        if (_error case final error?)
+          Text(error, style: type.caption.copyWith(color: palette.danger)),
+        Wrap(
+          alignment: WrapAlignment.end,
+          spacing: Space.s,
+          runSpacing: Space.s,
+          children: [
+            Button(
+              label: "Don't allow",
+              onPressed: _deciding ? null : () => _decide(device, allow: false),
+            ),
+            Button(
+              label: 'Allow',
+              primary: true,
+              onPressed: ready ? () => _decide(device, allow: true) : null,
+            ),
+          ],
+        ),
+      ],
     );
   }
 }

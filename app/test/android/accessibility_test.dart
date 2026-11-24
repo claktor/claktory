@@ -22,6 +22,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../harness.dart';
+import '../pair_start.dart';
 import '../phone_test.dart' show workspace;
 import 'support/android_harness.dart';
 import 'support/channel_fakes.dart';
@@ -428,6 +429,7 @@ void main() {
       tester,
       harness: Harness(Workspace(), localBackend: false),
     );
+    await pastPairStart(tester, paste: true);
     var data = find.semantics
         .byLabel('Connect')
         .evaluate()
@@ -631,6 +633,7 @@ void main() {
           size: size,
         );
         expect(find.byType(PairScreen), findsOneWidget);
+        await pastPairStart(tester, paste: true);
         final field = find.byType(EditableText);
         await tester.ensureVisible(field);
         final code = 'factory://?t=${'a' * 64}&e=${'c' * 64}&name=Fixture';

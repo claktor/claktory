@@ -55,7 +55,7 @@ class ShareSheetTest {
     }
 
     private fun back() {
-        instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_BACK").close()
+        instrumentation.shell("input keyevent KEYCODE_BACK")
     }
 
     @Test

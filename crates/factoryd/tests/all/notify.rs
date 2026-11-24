@@ -171,7 +171,13 @@ async fn the_settings_and_each_agents_choice_decide() {
     assert_eq!(said, "Sent: the person gets it as a notification.");
     // Kept in factory.db: a backend rolled back to would refuse a
     // config.json with keys it doesn't know.
-    let config = std::fs::read_to_string(crate::common::home(&dir).config_path()).expect("config");
+    // Agents' prompts aside, which may name notify_person (Rivet's does).
+    let mut config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(crate::common::home(&dir).config_path()).expect("config")).expect("json");
+    for agent in config["agents"].as_array_mut().into_iter().flatten() {
+        agent.as_object_mut().expect("an agent").remove("prompt");
+    }
+    let config = config.to_string();
     assert!(!config.contains("notif") && !config.contains("always"), "{config}");
 
     apply_request(&mut client, &mut view, notify(v1::NotifyMode::Never)).await;

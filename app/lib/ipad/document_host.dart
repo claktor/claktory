@@ -29,41 +29,53 @@ import '../backend.dart';
 import '../claktory_identity.dart' show claktoryName;
 import '../controls.dart' show Button, ExtensionGlyph, GlyphButton;
 import '../identity.dart';
+import '../ink_preview.dart' show DrawBar;
 import '../layout.dart' show chatOnly, leaves;
 import '../mobile/device.dart' show Idiom, deviceCapabilities;
 import '../mobile/metrics.dart' show TypeScale;
-import '../pane_chrome.dart' show PaneAction, PaneScaffold;
+import '../pane_chrome.dart' show PaneAction, PaneChrome, PaneScaffold;
 // The bridge's InkComposite (what the native view exported) is this file's,
 // not the protocol's review-item composite.
 import '../protocol/factory/v1/factory.pb.dart' hide InkComposite;
 import '../scope.dart';
-import '../viewers/registry.dart' show ViewerProblem;
+import '../viewers/registry.dart' show HeaderTextButton, ViewerProblem;
 import 'ink_bridge.dart';
 import 'ink_surface.dart';
 import 'ink_sync.dart';
 import 'ink_tools.dart';
 import 'document_find.dart';
 import 'document_review.dart';
+import 'image_ink.dart';
 import 'workbench.dart' show WorkbenchScope;
 
 /// The pane kind a document drawn on is shown in (contract §2).
 const documentKind = 'pdf';
 
+/// The pane kind of an image, drawn on once the person taps Draw
+/// (#362 I2).
+const imageKind = 'image';
+
 /// [node]'s pane on an iPad when it's a document ([documentKind]): the
-/// document host, which draws. Null anywhere else, for the viewers'.
+/// document host, which draws. An image ([imageKind]) with its [viewer]
+/// given: the viewer, with Draw, which turns the pane into the host until
+/// Done ([ImageInkPane]). Null anywhere else, for the viewers'.
 /// [agentId] is whose layout it's in: the agent shown when null (the
 /// workbench's panes); the phone routes of a narrow window name it.
 Widget? ipadDocumentPane(
   BuildContext context,
   ViewNode node, {
   String? agentId,
+  Widget Function(BuildContext context)? viewer,
 }) {
   if (defaultTargetPlatform != TargetPlatform.iOS ||
       deviceCapabilities.idiom != Idiom.pad ||
-      !node.hasLeaf() ||
-      node.leaf.kind != documentKind) {
+      !node.hasLeaf()) {
     return null;
   }
+  if (node.leaf.kind == imageKind && viewer != null) {
+    return ImageInkPane(node: node, agentId: agentId, viewer: viewer);
+  }
+  if (node.leaf.kind != documentKind) return null;
   return DocumentHost.forLeaf(context, node, agentId: agentId);
 }
 
@@ -98,7 +110,13 @@ class DocumentSurfaces {
   /// [agentId]'s surface for [leaf], made the first time it's asked for.
   DocumentSurface of(String agentId, ViewNode leaf) =>
       _surfaces.putIfAbsent(_key(agentId, leaf), () {
-        final surface = DocumentSurface._(leaf.id, leaf.leaf.path);
+        final surface = DocumentSurface._(
+          leaf.id,
+          leaf.leaf.path,
+          kind: leaf.leaf.kind == imageKind
+              ? InkSurfaceKind.image
+              : InkSurfaceKind.pdf,
+        );
         surface._strokes.addListener(_restroke);
         return surface;
       });
@@ -123,6 +141,25 @@ class DocumentSurfaces {
   /// Keys of project files' surfaces: no agent id has a space.
   static const _files = 'file /';
 
+  /// The image leaves being drawn on, by their surfaces' keys: the pane
+  /// shows the host rather than the image's viewer until Done. In memory
+  /// only, never kept on the device; it goes with the leaf.
+  ValueListenable<Set<String>> get inking => _inking;
+  final _inking = ValueNotifier<Set<String>>(const {});
+
+  /// Whether [agentId]'s image [leaf] is being drawn on.
+  bool inks(String agentId, ViewNode leaf) =>
+      _inking.value.contains(_key(agentId, leaf));
+
+  /// Draw ([on]) or Done on [agentId]'s image [leaf].
+  void ink(String agentId, ViewNode leaf, {required bool on}) {
+    final key = _key(agentId, leaf);
+    if (_inking.value.contains(key) == on) return;
+    _inking.value = on
+        ? {..._inking.value, key}
+        : ({..._inking.value}..remove(key));
+  }
+
   /// Drops [agentId]'s surfaces whose leaf has left its layout [root]
   /// (closed, or another file in it).
   void prune(String agentId, ViewNode root) {
@@ -136,6 +173,11 @@ class DocumentSurfaces {
       _surfaces.remove(key)!._dispose();
     }
     if (gone.isNotEmpty) _restroke();
+    final inking = {
+      for (final key in _inking.value)
+        if (!key.startsWith(prefix) || kept.contains(key)) key,
+    };
+    if (inking.length != _inking.value.length) _inking.value = inking;
   }
 
   String _key(String agentId, ViewNode leaf) =>
@@ -150,6 +192,7 @@ class DocumentSurfaces {
     }
     _surfaces.clear();
     _drawing.dispose();
+    _inking.dispose();
   }
 }
 
@@ -173,12 +216,21 @@ newInkSync = InkLayerSync.new;
 /// its tools, the file as fetched, what's been drawn, and what to tell the
 /// person. Outlives the pane's widgets; [DocumentSurfaces] disposes it.
 class DocumentSurface extends ChangeNotifier {
-  DocumentSurface._(this.leafId, this.path, {this.readOnly = false}) {
+  DocumentSurface._(
+    this.leafId,
+    this.path, {
+    this.readOnly = false,
+    this.kind = InkSurfaceKind.pdf,
+  }) {
     _events = controller.events.listen(_on);
   }
 
   final String leafId;
   final String path;
+
+  /// A PDF, or an image (one drawing, no pages).
+  final InkSurfaceKind kind;
+  bool get image => kind == InkSurfaceKind.image;
 
   /// Only to read: nothing draws (a project's file, opened with no agent
   /// to answer).
@@ -200,7 +252,7 @@ class DocumentSurface extends ChangeNotifier {
     if (version == null) return null;
     return InkParams(
       leafId: leafId,
-      surface: InkSurfaceKind.pdf,
+      surface: kind,
       source: version.source,
       document: version.document,
       layers: const [],
@@ -390,7 +442,7 @@ class DocumentSurface extends ChangeNotifier {
     final selection = _strokeSelection;
     final reads = selection != null
         ? [(selection.page, InkRecognitionScope.selection)]
-        : [for (final page in inkedPages) (page, InkRecognitionScope.all)];
+        : [for (final page in inked) (page, InkRecognitionScope.all)];
     final texts = <String>[];
     for (final (page, scope) in reads) {
       final read = await controller.recognizeText(page, scope: scope);
@@ -421,6 +473,15 @@ class DocumentSurface extends ChangeNotifier {
   List<int> get drawnPages =>
       {...inkedPages, ..._earlier.keys}.toList()..sort();
 
+  /// What has ink now: a PDF's [inkedPages], or an image's one drawing
+  /// (null) when there's some.
+  List<int?> get inked =>
+      image ? [if (_sync?.inked(null) ?? false) null] : inkedPages;
+
+  /// What goes with a review's answer: a PDF's [drawnPages], or an
+  /// image's one drawing (null).
+  List<int?> get drawn => image ? inked : drawnPages;
+
   /// Pages whose ink was drawn on an earlier version of the PDF, which
   /// changed while it was open: each page as it was, with its ink, drawn
   /// out before the new version came. Native no longer shows that ink, and
@@ -429,11 +490,12 @@ class DocumentSurface extends ChangeNotifier {
   Map<int, InkComposite> get earlier => _earlier;
   final _earlier = <int, InkComposite>{};
 
-  /// [page] whole, with its ink, as a PNG small enough for an agent's
-  /// model to read (contract §5's context image limits). A page with no
-  /// ink now but ink on the earlier version gives that version's.
-  Future<InkComposite> exportPage(int page) {
-    if (!inkedPages.contains(page)) {
+  /// [page] whole (null: the whole image), with its ink, as a PNG small
+  /// enough for an agent's model to read (contract §5's context image
+  /// limits). A page with no ink now but ink on the earlier version gives
+  /// that version's.
+  Future<InkComposite> exportPage(int? page) {
+    if (page != null && !inkedPages.contains(page)) {
       if (_earlier[page] case final composite?) {
         return Future.value(composite);
       }
@@ -444,6 +506,8 @@ class DocumentSurface extends ChangeNotifier {
         page1based: page,
         inkLayerId: layer?.inkLayerId,
         layerRevision: layer?.revision,
+        // An image has no page box: the whole of it.
+        region: page == null ? const Rect.fromLTWH(0, 0, 1, 1) : null,
       ),
     );
   }
@@ -500,6 +564,11 @@ class DocumentSurface extends ChangeNotifier {
   bool get changed => _changed;
   var _changed = false;
 
+  /// The image changed on the machine while it was drawn on: the version
+  /// drawn on stays shown ([reload]).
+  bool get imageChanged => _imageChanged;
+  var _imageChanged = false;
+
   var _reloading = false;
   var _reloadAgain = false;
 
@@ -516,6 +585,16 @@ class DocumentSurface extends ChangeNotifier {
     if (_disposed) return;
     if (_current == null) return fetch(backend, claktory: claktory);
     if (sha256 != null && sha256 == _shown) return;
+    if (image) {
+      // An image's surface can't take a new version in place: the one
+      // drawn on stays, and Done shows the new one. Its ink stays with
+      // the version it was drawn on.
+      if (!_imageChanged) {
+        _imageChanged = true;
+        notifyListeners();
+      }
+      return;
+    }
     if (_reloading) {
       _reloadAgain = true;
       return;
@@ -603,7 +682,7 @@ class DocumentSurface extends ChangeNotifier {
     if (first.error.isNotEmpty) throw _Problem(first.error);
     final size = first.size.toInt();
     final sha = first.sha256;
-    if (sha.isEmpty) throw const _Problem(_update);
+    if (sha.isEmpty) throw _Problem(_update(kind, _machine));
     final name = path.split('/').last;
     final source = InkSource(
       backend: claktory,
@@ -641,7 +720,7 @@ class DocumentSurface extends ChangeNotifier {
           }
           if (chunk.error.isNotEmpty) throw _Problem(chunk.error);
           if (chunk.offset.toInt() != offset || chunk.data.isEmpty) {
-            throw const _Problem(_update);
+            throw _Problem(_update(kind, _machine));
           }
           await writer.append(Uint8List.fromList(chunk.data));
           offset += chunk.data.length;
@@ -732,7 +811,8 @@ class DocumentSurface extends ChangeNotifier {
                   '${_count(most)} Claktory can open here.';
       case InkError(:final code):
         _problem = switch (code) {
-          'os_too_old' => 'Drawing on PDFs needs iPadOS 16 or later.',
+          'os_too_old' =>
+            'Drawing on ${image ? 'images' : 'PDFs'} needs iPadOS 16 or later.',
           'document_hash_mismatch' || 'document_changed' => 'This file changed while it was opening. Close it and open it again.',
           'drawing_unreadable' => "Some drawings on this file can't be read.",
           _ => "Claktory can't open this file here.",
@@ -839,8 +919,12 @@ class _Changed implements Exception {
   const _Changed();
 }
 
-const _update =
-    "To draw on PDFs here, update Claktory on the computer it runs on.";
+String _update(InkSurfaceKind kind, String machine) =>
+    kind != InkSurfaceKind.image
+    ? 'To draw on PDFs here, update Claktory on the computer it runs on.'
+    : machine.isEmpty
+    ? 'Update Claktory on the computer it runs on to draw on images.'
+    : 'Update Claktory on $machine to draw on images.';
 
 class _Problem implements Exception {
   const _Problem(this.text);
@@ -860,6 +944,7 @@ class DocumentHost extends StatelessWidget {
     BuildContext context,
     ViewNode leaf, {
     String? agentId,
+    VoidCallback? onDone,
   }) {
     final focus = WorkbenchScope.maybeOf(context);
     final agent = agentId ?? AppScope.of(context).workspace.selectedAgent?.id;
@@ -872,6 +957,7 @@ class DocumentHost extends StatelessWidget {
       key: surface.hostKey,
       agentId: agent,
       surface: surface,
+      onDone: onDone,
       // The pane went: if it left the agent's layout (closed, even the last
       // one, which leaves no panes to lay out and so nothing else to drop
       // it), its surface goes, and its last save finishes or gives up.
@@ -904,7 +990,13 @@ class DocumentHost extends StatelessWidget {
 }
 
 class _Host extends StatefulWidget {
-  const _Host({super.key, this.agentId, required this.surface, this.onGone});
+  const _Host({
+    super.key,
+    this.agentId,
+    required this.surface,
+    this.onGone,
+    this.onDone,
+  });
 
   /// Whose pane it is; null for a project's file, which no agent asks
   /// about.
@@ -914,6 +1006,9 @@ class _Host extends StatefulWidget {
   /// The host went: a project's file's surface goes too; an agent's pane's
   /// goes if the pane left its layout.
   final VoidCallback? onGone;
+
+  /// An image's Done: back to its viewer, which shows what's saved.
+  final VoidCallback? onDone;
 
   @override
   State<_Host> createState() => _HostState();
@@ -1078,10 +1173,15 @@ class _HostState extends State<_Host> {
       void toggle(DocumentPanel panel) => surface.panel == panel
           ? surface.closePanel()
           : surface.openPanel(panel);
-      final canSearch = params != null && problem == null;
+      final canSearch = params != null && problem == null && !surface.image;
+      final onDone = widget.onDone;
       final hasContents = canSearch && surface.outline.isNotEmpty;
       final status = params == null ? null : _statusOf(surface);
+      // A window narrowed to the phone's routes has no header for Done:
+      // it's under the image.
+      final phone = PaneChrome.of(context)?.phone != null;
       final foot = [
+        if (onDone != null && phone) DrawBar.done(onDone: onDone),
         if (params != null && surface.link != null)
           _LinkOffer(surface: surface),
         if (status != null)
@@ -1093,6 +1193,12 @@ class _HostState extends State<_Host> {
       return PaneScaffold(
         details: page == null ? '' : 'Page ${page.page} of ${page.count}',
         controls: [
+          if (onDone != null)
+            HeaderTextButton(
+              'Done',
+              onDone,
+              key: const ValueKey('document-done'),
+            ),
           if (canSearch)
             GlyphButton(
               key: const ValueKey('document-search'),
@@ -1114,6 +1220,7 @@ class _HostState extends State<_Host> {
             ),
         ],
         actions: [
+          if (onDone != null) PaneAction('Done', onDone),
           if (canSearch)
             PaneAction(
               'Search',
@@ -1243,6 +1350,7 @@ class _LinkOffer extends StatelessWidget {
   }
   final state = surface.readOnly ? null : surface.sync?.state.value;
   final machine = surface.machine;
+  if (surface.image) return _imageStatus(surface, state, machine);
   String pages(List<int?> pages) => pageList(pages.nonNulls.toList());
   final urgent = switch (state) {
     InkConflict(pages: final at) => (
@@ -1286,6 +1394,58 @@ class _LinkOffer extends StatelessWidget {
       text: at.length > 1 ? 'Saving your drawings…' : 'Saving your drawing…',
       keepBoth: null,
     ),
+    InkSaved() => (text: 'Saved to $machine', keepBoth: null),
+    _ => null,
+  };
+}
+
+/// [_statusOf] for an image: one drawing, no pages. Its surface keeps the
+/// version drawn on when the file changes ([DocumentSurface.imageChanged]).
+({String text, VoidCallback? keepBoth})? _imageStatus(
+  DocumentSurface surface,
+  InkSaveState? state,
+  String machine,
+) {
+  final urgent = switch (state) {
+    InkConflict(pages: final at) => (
+      text:
+          'A drawing on this image was saved on another device first. '
+          "Yours isn't saved yet.",
+      keepBoth: () => surface.keepBoth(at),
+    ),
+    InkUnsaved(:final reason) => (
+      text: switch (reason) {
+        InkOffline() =>
+          'Not connected to $machine. Your drawing is kept on this iPad, '
+              'and saves once $machine is back and you open this image '
+              'again.',
+        InkUnsupported() =>
+          'Not saved. To keep drawings, update Claktory on the computer it '
+              'runs on.',
+        InkRefused(:final message) => 'Not saved. $message',
+        InkFailed() =>
+          "Couldn't save your drawing. Claktory tries again the next time "
+              'you draw.',
+      },
+      keepBoth: null,
+    ),
+    InkOutdated() => (
+      text: 'This image changed. Your drawing is from the earlier version.',
+      keepBoth: null,
+    ),
+    _ => null,
+  };
+  if (urgent != null) return urgent;
+  if (surface.imageChanged) {
+    return (
+      text:
+          "This image changed. You're drawing on the earlier version. Tap "
+          'Done to see the new one.',
+      keepBoth: null,
+    );
+  }
+  return switch (state) {
+    InkSaveInProgress() => (text: 'Saving your drawing…', keepBoth: null),
     InkSaved() => (text: 'Saved to $machine', keepBoth: null),
     _ => null,
   };

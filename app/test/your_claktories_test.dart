@@ -1,8 +1,10 @@
 import 'package:factory_app/account.dart' show openAccountPage, privacyPage;
 import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/device_account.dart';
+import 'package:factory_app/loopback_forward.dart' show linkLauncher;
 import 'package:factory_app/connections.dart' show parsePairingCode;
 import 'package:factory_app/people/e2ee.dart' show e2eeFor;
+import 'package:factory_app/pairing.dart' show DeviceNumberField;
 import 'package:factory_app/phone.dart' show PairScreen;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
@@ -16,6 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'device_confirm_test.dart' show FakeAccountApi, home, signIn;
 import 'dm_fakes.dart';
 import 'harness.dart';
+import 'pair_start.dart';
 
 Future<bool> launchUrlForTests(Uri url) async => true;
 
@@ -23,6 +26,7 @@ void main() {
   Future<(Harness, FakeAccountApi)> phone(
     WidgetTester tester, {
     bool signedIn = false,
+    bool none = false,
   }) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -38,6 +42,7 @@ void main() {
         ),
         const AccountClaktory(id: 'c2', name: 'Server', machine: 'nas'),
       ];
+    if (none) api.claktoryList = [];
     final account = DeviceAccount(key: 'k' * 64, open: (_, _) => api);
     if (signedIn) await signIn(account);
     final harness = Harness(Workspace(), localBackend: false, account: account);
@@ -50,7 +55,7 @@ void main() {
       'connects to one after confirming', (tester) async {
     final (harness, _) = await phone(tester);
     expect(find.byType(PairScreen), findsOneWidget);
-    await tester.tap(find.text('Sign in with your email instead'));
+    await pastPairStart(tester, email: true);
     await pumpFrames(tester);
     await tester.enterText(
       find.byKey(const ValueKey('device-email')),
@@ -278,6 +283,29 @@ void main() {
     });
   });
 
+  testWidgets('no Claktory on the account yet: where to get one, the '
+      'download page a link', (tester) async {
+    final pages = <Uri>[];
+    linkLauncher = (url) async {
+      pages.add(url);
+      return true;
+    };
+    addTearDown(() => linkLauncher = null);
+    await phone(tester, signedIn: true, none: true);
+    expect(
+      find.text(
+        'No Claktories on this account yet. Claktory runs on a Mac or a '
+        'Linux server: install it there from claktory.com/download and sign '
+        'in with this email, and it shows up here.',
+        findRichText: true,
+      ),
+      findsOneWidget,
+    );
+    await tester.tapOnText(find.textRange.ofSubstring('claktory.com/download'));
+    await pumpFrames(tester);
+    expect(pages, [Uri.parse(downloadUrl)]);
+  });
+
   testWidgets('App Store: a phone signed in with no Claktory yet can delete '
       'its account, and the email step links the privacy policy', (
     tester,
@@ -414,7 +442,10 @@ void main() {
     );
     await harness.show(tester, size: const Size(393, 852));
     await pumpFrames(tester);
-    final words = find.text("Matt's iPad, signed in as you, wants to connect.");
+    final words = find.text(
+      "A device that calls itself “Matt's iPad”, signed in as you, wants to "
+      'connect.',
+    );
     expect(words, findsOneWidget);
     expect(tester.getTopLeft(words).dy, greaterThanOrEqualTo(47));
     expect(
@@ -428,9 +459,12 @@ void main() {
       greaterThan(tester.getBottomLeft(find.text('Allow')).dy),
     );
 
+    await tester.enterText(_numberField, '0427');
+    await pumpFrames(tester);
     await tester.tap(find.text('Allow'));
     await pumpFrames(tester);
     expect(harness.last.approveDevice.deviceId, 'd4');
+    expect(harness.last.approveDevice.number, '0427');
     harness.backend.workspace.apply(
       harness.backend.workspace.workspace.deepCopy()
         ..remote.pendingDevices.clear(),
@@ -522,16 +556,40 @@ void main() {
       await harness.show(tester, size: const Size(1200, 900));
       await pumpFrames(tester);
       expect(
-        find.text("Matt's iPad, signed in as you, wants to connect."),
+        find.text(
+          "A device that calls itself “Matt's iPad”, signed in as you, wants "
+          'to connect.',
+        ),
         findsOneWidget,
       );
+      // Typed off its screen, never shown here (#352 P4), with what to
+      // do if it isn't the person's (Fugo's rule 3).
+      expect(find.textContaining('0427'), findsNothing);
       expect(
-        find.text('Allow it only if its screen shows 0427.'),
+        find.textContaining("If you didn't just set up a new device"),
         findsOneWidget,
       );
-      await tester.tap(find.text('Allow'));
+      final allow = find.widgetWithText(Button, 'Allow');
+      expect(tester.widget<Button>(allow).onPressed, isNull);
+      // A wrong number: the backend's words.
+      harness.backend.refuse =
+          "That's not the number Matt's iPad shows. 2 tries left.";
+      await tester.enterText(_numberField, '1111');
+      await pumpFrames(tester);
+      await tester.tap(allow);
+      await pumpFrames(tester);
+      expect(harness.last.approveDevice.number, '1111');
+      expect(
+        find.text("That's not the number Matt's iPad shows. 2 tries left."),
+        findsOneWidget,
+      );
+      harness.backend.refuse = null;
+      await tester.enterText(_numberField, '0427');
+      await pumpFrames(tester);
+      await tester.tap(allow);
       await pumpFrames(tester);
       expect(harness.last.approveDevice.deviceId, 'd4');
+      expect(harness.last.approveDevice.number, '0427');
     });
   });
 
@@ -562,3 +620,9 @@ void main() {
     );
   });
 }
+
+/// The field a waiting device's number is typed in, in the banner.
+Finder get _numberField => find.descendant(
+  of: find.byType(DeviceNumberField),
+  matching: find.byType(EditableText),
+);

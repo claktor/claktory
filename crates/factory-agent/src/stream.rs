@@ -132,6 +132,9 @@ pub struct StreamOptions {
     pub transport: Transport,
     /// How long the prompt cache is kept, where the provider lets a request ask.
     pub cache_ttl: CacheTtl,
+    /// Where Anthropic's requests keep the images they sent as files, and
+    /// for which account (#382); None sends every image inline.
+    pub image_files: Option<crate::providers::anthropic::files::ImageFilesFor>,
 }
 
 #[derive(Clone, Debug)]

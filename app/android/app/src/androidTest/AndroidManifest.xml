@@ -17,6 +17,27 @@
             android:name="androidx.test.core.app.InstrumentationActivityInvoker$EmptyFloatingActivity"
             android:exported="false"
             tools:node="merge" />
+        <!-- Another app's files, for SharedContentTest: the test APK is
+             another package, so the app reads them across apps, as a
+             share from Photos or Files. -->
+        <provider
+            android:name="com.claktory.app.ShareTestProvider"
+            android:authorities="com.claktory.app.sharetest"
+            android:exported="true"
+            android:grantUriPermissions="true" />
+        <!-- The same files, readable only through a share's grant, and the
+             activity that shares them (SharedContentTest). -->
+        <provider
+            android:name="com.claktory.app.ShareSender$Private"
+            android:authorities="com.claktory.app.sharetest.private"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+        <activity
+            android:name="com.claktory.app.ShareSender"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <!-- tools/backup_exclusion_check.sh wakes its control with it. -->
         <receiver
             android:name="com.claktory.app.BackupControlWaker"

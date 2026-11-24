@@ -586,8 +586,11 @@ class _MessageBoxState extends State<MessageBox> {
       return KeyEventResult.ignored;
     }
     // On a phone Return starts a new line, as the keyboard's own does; ⌘
-    // or Ctrl with it sends from a hardware keyboard.
+    // or Ctrl with it sends from a hardware keyboard. An iPad with a
+    // hardware keyboard sends with Return at every width, a narrow Split
+    // View too, as Messages does (#362 I1).
     if (isPhoneLayout(context) &&
+        !hardwareKeyboard.value &&
         !HardwareKeyboard.instance.isMetaPressed &&
         !HardwareKeyboard.instance.isControlPressed &&
         _matches.isEmpty) {

@@ -601,6 +601,21 @@ pub fn parse_anthropic_plan(profile: &Value) -> String {
     }
 }
 
+/// Whether an Anthropic subscription's organization is the person's own: a
+/// Pro or Max plan (`organization_type`, whatever name the plan shows,
+/// "Ultra" included). A Team's or an Enterprise's is shared with others,
+/// and so is one it doesn't say (#382: images kept as files are reachable
+/// to everyone with access to the organization's workspace).
+pub fn parse_anthropic_personal(profile: &Value) -> bool {
+    matches!(profile["organization"]["organization_type"].as_str(), Some("claude_max" | "claude_pro"))
+}
+
+/// Reads whether an Anthropic subscription sign-in is the person's own
+/// (`parse_anthropic_personal`).
+pub fn anthropic_personal(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<bool, Error>> {
+    Box::pin(async move { Ok(parse_anthropic_personal(&anthropic_get("Anthropic plan", "profile", &base_url, auth).await?)) })
+}
+
 /// Whether Anthropic's `plan_display_name` is a name to show, by the rule
 /// Claude Code checks it with: letters, digits, spaces and . + -, at most 40,
 /// starting with a letter or digit.

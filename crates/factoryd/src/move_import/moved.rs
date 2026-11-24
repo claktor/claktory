@@ -147,7 +147,7 @@ async fn client(mut socket: Socket, loopback: bool, home: &Home) {
 }
 
 async fn send(socket: &mut Socket, reply_to: u64, body: Body) -> bool {
-    let answer = ServerMessage { reply_to, body: Some(body) };
+    let answer = ServerMessage { reply_to, body: Some(body), ..Default::default() };
     socket.send(Message::Binary(answer.encode_to_vec().into())).await.is_ok()
 }
 

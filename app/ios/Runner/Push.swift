@@ -35,17 +35,26 @@ struct PushNotice: Equatable {
 }
 
 /// What a tap on a push opens: an agent (at its Needs-you item, `seq`), a
-/// pipe (at its held message) or a chat; none of them for a test.
+/// pipe (at its held message), a chat, or Needs you for a device waiting
+/// to be allowed (`device`, #352 P4) or for a Needs-you push about no one
+/// thing (`kind` "needs_you": what waited out quiet hours, #364 O3); none
+/// of them for a test.
 struct PushTarget: Equatable {
   var agent = ""
   var pipe = ""
   var chat = ""
   var seq: UInt64 = 0
+  var device = ""
+  /// The push's kind, "needs_you" or another.
+  var kind = ""
 
   /// As the app's notifications take it (app/lib/notifications.dart's
   /// NotificationTarget): `claktory` is the id the app keeps the key by.
   func map(claktory: String) -> [String: Any] {
-    ["claktory": claktory, "agentId": agent, "pipeId": pipe, "chatId": chat, "seq": Int(seq)]
+    [
+      "claktory": claktory, "agentId": agent, "pipeId": pipe, "chatId": chat, "seq": Int(seq),
+      "deviceId": device, "kind": kind,
+    ]
   }
 }
 
@@ -154,7 +163,9 @@ enum PushOpener {
       target: PushTarget(
         agent: text("agent", in: target), pipe: text("pipe", in: target),
         chat: text("chat", in: target),
-        seq: (target["seq"] as? NSNumber)?.uint64Value ?? 0))
+        seq: (target["seq"] as? NSNumber)?.uint64Value ?? 0,
+        // Older Claktories send none: no device.
+        device: text("device", in: target), kind: text("kind")))
   }
 }
 

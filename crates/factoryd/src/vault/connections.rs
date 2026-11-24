@@ -400,7 +400,7 @@ impl Vault {
 // ---- Proposals ----
 
 const PROPOSAL_COLUMNS: &str =
-    "id, agent, connector, access_id, purpose, access, reason, state, created, decided, comment, secret, secret_name, statements, region";
+    "id, agent, connector, access_id, purpose, access, reason, state, created, decided, comment, secret, secret_name, statements, region, replied";
 
 fn proposal_state(state: &str) -> ConnectProposalState {
     match state {
@@ -428,6 +428,7 @@ fn proposal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::ConnectProposal
         secret_name: row.get(12)?,
         statements: crate::connectors::aws_stack::stored_statements(&row.get::<_, String>(13)?),
         region: row.get(14)?,
+        replied: row.get(15)?,
     })
 }
 
@@ -486,21 +487,23 @@ impl Vault {
     }
 
     /// Marks a pending proposal connected (the connection: its id and name)
-    /// or dismissed (None); returns it as it is now.
+    /// or dismissed (None), `replied` when dismissed by the person's reply
+    /// (#370); returns it as it is now.
     pub(crate) fn decide_proposal(
         &self,
         id: &str,
         connected: Option<(&str, &str)>,
         comment: &str,
+        replied: bool,
     ) -> Result<v1::ConnectProposal, VaultError> {
         let mut inner = self.lock();
         let db = Self::db(&inner)?;
         let state = if connected.is_some() { "connected" } else { "dismissed" };
         let (secret, secret_name) = connected.unwrap_or_default();
         let changed = db.execute(
-            "UPDATE connect_proposals SET state = ?2, decided = ?3, comment = ?4, secret = ?5, secret_name = ?6
+            "UPDATE connect_proposals SET state = ?2, decided = ?3, comment = ?4, secret = ?5, secret_name = ?6, replied = ?7
              WHERE id = ?1 AND state = 'pending'",
-            params![id, state, now_ms(), comment.trim(), secret, secret_name],
+            params![id, state, now_ms(), comment.trim(), secret, secret_name, replied && connected.is_none()],
         )?;
         if changed == 0 {
             return Err(VaultError::Invalid("This suggestion was already answered.".to_owned()));

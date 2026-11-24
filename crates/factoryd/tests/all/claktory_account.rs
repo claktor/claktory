@@ -320,9 +320,11 @@ async fn signing_in_protects_the_vault_with_the_account_which_opens_it_after_a_r
     let revealed = client.request(Request::RevealSecret(v1::RevealSecret { id: secret.clone(), proof: None })).await;
     let Body::SecretValue(value) = revealed.body else { panic!("expected the value, got {:?}", revealed.body) };
     assert_eq!(value.entries[0].value, "wJalrXUtnFEMI-account-test");
+    // A minute after signing in, from where it signed in: the person's own
+    // unlock, not emailed (#412: only an unusual one is).
     assert!(
-        instance.mail.sent().iter().any(|mail| mail.to == "matt@example.com" && mail.subject.contains("unlocked")),
-        "the unlock is emailed"
+        !instance.mail.sent().iter().any(|mail| mail.to == "matt@example.com" && mail.subject.contains("unlocked")),
+        "the unlock just after signing in isn't emailed"
     );
 
     // Signing out: the vault opens by itself again, with a key on disk.

@@ -29,12 +29,16 @@ TunnelStatus tunnelStatus({
   TunnelFailure failure = TunnelFailure.none,
   String error = '',
   bool relay = true,
+  int relayUpMs = 0,
+  TunnelRelayTrouble trouble = TunnelRelayTrouble.none,
 }) => TunnelStatus(
   phase: phase,
   path: path,
   error: error,
   failure: failure,
   relayConnected: relay,
+  relayUpMs: relayUpMs,
+  relayTrouble: trouble,
 );
 
 /// A tunnel that's a local port: whatever listens there stands for the

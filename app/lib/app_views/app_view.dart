@@ -189,7 +189,10 @@ class _AppViewState extends State<AppView> with WidgetsBindingObserver {
 }
 
 /// What an app draws, always framed as the app's: "From Charts" over it,
-/// inside a hairline, so nothing in it passes for Claktory's own cards.
+/// inside a hairline, so nothing in it passes for Claktory's own cards. On
+/// a phone the caption alone frames it: its panels sit on the page, 16pt
+/// from the edge, as a dashboard's do in Grafana (Bruno's P5), not inset
+/// again in a card.
 class _Framed extends StatelessWidget {
   const _Framed({required this.appName, required this.child});
 
@@ -212,14 +215,17 @@ class _Framed extends StatelessWidget {
             fontWeight: FontWeight.w500,
           ),
         ),
-        Container(
-          padding: EdgeInsets.all(touchFirst(context) ? Space.m : Space.l),
-          decoration: BoxDecoration(
-            border: Border.all(color: palette.hairline),
-            borderRadius: BorderRadius.circular(Radii.panel),
+        if (isPhoneLayout(context))
+          child
+        else
+          Container(
+            padding: EdgeInsets.all(touchFirst(context) ? Space.m : Space.l),
+            decoration: BoxDecoration(
+              border: Border.all(color: palette.hairline),
+              borderRadius: BorderRadius.circular(Radii.panel),
+            ),
+            child: child,
           ),
-          child: child,
-        ),
       ],
     );
   }

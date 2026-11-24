@@ -142,6 +142,7 @@ pub(crate) async fn hello_as<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + U
         device_kind: v1::DeviceKind::Phone.into(),
         workspace_patches: false,
         device_name: name.into(),
+        platform: "ios".into(),
         ..Default::default()
     };
     let message = ClientMessage { id: 1, body: Some(client_message::Body::Hello(hello)) };
@@ -299,6 +300,7 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
         other => panic!("expected a pairing code, got {other:?}"),
     };
     assert_eq!(made.device_id, "phone");
+    assert_eq!(made.link, factoryd::remote::pairing_link(&made.code), "the same code, as a link once links are on");
     let code = parse(&made.code);
     assert_eq!(code.relays, [relay], "{}", made.code);
     assert!(!code.addresses.is_empty() && code.addresses.iter().all(|address| !address.ip().is_loopback()), "{}", made.code);
@@ -332,7 +334,7 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     let copier = new_device().await;
     let refused = dial(&copier, &code, &code.addresses).await.expect_err("the code is taken");
     assert!(refused.contains("isn't paired"), "{refused}");
-    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "phone".into() });
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "phone".into(), number: asking.number.clone() });
     assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
     match next(&mut socket).await {
         Some(Body::Welcome(welcome)) => assert_eq!(welcome.device_id, "phone"),
@@ -347,6 +349,7 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     view.follow(&mut client, |view| remote(view).devices[0].connected && remote(view).devices[0].path() == v1::DevicePath::Direct).await;
     let device = &remote(&view).devices[0];
     assert!(device.code_expires_ms == 0 && device.last_seen_ms > 0 && !device.last_address.is_empty(), "{device:?}");
+    assert_eq!(device.platform, "ios", "its system, as its app said");
     // What the person sends from it says it came from it.
     apply_request(&mut client, &mut view, crate::common::create_agent("", "Ops", "")).await;
     let message =
@@ -510,7 +513,10 @@ async fn remote_access_turning_on_and_off_keeps_this_machines_app_connected() {
     let phone_link = dial(&phone, &code, &code.addresses).await.expect("the phone reaches the remote endpoint");
     let mut phone_socket = open(&phone_link).await;
     assert!(matches!(hello(&mut phone_socket, &code.token).await, Body::PairingPending(_)));
-    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "phone".into() });
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice {
+        device_id: "phone".into(),
+        number: number(&code, &phone.id().to_string()),
+    });
     assert!(matches!(ask(&mut socket, 4, allow).await, Body::Ack(_)));
     assert!(matches!(next(&mut phone_socket).await, Some(Body::Welcome(_))));
     assert!(matches!(ask(&mut socket, 4, list_home()).await, Body::FolderList(_)), "still connected");
@@ -545,7 +551,7 @@ async fn remote_access_turning_on_and_off_keeps_this_machines_app_connected() {
 /// Makes a code from the app and has a new device use it: the code, the
 /// device's id, its endpoint (kept, or its connection closes), its
 /// connection and the socket it waits on.
-async fn waiting_device(client: &mut Client, view: &mut View, name: &str) -> (Code, String, Endpoint, Connection, Socket) {
+pub(crate) async fn waiting_device(client: &mut Client, view: &mut View, name: &str) -> (Code, String, Endpoint, Connection, Socket) {
     let pairing = client_message::Body::CreatePairing(v1::CreatePairing { name: name.into(), host: String::new() });
     let made = match apply_request(client, view, pairing).await {
         Body::PairingCode(code) => code,
@@ -560,7 +566,7 @@ async fn waiting_device(client: &mut Client, view: &mut View, name: &str) -> (Co
 }
 
 /// The waiting device is turned away: why.
-async fn turned_away(socket: &mut Socket, case: &str) -> String {
+pub(crate) async fn turned_away(socket: &mut Socket, case: &str) -> String {
     match next(socket).await {
         Some(Body::Error(error)) if error.code() == ErrorCode::Unauthorized => error.message,
         other => panic!("{case}: expected to be turned away, got {other:?}"),
@@ -607,9 +613,12 @@ async fn a_code_lets_a_device_in_only_once_the_person_allows_it_and_ends_when_th
     let mut devices = factoryd::remote::devices(&home(&dir)).expect("devices");
     devices.iter_mut().find(|device| device.id == id).expect("waiting").code_expires = Some(now_ms() - 1);
     std::fs::write(dir.join("home/remote/devices.json"), serde_json::to_string(&devices).expect("json")).expect("write");
+    // Allow goes by the file at once, not by what the Workspace showed a
+    // moment ago.
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), ..Default::default() });
+    assert!(matches!(apply_request(&mut client, &mut view, allow.clone()).await, Body::Error(error) if error.code() == ErrorCode::NotFound));
     let why = turned_away(&mut socket, "expired").await;
     assert!(why.contains("expired"), "{why}");
-    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone() });
     assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Error(error) if error.code() == ErrorCode::NotFound));
 
     // Allowed in a terminal (factoryd allow), it's let in all the same;
@@ -711,7 +720,8 @@ async fn a_paired_device_forwards_to_this_machines_localhost() {
     let (answer, ..) = forward_to(&early, port).await;
     assert!(answer.starts_with("no ") && answer.contains("isn't paired"), "{answer}");
 
-    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone() });
+    let allow =
+        client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), number: number(&code, &device.id().to_string()) });
     assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
     assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
 
@@ -746,6 +756,212 @@ async fn a_paired_device_forwards_to_this_machines_localhost() {
     // Unpaired, its forwarding connection closes.
     let unpair = client_message::Body::UnpairDevice(v1::UnpairDevice { device_id: id });
     assert!(matches!(apply_request(&mut client, &mut view, unpair).await, Body::Ack(_)));
+    // Closed by Claktory; under load the device may hear only a reset, when
+    // Claktory's side has dropped the connection before the close reached
+    // it. Either is the end, and nothing gets through after it.
     let closed = tokio::time::timeout(WAIT, forwards.closed()).await.expect("closed in time");
-    assert!(matches!(closed, ConnectionError::ApplicationClosed(_)), "{closed:?}");
+    assert!(matches!(closed, ConnectionError::ApplicationClosed(_) | ConnectionError::Reset), "{closed:?}");
+    assert!(forwards.open_bi().await.is_err(), "nothing opens on it");
+}
+
+/// Dials `addr` (a relay and no address, as from away), offering the
+/// tunnel's ALPN; Err with why within `wait`.
+async fn dial_at(device: &Endpoint, addr: EndpointAddr, wait: Duration) -> Result<Connection, String> {
+    let dial = device.connect(addr, factoryd::remote::ALPN);
+    tokio::time::timeout(wait, dial).await.map_err(|_| "timed out".to_owned())?.map_err(|error| format!("{error:#}"))
+}
+
+/// An address lookup on this machine, in place of n0's.
+type Lookup = std::sync::Arc<iroh::test_utils::DnsPkarrServer>;
+
+/// Claktory's tunnel on `relays` (the default ones) and `lookup`, as on the
+/// internet with Claktory's relays and n0's lookup.
+fn on_local_network(factory: &factoryd::Factory, relays: &[&iroh::RelayUrl], lookup: &Lookup) {
+    let lookup = lookup.clone();
+    factory.set_tunnel_network(relays.iter().map(ToString::to_string).collect(), move |builder| {
+        builder.preset(lookup.preset()).ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
+    });
+}
+
+/// A device homed on `relay`, with `lookup` (`None`: none at all) and `key`.
+async fn device_on(relay: &iroh::RelayUrl, lookup: Option<&Lookup>, key: iroh::SecretKey) -> Endpoint {
+    let mut builder = Endpoint::builder(presets::Minimal)
+        .secret_key(key)
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
+        .relay_mode(RelayMode::Custom(relay.clone().into()));
+    if let Some(lookup) = lookup {
+        builder = builder.preset(lookup.preset());
+    }
+    builder.bind().await.expect("device endpoint")
+}
+
+/// Its code's relays, and no address (it's away from home).
+fn from_away(code: &Code) -> EndpointAddr {
+    code.relays.iter().fold(EndpointAddr::new(code.endpoint), |addr, relay| addr.with_relay_url(relay.parse().expect("a relay URL")))
+}
+
+/// Pairs "Phone" from the app, and gives its code once it names a relay the
+/// tunnel reached, which is published.
+async fn pair_phone(client: &mut Client, view: &mut View, lookup: &Lookup) -> Code {
+    let pairing = client_message::Body::CreatePairing(v1::CreatePairing { name: "Phone".into(), host: String::new() });
+    let made = match apply_request(client, view, pairing).await {
+        Body::PairingCode(code) => code,
+        other => panic!("expected a pairing code, got {other:?}"),
+    };
+    let code = parse(&made.code);
+    lookup.on_endpoint(&code.endpoint, WAIT).await.expect("published");
+    code
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_default_relays_are_claktorys_and_n0s_us_east_and_a_device_whose_code_names_n0s_still_connects() {
+    use iroh::test_utils::{DnsPkarrServer, run_relay_server};
+
+    let defaults = factoryd::remote::default_relays();
+    let us_east = iroh::defaults::prod::default_na_east_relay().url.to_string();
+    assert_eq!(defaults, ["https://relay.claktory.com/", us_east.as_str()]);
+    assert_eq!(factoryd::remote::DEFAULT_RELAY, "https://relay.claktory.com/", "as the apps write it");
+    assert_eq!(us_east, "https://use1-1.relay.n0.iroh.link./", "as iroh writes it, for devices homed there");
+    // Relays on this machine: Claktory's, the fallback, and one of n0's
+    // others, which were the default before; and an address lookup.
+    let (_, ours, _ours) = run_relay_server().await.expect("a relay");
+    let (_, fallback, _fallback) = run_relay_server().await.expect("a relay");
+    let (_, n0s, _n0s) = run_relay_server().await.expect("a relay");
+    let lookup: Lookup = std::sync::Arc::new(DnsPkarrServer::run().await.expect("an address lookup"));
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_tunnel_online_wait(WAIT);
+    on_local_network(&factory, &[&ours, &fallback], &lookup);
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let remote = |view: &View| view.workspace.remote.clone().expect("remote access");
+
+    // config.json names no relays: the tunnel uses the default ones, homes
+    // on one, and a new code names that one.
+    let code = pair_phone(&mut client, &mut view, &lookup).await;
+    view.follow(&mut client, |view| remote(view).on && remote(view).relay_connected).await;
+    let shown = remote(&view);
+    assert_eq!((shown.relays.as_slice(), shown.custom_relays), ([ours.to_string(), fallback.to_string()].as_slice(), false));
+    assert_eq!(code.relays, std::slice::from_ref(&shown.home_relay));
+    // A new phone, homed on Claktory's relay as the apps are, uses it from
+    // away; the person allows it.
+    let key = iroh::SecretKey::generate();
+    let phone = device_on(&ours, Some(&lookup), key.clone()).await;
+    let connection = dial_at(&phone, from_away(&code), WAIT).await.expect("reached through the code's relay");
+    let mut socket = open(&connection).await;
+    assert!(matches!(hello(&mut socket, &code.token).await, Body::PairingPending(_)));
+    factoryd::remote::approve(&home(&dir), "phone").expect("allowed");
+    assert!(matches!(next(&mut socket).await, Some(Body::Welcome(welcome)) if welcome.device_id == "phone"));
+    drop(socket);
+    connection.close(0u32.into(), b"bye");
+    drop(connection);
+    phone.close().await;
+
+    // A device paired while n0's relays were the default: homed on one of
+    // them, and its code names it and no address. It finds this Claktory
+    // through the address lookup.
+    let old = EndpointAddr::new(code.endpoint).with_relay_url(n0s.clone());
+    let phone = device_on(&n0s, Some(&lookup), key).await;
+    let connection = dial_at(&phone, old.clone(), WAIT).await.expect("found through the address lookup");
+    let mut socket = open(&connection).await;
+    assert!(matches!(hello(&mut socket, &code.token).await, Body::Welcome(welcome) if welcome.device_id == "phone"));
+    view.follow(&mut client, |view| remote(view).devices.iter().any(|device| device.id == "phone" && device.connected)).await;
+    // Without the lookup the old code alone leads nowhere: that relay
+    // doesn't have this Claktory any more.
+    let blind = device_on(&n0s, None, iroh::SecretKey::generate()).await;
+    assert!(dial_at(&blind, old, Duration::from_secs(3)).await.is_err(), "only the lookup finds it");
+
+    // config.json's relays still override the default ones.
+    let relay = "http://127.0.0.1:9/";
+    let relays = v1::SetRemoteAccess { relays: vec![relay.into()], set_relays: true, ..Default::default() };
+    assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::SetRemoteAccess(relays)).await, Body::Ack(_)));
+    view.follow(&mut client, |view| remote(view).custom_relays).await;
+    assert_eq!(remote(&view).relays, [relay]);
+    factory.set_tunnel_online_wait(Duration::from_millis(100));
+    let pairing = client_message::Body::CreatePairing(v1::CreatePairing { name: "Laptop".into(), host: String::new() });
+    let made = match apply_request(&mut client, &mut view, pairing).await {
+        Body::PairingCode(code) => code,
+        other => panic!("expected a pairing code, got {other:?}"),
+    };
+    assert_eq!(parse(&made.code).relays, [relay], "{}", made.code);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_claktorys_relay_down_the_tunnel_homes_on_the_fallback_and_devices_still_connect() {
+    use iroh::test_utils::{DnsPkarrServer, run_relay_server};
+
+    // Claktory's relay is down (nothing answers at its address); the
+    // fallback is up.
+    let (_, ours, server) = run_relay_server().await.expect("a relay");
+    drop(server);
+    let (_, fallback, _fallback) = run_relay_server().await.expect("a relay");
+    let lookup: Lookup = std::sync::Arc::new(DnsPkarrServer::run().await.expect("an address lookup"));
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_tunnel_online_wait(WAIT);
+    on_local_network(&factory, &[&ours, &fallback], &lookup);
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let remote = |view: &View| view.workspace.remote.clone().expect("remote access");
+
+    let code = pair_phone(&mut client, &mut view, &lookup).await;
+    assert_eq!(code.relays, [fallback.to_string()], "homed on the fallback");
+    view.follow(&mut client, |view| remote(view).relay_connected).await;
+    assert_eq!(remote(&view).home_relay, fallback.to_string());
+    // A phone homed on Claktory's relay alone, as the apps are, still
+    // reaches it through the fallback the code names.
+    let phone = device_on(&ours, Some(&lookup), iroh::SecretKey::generate()).await;
+    let connection = dial_at(&phone, from_away(&code), WAIT).await.expect("reached through the fallback");
+    let mut socket = open(&connection).await;
+    assert!(matches!(hello(&mut socket, &code.token).await, Body::PairingPending(_)));
+    factoryd::remote::approve(&home(&dir), "phone").expect("allowed");
+    assert!(matches!(next(&mut socket).await, Some(Body::Welcome(welcome)) if welcome.device_id == "phone"));
+    // And one whose code names no relay at all finds it through the lookup.
+    let bare = Code { token: code.token.clone(), endpoint: code.endpoint, relays: Vec::new(), addresses: Vec::new() };
+    let again = device_on(&ours, Some(&lookup), phone.secret_key().clone()).await;
+    let connection = dial_at(&again, from_away(&bare), WAIT).await.expect("found through the address lookup");
+    let mut socket = open(&connection).await;
+    assert!(matches!(hello(&mut socket, &code.token).await, Body::Welcome(welcome) if welcome.device_id == "phone"));
+}
+
+/// One of this machine's private network (LAN) IPv4 addresses in `code`, if
+/// it has one: reached from 127.0.0.1 over loopback, unlike a VPN's.
+fn lan_ipv4(code: &Code) -> Option<SocketAddr> {
+    code.addresses.iter().find(|address| matches!(address.ip(), std::net::IpAddr::V4(ip) if ip.is_private())).copied()
+}
+
+/// #392: a device that reaches Claktory at an address that isn't this
+/// machine's route back to the device (its second network, a port
+/// forward) gets its answers from that same address. macOS sent them from
+/// its route's address instead (noq-udp's IPv4 source went in a control
+/// message macOS ignores on send, vendor/README.md), so the device's
+/// handshake followed the answers there and Claktory's, pinned to the
+/// address dialled, never completed: a direct path that stalled for good.
+/// Here the device sends from 127.0.0.1 to this machine's network address:
+/// the route back to 127.0.0.1 is 127.0.0.1's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_reaching_claktory_at_an_address_other_than_its_route_back_gets_answers_from_it() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_tunnel_online_wait(Duration::from_millis(100));
+    let (mut setup, _, _) = Client::connect(addr).await;
+    let relays = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    setup.ok(client_message::Body::SetRemoteAccess(relays)).await;
+    let made = factory.create_pairing("Phone").await.expect("a code");
+    let code = parse(&made.code);
+    let Some(lan) = lan_ipv4(&code) else {
+        eprintln!("skipped: this machine has no private network IPv4 address");
+        return;
+    };
+    let device = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .clear_ip_transports()
+        .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .expect("loopback")
+        .bind()
+        .await
+        .expect("device endpoint");
+    let connection = dial(&device, &code, &[lan]).await.expect("answered from the address it dialled");
+    let mut socket = open(&connection).await;
+    assert!(matches!(hello(&mut socket, &code.token).await, Body::PairingPending(_)));
 }

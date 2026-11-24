@@ -6,7 +6,7 @@ import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
-import 'decision.dart' show DecisionComment;
+import 'decision.dart' show CommentTyped, DecisionComment, SubmitButton;
 import 'extensions.dart' show dayLabel, logTime;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
@@ -208,7 +208,10 @@ class _AppGrantCardState extends State<AppGrantCard> {
     super.dispose();
   }
 
-  Future<void> _decide({required bool approve}) async {
+  /// [reply]: Submit (#370), the comment going to Rivet as the person's
+  /// reply, and nothing given; Rivet can suggest it again. Sent with
+  /// approve off, so a backend that doesn't know replies declines it.
+  Future<void> _decide({required bool approve, bool reply = false}) async {
     if (_approving != null || (approve && !_known)) return;
     final backend = AppScope.of(context);
     setState(() {
@@ -221,6 +224,7 @@ class _AppGrantCardState extends State<AppGrantCard> {
         widget.seq,
         approve: approve,
         comment: _comment.text.trim(),
+        reply: reply,
       );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
@@ -228,6 +232,8 @@ class _AppGrantCardState extends State<AppGrantCard> {
       if (mounted) setState(() => _approving = null);
     }
   }
+
+  void _submit() => unawaited(_decide(approve: false, reply: true));
 
   @override
   Widget build(BuildContext context) {
@@ -427,50 +433,81 @@ class _AppGrantCardState extends State<AppGrantCard> {
     final loading = _reachesConversations && _friends == null;
     final unknown = !loading && !_known;
     return [
-      ActionLine(
-        lead: Text(
-          _error ??
-              (_approving == true
-                  ? 'Giving $name access…'
-                  : _friendsFailed
-                  ? "Can't check these conversations right now, so you "
-                        "can't approve yet."
-                  : unknown
-                  ? "You can't approve this: one of these conversations "
-                        "isn't among yours on this device."
-                  : 'Approving gives $name this access through your '
-                        'claktory.com account.'),
-          style: type.caption.copyWith(
-            color: _error == null && !unknown
-                ? palette.textFaint
-                : palette.danger,
-          ),
-        ),
-        action: ControlsLine(
-          children: [
-            if (_friendsFailed)
-              Button(
-                label: 'Try again',
-                onPressed: busy ? null : () => unawaited(_loadFriends()),
-              ),
-            Button(
-              label: 'Decline',
-              onPressed: busy ? null : () => _decide(approve: false),
-            ),
-            Button(
-              label: 'Approve',
-              primary: true,
-              // Only once every conversation it reaches is known here.
-              onPressed: busy || !_known ? null : () => _decide(approve: true),
-            ),
-          ],
+      // Once a comment is typed, one Submit: a reply, giving nothing.
+      CommentTyped(
+        controller: _comment,
+        builder: (context, typed) => typed
+            ? ActionLine(
+                lead: Text(
+                  _error ??
+                      'Nothing is given. $rivetName gets your comment and '
+                          'can suggest it again.',
+                  style: type.caption.copyWith(
+                    color: _error == null ? palette.textFaint : palette.danger,
+                  ),
+                ),
+                action: SubmitButton(onPressed: busy ? null : _submit),
+              )
+            : _buttons(palette, type, name, busy: busy, unknown: unknown),
+      ),
+      // The shared Add a comment: typed, it's Submit's, Return too.
+      const SizedBox(height: Space.xs),
+      DecisionComment(
+        controller: _comment,
+        agent: rivetName,
+        enabled: !busy,
+        onSubmit: _submit,
+      ),
+    ];
+  }
+
+  /// Decline and Approve, while no comment is typed.
+  Widget _buttons(
+    Palette palette,
+    TypeScale type,
+    String name, {
+    required bool busy,
+    required bool unknown,
+  }) {
+    return ActionLine(
+      lead: Text(
+        _error ??
+            (_approving == true
+                ? 'Giving $name access…'
+                : _friendsFailed
+                ? "Can't check these conversations right now, so you "
+                      "can't approve yet."
+                : unknown
+                ? "You can't approve this: one of these conversations "
+                      "isn't among yours on this device."
+                : 'Approving gives $name this access through your '
+                      'claktory.com account.'),
+        style: type.caption.copyWith(
+          color: _error == null && !unknown
+              ? palette.textFaint
+              : palette.danger,
         ),
       ),
-      // The shared Add a comment, with either answer. No Enter: access is
-      // approved only with the button.
-      const SizedBox(height: Space.xs),
-      DecisionComment(controller: _comment, agent: rivetName, enabled: !busy),
-    ];
+      action: ControlsLine(
+        children: [
+          if (_friendsFailed)
+            Button(
+              label: 'Try again',
+              onPressed: busy ? null : () => unawaited(_loadFriends()),
+            ),
+          Button(
+            label: 'Decline',
+            onPressed: busy ? null : () => _decide(approve: false),
+          ),
+          Button(
+            label: 'Approve',
+            primary: true,
+            // Only once every conversation it reaches is known here.
+            onPressed: busy || !_known ? null : () => _decide(approve: true),
+          ),
+        ],
+      ),
+    );
   }
 
   List<Widget> _decided(
@@ -492,6 +529,8 @@ class _AppGrantCardState extends State<AppGrantCard> {
         "Approved, but couldn't give $name access",
         palette.danger,
       ),
+      // Answered with a comment (#370): nothing given.
+      _ when grant.replied => ('Replied', palette.textMuted),
       _ => ('Declined', palette.textMuted),
     };
     return [

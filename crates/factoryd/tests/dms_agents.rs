@@ -158,7 +158,7 @@ async fn an_agents_message_is_sent_only_once_the_person_approves_exactly_it() {
     call(&mut client, &mut view, "rivet", "app_grants_propose", &proposal).await;
     let seq =
         view.entries.iter().rev().find_map(|entry| matches!(entry.kind, Some(Kind::AppGrant(_))).then_some(entry.seq)).expect("a card");
-    let decision = v1::DecideAppGrant { agent_id: "rivet".into(), seq, approve: true, comment: String::new() };
+    let decision = v1::DecideAppGrant { agent_id: "rivet".into(), seq, approve: true, comment: String::new(), ..Default::default() };
     apply_request(&mut client, &mut view, Request::DecideAppGrant(decision)).await;
     view.follow(&mut client, |view| view.agent("mike").extensions.iter().any(|extension| extension.id == "dm" && extension.enabled)).await;
     select(&mut client, &mut view, "mike").await;
@@ -310,7 +310,7 @@ async fn an_agents_message_is_sent_only_once_the_person_approves_exactly_it() {
     call(&mut client, &mut view, "rivet", "app_grants_propose", &narrower).await;
     let seq =
         view.entries.iter().rev().find_map(|entry| matches!(entry.kind, Some(Kind::AppGrant(_))).then_some(entry.seq)).expect("a card");
-    let decision = v1::DecideAppGrant { agent_id: "rivet".into(), seq, approve: true, comment: String::new() };
+    let decision = v1::DecideAppGrant { agent_id: "rivet".into(), seq, approve: true, comment: String::new(), ..Default::default() };
     apply_request(&mut client, &mut view, Request::DecideAppGrant(decision)).await;
     select(&mut client, &mut view, "mike").await;
     view.follow(&mut client, |view| {

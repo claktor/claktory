@@ -65,14 +65,14 @@ fn day(db: &Connection, now: i64) -> rusqlite::Result<(i64, i64)> {
         "SELECT CAST(strftime('%s', ?1 / 1000, 'unixepoch', 'localtime', 'start of day', 'utc') AS INTEGER) * 1000,
                 CAST(strftime('%s', ?1 / 1000, 'unixepoch', 'localtime', 'start of day', '+1 day', 'utc') AS INTEGER) * 1000",
         [now],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        crate::store::row2,
     )
 }
 
 /// The person's caps for `agent`: theirs, or the defaults.
 pub(crate) fn caps(db: &Connection, agent: &str) -> rusqlite::Result<(f64, u64)> {
     let set: Option<(f64, i64)> = db
-        .query_row("SELECT usd, tokens FROM pipe_spend_caps WHERE agent = ?1", [agent], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_row("SELECT usd, tokens FROM pipe_spend_caps WHERE agent = ?1", [agent], crate::store::row2)
         .optional()?;
     Ok(set.map_or((DEFAULT_USD, DEFAULT_TOKENS), |(usd, tokens)| (usd, u64::try_from(tokens).unwrap_or(DEFAULT_TOKENS))))
 }

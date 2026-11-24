@@ -1,9 +1,6 @@
 package com.claktory.app
 
 import android.Manifest
-import android.graphics.Color
-import android.media.MediaRecorder
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -156,31 +153,16 @@ class PlaybackTest {
         assertEquals("This recording can't be played.", refused!!.message)
     }
 
-    /** About a second of H.264 video, 320×240, made upright on a phone held upright (turned 90°). */
+    /**
+     * About a second of H.264 video, 320×240, made upright on a phone held
+     * upright (turned 90°): a fixed file of the tests' own (assets/clip.mp4,
+     * made with ffmpeg), not one recorded here. Android 7's emulator records
+     * from a surface with broken timestamps, so a clip recorded there lasted
+     * 0 s or weeks, which said nothing of the player.
+     */
     private fun video(name: String): File {
         val file = File(folder, name)
-        val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(context) else @Suppress("DEPRECATION") MediaRecorder()
-        recorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
-        recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-        recorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-        recorder.setVideoSize(320, 240)
-        recorder.setVideoFrameRate(30)
-        recorder.setVideoEncodingBitRate(500_000)
-        recorder.setOrientationHint(90)
-        recorder.setOutputFile(file.path)
-        recorder.prepare()
-        recorder.start()
-        val surface = recorder.surface
-        val start = System.currentTimeMillis()
-        var n = 0
-        while (System.currentTimeMillis() - start < 1_100) {
-            val canvas = surface.lockHardwareCanvas()
-            canvas.drawColor(if (n++ % 2 == 0) Color.BLUE else Color.WHITE)
-            surface.unlockCanvasAndPost(canvas)
-            Thread.sleep(33)
-        }
-        recorder.stop()
-        recorder.release()
+        instrumentation.context.assets.open("clip.mp4").use { from -> file.outputStream().use { from.copyTo(it) } }
         return file
     }
 

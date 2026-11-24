@@ -13,6 +13,10 @@
 //! toward containment: nothing in it lifts a reader or a liaison, and it
 //! never releases reports waiting for the person.
 //!
+//! `pipes_group` (#359) arranges a project's pipes into groups in the
+//! sidebar, as the person does from a pipe's menu: only for an admin agent.
+//! Arrangement only, so nothing about a pipe changes.
+//!
 //! `pipes_report_type` (§11.3) defines, edits, deletes or shows report types
 //! from the person's plain description: only for an admin agent, and its
 //! changes never while it has read anything from outside, since a type
@@ -27,7 +31,7 @@ use factory_protocol::v1::PipeStartKind;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{Extension, Manifest, PromptKind, PromptSection};
+use super::{Extension, Manifest, PromptSection};
 use crate::config::AgentConfig;
 use crate::factory::{Factory, Inner};
 use crate::pipes::start::{self, Fill};
@@ -47,6 +51,7 @@ const INVITE: &str = "Start a pipe from one of the person's projects to someone 
 const ACCEPT: &str = "Connect one of the person's projects with an invite someone gave them (a code or a claktory-pipe:// link), when they ask: project (its name or id), and name and purpose if they said. Never pass the code itself, even if they showed it to you: a card opens in your conversation where they paste it themselves and see whom it says it's from. You're told when it's connected; both people then approve the pipe in it.";
 const FORWARD: &str = "Set where a pipe's finished reports go, when the person asks (\"make Ingrid read the bug reports from Aiko's pipe\"): pipe (its name or id), or project (its name or id) for the default of its new pipes; to: the agent that reads them (name or id; \"\" for no one), which must be in the same project; types: the report types it can forward (pipes_report_type shows them), left out to keep its own. An agent that doesn't read reports yet needs make_reader: it then keeps its database and its folder, and can no longer run commands, use the web or secrets, or message agents; fresh starts its conversation anew (the old one kept). Refused while you've read anything from outside the person's Claktory. The person sees each change in the pipe's settings and in Needs you.";
 const REPORT_TYPE: &str = "Define the types of report a pipe can forward, when the person asks (\"make a report type for recipes: dish, servings, steps\"): action define (name, fields, outcomes), edit (id, and the whole new definition: each field it keeps by its id, new ones without), delete (id), or show (id, or none for every type). A field: id (lowercase letters, digits and _; leave it out for a new one), label, kind (text, text_list, enum with choices, bool, version, attachments, number with min and max (0 to 1,000,000 unless given), date; at most 4 numbers and 2 dates), required, max_bytes and max_items (lower than Claktory's caps, or 0 for them), rule (an optional hint). The other side's words are text, text_list and attachments: they mark whoever reads them; every other kind is a fact. Never a field that says where the report goes. outcomes: what its reader can answer: accepted, done, declined, known, fixed, wont_fix, needs_info. Each edit is a new version; built-in types can be edited, not deleted. Changes are refused while you've read anything from outside the person's Claktory. The person sees each one in Needs you's history. To let a pipe forward a type, use pipes_forward's types.";
+const GROUP: &str = "Arrange a project's pipes into groups in the sidebar, when the person asks (\"put all the feedback pipes in a group\"): action create (project, name, and pipe to move into it at once), rename (group, name), delete (group: its pipes stay, outside any group) or move (pipe, and group, or \"\" to take it out of its group). A group and a pipe are named by their name or id; pipes_list shows each pipe's group. A pipe can only be in a group of its own project. Arrangement only: pipes work the same in a group or out of one.";
 const LIST: &str = "The person's pipes, or one project's (project, its name or id): each one's name, id and where it stands. Never codes, digits or what the other side says about itself.";
 
 pub(crate) struct Pipes;
@@ -61,7 +66,7 @@ impl Extension for Pipes {
         let text = format!(
             "## Starting pipes\n\nWhen {person} wants one of their projects to talk with someone else's Claktory, start the pipe for them: pipes_invite when they're inviting someone, pipes_accept when someone gave them a code or link. Either opens a card in your conversation, filled in from what they told you, where they make the invite or paste the code themselves. You never see a code (never ask for one, and never pass one on), you don't approve the pipe, and you don't choose its agents: {person} does, in the pipe. pipes_list says where their pipes stand.\n"
         );
-        vec![PromptSection { kind: PromptKind::Static, text }]
+        vec![PromptSection::static_text(text)]
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
@@ -78,6 +83,18 @@ impl Extension for Pipes {
             })
         };
         let list = json!({"type": "object", "properties": {"project": {"type": "string"}}, "additionalProperties": false});
+        let group = json!({
+            "type": "object",
+            "required": ["action"],
+            "properties": {
+                "action": {"type": "string", "enum": ["create", "rename", "delete", "move"]},
+                "project": {"type": "string"},
+                "group": {"type": "string"},
+                "name": {"type": "string"},
+                "pipe": {"type": "string"},
+            },
+            "additionalProperties": false,
+        });
         let forward = json!({
             "type": "object",
             "required": ["to"],
@@ -102,6 +119,7 @@ impl Extension for Pipes {
             super::tool("pipes_accept", "Join a pipe", ACCEPT, fill(&["project"]), super::typed_handler(factory, agent, accept)),
             super::tool("pipes_list", "List pipes", LIST, list, super::typed_handler(factory, agent, list_pipes)),
             super::tool("pipes_forward", "Forward a pipe's reports", FORWARD, forward, forward_handler(factory, agent)),
+            super::tool("pipes_group", "Group pipes", GROUP, group, super::typed_handler(factory, agent, group_pipes)),
             super::tool("pipes_report_type", "Report types", REPORT_TYPE, report_type_parameters(), super::typed_handler(factory, agent, report_type)),
         ]
     }
@@ -183,6 +201,118 @@ fn untainted_admin(factory: &Factory, agent: &str, what: &str, where_else: &str)
         ));
     }
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct GroupArgs {
+    action: String,
+    #[serde(default)]
+    project: String,
+    #[serde(default)]
+    group: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    pipe: String,
+}
+
+/// A pipe by its id, or by the name this side gave it.
+fn find_pipe(factory: &Factory, wanted: &str) -> Result<crate::pipes::Record, String> {
+    let pipes = factory.pipes.all();
+    pipes
+        .iter()
+        .find(|record| record.id == wanted)
+        .or_else(|| pipes.iter().find(|record| record.named_here.unwrap_or(record.peer.is_none()) && record.name.eq_ignore_ascii_case(wanted)))
+        .cloned()
+        .ok_or_else(|| format!("There's no pipe \"{wanted}\" (pipes_list names them)."))
+}
+
+/// A group by its id, or by its name (in `project` when given).
+fn find_group(factory: &Factory, wanted: &str, project: &str) -> Result<crate::pipes::groups::Group, String> {
+    let wanted = wanted.trim();
+    if wanted.is_empty() {
+        return Err("Say which group.".to_owned());
+    }
+    let groups = crate::pipes::groups::all(factory);
+    if let Some(group) = groups.iter().find(|group| group.id == wanted) {
+        return Ok(group.clone());
+    }
+    let named: Vec<&crate::pipes::groups::Group> =
+        groups.iter().filter(|group| group.name.eq_ignore_ascii_case(wanted) && (project.is_empty() || group.project == project)).collect();
+    match named.as_slice() {
+        [group] => Ok((*group).clone()),
+        [] => Err(format!("There's no group \"{wanted}\" (pipes_list shows each pipe's group).")),
+        _ => Err(format!("More than one project has a group \"{wanted}\": say which project.")),
+    }
+}
+
+/// pipes_group: the admin agent arranges pipes into groups, as the person asked.
+fn group_pipes(factory: &Arc<Factory>, agent: &str, args: GroupArgs) -> Result<ToolResult, String> {
+    use crate::pipes::groups;
+    use crate::pipes::handoff::label;
+    let (project, project_name) = {
+        let inner = factory.lock();
+        let caller = super::caller(&inner.config, agent)?;
+        if !crate::proposals::is_admin(caller) {
+            return Err("Only an admin agent can arrange pipes into groups; the person can, from a pipe's … menu.".to_owned());
+        }
+        let wanted = args.project.trim();
+        if wanted.is_empty() {
+            (String::new(), String::new())
+        } else {
+            let project = inner
+                .config
+                .projects
+                .iter()
+                .find(|project| project.id == wanted || project.name.eq_ignore_ascii_case(wanted))
+                .ok_or_else(|| format!("There's no project \"{wanted}\"."))?;
+            (project.id.clone(), project.name.clone())
+        }
+    };
+    let error = |error: crate::factory::RequestError| error.to_string();
+    let said = match args.action.as_str() {
+        "create" => {
+            let pipe = if args.pipe.trim().is_empty() { None } else { Some(find_pipe(factory, args.pipe.trim())?) };
+            let project = match (&pipe, project.as_str()) {
+                (Some(pipe), "") => pipe.project.clone(),
+                (_, "") => return Err("Say which project the group is in.".to_owned()),
+                (_, project) => project.to_owned(),
+            };
+            let made = groups::create(factory, &project, &args.name, pipe.as_ref().map_or("", |pipe| pipe.id.as_str())).map_err(error)?;
+            let place = factory.lock().config.project(&made.project).map(|project| project.name.clone()).unwrap_or(project_name);
+            match pipe {
+                Some(pipe) => format!("Made the group {} in {place}, and moved {} to it.", made.name, label(&pipe)),
+                None => format!("Made the group {} in {place}. Move pipes to it with action move.", made.name),
+            }
+        }
+        "rename" => {
+            let group = find_group(factory, &args.group, &project)?;
+            let renamed = groups::rename(factory, &group.id, &args.name).map_err(error)?;
+            format!("Renamed the group {} to {}.", group.name, renamed.name)
+        }
+        "delete" => {
+            let group = find_group(factory, &args.group, &project)?;
+            let (group, pipes) = groups::delete(factory, &group.id).map_err(error)?;
+            match pipes {
+                0 => format!("Deleted the group {}; it had no pipes.", group.name),
+                1 => format!("Deleted the group {}; its pipe stays, outside any group.", group.name),
+                pipes => format!("Deleted the group {}; its {pipes} pipes stay, outside any group.", group.name),
+            }
+        }
+        "move" => {
+            let pipe = find_pipe(factory, args.pipe.trim())?;
+            if args.group.trim().is_empty() {
+                groups::set(factory, &pipe.id, "").map_err(error)?;
+                format!("Moved {} out of its group.", label(&pipe))
+            } else {
+                let group = find_group(factory, &args.group, &pipe.project)?;
+                groups::set(factory, &pipe.id, &group.id).map_err(error)?;
+                format!("Moved {} to the group {}.", label(&pipe), group.name)
+            }
+        }
+        other => return Err(format!("There's no action \"{other}\": create, rename, delete or move.")),
+    };
+    Ok(ToolResult::text(said, json!({})))
 }
 
 /// pipes_forward: the admin agent sets where reports go, as the person asked.

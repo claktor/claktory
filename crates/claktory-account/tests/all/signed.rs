@@ -7,12 +7,15 @@ async fn a_share_after_a_restart_is_emailed_with_its_ip_once_a_minute() {
     let instance = start().await;
     let mut claktory = Claktory::new("203.0.113.7");
     instance.sign_in(&mut claktory, "matt@example.com", "Mac mini").await;
+    // Not just after signing in, and from a network it hasn't unlocked from:
+    // emailed (#412).
+    instance.advance(16 * 60);
     assert_eq!(instance.share(&claktory, None).await.ok(), Some((1, instance.expected_share(&claktory, 1))));
 
     let notice = instance.mail.sent().pop().expect("a notice");
     assert_eq!(notice.from, "Claktory <notices@auth.claktory.com>");
     assert_eq!(notice.subject, "Mac mini unlocked its secrets");
-    assert!(notice.text.contains("When: 20 Nov 2026, 14:02 UTC\nFrom: 203.0.113.7\n"), "{}", notice.text);
+    assert!(notice.text.contains("When: 20 Nov 2026, 14:18 UTC\nFrom: 203.0.113.7\n"), "{}", notice.text);
     assert!(notice.text.contains("at claktory.com/account so it can't unlock again"));
 
     instance.advance(30);
@@ -22,7 +25,7 @@ async fn a_share_after_a_restart_is_emailed_with_its_ip_once_a_minute() {
     assert_eq!(answer.headers.get("retry-after").and_then(|value| value.to_str().ok()), Some("30"));
     instance.advance(30);
     assert!(instance.share(&claktory, None).await.is_ok());
-    assert_eq!(instance.mail.sent().len(), 3, "the code and two notices");
+    assert_eq!(instance.mail.sent().len(), 2, "the code and one notice: the second came from a network it unlocked from");
 }
 
 #[tokio::test]

@@ -434,7 +434,7 @@ async fn an_agent_waits_out_its_usage_limit_and_carries_on_by_itself() {
     assert_eq!(shown[0], "user: hello");
     assert!(
         shown[1].starts_with("notice: Your Claude account reached its usage limit; it resets ")
-            && shown[1].ends_with("Builder will carry on by itself then."),
+            && shown[1].ends_with("Builder will carry on by itself then. If you've upgraded your plan, choose Try now to carry on now."),
         "{}",
         shown[1]
     );
@@ -610,9 +610,9 @@ async fn answered(client: &mut Client, view: &mut View) {
 }
 
 /// Friend bug #3: signing in to the account again forgets its limits, and
-/// the waiting agent asks again at once, on either pool. Fable's mark isn't
-/// in the providers listing, so there the listing looked the same and the
-/// agent slept on until its reset.
+/// the waiting agent asks again at once, on either pool. (Fable's mark
+/// wasn't in the providers listing then, so the listing looked the same and
+/// the agent slept on until its reset; it shows now, as U10's.)
 #[tokio::test]
 async fn signing_in_again_wakes_an_agent_waiting_on_either_pool() {
     for fable in [true, false] {
@@ -623,7 +623,8 @@ async fn signing_in_again_wakes_an_agent_waiting_on_either_pool() {
         answered(&mut client, &mut view).await;
         assert_eq!(model_requests(&seen), 2, "fable {fable}");
         if fable {
-            assert_eq!(claude(&view), before, "the listing shows no change");
+            assert!(before.accounts[0].fable_exhausted_until > 0 && before.accounts[0].exhausted_until == 0, "{before:?}");
+            view.follow(&mut client, |view| claude(view).accounts[0].fable_exhausted_until == 0).await;
         }
     }
 }

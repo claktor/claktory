@@ -52,11 +52,51 @@ async fn stats_count_accounts_claktories_and_sign_ins() {
 fn old_share_releases_and_their_ips_are_forgotten() {
     let dir = tempfile::tempdir().unwrap();
     let conn = db::open(&dir.path().join("account.db")).unwrap();
-    db::record_release(&conn, "claktory-0123456789", START, "203.0.113.7", 1).unwrap();
+    db::record_release(&conn, "claktory-0123456789", START, "203.0.113.7", 1, false).unwrap();
     db::purge(&conn, START + db::RELEASES_KEPT - 1).unwrap();
     assert_eq!(db::releases(&conn, "claktory-0123456789", 10).unwrap().len(), 1);
     db::purge(&conn, START + db::RELEASES_KEPT + 1).unwrap();
     assert!(db::releases(&conn, "claktory-0123456789", 10).unwrap().is_empty());
+}
+
+/// #412: a database from before unlocks were emailed only when unusual
+/// gains when each Claktory signed in (unknown for those before) and
+/// whether each unlock was emailed: all of those before were.
+#[test]
+fn an_older_database_keeps_its_unlocks_as_emailed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("account.db");
+    {
+        let old = rusqlite::Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE claktories (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, name TEXT NOT NULL, backend_key TEXT NOT NULL,
+                 token_hash TEXT NOT NULL UNIQUE, epoch INTEGER NOT NULL, created INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+                 version TEXT NOT NULL, platform TEXT NOT NULL, revoked_at INTEGER);
+             CREATE TABLE share_releases (claktory_id TEXT NOT NULL, time INTEGER NOT NULL, ip TEXT NOT NULL, epoch INTEGER NOT NULL);
+             INSERT INTO share_releases VALUES ('claktory-0123456789', 1795183320, '203.0.113.7', 1);
+             PRAGMA user_version = 4;",
+        )
+        .unwrap();
+    }
+    let conn = db::open(&path).unwrap();
+    assert_eq!(db::releases(&conn, "claktory-0123456789", 10).unwrap(), [(1_795_183_320, "203.0.113.7".to_owned(), true)]);
+    let registered: bool =
+        conn.query_row("SELECT COUNT(*) > 0 FROM pragma_table_info('claktories') WHERE name = 'registered_at'", [], |row| row.get(0)).unwrap();
+    assert!(registered);
+    drop(conn);
+    // Opened again, nothing changes.
+    let conn = db::open(&path).unwrap();
+    assert_eq!(db::releases(&conn, "claktory-0123456789", 10).unwrap().len(), 1);
+}
+
+#[test]
+fn networks_are_compared_by_ipv4_24_and_ipv6_48() {
+    assert_eq!(db::network("203.0.113.7"), db::network("203.0.113.250"));
+    assert_ne!(db::network("203.0.113.7"), db::network("203.0.114.7"));
+    assert_eq!(db::network("2001:db8:1:1::5"), db::network("2001:db8:1:ffff::9"));
+    assert_ne!(db::network("2001:db8:1::5"), db::network("2001:db8:2::5"));
+    assert_eq!(db::network("::ffff:203.0.113.7"), db::network("203.0.113.9"), "IPv4 mapped into IPv6");
+    assert_eq!(db::network("not an ip"), "not an ip");
 }
 
 /// A stand-in for Resend's API: answers one request with `status`, and

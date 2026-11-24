@@ -1,8 +1,9 @@
 // Answering a review where the file is (Matt's ask, after #275): while an
 // agent's review ask waits on the file a viewer pane shows, a bar at the
 // pane's foot (expanded or not) says who asks and what, with the answer's
-// field: Return sends it (Approve, or the written answer when the ask
-// wants one), Dismiss is quiet beside it. Nothing else is added to the
+// field: Approve and Dismiss while it's empty; typed, one Submit, and
+// Return is Submit (the words go as the person's reply, #370), or the
+// written answer when the ask wants one. Nothing else is added to the
 // file meanwhile: on media the field is the only input; on text, line
 // comments stay and go with the answer. Answered, the pane closes and the
 // person is back where they pressed Review. The same model as the iPhone's
@@ -18,6 +19,7 @@ import 'package:flutter/widgets.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
+import 'decision.dart' show CommentTyped, SubmitButton;
 import 'dictation.dart';
 import 'identity.dart';
 import 'layout.dart';
@@ -307,9 +309,15 @@ class _ReviewBarState extends State<ReviewBar> {
 
   bool get _wantsText => widget.review.ask.wantsText;
 
-  Future<void> _answer({required bool dismiss}) async {
+  /// [dismiss], or answer; with [reply] (#370), what's typed on an
+  /// approval goes as the person's reply, neither a yes nor a no.
+  Future<void> _answer({required bool dismiss, bool reply = false}) async {
     final text = _text.text.trim();
-    if (_busy || (!dismiss && _wantsText && text.isEmpty)) return;
+    if (_busy ||
+        (!dismiss && _wantsText && text.isEmpty) ||
+        (reply && text.isEmpty)) {
+      return;
+    }
     setState(() {
       _busy = true;
       _failed = false;
@@ -320,6 +328,7 @@ class _ReviewBarState extends State<ReviewBar> {
         widget.review.seq,
         text: text,
         dismiss: dismiss,
+        reply: reply,
       );
       if (!mounted) return;
       await finishReview(context, widget.agentId, widget.path);
@@ -330,10 +339,11 @@ class _ReviewBarState extends State<ReviewBar> {
     }
   }
 
-  /// Return sends what's typed: an empty field never approves by itself.
+  /// Return sends what's typed: a written answer, or on an approval the
+  /// person's reply (Submit, #370). An empty field never approves by itself.
   void _return() {
     if (_text.text.trim().isEmpty) return;
-    unawaited(_answer(dismiss: false));
+    unawaited(_answer(dismiss: false, reply: !_wantsText));
   }
 
   @override
@@ -407,33 +417,57 @@ class _ReviewBarState extends State<ReviewBar> {
             controller: _text,
             focusNode: _focus,
             enabled: !_busy,
+            // As the ask's card keeps it: it comes back to either.
+            keep: DictationFor(
+              'ask/${widget.agentId}/${ask.id}',
+              ask.title.isEmpty
+                  ? 'Your answer to $name'
+                  : 'Your answer to $name: ${ask.title}',
+            ),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                _Sized(
-                  touch: touch,
-                  child: Button(
-                    label: 'Dismiss',
-                    onPressed: _busy ? null : () => _answer(dismiss: true),
+                // Typed on an approval: one Submit in place of both, the
+                // words a reply, neither a yes nor a no (#370).
+                CommentTyped(
+                  controller: _text,
+                  builder: (context, typed) => Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (typed && !_wantsText)
+                        _Sized(
+                          touch: touch,
+                          child: SubmitButton(
+                            onPressed: _busy
+                                ? null
+                                : () => _answer(dismiss: false, reply: true),
+                          ),
+                        )
+                      else ...[
+                        _Sized(
+                          touch: touch,
+                          child: Button(
+                            label: 'Dismiss',
+                            onPressed: _busy
+                                ? null
+                                : () => _answer(dismiss: true),
+                          ),
+                        ),
+                        const SizedBox(width: Space.xs),
+                        _Sized(
+                          touch: touch,
+                          child: Button(
+                            label: _wantsText ? 'Send' : 'Approve',
+                            primary: true,
+                            onPressed: _busy || (_wantsText && !typed)
+                                ? null
+                                : () => _answer(dismiss: false),
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
-                ),
-                const SizedBox(width: Space.xs),
-                ListenableBuilder(
-                  listenable: _text,
-                  builder: (context, _) {
-                    final empty = _text.text.trim().isEmpty;
-                    return _Sized(
-                      touch: touch,
-                      child: Button(
-                        label: empty && !_wantsText ? 'Approve' : 'Send',
-                        primary: true,
-                        onPressed: _busy || (_wantsText && empty)
-                            ? null
-                            : () => _answer(dismiss: false),
-                      ),
-                    );
-                  },
                 ),
               ],
             ),

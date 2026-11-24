@@ -19,10 +19,14 @@ import 'panes_test.dart' show beside, glyphButton, leaf, row, snapshot, split;
 /// selected agent's conversation on a Mac, as the backend keeps them in its
 /// layout; on a phone, or with no agent, they're pages of their own.
 void main() {
-  Future<Harness> showWith(WidgetTester tester, {ViewNode? layout}) async {
+  Future<Harness> showWith(
+    WidgetTester tester, {
+    ViewNode? layout,
+    Size size = const Size(1200, 900),
+  }) async {
     final harness = Harness(snapshot(layout: layout));
     harness.backend.appliesLayouts = true;
-    await harness.show(tester);
+    await harness.show(tester, size: size);
     await settle(tester);
     return harness;
   }
@@ -90,7 +94,12 @@ void main() {
 
   testWidgets("beside an open file it goes next to the conversation; its × "
       'closes it', (tester) async {
-    final harness = await showWith(tester, layout: beside());
+    // Wide enough for the conversation and all three beside it.
+    final harness = await showWith(
+      tester,
+      layout: beside(),
+      size: const Size(1600, 900),
+    );
     await tester.tap(glyphButton("What's new"));
     await settle(tester);
     expect(kinds(harness), ['chat', 'changelog', 'text']);
@@ -162,7 +171,7 @@ void main() {
     // both (with room for both, it gets its least).
     final harness = Harness(snapshot(layout: beside('settings', '')));
     harness.backend.appliesLayouts = true;
-    await harness.show(tester, size: const Size(790, 900));
+    await harness.show(tester, size: const Size(925, 900));
     await settle(tester);
     final pane = find.byType(PageSideways);
     expect(tester.getSize(pane).width, lessThan(pagePaneMinWidth - 40));

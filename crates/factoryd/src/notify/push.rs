@@ -297,7 +297,7 @@ pub(crate) fn seal_push(key: &[u8], ctr: u64, now: i64, claktory: &str, badge: u
             "body": body,
             "badge": badge,
             "urgent": notify.urgent,
-            "target": {"agent": notify.agent_id, "pipe": notify.pipe_id, "chat": notify.chat_id, "seq": notify.seq},
+            "target": {"agent": notify.agent_id, "pipe": notify.pipe_id, "chat": notify.chat_id, "seq": notify.seq, "device": notify.device_id},
         });
         let bytes = serde_json::to_vec(&payload).ok()?;
         if bytes.len() <= BUCKETS[BUCKETS.len() - 1] {

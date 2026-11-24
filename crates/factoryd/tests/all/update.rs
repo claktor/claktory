@@ -58,3 +58,46 @@ async fn a_release_that_only_changed_the_app_leaves_the_backend_running() {
     }
     assert!(!dir.join("home/bin/factoryd").exists(), "the backend wasn't replaced or restarted");
 }
+
+/// An update to a backend on another line names the paired devices whose
+/// app it would leave behind (#355 D1), by the app version each last said.
+#[tokio::test]
+async fn an_update_names_the_devices_whose_app_it_would_leave_behind() {
+    let dir = temp_dir();
+    let home = crate::common::home(&dir);
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    let (_, phone) = factoryd::remote::pair_offline(&home, "Phone").expect("pair");
+    let (_, mac) = factoryd::remote::pair_offline(&home, "Mac").expect("pair");
+    factoryd::remote::pair_offline(&home, "Tablet").expect("pair");
+    let path = dir.join("home/remote/devices.json");
+    let mut devices: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("devices")).expect("json");
+    for device in devices.as_array_mut().expect("a list") {
+        let version = match device["id"].as_str() {
+            Some(id) if id == phone.id => "v0.1.19",
+            Some(id) if id == mac.id => "v9.0.3",
+            _ => continue,
+        };
+        device["app_version"] = version.into();
+    }
+    std::fs::write(&path, devices.to_string()).expect("devices");
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let behind = |view: &View| -> Vec<(String, String, bool)> {
+        let mut devices: Vec<(String, String, bool)> = view.workspace.remote.as_ref().map_or_else(Vec::new, |remote| {
+            remote.devices.iter().map(|device| (device.name.clone(), device.app_version.clone(), device.update_leaves_behind)).collect()
+        });
+        devices.sort();
+        devices
+    };
+    assert_eq!(behind(&view).iter().filter(|device| device.2).count(), 0, "no update on offer");
+
+    let release = dir.join("home/releases/v9.0.4");
+    std::fs::create_dir_all(&release).expect("mkdir");
+    std::fs::write(release.join("factoryd"), "binary").expect("write");
+    std::fs::write(dir.join("home/releases/latest"), "v9.0.4").expect("write");
+    view.follow(&mut client, |view| view.workspace.latest_release == "v9.0.4").await;
+    let row = |name: &str, version: &str, left: bool| (name.to_owned(), version.to_owned(), left);
+    // The phone's app is on 0.1; the Mac's on 9.0 already; the tablet never said.
+    assert_eq!(behind(&view), [row("Mac", "v9.0.3", false), row("Phone", "v0.1.19", true), row("Tablet", "", false)]);
+}

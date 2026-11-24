@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use factory_agent::{Event, EventSource, Tool, ToolResult};
@@ -108,7 +108,7 @@ fn section(factory: &Factory, config: &Config, record: &Record, agent: &str) -> 
         let _ = writeln!(text, "Review incoming is on: {person} lets in each message from the other side before you can read it.");
     }
     if record.quarantined.iter().any(|id| id == agent) {
-        let _ = writeln!(text, "{}", super::quarantine::prompt_line(record));
+        let _ = writeln!(text, "{}", super::quarantine::prompt_line(record, person));
     }
     if record.state == State::WaitingPeer {
         text.push_str("It opens once the other side approves it too.\n");
@@ -211,7 +211,12 @@ pub(crate) fn tools(factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
                 "properties": {"pipe": pipe, "text": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}},
                 "additionalProperties": false,
             }),
-            crate::extensions::typed_handler(factory, agent, send),
+            crate::extensions::agent_handler(factory, agent, |factory, agent, args| async move {
+                let args: SendArgs = serde_json::from_value(args)?;
+                let factory = crate::extensions::live(factory)?;
+                let attached = attached_by_person(&factory, &agent, args.files.as_deref().unwrap_or_default()).await;
+                send(&factory, &agent, args, &attached).map_err(factory_agent::Error::Other)
+            }),
         ),
         crate::extensions::tool(
             "pipe_read",
@@ -267,7 +272,8 @@ pub(crate) fn sha256(bytes: &[u8]) -> String {
 
 /// The secrets in `text` or the files' contents, by name ("AWS, Stripe");
 /// None when none is. It knows a secret in plain text and in common
-/// encodings, not every way of hiding one.
+/// encodings, not every way of hiding one, and a value already hidden as
+/// "[secret NAME/…]" when NAME is the vault's.
 pub(crate) fn secrets_in(factory: &Factory, text: &str, files: &[Vec<u8>]) -> Option<String> {
     let redactor = factory.redaction.current();
     let mut names = BTreeSet::new();
@@ -286,10 +292,28 @@ pub(crate) fn secrets_in(factory: &Factory, text: &str, files: &[Vec<u8>]) -> Op
             found(&String::from_utf8_lossy(&redacted));
         }
     }
+    // A value already hidden reads "[secret NAME/VARIABLE]": that names a
+    // secret of the vault's to the other side all the same.
+    let mut marked = BTreeSet::new();
+    let mut markers = |text: &str| {
+        for part in text.split("[secret ").skip(1) {
+            if let Some((name, _)) = part.split_once('/') {
+                marked.insert(name.to_owned());
+            }
+        }
+    };
+    markers(text);
+    for bytes in files {
+        markers(&String::from_utf8_lossy(bytes));
+    }
+    if !marked.is_empty() {
+        let vault = factory.vault.state(|_, _| false);
+        names.extend(vault.secrets.into_iter().map(|secret| secret.name).filter(|name| marked.contains(name)));
+    }
     (!names.is_empty()).then(|| names.into_iter().collect::<Vec<_>>().join(", "))
 }
 
-fn send(factory: &Arc<Factory>, agent: &str, args: SendArgs) -> Result<ToolResult, String> {
+fn send(factory: &Arc<Factory>, agent: &str, args: SendArgs, attached: &Attached) -> Result<ToolResult, String> {
     let record = resolve(factory, agent, args.pipe.as_deref())?;
     if record.state != State::Open {
         return Err(super::not_open(&record));
@@ -315,6 +339,10 @@ fn send(factory: &Arc<Factory>, agent: &str, args: SendArgs) -> Result<ToolResul
     let mut files = Vec::new();
     let mut contents = Vec::new();
     let mut outside = Vec::new();
+    // The person's attachments (Fugo's ruling, friend bug #15): which go as
+    // copies in the outbox, and which wait for them, attached over a day ago.
+    let mut copies = Vec::new();
+    let mut earlier = Vec::new();
     for wanted in &wanted {
         let path = PathBuf::from(wanted);
         let path = if path.is_absolute() { path } else { outbox.join(path) };
@@ -327,20 +355,33 @@ fn send(factory: &Arc<Factory>, agent: &str, args: SendArgs) -> Result<ToolResul
             return Err(format!("{} is bigger than a pipe takes (10 MB).", real.display()));
         }
         let name = real.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut recorded = None;
         if !real.starts_with(&outbox_real) {
-            if quarantined {
+            if !quarantined {
+                outside.push(name.clone());
+            } else if let Some(&(size, sent_ms)) = as_attached(factory, agent, attached, &path, &real) {
+                recorded = Some(size);
+                if now_ms() + factory.pipes.attached_later_ms() - sent_ms <= ATTACHED_RECENTLY_MS {
+                    copies.push(files.len());
+                } else {
+                    earlier.push(name.clone());
+                }
+            } else {
                 return Err(format!(
-                    "Not sent: {} isn't in the pipe's outbox, and you're limited to the pipe: you can send only files in {}.",
+                    "Not sent: {} isn't in the pipe's outbox, and you're limited to the pipe: you can send only files in {} and those {} attached to their messages to you.",
                     wanted,
-                    outbox.display()
+                    outbox.display(),
+                    factory.lock().config.person()
                 ));
             }
-            outside.push(name.clone());
         }
         // Read once: these bytes are scanned, and what goes must be them.
         let bytes = std::fs::read(&real).map_err(|error| format!("Can't read {}: {error}", real.display()))?;
         if bytes.len() as u64 > pipe_link::MAX_FILE {
             return Err(format!("{} is bigger than a pipe takes (10 MB).", real.display()));
+        }
+        if recorded.is_some_and(|size| size != bytes.len() as u64) {
+            return Err(format!("Not sent: {wanted} changed since it was attached."));
         }
         files.push(FileRecord { name, size: bytes.len() as u64, path: real, sha256: sha256(&bytes) });
         contents.push(bytes);
@@ -374,16 +415,28 @@ fn send(factory: &Arc<Factory>, agent: &str, args: SendArgs) -> Result<ToolResul
         super::add(factory, &record.id, Message { state: MessageState::Refused, note: over.clone(), ..base });
         return Err(format!("Not sent: {over}"));
     }
-    if record.review || !outside.is_empty() {
-        let note =
-            if outside.is_empty() { String::new() } else { format!("Files from outside the pipe's outbox: {}.", outside.join(", ")) };
-        let held = super::add(factory, &record.id, Message { state: MessageState::Held, note: note.clone(), ..base })
+    // What goes is a copy in the outbox, so the person and History see it.
+    for index in copies {
+        std::fs::create_dir_all(&outbox).map_err(|error| format!("Couldn't copy into the outbox: {error}"))?;
+        let copy = crate::uploads::free_path(&outbox, &files[index].name);
+        std::fs::write(&copy, &contents[index]).map_err(|error| format!("Couldn't copy into the outbox: {error}"))?;
+        files[index].path = copy;
+    }
+    let base = Message { files, ..base };
+    let mut notes = Vec::new();
+    let mut whys = Vec::new();
+    if !outside.is_empty() {
+        notes.push(format!("Files from outside the pipe's outbox: {}.", outside.join(", ")));
+        whys.push(format!("it carries files from outside the outbox ({})", outside.join(", ")));
+    }
+    if !earlier.is_empty() {
+        notes.push(format!("Files you attached earlier: {}.", earlier.join(", ")));
+        whys.push(format!("it carries files {person} attached over a day ago ({})", earlier.join(", ")));
+    }
+    if record.review || !whys.is_empty() {
+        let held = super::add(factory, &record.id, Message { state: MessageState::Held, note: notes.join(" "), ..base })
             .ok_or("Couldn't keep the message.")?;
-        let why = if outside.is_empty() {
-            "Review outgoing is on".to_owned()
-        } else {
-            format!("it carries files from outside the outbox ({})", outside.join(", "))
-        };
+        let why = if whys.is_empty() { "Review outgoing is on".to_owned() } else { whys.join(", and ") };
         return Ok(ToolResult::text(
             format!("Held for {person}: {why}, so it waits for them to send or discard it. You'll be told if they discard it."),
             json!({"pipe": record.id, "seq": held.seq, "held": true}),
@@ -396,6 +449,55 @@ fn send(factory: &Arc<Factory>, agent: &str, args: SendArgs) -> Result<ToolResul
         Some(sent) if sent.state == MessageState::Refused => Err(format!("Not sent: {}", sent.note)),
         _ => Ok(ToolResult::text(format!("Sent to {}'s Claktory.", record.peer_who()), json!({"pipe": record.id, "seq": queued.seq}))),
     }
+}
+
+/// How long a file the person attached may go through a pipe with no hold
+/// beyond Review outgoing; one attached earlier waits for them.
+const ATTACHED_RECENTLY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// The files the person attached to their own messages to an agent (never
+/// an event, nor another agent's), by path: each one's size as recorded, and
+/// when they sent it.
+type Attached = BTreeMap<PathBuf, (u64, i64)>;
+
+/// Which of `wanted` (paths in `agent`'s uploads) the person attached to
+/// their own messages to it. Checked against the conversation, not the
+/// folder, since an agent can write in its own uploads.
+async fn attached_by_person(factory: &Arc<Factory>, agent: &str, wanted: &[String]) -> Attached {
+    let uploads = factory.home.agent_dir(agent).join("uploads");
+    let mut looking: BTreeSet<PathBuf> = wanted.iter().map(PathBuf::from).filter(|path| path.starts_with(&uploads)).collect();
+    let mut found = Attached::new();
+    if looking.is_empty() {
+        return found;
+    }
+    if factory.ensure_loaded(agent).await.is_err() {
+        return found;
+    }
+    // Every entry, newest first: older ones are read back from disk.
+    crate::transcript::scan_back(factory, agent, None, |entry| {
+        if let Some(v1::entry::Kind::User(user)) = &entry.kind {
+            for attachment in &user.attachments {
+                if looking.remove(Path::new(&attachment.path)) {
+                    found.insert(PathBuf::from(&attachment.path), (attachment.size, entry.timestamp_ms));
+                }
+            }
+        }
+        looking.is_empty()
+    })
+    .await;
+    found
+}
+
+/// `path`'s size as the person attached it and when, if it's one of
+/// theirs and is that file: in the agent's uploads, with no symbolic link on
+/// the way.
+fn as_attached<'a>(factory: &Factory, agent: &str, attached: &'a Attached, path: &Path, real: &Path) -> Option<&'a (u64, i64)> {
+    let uploads = factory.home.agent_dir(agent).join("uploads");
+    let inside = path.strip_prefix(&uploads).ok()?;
+    if uploads.canonicalize().ok()?.join(inside) != real {
+        return None;
+    }
+    attached.get(path)
 }
 
 fn read(factory: &Arc<Factory>, agent: &str, args: ReadArgs) -> Result<ToolResult, String> {
@@ -440,6 +542,8 @@ fn shown(record: &Record, message: &Message, person: &str) -> Option<String> {
         Author::TheirAgent | Author::TheirPerson => return None,
         Author::MyAgent => format!("#{} {} (yours){state}:\n{}", message.seq, message.name, message.text),
         Author::Me => format!("#{} {person}{state}:\n{}", message.seq, message.text),
+        // What the other side says of its liaison is the person's alone.
+        Author::Claktory if message.msg_id == super::waiting::LINE_ID => return None,
         Author::Claktory => format!("#{} Claktory: {}", message.seq, escape(&message.text)),
     })
 }
@@ -448,7 +552,8 @@ pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-fn boundary() -> String {
+/// A random fence for untrusted pipe messages and forwarded reports.
+pub(super) fn boundary() -> String {
     const LETTERS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
     let mut random = [0u8; 8];
     getrandom::fill(&mut random).expect("the system's random source");
@@ -624,18 +729,13 @@ fn deliver(factory: &Arc<Factory>, pipe: &str) {
 }
 
 /// Tells the agent that wrote a message what became of it: `who` did it,
-/// the person when None.
-pub(crate) fn tell(factory: &Arc<Factory>, agent: &str, record: &Record, who: Option<&str>, what: &str, text: &str) {
-    tell_noted(factory, agent, record, who, what, text, "");
-}
-
-/// `tell`, with the person's note on their decision (`crate::decisions`)
-/// after what happened.
+/// the person when None, and `note` after it (the person's note on their
+/// decision, `crate::decisions`, or Claktory's reason).
 pub(crate) fn tell_noted(factory: &Arc<Factory>, agent: &str, record: &Record, who: Option<&str>, what: &str, text: &str, note: &str) {
     if agent.is_empty() {
         return;
     }
-    let who = who.map_or_else(|| factory.lock().config.person_capitalized().to_owned(), str::to_owned);
+    let who = who.map_or_else(|| factory.person_capitalized(), str::to_owned);
     let summary = format!("{who} {what} on the pipe \"{}\"", record.name);
     let quoted: String = text.chars().take(500).collect();
     let event = host_event(summary.clone());
@@ -1020,6 +1120,7 @@ pub(crate) fn asked(tool: &str, details: &Value) -> Option<v1::SecretApproval> {
         command: details.get("command").and_then(Value::as_str).unwrap_or_default().to_owned(),
         state: v1::SecretApprovalState::Pending.into(),
         decided_ms: 0,
+        ..Default::default()
     })
 }
 
@@ -1036,11 +1137,19 @@ fn approval_state(state: &str) -> v1::SecretApprovalState {
 pub(crate) fn restore(factory: &Factory, agent: &str, transcript: &mut Transcript) -> rusqlite::Result<()> {
     let db = factory.store.db();
     let mut statement =
-        db.prepare("SELECT id, state, decided FROM pipe_secret_approvals WHERE agent = ?1 AND state != 'pending' ORDER BY id")?;
-    let rows = statement.query_map([agent], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<i64>>(2)?)))?;
+        db.prepare(
+            "SELECT a.id, a.state, a.decided, a.replied, COALESCE(n.comment, '') FROM pipe_secret_approvals a
+             LEFT JOIN decision_notes n ON a.replied = 1 AND n.kind = 'secret_use' AND n.ref = CAST(a.id AS TEXT)
+             WHERE a.agent = ?1 AND a.state != 'pending' ORDER BY a.id",
+        )?;
+    let rows = statement.query_map([agent], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, bool>(3)?, row.get::<_, String>(4)?))
+    })?;
     for row in rows {
-        let (id, state, decided) = row?;
-        transcript.set_secret_approval(&id.to_string(), approval_state(&state), decided.unwrap_or_default());
+        let (id, state, decided, replied, comment) = row?;
+        // The reply is kept in decision_notes, never in a pipe table (Fugo).
+        let reply = replied.then_some(comment.as_str());
+        transcript.set_secret_approval(&id.to_string(), approval_state(&state), decided.unwrap_or_default(), reply);
     }
     Ok(())
 }
@@ -1048,12 +1157,16 @@ pub(crate) fn restore(factory: &Factory, agent: &str, transcript: &mut Transcrip
 /// How long the person has to answer.
 const ANSWER_WITHIN_MS: i64 = 12 * 3_600_000;
 
-/// DecideSecretApproval: the person allows the use once, or denies it; the
+/// DecideSecretApproval: the person allows the use once, or denies it, or
+/// replies with a comment (#370 Submit), which runs nothing either; the
 /// agent is told either way.
 pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideSecretApproval) -> Result<(), RequestError> {
     let agent = request.agent_id.as_str();
     factory.known_agent(agent)?;
     let comment = crate::decisions::comment(&request.comment)?;
+    if request.reply && comment.is_empty() {
+        return Err(RequestError::Pipe("Write a reply, or allow it or not.".to_owned()));
+    }
     factory.ensure_loaded(agent).await?;
     let id = {
         let inner = factory.lock();
@@ -1061,7 +1174,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideSecretApp
             .agents
             .get(agent)
             .and_then(|runtime| runtime.transcript.as_ref())
-            .and_then(|transcript| transcript.entries().iter().find(|entry| entry.seq == request.seq).cloned());
+            .and_then(|transcript| transcript.entry(request.seq).cloned());
         match entry.and_then(|entry| entry.kind) {
             Some(v1::entry::Kind::SecretApproval(approval)) => approval.id,
             _ => return Err(RequestError::Pipe("No such request in this agent's conversation.".to_owned())),
@@ -1081,14 +1194,19 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideSecretApp
     let now = now_ms();
     let state = if now - created > ANSWER_WITHIN_MS {
         "expired"
-    } else if request.allow {
+    } else if request.allow && !request.reply {
         "allowed"
     } else {
         "denied"
     };
+    let replied = request.reply && state == "denied";
+    if replied {
+        // Apart from the pipe tables (Fugo): the card and the history read it there.
+        crate::needs_you::keep_note(factory, "secret_use", &id, comment);
+    }
     factory.store.db().execute(
-        "UPDATE pipe_secret_approvals SET state = ?2, decided = ?3 WHERE id = ?1 AND state = 'pending'",
-        params![id, state, now],
+        "UPDATE pipe_secret_approvals SET state = ?2, decided = ?3, replied = ?4 WHERE id = ?1 AND state = 'pending'",
+        params![id, state, now, replied],
     )?;
     {
         let mut inner = factory.lock();
@@ -1096,7 +1214,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideSecretApp
             .agents
             .get_mut(agent)
             .and_then(|runtime| runtime.transcript.as_mut())
-            .and_then(|transcript| transcript.set_secret_approval(&id, approval_state(state), now));
+            .and_then(|transcript| transcript.set_secret_approval(&id, approval_state(state), now, replied.then_some(comment)));
         if let Some(entry) = entry {
             factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
         }
@@ -1106,21 +1224,45 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideSecretApp
         return Err(RequestError::Pipe("It waited more than 12 hours, so it expired; the agent can ask again.".to_owned()));
     }
     let names: Vec<String> = serde_json::from_str(&secrets).unwrap_or_default();
-    let person = factory.lock().config.person_capitalized().to_owned();
+    let person = factory.person_capitalized();
     let summary = if state == "allowed" {
         format!("{person} allowed you to use {} once, for that command", names.join(", "))
+    } else if replied {
+        format!("{person} didn't allow you to use {} this time, and replied", names.join(", "))
     } else {
         format!("{person} didn't allow you to use {}", names.join(", "))
     };
     let note = crate::decisions::note(&person, comment);
     let text = if state == "allowed" {
         format!("{summary}: run the same command again, exactly as it was; any other command with them asks again.{note}")
+    } else if replied {
+        format!("{summary}; nothing ran. They say:\n\n{comment}")
     } else {
         format!("{summary}.{note}")
     };
     let event = host_event(summary);
     factory.deliver_event(agent, text, event);
     Ok(())
+}
+
+/// Tells each agent whose use of a secret waited for the person only
+/// because it had read a pipe (#346) that the request is gone: it was told
+/// it would hear when they decided.
+pub(crate) fn retired(factory: &Arc<Factory>, retired: Vec<(String, Vec<String>)>) {
+    if retired.is_empty() {
+        return;
+    }
+    let person = factory.person_capitalized();
+    for (agent, names) in retired {
+        if factory.lock().config.agent(&agent).is_none() {
+            continue;
+        }
+        let summary = format!("Your request to use {} was withdrawn", names.join(", "));
+        let text = format!(
+            "{summary}: reading a pipe no longer needs {person}'s approval each time you use a secret, so {person} won't decide on it. Run the command again if you still need it: it runs, or asks afresh if one of its secrets asks each time."
+        );
+        factory.deliver_event(&agent, text, host_event(summary));
+    }
 }
 
 #[cfg(test)]

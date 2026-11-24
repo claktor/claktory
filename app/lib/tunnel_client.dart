@@ -3,14 +3,25 @@ import 'dart:math';
 import 'loopback_forward.dart';
 import 'tunnel/api/tunnel.dart' as rust;
 import 'tunnel/api/tunnel.dart'
-    show TunnelFailure, TunnelPath, TunnelPhase, TunnelStatus;
+    show
+        TunnelFailure,
+        TunnelPath,
+        TunnelPhase,
+        TunnelRelayTrouble,
+        TunnelStatus;
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart'
     show ExternalLibrary;
 
 import 'tunnel/frb_generated.dart';
 
 export 'tunnel/api/tunnel.dart'
-    show TunnelFailure, TunnelPath, TunnelPhase, TunnelStatus;
+    show
+        TunnelFailure,
+        TunnelPath,
+        TunnelPhase,
+        TunnelRelayTrouble,
+        TunnelStatus;
 
 /// The private tunnel (rust/, docs: private-tunnel.md): the app reaches its
 /// backend only through iroh, dialled by the backend's public key, direct or
@@ -223,6 +234,8 @@ const idleTunnel = TunnelStatus(
   error: '',
   failure: TunnelFailure.none,
   relayConnected: false,
+  relayUpMs: 0,
+  relayTrouble: TunnelRelayTrouble.none,
 );
 
 /// A new device key: an iroh secret key is any 32 bytes, so 32 random ones

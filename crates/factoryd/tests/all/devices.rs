@@ -92,7 +92,8 @@ async fn an_admin_agent_adds_a_device_the_person_allows_and_the_code_never_reach
     let Body::PairingCode(made) = apply_request(&mut client, &mut view, show(&pairing)).await else { panic!("a code") };
     assert_eq!(made.device_id, "laptop");
     let Body::PairingCode(again) = apply_request(&mut client, &mut view, show(&pairing)).await else { panic!("a code") };
-    assert_eq!(again.code, made.code);
+    assert_eq!((again.code.as_str(), again.link.as_str()), (made.code.as_str(), made.link.as_str()));
+    assert_eq!(made.link, factoryd::remote::pairing_link(&made.code), "the same code, as a link for its QR code");
     let code = parse(&made.code);
     // Neither the agent nor anything on disk ever has it.
     let shown: Vec<String> = crate::common::describe(&view.entries);
@@ -109,7 +110,8 @@ async fn an_admin_agent_adds_a_device_the_person_allows_and_the_code_never_reach
     assert_eq!(error.code(), ErrorCode::NotFound);
 
     // Allowed, exactly as before: it's added, and Rivet is told.
-    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "laptop".into() });
+    let number = crate::remote::number(&code, &device.id().to_string());
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "laptop".into(), number });
     assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
     assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
     let added = follow_card(&mut client, &mut view, "Laptop", DevicePairingState::Added).await;

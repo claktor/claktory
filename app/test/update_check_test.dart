@@ -2,9 +2,13 @@
 // (Workspace.update_check), with Update when a release is ready; on a Mac
 // it's the banner's Update, on a phone it updates the Claktory only.
 
+import 'package:factory_app/android/android_app_updates.dart'
+    show androidAppInstallPage;
 import 'package:factory_app/controls.dart' show Button;
+import 'package:factory_app/mobile/platform_policy.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
+import 'package:factory_app/update.dart';
 import 'package:factory_app/update_check.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -168,5 +172,202 @@ void main() {
     await pumpFrames(tester);
     expect(harness.last.installUpdate.appPath, isEmpty);
     expect(harness.quits, 0);
+  });
+
+  group('an update that would leave a device behind (#355 D1)', () {
+    // v0.2.0 starts a new line: apps on v0.1.x can't connect to it.
+    Workspace offer({List<PairedDevice> devices = const []}) => _workspace(
+      UpdateCheckState.UPDATE_CHECK_STATE_READY,
+      version: 'v0.2.0',
+      latest: 'v0.2.0',
+    )..remote = RemoteAccess(devices: devices);
+    PairedDevice paired(String id, String name, {bool behind = false}) =>
+        PairedDevice(
+          id: id,
+          name: name,
+          appVersion: 'v0.1.19',
+          updateLeavesBehind: behind,
+        );
+
+    test('the devices it names, in words', () {
+      final workspace = offer(
+        devices: [
+          paired('me', "Ana's iPhone", behind: true),
+          paired('d2', 'Pixel', behind: true),
+          paired('d3', 'Studio'),
+          paired('d4', "Ana's iPad", behind: true),
+        ],
+      );
+      // This device isn't named: it's told what to do instead.
+      expect(
+        leftBehindText(leftBehind(workspace, 'me')),
+        "Pixel and Ana's iPad won't connect after this update until their "
+        'apps are updated.',
+      );
+      expect(
+        leftBehindText(leftBehind(workspace, 'elsewhere')),
+        "Ana's iPhone, Pixel and Ana's iPad won't connect after this update "
+        'until their apps are updated.',
+      );
+      expect(
+        leftBehindText(
+          leftBehind(
+            offer(devices: workspace.remote.devices.take(2).toList()),
+            'me',
+          ),
+        ),
+        "Pixel won't connect after this update until its app is updated.",
+      );
+      expect(leftBehindText(leftBehind(offer(), 'me')), isNull);
+    });
+
+    test("whether this device can't follow it", () {
+      bool cant(
+        Workspace workspace, {
+        String app = 'v0.1.19',
+        bool replaces = false,
+      }) => cantFollowUpdate(
+        workspace,
+        thisDevice: 'me',
+        appVersion: app,
+        replacesApp: replaces,
+      );
+      // Its own row says so.
+      expect(
+        cant(offer(devices: [paired('me', 'Phone', behind: true)]), app: 'dev'),
+        isTrue,
+      );
+      // An older backend that doesn't say: its own build's line.
+      expect(cant(offer()), isTrue);
+      expect(cant(offer(), app: 'v0.2.0'), isFalse);
+      expect(cant(offer(), app: 'dev'), isFalse);
+      // A Mac's app is replaced along with it.
+      expect(cant(offer(), replaces: true), isFalse);
+      // Nothing of the backend's on offer.
+      expect(cant(offer()..latestBackend = 'v0.1.16'), isFalse);
+    });
+
+    testWidgets("on a phone that can't follow it: no Update, and its app "
+        'first', (tester) async {
+      final harness = Harness(
+        offer(devices: [paired('me', "Ana's iPhone", behind: true)]),
+      )..appVersion = 'v0.1.19';
+      harness.backend.deviceId = 'me';
+      await harness.show(tester, size: const Size(393, 852));
+      harness.page.value = AppPage.settings;
+      await pumpFrames(tester);
+      await tester.tap(find.text('General'));
+      await pumpFrames(tester);
+      final first = find.textContaining(
+        "app first, from the App Store or "
+        'TestFlight. Then Studio can update to Claktory v0.2.0.',
+      );
+      await tester.ensureVisible(first);
+      await pumpFrames(tester);
+      expect(first, findsOneWidget);
+      expect(_button('Update'), findsNothing);
+      expect(find.textContaining("won't connect"), findsNothing);
+    });
+
+    testWidgets("on an Android phone that can't follow it: no Update, and "
+        'Download for its app, not a store (Sale\'s row 60)', (tester) async {
+      PhonePlatformPolicy.debugAndroidPolicy = true;
+      addTearDown(() {
+        PhonePlatformPolicy.debugAndroidPolicy = false;
+        UpdateCheckRow.debugOpen = null;
+      });
+      final opened = <Uri>[];
+      var answer = false;
+      UpdateCheckRow.debugOpen = (uri) async {
+        opened.add(uri);
+        return answer;
+      };
+      final harness = Harness(
+        offer(devices: [paired('me', 'Pixel', behind: true)]),
+      )..appVersion = 'v0.1.19';
+      harness.backend.deviceId = 'me';
+      await harness.show(tester, size: const Size(412, 915));
+      harness.page.value = AppPage.settings;
+      await pumpFrames(tester);
+      await tester.tap(find.text('General'));
+      await pumpFrames(tester);
+      final first = find.textContaining(
+        "app first: tap Download for its new version. Then Studio can "
+        'update to Claktory v0.2.0.',
+      );
+      await tester.ensureVisible(first);
+      await pumpFrames(tester);
+      expect(first, findsOneWidget);
+      expect(find.textContaining('App Store'), findsNothing);
+      expect(_button('Update'), findsNothing);
+      // Download opens the app's download page; one that doesn't open
+      // says so, and Download tries again.
+      await tester.tap(_button('Download'));
+      await pumpFrames(tester);
+      expect(opened, [androidAppInstallPage]);
+      expect(
+        find.text("Couldn't open the download page. Try again."),
+        findsOneWidget,
+      );
+      answer = true;
+      await tester.tap(_button('Download'));
+      await pumpFrames(tester);
+      expect(opened, hasLength(2));
+      expect(
+        find.text("Couldn't open the download page. Try again."),
+        findsNothing,
+      );
+    });
+
+    testWidgets('on a phone that can, the others are named above Update', (
+      tester,
+    ) async {
+      final harness = Harness(
+        offer(
+          devices: [
+            paired('me', "Ana's iPhone"),
+            paired('d2', 'Pixel', behind: true),
+          ],
+        ),
+        // A phone on the new line already can't reach the old Claktory at
+        // all: only a build that isn't numbered follows either.
+      )..appVersion = 'dev';
+      harness.backend.deviceId = 'me';
+      await harness.show(tester, size: const Size(393, 852));
+      harness.page.value = AppPage.settings;
+      await pumpFrames(tester);
+      await tester.tap(find.text('General'));
+      await pumpFrames(tester);
+      final behind = find.text(
+        "Pixel won't connect after this update until its app is updated.",
+      );
+      await tester.ensureVisible(behind);
+      await pumpFrames(tester);
+      expect(
+        tester.getRect(behind).bottom,
+        lessThanOrEqualTo(tester.getRect(_button('Update')).top),
+      );
+      await tester.tap(_button('Update'));
+      await pumpFrames(tester);
+      expect(harness.last.hasInstallUpdate(), isTrue);
+    });
+
+    testWidgets('on a Mac, the banner and the Version row name them', (
+      tester,
+    ) async {
+      await _mac(
+        tester,
+        offer(devices: [paired('d1', "Ana's iPhone", behind: true)]),
+      );
+      expect(
+        find.text(
+          "Ana's iPhone won't connect after this update until its app is "
+          'updated.',
+        ),
+        findsNWidgets(2),
+      );
+      // The Mac's own app is replaced with it: Update is offered.
+      expect(_button('Update'), findsWidgets);
+    });
   });
 }

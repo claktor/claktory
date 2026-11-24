@@ -2,7 +2,9 @@
 // Return arrives as text and adds a line, so with no hardware keyboard the
 // message box has Send, as on an iPhone. A hardware keyboard sends with
 // Return, as in Messages, and Send steps aside; the draft and the focus
-// stay through the keyboard coming and going.
+// stay through the keyboard coming and going. At every width: a narrow
+// Split View lays the box out as a phone's, and Return still sends from a
+// hardware keyboard (#362 I1).
 import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/ipad/workbench.dart';
 import 'package:factory_app/mobile/device.dart' show hardwareKeyboard;
@@ -21,7 +23,11 @@ const _wide = Size(1376, 1032);
 Finder get _send =>
     find.ancestor(of: find.text('Send'), matching: find.byType(Button));
 
-Future<Harness> _show(WidgetTester tester, {bool iPad = true}) async {
+Future<Harness> _show(
+  WidgetTester tester, {
+  bool iPad = true,
+  Size size = _wide,
+}) async {
   if (iPad) asIPad();
   addTearDown(() => hardwareKeyboard.value = false);
   final focus = WorkbenchFocus();
@@ -29,7 +35,7 @@ Future<Harness> _show(WidgetTester tester, {bool iPad = true}) async {
   final harness = Harness(snapshot(layout: leaf('chat', 'chat')));
   await harness.show(
     tester,
-    size: _wide,
+    size: size,
     home: WorkbenchScope(
       focus: focus,
       child: const Shell(rail: SizedBox(width: 56)),
@@ -95,5 +101,21 @@ void main() {
   testWidgets("a Mac's box has no Send: Return sends", (tester) async {
     await _show(tester, iPad: false);
     expect(_send, findsNothing);
+  });
+
+  testWidgets('in a narrow Split View, a hardware keyboard sends with '
+      'Return; the on-screen one adds a line', (tester) async {
+    // A third of an iPad Pro 13 in landscape: the phone's layout.
+    final harness = await _show(tester, size: const Size(507, 1032));
+    await _type(tester, 'From the narrow window');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await pumpFrames(tester);
+    expect(harness.backend.sent.where((m) => m.hasSendMessage()), isEmpty);
+
+    hardwareKeyboard.value = true;
+    await pumpFrames(tester);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await pumpFrames(tester);
+    expect(harness.last.sendMessage.text, 'From the narrow window');
   });
 }

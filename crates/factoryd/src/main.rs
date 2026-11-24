@@ -200,7 +200,11 @@ async fn run() -> Result<(), MainError> {
             // A terminal gets the code as a QR code too, to scan from the
             // screen; piped elsewhere, just the text.
             use std::io::IsTerminal;
-            let qr = if std::io::stdout().is_terminal() { factoryd::terminal_qr::lines(&code) } else { None };
+            // The QR code holds the code as a link, once links are on: a
+            // phone's camera opens it in Claktory, or in the store without it.
+            let link = factoryd::remote::pairing_link(&code);
+            let scanned = if link.is_empty() { &code } else { &link };
+            let qr = if std::io::stdout().is_terminal() { factoryd::terminal_qr::lines(scanned) } else { None };
             match qr {
                 Some(lines) => {
                     println!("Scan this with Claktory on your iPhone:\n");
@@ -218,43 +222,40 @@ async fn run() -> Result<(), MainError> {
             println!("It works once, for {minutes} minutes. You'll be asked to allow the device that uses it.");
             allow_in_terminal(&instance.home, &device).await
         }
+        // `allow` goes to the running Claktory (cli), which checks the
+        // number typed (#352 P4); never allowed here, without it.
         [allow, device @ ..] if allow == "allow" && !device.is_empty() => {
-            // Run by a program rather than a person at a terminal: only the
-            // first device (cli::HAS_DEVICES).
-            if !std::io::stdin().is_terminal()
-                && factoryd::remote::devices(&instance.home)?.iter().any(|known| !known.local && !known.endpoint_id.is_empty())
-            {
-                eprintln!("{}", factoryd::cli::HAS_DEVICES);
-                std::process::exit(3);
-            }
-            let device = factoryd::remote::approve(&instance.home, &device.join(" "))?;
-            println!("Allowed {}: it can connect now.", device.name);
-            Ok(())
+            eprintln!("Run factoryd allow {} --number <the 4 digits on its screen> while Claktory runs.", device.join(" "));
+            std::process::exit(2);
         }
         [command, rest @ ..] if command == "import" => import(&instance, rest),
         [command, rest @ ..] if command == "receive" => receive(&instance, rest).await,
         [deny, device @ ..] if deny == "deny" && !device.is_empty() => {
             let device = factoryd::remote::deny(&instance.home, &device.join(" "))?;
-            println!("Not allowed. {} can't connect. To try again, run factoryd pair.", device.name);
+            println!("Not allowed. {} can't connect. To try again, run factoryd pair.", factoryd::remote::shown_name(&device.name));
             Ok(())
         }
         [unpair, device @ ..] if unpair == "unpair" && !device.is_empty() => {
             let device = factoryd::remote::unpair(&instance.home, &device.join(" "))?;
-            println!("Removed {} ({}): it can't connect any more.", device.name, device.id);
+            println!("Removed {} ({}): it can't connect any more.", factoryd::remote::shown_name(&device.name), device.id);
             Ok(())
         }
+        // Never a waiting device's number (#352 P4, Fugo): the person reads
+        // it off the device's own screen. Names as `shown_name` shows them,
+        // since a device chooses its own (no escape sequences reach the
+        // terminal).
         [devices] if devices == "devices" => {
             for device in factoryd::remote::devices(&instance.home)?.into_iter().filter(|device| !device.local) {
+                let name = factoryd::remote::shown_name(&device.name);
+                if device.is_pending(now_ms()) {
+                    println!("{}  {}", device.id, factoryd::cli::waiting_sentence(&device.id, &name));
+                    continue;
+                }
                 let seen = match device.last_seen.map(jiff::Timestamp::from_millisecond) {
-                    _ if device.is_pending(now_ms()) => {
-                        let claktory = factoryd::remote::secret_key(&instance.home)?.public().to_string();
-                        let number = factoryd::remote::approval_number(&claktory, &device.pending_endpoint_id, &device.token_sha256);
-                        format!("waiting to be allowed: allow it with factoryd allow {} if it shows {number}", device.id)
-                    }
                     Some(Ok(seen)) => format!("last connected {seen}"),
                     _ => "never connected".to_owned(),
                 };
-                println!("{}  {}  {seen}", device.id, device.name);
+                println!("{}  {name}  {seen}", device.id);
             }
             Ok(())
         }
@@ -465,32 +466,48 @@ async fn allow_in_terminal(home: &Home, device: &factoryd::remote::Device) -> Re
         let now = now_ms();
         match remote::devices(home)?.into_iter().find(|known| known.id == device.id) {
             Some(known) if !known.endpoint_id.is_empty() => {
-                println!("Allowed in Claktory. {} can connect now.", known.name);
+                println!("Allowed in Claktory. {} can connect now.", remote::shown_name(&known.name));
                 return Ok(());
             }
             Some(known) if known.is_pending(now) => {
+                // The person types the digits the device's own screen shows
+                // (#352 P4, Fugo): never printed here. Three wrong, or none,
+                // and it's turned away.
                 let number = remote::approval_number(&claktory, &known.pending_endpoint_id, &known.token_sha256);
-                print!("\nA device wants to connect as \"{}\". Its screen should show {number}. Allow it? [y/N] ", known.name);
-                std::io::stdout().flush().map_err(remote::RemoteError::from)?;
-                let answer = tokio::task::spawn_blocking(move || {
-                    let mut line = String::new();
-                    std::io::BufReader::new(tty).read_line(&mut line).map(|_| line)
-                });
-                let answer = tokio::select! {
-                    answer = answer => answer.map_err(std::io::Error::other).and_then(|line| line).map_err(remote::RemoteError::from)?,
-                    _ = tokio::signal::ctrl_c() => {
-                        let _ = remote::cancel(home, &device.id);
-                        println!("\nCancelled. The code no longer works.");
-                        std::process::exit(130);
+                let name = remote::shown_name(&known.name);
+                println!("\nA device calling itself \"{name}\" wants to connect. Allow it only if its screen shows the number you type.");
+                let mut allowed = Ok(false);
+                for tries_left in (0..3).rev() {
+                    print!("Type the 4 digits on its screen (Enter to refuse): ");
+                    std::io::stdout().flush().map_err(remote::RemoteError::from)?;
+                    let reading = tty.try_clone().map_err(remote::RemoteError::from)?;
+                    let answer = tokio::task::spawn_blocking(move || {
+                        let mut line = String::new();
+                        std::io::BufReader::new(reading).read_line(&mut line).map(|_| line)
+                    });
+                    let answer = tokio::select! {
+                        answer = answer => answer.map_err(std::io::Error::other).and_then(|line| line).map_err(remote::RemoteError::from)?,
+                        _ = tokio::signal::ctrl_c() => {
+                            let _ = remote::cancel(home, &device.id);
+                            println!("\nCancelled. The code no longer works.");
+                            std::process::exit(130);
+                        }
+                    };
+                    let typed = answer.trim();
+                    if typed == number {
+                        allowed = remote::approve(home, &device.id).map(|_| true);
+                        break;
                     }
-                };
-                let allowed = if matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
-                    remote::approve(home, &device.id).map(|_| true)
-                } else {
-                    remote::deny(home, &device.id).map(|_| false)
-                };
+                    if typed.is_empty() || tries_left == 0 {
+                        allowed = remote::deny(home, &device.id).map(|_| false);
+                        break;
+                    }
+                    let tries = if tries_left == 1 { "1 try left".to_owned() } else { format!("{tries_left} tries left") };
+                    println!("That's not the number its screen shows. {tries}.");
+                }
+
                 match allowed {
-                    Ok(true) => println!("Allowed. {} can connect now.", known.name),
+                    Ok(true) => println!("Allowed. {name} can connect now."),
                     Ok(false) => println!("Not allowed. To try again, run factoryd pair."),
                     Err(_) => println!("The code expired or was cancelled. Run factoryd pair for a new one."),
                 }

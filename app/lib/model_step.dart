@@ -89,6 +89,10 @@ class _ConnectModelState extends State<ConnectModel> {
   var _busy = false;
   String? _failure;
 
+  /// The accounts the provider had when the sign-in started here, so what
+  /// it connected is the one not among them; null when none started here.
+  Set<String>? _before;
+
   bool get _step => widget.close == null;
 
   Future<void> _start(Provider provider, String methodId) async {
@@ -98,6 +102,7 @@ class _ConnectModelState extends State<ConnectModel> {
       _keys = false;
     });
     widget.started.value = provider.id;
+    _before = {for (final account in provider.accounts) account.id};
     try {
       await scope.login.start(
         provider.id,
@@ -226,7 +231,7 @@ class _ConnectModelState extends State<ConnectModel> {
       if (keys)
         _Choice(
           title: 'Use an API key',
-          note: 'From Anthropic, OpenAI, OpenRouter or another provider',
+          note: 'From Anthropic, OpenAI or OpenRouter',
           onTap: () => setState(() {
             _keys = true;
             _failure = null;
@@ -320,6 +325,13 @@ class _ConnectModelState extends State<ConnectModel> {
         ? provider.name
         : meter.plan;
     final rivet = rivetIn(AppScope.of(context).workspace.workspace);
+    // A key that can't run paid models (#343 U14): the backend's sentence
+    // says so, rather than that the agents can work.
+    final before = _before ?? const <String>{};
+    final warning = provider.accounts
+        .where((a) => !before.contains(a.id) && a.credit.warning.isNotEmpty)
+        .map((a) => a.credit.warning)
+        .firstOrNull;
     return [
       Text(
         'Connected',
@@ -340,10 +352,13 @@ class _ConnectModelState extends State<ConnectModel> {
       ),
       const SizedBox(height: Space.l),
       Text(
-        _step && rivet != null
-            ? '${rivet.name} is ready.'
-            : 'Your agents can work now.',
-        style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
+        warning ??
+            (_step && rivet != null
+                ? '${rivet.name} is ready.'
+                : 'Your agents can work now.'),
+        style: TypeScale.of(context).body.copyWith(
+          color: warning == null ? palette.textMuted : palette.text,
+        ),
       ),
       const SizedBox(height: Space.xl),
       Align(

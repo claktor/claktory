@@ -5,16 +5,93 @@ import 'controls.dart';
 import 'dictation.dart';
 import 'identity.dart';
 import 'mobile/metrics.dart' show Metrics, TypeScale;
+import 'scope.dart';
+import 'voice_keep.dart' show KeptVoices;
 
 /// The most a comment may say, as the backend checks too.
 const decisionCommentLimit = 2000;
 
+/// Whether something is typed in a card's [comment] (trimmed): its own
+/// buttons then give way to one Submit, and what's typed goes as a reply,
+/// never with a verdict (#370, Matt's).
+bool commentTyped(TextEditingController comment) =>
+    comment.text.trim().isNotEmpty;
+
+/// Builds [builder] again whenever [controller]'s comment becomes typed or
+/// empty ([commentTyped]), not at every key: a card's buttons, or one
+/// Submit (#370).
+class CommentTyped extends StatefulWidget {
+  const CommentTyped({
+    super.key,
+    required this.controller,
+    required this.builder,
+  });
+
+  final TextEditingController controller;
+  final Widget Function(BuildContext context, bool typed) builder;
+
+  @override
+  State<CommentTyped> createState() => _CommentTypedState();
+}
+
+class _CommentTypedState extends State<CommentTyped> {
+  late var _typed = commentTyped(widget.controller);
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_changed);
+  }
+
+  @override
+  void didUpdateWidget(CommentTyped old) {
+    super.didUpdateWidget(old);
+    if (old.controller != widget.controller) {
+      old.controller.removeListener(_changed);
+      widget.controller.addListener(_changed);
+      _typed = commentTyped(widget.controller);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    final typed = commentTyped(widget.controller);
+    if (typed != _typed) setState(() => _typed = typed);
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context, _typed);
+}
+
+/// The one button a card shows once a comment is typed (#370): it sends
+/// the comment as a reply and carries out nothing.
+class SubmitButton extends StatelessWidget {
+  const SubmitButton({super.key, required this.onPressed});
+
+  /// Null while it's being sent.
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) =>
+      Button(label: 'Submit', primary: true, onPressed: onPressed);
+}
+
 /// A comment to go with the person's decision on a card an agent waits on
 /// (Matt's: approve or dismiss, always with an optional comment): under
-/// the card's buttons, "Add a comment", quiet; tapped, a field. Whatever
-/// is typed goes with either button, as the person's own words, to
-/// [agent] only. The card owns [controller] and sends its text trimmed;
-/// nothing is kept once the card is answered.
+/// the card's buttons, "Add a comment", quiet; tapped, a field. The card
+/// owns [controller] and sends its text trimmed; nothing is kept once the
+/// card is answered.
+///
+/// With [onSubmit] (#370), once something is typed the card shows one
+/// Submit in place of its buttons ([CommentTyped], [SubmitButton]), Return
+/// in the field is Submit, and what's typed goes as a reply to [agent],
+/// never as a yes or a no. Without it, whatever is typed goes with either
+/// button, as the person's own words, to [agent] only.
 class DecisionComment extends StatefulWidget {
   const DecisionComment({
     super.key,
@@ -23,7 +100,9 @@ class DecisionComment extends StatefulWidget {
     this.peer = '',
     this.enabled = true,
     this.onSubmitted,
+    this.onSubmit,
     this.note,
+    this.keep,
   });
 
   final TextEditingController controller;
@@ -41,8 +120,17 @@ class DecisionComment extends StatefulWidget {
   /// Enter in the field, where the card has a main action for it.
   final VoidCallback? onSubmitted;
 
+  /// The card's Submit: sends what's typed as a reply. Return in the field
+  /// does it, once something is typed, and the note under the field goes:
+  /// the line beside Submit says what happens.
+  final VoidCallback? onSubmit;
+
   /// Who gets it, said otherwise, where it depends on the answer.
   final String? note;
+
+  /// What a recording for it is kept as until its words come (#401): one
+  /// kept from before opens the field, for it to come back to.
+  final DictationFor? keep;
 
   @override
   State<DecisionComment> createState() => _DecisionCommentState();
@@ -55,8 +143,33 @@ class _DecisionCommentState extends State<DecisionComment> {
   /// something else in the scope has focus (a PDF's pane after a reload).
   final _focus = FocusNode();
 
+  KeptVoices? _voices;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final voices = KeptVoices.of(AppScope.of(context));
+    if (identical(voices, _voices)) return;
+    _voices?.removeListener(_kept);
+    _voices = voices..addListener(_kept);
+    _open = _open || _holdsKept();
+  }
+
+  bool _holdsKept() {
+    final key = widget.keep?.key;
+    return key != null && (_voices?.holds(key) ?? false);
+  }
+
+  /// A recording kept for this comment from before: the field opens, so
+  /// it comes back to it.
+  void _kept() {
+    if (_open || !_holdsKept() || !mounted) return;
+    setState(() => _open = true);
+  }
+
   @override
   void dispose() {
+    _voices?.removeListener(_kept);
     _focus.dispose();
     super.dispose();
   }
@@ -104,13 +217,25 @@ class _DecisionCommentState extends State<DecisionComment> {
         ),
       );
     }
-    final onSubmitted = widget.onSubmitted;
+    final submit = widget.onSubmit;
+    final onSubmitted = submit == null
+        ? widget.onSubmitted
+        : () {
+            if (widget.enabled && commentTyped(widget.controller)) submit();
+          };
+    final note = Text(
+      widget.note ??
+          (widget.peer.isEmpty
+              ? '${widget.agent} gets it with your answer.'
+              : 'Only ${widget.agent} sees it, not ${widget.peer}.'),
+      style: type.caption.copyWith(color: palette.textFaint),
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Enter does the card's main action, where it has one; Shift+Enter
-        // starts a new line.
+        // Enter does the card's main action, where it has one, or Submit;
+        // Shift+Enter starts a new line.
         // Or said: the mic puts what's said in, to check before sending.
         KeepWhileTyped(
           controller: widget.controller,
@@ -118,9 +243,13 @@ class _DecisionCommentState extends State<DecisionComment> {
             controller: widget.controller,
             focusNode: _focus,
             enabled: widget.enabled,
+            keep: widget.keep,
             child: CallbackShortcuts(
               bindings: {
                 const SingleActivator(LogicalKeyboardKey.enter): ?onSubmitted,
+                if (submit != null)
+                  const SingleActivator(LogicalKeyboardKey.numpadEnter):
+                      onSubmitted!,
               },
               child: TextField(
                 controller: widget.controller,
@@ -138,14 +267,20 @@ class _DecisionCommentState extends State<DecisionComment> {
             ),
           ),
         ),
-        const SizedBox(height: Space.xs),
-        Text(
-          widget.note ??
-              (widget.peer.isEmpty
-                  ? '${widget.agent} gets it with your answer.'
-                  : 'Only ${widget.agent} sees it, not ${widget.peer}.'),
-          style: type.caption.copyWith(color: palette.textFaint),
-        ),
+        // With Submit, the line beside it says what happens once typed.
+        if (submit == null) ...[
+          const SizedBox(height: Space.xs),
+          note,
+        ] else
+          CommentTyped(
+            controller: widget.controller,
+            builder: (context, typed) => typed
+                ? const SizedBox.shrink()
+                : Padding(
+                    padding: const EdgeInsets.only(top: Space.xs),
+                    child: note,
+                  ),
+          ),
       ],
     );
   }

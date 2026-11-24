@@ -1,5 +1,36 @@
-use serde::{Deserialize, Serialize};
+use std::cell::Cell;
+
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
+
+thread_local! {
+    static SKIP_IMAGE_DATA: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `parse` with images' data left out of what it deserializes on this
+/// thread (each image's `data` empty, its MIME type kept): for messages read
+/// only to show them, which say "[image]", such as a conversation's older
+/// segments. Their base64 can be most of a conversation's bytes.
+pub fn without_image_data<T>(parse: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SKIP_IMAGE_DATA.set(self.0);
+        }
+    }
+    let _restore = Restore(SKIP_IMAGE_DATA.replace(true));
+    parse()
+}
+
+/// An image's base64 data, or nothing inside `without_image_data`.
+fn image_data<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    if SKIP_IMAGE_DATA.get() {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(String::new())
+    } else {
+        String::deserialize(deserializer)
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -505,8 +536,14 @@ pub enum UserContent {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum UserPart {
-    Text { text: String },
-    Image { data: String, mime_type: String },
+    Text {
+        text: String,
+    },
+    Image {
+        #[serde(deserialize_with = "image_data")]
+        data: String,
+        mime_type: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -582,8 +619,20 @@ pub struct ToolResultMessage {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ToolResultPart {
-    Text { text: String },
-    Image { data: String, mime_type: String },
+    Text {
+        text: String,
+    },
+    Image {
+        #[serde(deserialize_with = "image_data")]
+        data: String,
+        mime_type: String,
+        /// The SHA-256 of its bytes (hex), on images read since #382: such
+        /// an image goes to Anthropic once, as a file, and later requests
+        /// name it (`providers::anthropic::files`). Without one (read
+        /// before), it always goes inline, as it went then.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        digest: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -672,7 +721,8 @@ pub enum AgentEvent {
         delay_ms: u64,
     },
     /// The response that the last `MessageStart` began failed because none of
-    /// the provider's accounts can take a request now (`accounts::none_left`).
+    /// the provider's accounts can take a request now (`accounts::none_left`),
+    /// or because it can't connect, after the quick retries (`until_ms` None).
     /// It ends that message in place of `MessageEnd` and is not part of the
     /// context; the run waits until `until_ms` (ms since 1970), or, when None,
     /// until the person changes something, then sends the request again.

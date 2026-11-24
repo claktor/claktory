@@ -15,7 +15,7 @@ use factory_protocol::v1::{self, NoticeLevel};
 
 use crate::config::{AgentConfig, Config, ProjectConfig};
 use crate::extensions::{Extension, PromptKind};
-use crate::factory::{Factory, Inner, Queued, write_atomic};
+use crate::factory::{Factory, Inner, Queued};
 use crate::home::Home;
 use crate::store::Outcome;
 use crate::transcript::{Change, Frame};
@@ -480,7 +480,7 @@ fn settings_note(
                         }
                         _ => continue,
                     };
-                    said.push(format!("the {} option {} is now {now}", manifest.name, option.id));
+                    said.push(format!("the {} extension's “{}” is now {now}", manifest.name, option.label));
                 }
             }
             (false, false) => {}
@@ -665,6 +665,13 @@ impl Factory {
             runtime.idle = false;
             return None;
         };
+        // Its conversation is being taken back (`crate::fork`): what's queued
+        // waits for the conversation as it will be, not as it was.
+        if runtime.forking {
+            runtime.running = false;
+            runtime.idle = false;
+            return None;
+        }
         // Its project is archived: what's queued waits for it to come back.
         if archived {
             runtime.running = false;
@@ -705,6 +712,7 @@ impl Factory {
         // A new run: a stop before now was of the one that ended.
         runtime.stopped = false;
         runtime.wait_said = None;
+        (runtime.network_since, runtime.network_waits) = (0, 0);
         // Quiet messages come with what wakes it, never on their own.
         let mut prompts = crate::extensions::agents::quiet::take(runtime, crate::extensions::agents::quiet::At::Wake);
         prompts.splice(0..0, note.into_iter().chain(cleared));
@@ -796,6 +804,22 @@ impl Factory {
         }
         inner.agents.get_mut(id)?.transcript.as_mut()?.set_frame(frame);
         Some(note)
+    }
+
+    /// Notes that `agent` was told it has the secret `secret` (its id) in an
+    /// event of its own, such as the answer to its request, so the next
+    /// note of what changed doesn't say it again.
+    pub(crate) fn told_secret(&self, agent: &str, secret: &str) {
+        // Quarantined, its notes list no secret.
+        if self.pipes.contained(agent) {
+            return;
+        }
+        let Some(label) = self.vault.granted(agent).remove(secret) else { return };
+        let mut inner = self.lock();
+        let Some(transcript) = inner.agents.get_mut(agent).and_then(|runtime| runtime.transcript.as_mut()) else { return };
+        let Some(mut frame) = transcript.frame().cloned() else { return };
+        frame.secrets.insert(secret.to_owned(), label);
+        transcript.set_frame(frame);
     }
 
     /// Writes the segment's frame from Factory as it is now, keeps it with the
@@ -998,6 +1022,7 @@ impl Factory {
         });
         agent.state.cache_ttl = job.cache_ttl;
         agent.wait_out_with(crate::waits::wait_out(Arc::downgrade(self), id.to_owned(), job.epoch));
+        agent.wait_network_with(crate::waits::wait_network(Arc::downgrade(self), id.to_owned(), job.epoch));
         let factory = self.clone();
         let agent_id = id.to_owned();
         let epoch = job.epoch;
@@ -1230,8 +1255,17 @@ impl Factory {
                 crate::annotations::written(self, id, &folder, path);
             }
         }
+        // The images a compaction let go of: their files at the provider go.
+        let mut forgotten = Vec::new();
         let persist = {
             let mut inner = self.lock();
+            // An answer: the connection is back (`crate::waits`, #364 O2).
+            if let AgentEvent::MessageEnd { message: factory_agent::types::Message::Assistant(answer) } = &event
+                && answer.stop_reason != factory_agent::types::StopReason::Error
+                && let Some(runtime) = inner.agents.get_mut(id).filter(|runtime| runtime.epoch == epoch)
+            {
+                (runtime.network_since, runtime.network_waits) = (0, 0);
+            }
             // A model call's tokens, for the account's check-ins.
             if matches!(event, AgentEvent::MessageEnd { .. } | AgentEvent::Compacted { .. })
                 && let Some(runtime) = inner.agents.get(id).filter(|runtime| runtime.epoch == epoch)
@@ -1252,6 +1286,9 @@ impl Factory {
                 return;
             }
             let writes = runtime.writes.clone();
+            if let AgentEvent::Waiting { message: Message::Assistant(reply), .. } = &event {
+                runtime.asked_on.clone_from(&reply.provider);
+            }
             let doing = match &event {
                 AgentEvent::ToolExecutionStart { tool_name, .. } => Some(Some(tool_name.clone())),
                 AgentEvent::ToolExecutionEnd { .. } | AgentEvent::AgentEnd { .. } => Some(None),
@@ -1266,6 +1303,10 @@ impl Factory {
                 runtime.make_way();
             }
             let Some(transcript) = runtime.transcript.as_mut() else { return };
+            if let AgentEvent::Compacted { messages, .. } = &event {
+                let kept = crate::models::image_digests(messages);
+                forgotten = crate::models::image_digests(transcript.messages()).into_iter().filter(|digest| !kept.contains(digest)).collect();
+            }
             let applied = match transcript.apply(event) {
                 Ok(applied) => applied,
                 Err(error) => {
@@ -1273,7 +1314,25 @@ impl Factory {
                     return;
                 }
             };
-            for change in applied.changes {
+            // A request for a secret shows what in the vault fits it (#360),
+            // which its tool result doesn't hold: the agent never sees it.
+            let changes: Vec<crate::transcript::Change> = applied
+                .changes
+                .into_iter()
+                .map(|change| match change {
+                    crate::transcript::Change::Entry(entry) => match &entry.kind {
+                        Some(factory_protocol::v1::entry::Kind::SecretRequest(request))
+                            if request.state() == factory_protocol::v1::SecretRequestState::Pending =>
+                        {
+                            let fitted = crate::vault::requests::fitted(self, request.clone());
+                            crate::transcript::Change::Entry(transcript.set_secret_request(fitted).unwrap_or(entry))
+                        }
+                        _ => crate::transcript::Change::Entry(entry),
+                    },
+                    other => other,
+                })
+                .collect();
+            for change in changes {
                 self.send_change(&inner, id, change);
             }
             if applied.context_changed || doing_changed {
@@ -1281,13 +1340,18 @@ impl Factory {
             }
             (applied.persist, applied.user_message, writes)
         };
+        if !forgotten.is_empty() {
+            let models = self.models.clone();
+            tokio::spawn(async move { models.forget_images(forgotten).await });
+        }
         let (Some(persist), user_message, writes) = persist else { return };
         let _writing = writes.lock().await;
         if self.lock().agents.get(id).is_none_or(|runtime| runtime.epoch != epoch) {
             return;
         }
-        if let Err(error) = write_atomic(&persist.path, &persist.bytes).await {
-            tracing::error!(agent = %id, path = %persist.path.display(), %error, "could not save transcript");
+        let path = persist.path().to_owned();
+        if let Err(error) = persist.write().await {
+            tracing::error!(agent = %id, path = %path.display(), %error, "could not save transcript");
             return;
         }
         if user_message && let Some(runtime) = self.lock().agents.get_mut(id) {

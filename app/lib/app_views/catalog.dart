@@ -82,6 +82,11 @@ class _Renderer {
   /// How many TextFields each component holds, counted once per drawing.
   final _fieldCounts = <String, int>{};
 
+  /// Whether what's being built sits in a horizontal List's line, where a
+  /// Button takes only its own width (as it did when that line scrolled),
+  /// never the whole line.
+  var _inLine = false;
+
   /// How many TextFields component [id] holds, itself and in what it holds
   /// (a template's counts twice: it may repeat).
   int _fieldsIn(Object? id) {
@@ -222,6 +227,10 @@ class _Renderer {
       case 'Row':
         final weighted = _weighted(context, c['children'], scope, depth);
         final anyWeight = weighted.any((one) => one.$2 != null);
+        final stackBelow = switch (c['stackBelow']) {
+          final num n when n >= 320 && n <= 1200 => n.toDouble(),
+          _ => null,
+        };
         return LayoutBuilder(
           builder: (context, constraints) {
             // Weighted children (a dashboard's grid of stats) too narrow
@@ -230,11 +239,45 @@ class _Renderer {
             final each = constraints.maxWidth / math.max(1, weighted.length);
             // The least grows with the text: at a large text size, half a
             // phone's width breaks words mid-word.
-            final least =
-                minRowChildWidth *
-                MediaQuery.textScalerOf(context).scale(14) /
-                14;
-            if (anyWeight && weighted.length > 1 && each < least) {
+            final grow = MediaQuery.textScalerOf(context).scale(14) / 14;
+            final least = minRowChildWidth * grow;
+            final squeezed = anyWeight && weighted.length > 1 && each < least;
+            // Narrower than the app asks (a dashboard on a phone, as
+            // Grafana's under 768; more at a larger text size), or
+            // squeezed: every child full width, one under another, without
+            // the empty weighted Columns that fill a grid's gaps.
+            if (stackBelow != null &&
+                (constraints.maxWidth < stackBelow * grow || squeezed)) {
+              // The ids in step with [weighted] (a template's have none).
+              final ids = switch (c['children']) {
+                final List list => [
+                  for (final id in list)
+                    if (id is String) id,
+                ],
+                _ => const <String>[],
+              };
+              // Panels 20 apart, as Grafana's are on a phone: within the
+              // row, and from the next stacked row (a Column's 8 between,
+              // and 6 either side).
+              const stackedRowGap = 20.0;
+              return Padding(
+                padding: const EdgeInsets.symmetric(
+                  vertical: stackedRowGap / 2 - Space.s / 2,
+                ),
+                child: Column(
+                  spacing: stackedRowGap,
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final (i, (child, _)) in weighted.indexed)
+                      if (i >= ids.length ||
+                          !_isGap(surface.components[ids[i]]))
+                        child,
+                  ],
+                ),
+              );
+            }
+            if (squeezed) {
               return Column(
                 spacing: Space.s,
                 mainAxisSize: MainAxisSize.min,
@@ -279,13 +322,21 @@ class _Renderer {
         );
       case 'List':
         if (c['direction'] == 'horizontal') {
-          return SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              spacing: Space.s,
-              crossAxisAlignment: _align(c['align'], CrossAxisAlignment.start),
-              children: children(c['children']),
-            ),
+          // In a line while it fits; what doesn't fit goes on the next
+          // line rather than off the screen (the largest text on a phone).
+          final outer = _inLine;
+          _inLine = true;
+          final inLine = children(c['children']);
+          _inLine = outer;
+          return Wrap(
+            spacing: Space.s,
+            runSpacing: Space.xs,
+            crossAxisAlignment: switch (c['align']) {
+              'center' => WrapCrossAlignment.center,
+              'end' => WrapCrossAlignment.end,
+              _ => WrapCrossAlignment.start,
+            },
+            children: inLine,
           );
         }
         return _noted(
@@ -301,6 +352,13 @@ class _Renderer {
           ),
         );
       case 'Card':
+        // A Stat reaches its card's edges, as a Grafana panel's does.
+        final child = c['child'];
+        if (child is String &&
+            surface.components[child]?['component'] == 'Stat' &&
+            depth <= _maxInsetDepth) {
+          return AppStatCard(child: _child(context, child, scope, depth));
+        }
         return Container(
           padding: EdgeInsets.all(depth > _maxInsetDepth ? 0 : Space.m),
           decoration: BoxDecoration(
@@ -406,6 +464,14 @@ class _Renderer {
         );
       case 'Chart':
         final height = number(c['height'], scope) ?? 200;
+        double? instant(Object? value) => switch (number(value, scope)) {
+          final n? when n >= 0 && n <= 8.64e15 && n == n.roundToDouble() =>
+            n.toDouble(),
+          _ => null,
+        };
+        var from = instant(c['timeFrom']);
+        var to = instant(c['timeTo']);
+        if (from != null && to != null && from >= to) from = to = null;
         return AppChart(
           key: ValueKey('$id@$scope'),
           kind: c['kind'] is String ? c['kind']! as String : '',
@@ -421,6 +487,43 @@ class _Renderer {
           label: string(c['label'], scope),
           unit: string(c['unit'], scope),
           height: height.clamp(120, 480).toDouble(),
+          // Grafana's per-panel settings: each read only when it's the
+          // right kind of value in range, else the renderer's default.
+          lineWidth: switch (c['lineWidth']) {
+            final num n when n >= 0 && n <= 10 => n.toDouble(),
+            _ => 1,
+          },
+          fill: switch (c['fill']) {
+            final num n when n >= 0 && n <= 100 => n.toDouble(),
+            _ => 0,
+          },
+          points: switch (c['points']) {
+            final String p when const {'auto', 'always', 'never'}.contains(p) =>
+              p,
+            _ => 'auto',
+          },
+          pointSize: switch (c['pointSize']) {
+            final num n when n >= 1 && n <= 40 => n.toDouble(),
+            _ => 5,
+          },
+          min: switch (c['min']) {
+            final num n when n.isFinite => n.toDouble(),
+            _ => null,
+          },
+          max: switch (c['max']) {
+            final num n when n.isFinite => n.toDouble(),
+            _ => null,
+          },
+          decimals: switch (c['decimals']) {
+            final num n when n >= 0 && n <= 10 && n == n.roundToDouble() =>
+              n.toInt(),
+            _ => null,
+          },
+          legend: c['legend'] != false,
+          // The dashboard's time range, in milliseconds since 1970: whole,
+          // not negative, and in order when both are set.
+          timeFrom: from,
+          timeTo: to,
         );
       case 'Stat':
         final color = c['color'];
@@ -432,7 +535,46 @@ class _Renderer {
             if (resolveValue(surface, c['spark'], scope) case final List spark)
               for (final point in spark) ?cellNumber(point),
           ],
-          color: color is String ? roleColor(context, color) : null,
+          color: color is String ? color : null,
+          // Grafana's settings: each read only when it's the right kind of
+          // value, else the renderer's default.
+          thresholds: switch (c['thresholds']) {
+            final List steps when steps.isNotEmpty && steps.length <= 10 => [
+              for (final (i, step) in steps.indexed)
+                if (step is Map && step['color'] is String)
+                  (
+                    value: i == 0
+                        ? null
+                        : switch (step['value']) {
+                            final num n when n.isFinite => n.toDouble(),
+                            _ => null,
+                          },
+                    color: step['color']! as String,
+                  ),
+            ],
+            _ => null,
+          },
+          colorMode: switch (c['colorMode']) {
+            final String m
+                when const {
+                  'value',
+                  'background',
+                  'solid',
+                  'none',
+                }.contains(m) =>
+              m,
+            _ => 'value',
+          },
+          graph: c['graph'] == 'none' ? 'none' : 'area',
+          decimals: switch (c['decimals']) {
+            final num n when n >= 0 && n <= 10 && n == n.roundToDouble() =>
+              n.toInt(),
+            _ => null,
+          },
+          height: switch (c['height']) {
+            final num n when n >= 60 && n <= 480 => n.toDouble(),
+            _ => null,
+          },
         );
       case 'Table':
         final table = AppTable.from(resolveValue(surface, c['data'], scope));
@@ -566,11 +708,13 @@ class _Renderer {
       if (c['variant'] == 'borderless') {
         return Align(
           alignment: Alignment.centerLeft,
+          widthFactor: _inLine ? 1 : null,
           child: _QuietButton(label: label, onPressed: onPressed),
         );
       }
       return Align(
         alignment: Alignment.centerLeft,
+        widthFactor: _inLine ? 1 : null,
         child: Button(
           label: label,
           primary: c['variant'] == 'primary',
@@ -578,21 +722,63 @@ class _Renderer {
         ),
       );
     }
+    // A row of a menu: a List holding one Text. Full width, its words
+    // wrapping; the chosen one ("primary") filled, with an accent bar on
+    // its left, as Grafana's pickers mark theirs.
+    if (child?['children'] case [final String only]
+        when child!['component'] == 'List' &&
+            surface.components[only]?['component'] == 'Text') {
+      return _MenuRow(
+        chosen: c['variant'] == 'primary',
+        onPressed: onPressed,
+        child: _child(context, only, scope, depth),
+      );
+    }
+    final borderless = c['variant'] == 'borderless';
     return Semantics(
       button: true,
       enabled: onPressed != null,
       child: Pressable(
         onTap: onPressed,
-        builder: (context, hovered) => Container(
-          padding: const EdgeInsets.all(Space.xs),
-          decoration: BoxDecoration(
+        builder: (context, hovered) {
+          final tint = BoxDecoration(
             color: hovered && onPressed != null
                 ? Palette.of(context).hover
                 : null,
             borderRadius: BorderRadius.circular(Radii.control),
-          ),
-          child: _child(context, childId, scope, depth),
-        ),
+          );
+          final inside = _child(context, childId, scope, depth);
+          if (!borderless) {
+            return Container(
+              padding: const EdgeInsets.all(Space.xs),
+              decoration: tint,
+              child: inside,
+            );
+          }
+          // A borderless one (a menu's button in a top bar): its words in
+          // line with the page's, the tint reaching a little past them,
+          // and at least a target tall.
+          return ConstrainedBox(
+            constraints: BoxConstraints(minHeight: Metrics.of(context).target),
+            child: Stack(
+              clipBehavior: Clip.none,
+              alignment: AlignmentDirectional.centerStart,
+              children: [
+                PositionedDirectional(
+                  start: -Space.xs,
+                  end: -Space.xs,
+                  top: 0,
+                  bottom: 0,
+                  child: DecoratedBox(decoration: tint),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: Space.xs),
+                  child: inside,
+                ),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
@@ -783,6 +969,105 @@ class _QuietButton extends StatelessWidget {
                   : hovered
                   ? palette.text
                   : palette.textMuted,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Whether [component] fills a grid's gap: a weighted Column with no
+/// children (not one bound to data).
+bool _isGap(Map<String, Object?>? component) =>
+    component != null &&
+    component['component'] == 'Column' &&
+    component['weight'] is num &&
+    switch (component['children']) {
+      final List children => children.isEmpty,
+      _ => false,
+    };
+
+/// A row of a menu (a Button over a List of one Text): full width, a
+/// finger's height on a phone, its words wrapping; the [chosen] one
+/// filled, with an accent bar on its left, as Grafana's pickers mark
+/// theirs. Focusable, Return or Space presses it.
+class _MenuRow extends StatefulWidget {
+  const _MenuRow({
+    required this.chosen,
+    required this.onPressed,
+    required this.child,
+  });
+
+  final bool chosen;
+  final VoidCallback? onPressed;
+  final Widget child;
+
+  @override
+  State<_MenuRow> createState() => _MenuRowState();
+}
+
+class _MenuRowState extends State<_MenuRow> {
+  var _hovered = false;
+  var _focused = false;
+
+  static const _bar = 3.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final enabled = widget.onPressed != null;
+    final chosen = widget.chosen;
+    return Semantics(
+      button: true,
+      selected: chosen,
+      enabled: enabled,
+      child: FocusableActionDetector(
+        enabled: enabled,
+        mouseCursor: enabled
+            ? SystemMouseCursors.click
+            : SystemMouseCursors.basic,
+        onShowHoverHighlight: (value) => setState(() => _hovered = value),
+        onShowFocusHighlight: (value) => setState(() => _focused = value),
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              widget.onPressed?.call();
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onPressed,
+          child: LayoutBuilder(
+            builder: (context, constraints) => Container(
+              width: constraints.hasBoundedWidth ? double.infinity : null,
+              constraints: BoxConstraints(
+                minHeight: Metrics.of(context).target,
+              ),
+              alignment: Alignment.centerLeft,
+              // The bar takes its width from the left inset, so the
+              // chosen row's words line up with the others'.
+              padding: EdgeInsets.fromLTRB(
+                Space.m - (chosen ? _bar : 0),
+                Space.s - 2,
+                Space.m,
+                Space.s - 2,
+              ),
+              decoration: BoxDecoration(
+                color: chosen
+                    ? palette.selected
+                    : (_hovered || _focused) && enabled
+                    ? palette.hover
+                    : null,
+                border: chosen
+                    ? Border(
+                        left: BorderSide(color: palette.signal, width: _bar),
+                      )
+                    : null,
+              ),
+              child: widget.child,
             ),
           ),
         ),

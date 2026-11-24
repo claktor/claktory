@@ -647,16 +647,76 @@ pub(crate) fn ready(db: &Connection, team: &Team) -> rusqlite::Result<HashMap<St
     )
 }
 
-/// Messages and events each agent was sent in the window, but the
-/// person's: what wakes it without them (agents copying it in, monitors,
-/// tasks).
-pub(crate) fn received(db: &Connection, team: &Team, window: Window) -> rusqlite::Result<HashMap<String, i64>> {
-    query(
+/// A wake-up answered within this long by a message to another agent did
+/// its job.
+pub(crate) const ANSWER_MS: i64 = HOUR_MS;
+
+/// What woke an agent in a window without the person, and how much of it
+/// the agent answered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub(crate) struct Woken {
+    /// Messages and events it was sent, but the person's and those sent
+    /// quietly (which don't wake it): agents copying it in, monitors, tasks.
+    pub wakes: i64,
+    /// Of them, those it followed within `ANSWER_MS` with a message to
+    /// another agent.
+    pub answered: i64,
+}
+
+const WAKES: &str = "
+SELECT agent, created FROM messages WHERE created >= ?1 AND created < ?2 AND source != 'person' AND quiet IS NULL
+  AND agent IN (SELECT value FROM json_each(?3))";
+
+const ANSWERS: &str = "
+SELECT sender_id, created FROM messages WHERE source = 'agent' AND created >= ?1 AND created < ?2 AND agent != sender_id
+  AND sender_id IN (SELECT value FROM json_each(?3))";
+
+/// `Woken` for each agent woken in the window.
+pub(crate) fn woken(db: &Connection, team: &Team, window: Window) -> rusqlite::Result<HashMap<String, Woken>> {
+    let wakes: Vec<(String, i64)> = query(db.prepare_cached(WAKES)?, params![window.t0, window.t1, team.ids()], crate::store::row2)?;
+    let sent: Vec<(String, i64)> =
+        query(db.prepare_cached(ANSWERS)?, params![window.t0, window.t1 + ANSWER_MS, team.ids()], crate::store::row2)?;
+    let mut sent_by: HashMap<String, Vec<i64>> = HashMap::new();
+    for (agent, created) in sent {
+        sent_by.entry(agent).or_default().push(created);
+    }
+    sent_by.values_mut().for_each(|times| times.sort_unstable());
+    let mut woken: HashMap<String, Woken> = HashMap::new();
+    for (agent, created) in wakes {
+        let answered = sent_by.get(&agent).is_some_and(|times| {
+            let next = times.partition_point(|time| *time < created);
+            times.get(next).is_some_and(|time| *time < created + ANSWER_MS)
+        });
+        let entry = woken.entry(agent).or_default();
+        entry.wakes += 1;
+        entry.answered += i64::from(answered);
+    }
+    Ok(woken)
+}
+
+/// When each agent first shows in the records: the first message it was
+/// sent or its first run, whichever came first. Claktory doesn't record
+/// when an agent was made, and a new one is sent its first message as it
+/// starts. An agent with no records is left out.
+pub(crate) fn first_seen(db: &Connection, team: &Team) -> rusqlite::Result<HashMap<String, i64>> {
+    let rows: Vec<(String, Option<i64>, Option<i64>)> = query(
         db.prepare_cached(
-            "SELECT agent, COUNT(*) FROM messages WHERE created >= ?1 AND created < ?2 AND source != 'person' AND agent IN (SELECT value FROM json_each(?3)) GROUP BY agent",
+            "SELECT value, (SELECT created FROM messages WHERE agent = value ORDER BY id LIMIT 1),
+               (SELECT started FROM runs WHERE agent = value ORDER BY id LIMIT 1) FROM json_each(?1)",
         )?,
-        params![window.t0, window.t1, team.ids()], crate::store::row2,
-    )
+        params![team.ids()],
+        crate::store::row3,
+    )?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(agent, message, run)| {
+            let first = match (message, run) {
+                (Some(message), Some(run)) => message.min(run),
+                (first, None) | (None, first) => first?,
+            };
+            Some((agent, first))
+        })
+        .collect())
 }
 
 #[cfg(test)]

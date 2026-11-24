@@ -556,3 +556,58 @@ async fn a_pasted_token_is_checked_with_what_the_flow_kept_when_it_started() {
     view.follow(&mut client, |view| flow(view, &started.flow_id).is_some_and(|flow| flow.state() == ConnectFlowState::Connected)).await;
     assert_eq!(vault(&view).secrets[0].name, "Pasty (matt@example.com)");
 }
+
+/// Submit (#370): a comment instead of Connect or Dismiss is a reply.
+/// Nothing is connected, and the agent gets the person's words.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reply_to_a_suggested_service_connects_nothing_and_tells_the_agent() {
+    let dir = temp_dir();
+    let (addr, factory) = start_with(&dir, Scripted::signed_in()).await;
+    factory.set_vault_passphrase_cost("argon2id m=1024 t=1 p=1");
+    factory.add_connector(Arc::new(Demo::browser()), &[]);
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    apply_request(&mut client, &mut view, connect_option("builder", true)).await;
+    let args = r#"{"service":"Demo","purpose":"Deploy acme.com","access":"DNS edit on acme.com","reason":"The site moves to Demo."}"#;
+    call(&mut client, &mut view, "builder", "secrets_propose_connection", args).await;
+    let proposal = vault(&view).proposals[0].clone();
+    let reply = |comment: &str| {
+        Request::DismissConnectProposal(v1::DismissConnectProposal {
+            proposal_id: proposal.id.clone(),
+            comment: comment.into(),
+            reply: true,
+        })
+    };
+    let empty = apply_request(&mut client, &mut view, reply("")).await;
+    assert_eq!(failure(&empty), "Write a reply, or connect or dismiss it.");
+    ok(&mut client, &mut view, reply("Ask for DNS read only.")).await;
+    let told = |view: &View| {
+        view.entries.iter().find_map(|entry| match &entry.kind {
+            Some(Kind::Event(event)) if event.summary.starts_with("The person replied") => Some(event.clone()),
+            _ => None,
+        })
+    };
+    view.follow(&mut client, |view| told(view).is_some() && idle(view, "builder")).await;
+    let event = told(&view).expect("told");
+    assert_eq!(event.summary, "The person replied to your proposal to connect Demo.");
+    assert_eq!(
+        event.text,
+        "The person replied to your proposal to connect Demo; nothing was connected. They say:\n\nAsk for DNS read only.\n\nIf it \
+         still fits, propose it again with that in mind.\n\nYou proposed it for: Deploy acme.com"
+    );
+    let shown = view
+        .entries
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            Some(Kind::ConnectProposal(shown)) if shown.id == proposal.id => Some(shown.clone()),
+            _ => None,
+        })
+        .expect("the card");
+    assert_eq!(
+        (shown.state(), shown.replied, shown.comment.as_str()),
+        (v1::ConnectProposalState::Dismissed, true, "Ask for DNS read only.")
+    );
+    assert!(vault(&view).secrets.iter().all(|secret| secret.connection.is_none()), "nothing was connected");
+}

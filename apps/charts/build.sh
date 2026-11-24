@@ -41,5 +41,10 @@ cp manifest.toml "$work/manifest.toml"
 )
 
 mkdir -p dist
-COPYFILE_DISABLE=1 tar --format ustar --no-mac-metadata -cf dist/charts.clapp -C "$work" manifest.toml app.wasm signature
+# Nothing of this Mac in the archive (as scripts/sign-clapp.sh): no owner's
+# name, the same mode and time.
+chmod 644 "$work/manifest.toml" "$work/app.wasm" "$work/signature"
+touch -t 202601010000 "$work/manifest.toml" "$work/app.wasm" "$work/signature"
+COPYFILE_DISABLE=1 tar --format ustar --no-mac-metadata --uid 0 --gid 0 --uname "" --gname "" \
+  -cf dist/charts.clapp -C "$work" manifest.toml app.wasm signature
 echo "dist/charts.clapp  sha256 $(shasum -a 256 dist/charts.clapp | cut -d' ' -f1)"

@@ -36,7 +36,7 @@ static MANIFEST: Manifest = Manifest {
     options: &[],
 };
 
-const SHOW: &str = "Show the person a file in the app, in a pane beside your conversation: text (code, Markdown, logs, CSV…), an image, a video (MP4 or QuickTime) or a PDF. Use it instead of opening apps such as Preview or a browser on this machine: the person may be using Claktory from another device. path: absolute, or relative to your working folder. kind: \"text\", \"image\", \"video\" or \"pdf\", inferred when left out. A file already open isn't opened twice. The person sets how many panes can be open beside your conversation (Settings → Display): past that, show replaces the pane opened longest ago (never the one they expanded to fill the window), and its result says which. Returns at once.";
+const SHOW: &str = "Show the person a file in the app, in a pane beside your conversation: text (code, Markdown, logs, CSV…), an image, a video (MP4 or QuickTime) or a PDF. Use it instead of opening apps such as Preview or a browser on this machine: the person may be using Claktory from another device. path: absolute, or relative to your working folder. kind: \"text\", \"image\", \"video\" or \"pdf\", inferred when left out. A file already open isn't opened twice; showing it again counts as opening it now. The person sets how many panes can be open beside your conversation (Settings → Display): past that, show replaces the pane opened longest ago (never the one they expanded to fill the window), and its result says which. Returns at once.";
 
 pub(crate) const SCHEMA: &str = "
 -- How each agent's main area is laid out (the Viewer extension): its
@@ -105,7 +105,7 @@ impl State {
         let read = || -> rusqlite::Result<Vec<Row>> {
             let db = store.db();
             let mut statement = db.prepare("SELECT agent, layout, focus, opened FROM layouts")?;
-            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
+            let rows = statement.query_map([], crate::store::row4)?;
             rows.collect()
         };
         match read() {
@@ -132,9 +132,14 @@ impl State {
         self.layouts.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The agent's layout; None for just its conversation.
+    /// The agent's layout, each pane with when it was opened; None for just
+    /// its conversation.
     pub(crate) fn layout(&self, agent: &str) -> Option<v1::ViewNode> {
-        self.lock().get(agent).map(|kept| kept.root.clone())
+        self.lock().get(agent).map(|kept| {
+            let mut root = kept.root.clone();
+            stamp(&mut root, &kept.opened);
+            root
+        })
     }
 
     /// The id of the agent's pane shown in focus; empty for none.
@@ -497,7 +502,12 @@ fn is_plain(root: &v1::ViewNode) -> bool {
 /// in focus (a leaf of it, or empty), and shows it on every device. Just
 /// the conversation has nothing to focus.
 fn store_layout(factory: &Factory, agent: &str, root: Option<v1::ViewNode>, focus: &str) -> Result<(), RequestError> {
-    let root = root.filter(|root| !is_plain(root));
+    let mut root = root.filter(|root| !is_plain(root));
+    // When each pane was opened is kept beside the layout, not in it: what
+    // a device sends back of it is left out.
+    if let Some(root) = &mut root {
+        stamp(root, &HashMap::new());
+    }
     let focus = if root.is_some() { focus } else { "" };
     // Panes it had keep when they were opened; new ones are opened now.
     let opened = root.as_ref().map(|root| {
@@ -547,11 +557,46 @@ pub(crate) fn set_layout(factory: &Factory, agent: &str, root: Option<v1::ViewNo
     store_layout(factory, agent, root, &focus)
 }
 
+/// PaneOpened: the person opened the agent's pane `pane`, which counts as
+/// opened now (#347).
+pub(crate) fn pane_opened(factory: &Factory, agent: &str, pane: &str) -> Result<(), RequestError> {
+    factory.known_agent(agent)?;
+    let has = factory.viewer.layout(agent).is_some_and(|root| leaves(&root).iter().any(|(id, _)| *id == pane));
+    if !has {
+        return Err(RequestError::Layout(format!("The layout has no pane \"{pane}\".")));
+    }
+    reopened(factory, agent, pane)?;
+    Ok(())
+}
+
 /// An agent is deleted, and its layout with it.
 pub(crate) fn forget(factory: &Factory, agent: &str) -> rusqlite::Result<()> {
     factory.store.db().execute("DELETE FROM layouts WHERE agent = ?1", [agent])?;
     factory.viewer.lock().remove(agent);
     Ok(())
+}
+
+/// An agent showed the file of its pane `id` again: that opens it now, on
+/// every device.
+fn reopened(factory: &Factory, agent: &str, id: &str) -> rusqlite::Result<()> {
+    let opened = {
+        let mut layouts = factory.viewer.lock();
+        let Some(kept) = layouts.get_mut(agent) else { return Ok(()) };
+        kept.opened.insert(id.to_owned(), crate::transcript::now_ms());
+        serde_json::to_string(&kept.opened).unwrap_or_default()
+    };
+    factory.store.db().execute("UPDATE layouts SET opened = ?2 WHERE agent = ?1", rusqlite::params![agent, opened])?;
+    factory.broadcast_workspace(&factory.lock());
+    Ok(())
+}
+
+/// `node`'s panes with when each was opened, as in `opened` (0 when not).
+fn stamp(node: &mut v1::ViewNode, opened: &HashMap<String, i64>) {
+    match &mut node.node {
+        Some(Node::Leaf(leaf)) => leaf.opened_ms = opened.get(&node.id).copied().unwrap_or(0),
+        Some(Node::Split(split)) => split.children.iter_mut().for_each(|child| stamp(child, opened)),
+        None => {}
+    }
 }
 
 /// When each pane of `root` was opened: as in `before`, else `now`.
@@ -598,6 +643,7 @@ fn named(leaf: &v1::ViewLeaf) -> String {
             "changelog" => "What's new",
             "map" => "Map",
             "usage" => "Usage",
+            "monitors" => "Monitors",
             "files" => "Files",
             other => other,
         }
@@ -721,7 +767,12 @@ fn show(factory: &Factory, agent: &str, args: Value) -> Result<ToolResult, Strin
     // What a full layout's new pane took the place of.
     let mut replaced: Option<v1::ViewLeaf> = None;
     let pane = match open {
-        Some(pane) => pane,
+        // Shown again, it counts as opened now (and is the last a full
+        // layout gives up).
+        Some(pane) => {
+            reopened(factory, agent, &pane).map_err(|error| format!("Couldn't save the layout: {error}"))?;
+            pane
+        }
         None => {
             let id = new_id(&root, "pane");
             let title = path.file_name().map_or_else(|| path_text.clone(), |name| name.to_string_lossy().into_owned());
@@ -753,6 +804,10 @@ fn show(factory: &Factory, agent: &str, args: Value) -> Result<ToolResult, Strin
             id
         }
     };
+    // A phone that opens it gets its preview without waiting for it (#379).
+    if kind == "image" || kind == "video" || kind == "pdf" {
+        crate::previews::ahead(factory.home.root(), &path);
+    }
     // The pane glows, so the person sees where it is.
     factory.send(Body::Highlight(v1::Highlight {
         targets: vec![v1::HighlightTarget { kind: "pane".to_owned(), id: format!("{agent}:{pane}") }],
@@ -827,8 +882,8 @@ mod tests {
         let named = |kind: &str, path: &str, title: &str| {
             named(&v1::ViewLeaf { kind: kind.into(), path: path.into(), title: title.into(), ..Default::default() })
         };
-        let pages = ["inbox", "settings", "marketplace", "changelog", "map", "usage", "files"].map(|kind| named(kind, "", ""));
-        assert_eq!(pages, ["Needs you", "Settings", "Marketplace", "What's new", "Map", "Usage", "Files"]);
+        let pages = ["inbox", "settings", "marketplace", "changelog", "map", "usage", "monitors", "files"].map(|kind| named(kind, "", ""));
+        assert_eq!(pages, ["Needs you", "Settings", "Marketplace", "What's new", "Map", "Usage", "Monitors", "Files"]);
         assert_eq!(named("text", "/Users/someone/notes/a.md", ""), "a.md");
         assert_eq!(named("app", "", "Budget"), "Budget");
     }

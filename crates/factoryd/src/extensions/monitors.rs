@@ -11,8 +11,10 @@
 //! paused, with one notice.
 //!
 //! `when` reads what a monitor waits for; `run` is the scheduler that fires
-//! them.
+//! them; `overview` lists every agent's monitors and their history for the
+//! app.
 
+mod overview;
 mod run;
 pub(crate) mod when;
 
@@ -28,7 +30,7 @@ use serde_json::{Value, json};
 pub(crate) use run::{State, monitor};
 use when::When;
 
-use super::{Extension, Manifest, PromptKind, PromptSection};
+use super::{Extension, Manifest, PromptSection};
 use crate::config::{AgentConfig, Config};
 use crate::factory::{Factory, Inner, RequestError};
 use crate::store::Store;
@@ -48,12 +50,14 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Monitors",
     icon: "alarm-clock",
-    description: "Lets it wake itself later: at a set time, on a schedule, or when something changes.",
+    description: "Lets it do things later on its own, such as scheduled jobs and reminders: at a set time, on a schedule, or when something changes.",
     default_enabled: true,
     options: &[],
 };
 
 const PROMPT: &str = "## Monitors
+
+Use monitors for scheduled jobs and reminders, once or on repeat: say, check production logs every 6 hours and alert only when something's wrong. For that, prefer a check whose command finds the problem, so you wake only when there is one. A check fires once unless told otherwise, so for a job that runs on, use \"fire_on\": \"changed\" with a command that prints the problems (the latest matching lines, such as grep ERROR app.log | tail -5), or \"repeat\": true with one that looks only at what's new since $FACTORY_MONITOR_LAST_FIRED, so each new problem fires it again. When it fires with a reminder for the person, or a problem they should know about, tell them with notify_person if you have it, not only in your conversation: they may be away. Use every or cron when the work needs you each time.
 
 A monitor wakes you later with a prompt you write: at a time (at), on an interval since its last fire (every), on a cron schedule (cron), when a command you run periodically succeeds, fails, matches or changes (check), when files change (files), or when a long-running command prints lines (watch). Monitors last until done or cancelled, across restarts and compactions. Each fire arrives as an event from the monitor with your prompt and what happened, so write the prompt so it makes sense on its own. Every fire makes you read your whole context again, so use the slowest schedule that works and prefer check, files or watch to polling on a short interval. Background tasks already wake you when they end; don't add monitors for them. Cancel monitors you no longer need.
 ";
@@ -420,7 +424,7 @@ impl Extension for Monitors {
     }
 
     fn prompt(&self, _factory: &Factory, _inner: &Inner, _agent: &AgentConfig) -> Vec<PromptSection> {
-        vec![PromptSection { kind: PromptKind::Static, text: PROMPT.to_owned() }]
+        vec![PromptSection::static_text(PROMPT)]
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
@@ -519,8 +523,9 @@ fn to_proto(monitor: &Monitor, now: i64) -> v1::Monitor {
 }
 
 /// Shows the open Monitors panel as it is now, if one is open; sent only when
-/// it changed.
+/// it changed. Tells clients when any agent's monitors changed, too.
 pub(crate) fn refresh_view(factory: &Factory) {
+    overview::signal(factory);
     let mut inner = factory.lock();
     if inner.view.as_ref().is_none_or(|view| view.extension_id != ID) {
         return;

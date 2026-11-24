@@ -14,6 +14,7 @@ macro_rules! spawn_stream {
 pub mod anthropic;
 pub mod catalog;
 pub mod keys;
+pub mod listing;
 pub mod models;
 pub mod openai;
 pub mod openai_codex;
@@ -110,6 +111,9 @@ pub struct Provider {
     /// Asks the provider whether it accepts a new API key, before it's kept;
     /// None when it can't be asked.
     pub check_key: Option<keys::CheckKeyFn>,
+    /// Reads what an API key has to spend (#343 U8); None when the provider
+    /// can't say.
+    pub credit: Option<keys::CreditFn>,
 }
 
 fn api_key(auth: impl ApiKeyAuth + 'static) -> Option<Arc<dyn ApiKeyAuth>> {
@@ -142,6 +146,7 @@ impl Provider {
             identity: None,
             reset: None,
             check_key: None,
+            credit: None,
         }
     }
 }

@@ -42,6 +42,15 @@ backend() {
   # Speech recognition for voice messages, which factoryd also finds beside itself.
   cp "$ROOT/target/debug/claktory-speech" "$DEV_HOME/bin/claktory-speech.new"
   mv -f "$DEV_HOME/bin/claktory-speech.new" "$DEV_HOME/bin/claktory-speech"
+  # Phone-sized video previews (#379), on a Mac: factoryd finds it beside itself.
+  local preview_src="$ROOT/app/macos/VideoPreview/main.swift" preview="$ROOT/target/debug/claktory-video-preview"
+  if [[ "$(uname)" == Darwin && -f "$preview_src" ]]; then
+    if [[ ! -f "$preview" || "$preview_src" -nt "$preview" ]]; then
+      xcrun swiftc -target "$(uname -m)-apple-macos12" -O -o "$preview" "$preview_src"
+    fi
+    cp "$preview" "$DEV_HOME/bin/claktory-video-preview.new"
+    mv -f "$DEV_HOME/bin/claktory-video-preview.new" "$DEV_HOME/bin/claktory-video-preview"
+  fi
   rm -f "$DEV_HOME/bin/trial.json"
   # Own session: the backend outlives this script and whatever ran it.
   perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- "$ROOT/target/debug/factoryd" --dev supervise \

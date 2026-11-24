@@ -18,6 +18,8 @@ use base64::engine::general_purpose::STANDARD;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::encoding::hex;
+
 /// The WIT world apps are built for, which every apps host runs.
 pub(crate) const WORLD: &str = "claktory:app@1";
 /// The world of apps with views (WIT 1.1).
@@ -462,10 +464,6 @@ fn untar(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String> {
         at = start + size.div_ceil(512) * 512;
     }
     Ok(files)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]

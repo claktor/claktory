@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -13,11 +15,15 @@ import 'devices.dart';
 import 'diagnostics.dart' show DiagnosticsSettings;
 import 'find.dart' show RenderedFindScope;
 import 'identity.dart';
+import 'keep_awake_card.dart'
+    show keepAwakeHolding, keepAwakeLabel, keepAwakeNote, keepAwakeOnBattery;
+import 'lid_closed.dart';
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/header.dart';
 import 'mobile/input.dart' show InputKind;
 import 'mobile/platform_policy.dart' show PhonePlatformPolicy;
 import 'mobile/metrics.dart';
+import 'model_select.dart' show ModelSelect;
 import 'mobile/navigation.dart';
 import 'move.dart' show BackendMove, MoveSettingRow;
 import 'notification_settings.dart'
@@ -174,23 +180,6 @@ class SettingsSection {
   String get id => title.toLowerCase();
 }
 
-/// The models a step a model declines can be tried again on: [emptyLabel]
-/// for none chosen ('', no fallback or the default's), then the models
-/// there are, and [current] as "No model available" if it isn't one of
-/// them.
-List<SelectOption<String>> fallbackModelOptions(
-  Workspace workspace,
-  String current, {
-  required String emptyLabel,
-}) => [
-  SelectOption('', emptyLabel),
-  for (final model in workspace.models)
-    SelectOption(model.id, modelLabel(model)),
-  if (current.isNotEmpty &&
-      !workspace.models.any((model) => model.id == current))
-    SelectOption(current, 'No model available'),
-];
-
 /// The sections Settings shows now, in order.
 List<SettingsSection> settingsSectionsOf(
   BuildContext context,
@@ -221,6 +210,8 @@ List<SettingsSection> settingsSectionsOf(
         ClaktoryIdentity(workspace: workspace),
         // The version, and checking for a newer one now.
         UpdateCheckRow(workspace: workspace),
+        // Keeping the Mac awake while agents work, on a Mac.
+        if (workspace.keepAwake.available) _KeepAwake(workspace: workspace),
         // Moving this Claktory to another computer, from any device.
         MoveSettingRow(source: BackendMove(AppScope.of(context))),
       ],
@@ -761,14 +752,10 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
                 )
               : SizedBox(
                   width: controlWidth(context, 280),
-                  child: Select(
+                  child: ModelSelect(
+                    workspace: workspace,
                     value: model?.id ?? '',
-                    options: [
-                      if (model == null)
-                        const SelectOption('', 'No model available'),
-                      for (final candidate in workspace.models)
-                        SelectOption(candidate.id, modelLabel(candidate)),
-                    ],
+                    title: 'Default model',
                     onChanged: (id) {
                       if (id.isEmpty) return;
                       final update = UpdateSettings(defaultModel: id);
@@ -819,13 +806,11 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
               children: [
                 SizedBox(
                   width: controlWidth(context, 280),
-                  child: Select(
+                  child: ModelSelect(
+                    workspace: workspace,
                     value: settings.defaultFallbackModel,
-                    options: fallbackModelOptions(
-                      workspace,
-                      settings.defaultFallbackModel,
-                      emptyLabel: 'None',
-                    ),
+                    title: 'Default fallback model',
+                    extra: const [SelectOption('', 'None')],
                     onChanged: (id) =>
                         _update(UpdateSettings(defaultFallbackModel: id)),
                   ),
@@ -1617,6 +1602,242 @@ class _HighlightsState extends State<_Highlights> with SettingRequests {
   }
 }
 
+/// Keeping the Mac Claktory runs on awake while agents work
+/// (Workspace.keep_awake): off unless the person says yes. On a laptop the
+/// note says it uses battery and the lid still sleeps it; while it's held,
+/// a line says so.
+class _KeepAwake extends StatefulWidget {
+  const _KeepAwake({required this.workspace});
+
+  final Workspace workspace;
+
+  @override
+  State<_KeepAwake> createState() => _KeepAwakeState();
+}
+
+class _KeepAwakeState extends State<_KeepAwake> with SettingRequests {
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final keep = widget.workspace.keepAwake;
+    final backend = AppScope.of(context);
+    // Whether it's plugged in is known only while agents work (O1).
+    final working = widget.workspace.agents.any(
+      (agent) => agent.status == AgentStatus.AGENT_STATUS_WORKING,
+    );
+    final status = !keep.on
+        ? null
+        : keep.holding
+        ? keepAwakeHolding(backend)
+        : keep.laptop && !keep.pluggedIn && working
+        ? keepAwakeOnBattery(backend)
+        : null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SettingRow(
+          label: 'Sleep',
+          top: true,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _Switch(
+                label: keepAwakeLabel(AppScope.of(context)),
+                note: keep.laptop ? keepAwakeNote : '',
+                value: keep.on,
+                onChanged: (on) =>
+                    run(() => AppScope.of(context).setKeepAwake(on)),
+              ),
+              if (status != null) ...[
+                const SizedBox(height: Space.xs),
+                Padding(
+                  padding: const EdgeInsets.only(left: 28 + Space.m),
+                  child: Text(
+                    status,
+                    style: TypeScale.of(context).caption.copyWith(
+                      color: keep.holding ? palette.signal : palette.textMuted,
+                    ),
+                  ),
+                ),
+              ],
+              // With the lid closed too: its own switch, its own question
+              // (#371), never bundled with this one.
+              if (LidClosedSetting.offered(keep)) ...[
+                const SizedBox(height: Space.l),
+                LidClosedSetting(keep: keep),
+              ],
+            ],
+          ),
+        ),
+        failureLine(palette),
+      ],
+    );
+  }
+}
+
+/// Keeping a laptop's agents working with its lid closed (#371,
+/// lid_closed.dart): on a laptop that can (KeepAwake.lid_closed_available),
+/// and on the Mac itself only when this app carries the helper. Turning it
+/// on asks first and works only on the Mac; off works anywhere. Its line
+/// says where the helper stands, with what to do about it on the Mac.
+class LidClosedSetting extends StatefulWidget {
+  const LidClosedSetting({super.key, required this.keep});
+
+  final KeepAwake keep;
+
+  /// Shown at all: a laptop that can.
+  static bool offered(KeepAwake keep) => keep.laptop && keep.lidClosedAvailable;
+
+  @override
+  State<LidClosedSetting> createState() => _LidClosedSettingState();
+}
+
+class _LidClosedSettingState extends State<LidClosedSetting> {
+  late final Backend _backend = AppScope.of(context);
+
+  /// What macOS says of this app's helper: asked only on the Mac it's
+  /// installed from; null until then.
+  LidHelperStatus? _status;
+  var _busy = false;
+  String? _failure;
+
+  bool get _here => lidClosedHere(_backend);
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _here) unawaited(_read());
+    });
+  }
+
+  @override
+  void didUpdateWidget(LidClosedSetting old) {
+    super.didUpdateWidget(old);
+    // Where it stands changed (approved, removed): macOS asked again.
+    if (old.keep.lidClosed != widget.keep.lidClosed && _here) {
+      unawaited(_read());
+    }
+  }
+
+  Future<void> _read() async {
+    final status = await lidHelper.status();
+    if (mounted) setState(() => _status = status);
+  }
+
+  Future<void> _run(Future<void> Function() change) async {
+    setState(() {
+      _busy = true;
+      _failure = null;
+    });
+    try {
+      await change();
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _failure = failure.message);
+    } on LidHelperFailure catch (failure) {
+      if (mounted) setState(() => _failure = failure.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+      if (mounted && _here) unawaited(_read());
+    }
+  }
+
+  void _turn(bool on) => on
+      ? unawaited(askLidClosed(context, _backend))
+      : unawaited(_run(() => removeLidHelper(_backend)));
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final keep = widget.keep;
+    final on = keep.lidClosed != LidClosedState.LID_CLOSED_OFF;
+    final here = _here;
+    // On the Mac, a build with no helper (Claktory Dev, ad hoc) leaves it
+    // out, unless it's on and has to be turned off.
+    if (here && !on && !(_status?.present ?? false)) {
+      return const SizedBox.shrink();
+    }
+    final status = lidClosedStatus(_backend, keep, here: here);
+    final openLoginItems = (
+      'Open Login Items',
+      () => unawaited(lidHelper.openLoginItems()),
+    );
+    final install = (
+      'Install again',
+      () => unawaited(_run(() => installLidHelper(_backend))),
+    );
+    // A helper macOS refused once stays off in Login Items until the person
+    // turns it on there again (Pericolo's spike): missing, that's offered
+    // before installing it again.
+    final actions = !here || _busy
+        ? const <(String, VoidCallback)>[]
+        : switch (keep.lidClosed) {
+            LidClosedState.LID_CLOSED_NEEDS_APPROVAL => [openLoginItems],
+            LidClosedState.LID_CLOSED_MISSING => [openLoginItems, install],
+            LidClosedState.LID_CLOSED_OUTDATED => [install],
+            LidClosedState.LID_CLOSED_FAILED => [
+              (
+                'Try again',
+                () => unawaited(_run(() => installLidHelper(_backend))),
+              ),
+            ],
+            _ => const <(String, VoidCallback)>[],
+          };
+    const indent = EdgeInsets.only(left: 28 + Space.m);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _Switch(
+          label: lidClosedLabel,
+          note: here || on ? lidClosedNote : lidClosedFromMac,
+          value: on,
+          // Turned on only on the Mac; off from anywhere.
+          onChanged: _busy || (!here && !on) ? null : _turn,
+        ),
+        if (status != null) ...[
+          const SizedBox(height: Space.xs),
+          Padding(
+            padding: indent,
+            child: status.failed
+                ? ErrorLine(status.text, about: 'In Settings → General:')
+                : Text(
+                    status.text,
+                    style: TypeScale.of(context).caption.copyWith(
+                      color: status.holding
+                          ? palette.signal
+                          : palette.textMuted,
+                    ),
+                  ),
+          ),
+        ],
+        if (actions.isNotEmpty) ...[
+          const SizedBox(height: Space.s),
+          Padding(
+            padding: indent,
+            child: Wrap(
+              spacing: Space.s,
+              runSpacing: Space.s,
+              children: [
+                for (final (label, onPressed) in actions)
+                  Button(label: label, onPressed: onPressed),
+              ],
+            ),
+          ),
+        ],
+        if (_failure case final failure?) ...[
+          const SizedBox(height: Space.xs),
+          Padding(
+            padding: indent,
+            child: ErrorLine(failure, about: 'In Settings → General:'),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
 /// The most panes agents can open beside a conversation, counting every
 /// pane but the conversation, whoever opened it; past it, an agent's show
 /// replaces the pane open longest, never an expanded one. The person's own
@@ -1727,12 +1948,14 @@ class _Switch extends StatelessWidget {
                     color: enabled ? palette.text : palette.textFaint,
                   ),
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  note,
-                  style: TypeScale.of(context).caption
-                      .copyWith(color: palette.textMuted),
-                ),
+                if (note.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    note,
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textMuted),
+                  ),
+                ],
               ],
             ),
           ),

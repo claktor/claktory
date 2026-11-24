@@ -1,5 +1,5 @@
 import 'package:factory_app/devices.dart' show QrCode;
-import 'package:factory_app/controls.dart' show Field, Toggle;
+import 'package:factory_app/controls.dart' show Button, Field, Toggle;
 import 'package:factory_app/decision.dart';
 import 'package:factory_app/inbox.dart' show InboxView;
 import 'package:factory_app/map.dart';
@@ -14,7 +14,9 @@ import 'package:factory_app/sidebar.dart' show Sidebar;
 import 'package:factory_app/taint_label.dart';
 import 'package:factory_app/update.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:factory_app/usage.dart' show formatUntil;
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -126,6 +128,125 @@ void main() {
     await settle(tester);
     return harness;
   }
+
+  testWidgets("a liaison held up by its usage: the pipe says so in place of "
+      "'Online', in the sidebar and the pipe's header (#343 U18)", (
+    tester,
+  ) async {
+    final until = DateTime.now().add(const Duration(hours: 3));
+    final snapshot = _workspace([
+      _pipe(members: ['june'], lead: 'june'),
+    ], selected: 'pipe1');
+    snapshot.agents.first
+      ..usageWait = 'Waiting for your Claude usage to reset at 18:00'
+      ..usageWaitUntilMs = Int64(until.millisecondsSinceEpoch);
+    await show(tester, snapshot);
+    final line =
+        'June is waiting until ${formatUntil(until.millisecondsSinceEpoch, DateTime.now())}';
+    expect(find.text(line, findRichText: true), findsWidgets);
+    expect(find.text('Online', findRichText: true), findsNothing);
+    // Waiting for the person (out of credit): no time.
+    final june = snapshot.agents.first;
+    expect(
+      pipeStatus(
+        _pipe(members: ['june'], lead: 'june'),
+        lead: june.deepCopy()..usageWaitUntilMs = Int64.ZERO,
+      ),
+      'June is waiting',
+    );
+    // Offline or not waiting: as before.
+    expect(
+      pipeStatus(_pipe(online: false, lead: 'june'), lead: june),
+      'Offline',
+    );
+    expect(
+      pipeStatus(_pipe(lead: 'june'), lead: june.deepCopy()..usageWait = ''),
+      'Online',
+    );
+  });
+
+  testWidgets("the other side's liaison waits: the pipe says so by this "
+      "side's own name for it, never their words (#343 U18)", (tester) async {
+    final until = DateTime.now().add(const Duration(hours: 2));
+    final snapshot = _workspace([
+      _pipe(members: ['june'], lead: 'june')
+        ..peerWaiting = true
+        ..peerWaitingUntilMs = Int64(until.millisecondsSinceEpoch),
+    ], selected: 'pipe1');
+    await show(tester, snapshot);
+    final line =
+        'Acme launch is waiting until '
+        '${formatUntil(until.millisecondsSinceEpoch, DateTime.now())}';
+    expect(find.text(line, findRichText: true), findsWidgets);
+    expect(find.text('Online', findRichText: true), findsNothing);
+    expect(find.textContaining('Ana is waiting'), findsNothing);
+    // No known end, or one that passed: no time.
+    final june = snapshot.agents.first;
+    final noEnd = _pipe(lead: 'june')..peerWaiting = true;
+    expect(pipeStatus(noEnd, lead: june), 'Acme launch is waiting');
+    expect(
+      pipeStatus(
+        noEnd.deepCopy()..peerWaitingUntilMs = Int64(1000),
+        lead: june,
+      ),
+      'Acme launch is waiting',
+    );
+    // Our own lead's wait comes first; offline, as before.
+    expect(
+      pipeStatus(
+        noEnd,
+        lead: june.deepCopy()
+          ..usageWait = 'Waiting'
+          ..usageWaitUntilMs = Int64.ZERO,
+      ),
+      'June is waiting',
+    );
+    expect(pipeStatus(noEnd.deepCopy()..online = false, lead: june), 'Offline');
+  });
+
+  testWidgets('its lead past its spending limit: the row says so, and a '
+      'note under the header raises the limit (#357 L1)', (tester) async {
+    final snapshot = _workspace([
+      _pipe(members: ['june'], lead: 'june'),
+    ], selected: 'pipe1');
+    snapshot.agents.first.spend = ContainedSpend(
+      spentUsd: 10.2,
+      capUsd: 10,
+      capTokens: Int64(500000),
+      over: true,
+    );
+    final harness = await show(tester, snapshot);
+    expect(find.text(pipeOverLimitLine, findRichText: true), findsWidgets);
+    expect(find.text('Online', findRichText: true), findsNothing);
+    expect(find.text('June reached today’s \$10 limit'), findsOneWidget);
+    final raise = find.widgetWithText(Button, 'Raise limit');
+    expect(tester.widget<Button>(raise).onPressed, isNull);
+    final field = find.descendant(
+      of: find.byType(PipeSpendNotice),
+      matching: find.byType(EditableText),
+    );
+    // Not a raise: nothing to send.
+    await tester.enterText(field, '8');
+    await pumpFrames(tester);
+    expect(tester.widget<Button>(raise).onPressed, isNull);
+    await tester.enterText(field, '15');
+    await pumpFrames(tester);
+    await tester.tap(raise);
+    await pumpFrames(tester);
+    final cap = harness.last.setSpendCap;
+    expect(
+      (cap.agentId, cap.capUsd, cap.capTokens),
+      ('june', 15.0, Int64(500000)),
+    );
+    // Under its limit again: as before.
+    final under = harness.backend.workspace.workspace.deepCopy();
+    under.agents.first.spend.over = false;
+    harness.backend.workspace.apply(under);
+    await pumpFrames(tester);
+    expect(find.byType(PipeSpendNotice), findsOneWidget);
+    expect(find.textContaining('reached today’s'), findsNothing);
+    expect(find.text('Online', findRichText: true), findsWidgets);
+  });
 
   testWidgets('a pipe shows under its project, with a portal, where it '
       'stands and what waits for the person; a click opens it', (tester) async {
@@ -380,6 +501,118 @@ void main() {
     await settle(tester);
     expect(find.textContaining('Waiting for you to send it'), findsOneWidget);
     expect(find.text('Add a comment'), findsNothing);
+  });
+
+  testWidgets("an agent's held message with a comment typed: one Submit, "
+      'which sends it back unsent to its writer (#370)', (tester) async {
+    final harness = await show(
+      tester,
+      _workspace([
+        _pipe(members: ['june'], lead: 'june'),
+      ], selected: 'pipe1'),
+    );
+    harness.backend.pipeChat.load(
+      PipeTranscript(
+        pipeId: 'pipe1',
+        messages: [
+          _message(
+            1,
+            'The launch is on the 3rd.',
+            PipeAuthorKind.PIPE_AUTHOR_KIND_MY_AGENT,
+            agentId: 'june',
+            state: PipeMessageState.PIPE_MESSAGE_STATE_HELD,
+          ),
+        ],
+      ),
+    );
+    await settle(tester);
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
+    final field = find.descendant(
+      of: find.byType(DecisionComment),
+      matching: find.byType(EditableText),
+    );
+    await tester.enterText(field, 'Fix the date first.');
+    await tester.pump();
+    expect(find.text('Discard'), findsNothing);
+    expect(find.text('Send'), findsOneWidget, reason: "the composer's only");
+    expect(
+      find.text('Not sent. June gets your comment and writes it again.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Submit'));
+    await settle(tester);
+    final decided = harness.last.decidePipeMessage;
+    expect(decided.seq.toInt(), 1);
+    expect(decided.reply, isTrue);
+    expect(decided.allow, isFalse);
+    expect(decided.comment, 'Fix the date first.');
+
+    // Back as Discarded, replied, with the comment as its note.
+    harness.backend.pipeChat.update(
+      PipeMessageUpdate(
+        pipeId: 'pipe1',
+        message:
+            _message(
+                1,
+                'The launch is on the 3rd.',
+                PipeAuthorKind.PIPE_AUTHOR_KIND_MY_AGENT,
+                agentId: 'june',
+                state: PipeMessageState.PIPE_MESSAGE_STATE_DISCARDED,
+              )
+              ..replied = true
+              ..note = 'Fix the date first.',
+      ),
+    );
+    await settle(tester);
+    expect(
+      find.textContaining('Sent back to June · “Fix the date first.”'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Discarded'), findsNothing);
+  });
+
+  testWidgets("one held on its way in keeps Let in with a comment, and Return "
+      "doesn't decide it", (tester) async {
+    final harness = await show(
+      tester,
+      _workspace([
+        _pipe(members: ['june'], lead: 'june'),
+      ], selected: 'pipe1'),
+    );
+    harness.backend.pipeChat.load(
+      PipeTranscript(
+        pipeId: 'pipe1',
+        messages: [
+          _message(
+            1,
+            'Can you send the deck?',
+            PipeAuthorKind.PIPE_AUTHOR_KIND_THEIR_AGENT,
+            name: 'Bo',
+            state: PipeMessageState.PIPE_MESSAGE_STATE_HELD_INCOMING,
+          ),
+        ],
+      ),
+    );
+    await settle(tester);
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(DecisionComment),
+        matching: find.byType(EditableText),
+      ),
+      'Only the public deck.',
+    );
+    await tester.pump();
+    expect(find.text('Submit'), findsNothing);
+    expect(find.text('Let in'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await settle(tester);
+    expect(
+      harness.backend.sent.where((m) => m.hasDecidePipeMessage()),
+      isEmpty,
+    );
   });
 
   testWidgets("on a phone, the pipe's header leads with Menu", (tester) async {
@@ -709,7 +942,8 @@ void main() {
     expect(approve.reviewOutgoing, isFalse);
   });
 
-  testWidgets('Decline takes a comment for this side only', (tester) async {
+  testWidgets('with no agent to reply to, Decline takes a comment for this '
+      'side only', (tester) async {
     final harness = await show(
       tester,
       _workspace([
@@ -737,6 +971,46 @@ void main() {
     final approve = harness.last.approvePipe;
     expect(approve.approve, isFalse);
     expect(approve.comment, 'Not this client.');
+  });
+
+  testWidgets('with an agent to hear it, a comment on the approval is a '
+      'reply: Submit, and the pipe still waits (#370)', (tester) async {
+    final harness = await show(
+      tester,
+      _workspace([
+        _pipe(state: PipeState.PIPE_STATE_APPROVAL, digits: '4821')
+          ..replyAgentId = 'june',
+      ], selected: 'pipe1'),
+    );
+    final add = find.text('Add a comment');
+    await tester.ensureVisible(add);
+    await tester.tap(add);
+    await settle(tester);
+    final field = find.descendant(
+      of: find.byType(DecisionComment),
+      matching: find.byType(EditableText),
+    );
+    await tester.enterText(field, 'Which client is this for?');
+    await tester.pump();
+    expect(find.text('Approve'), findsNothing);
+    expect(find.text('Decline'), findsNothing);
+    expect(
+      find.text('The pipe still waits for you. June gets your comment.'),
+      findsOneWidget,
+    );
+    await tester.ensureVisible(find.text('Submit'));
+    await tester.tap(find.text('Submit'));
+    await settle(tester);
+    final approve = harness.last.approvePipe;
+    expect(approve.pipeId, 'pipe1');
+    expect(approve.reply, isTrue);
+    expect(approve.approve, isFalse);
+    expect(approve.comment, 'Which client is this for?');
+    expect(approve.memberIds, isEmpty);
+    // Still to decide; said where it went.
+    expect(tester.widget<EditableText>(field).controller.text, isEmpty);
+    expect(find.text('Sent to June.'), findsOneWidget);
+    expect(find.text('Approve'), findsOneWidget);
   });
 
   testWidgets('Review incoming, turned on at approval, goes with it', (

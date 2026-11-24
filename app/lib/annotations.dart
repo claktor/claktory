@@ -815,11 +815,14 @@ class CommentsController extends ChangeNotifier {
 
   /// Accepts [thread]'s suggested change, which Claktory makes in the
   /// file, or rejects it. The person's own, never sent, is taken back
-  /// instead: deleting its comments deletes it.
-  Future<void> decide(
+  /// instead: deleting its comments deletes it. [reply] (#370) does
+  /// neither: [comment] goes into the thread, which stays open. Whether
+  /// it went.
+  Future<bool> decide(
     Thread thread, {
     required bool accept,
     String comment = '',
+    bool reply = false,
   }) {
     final own = thread.suggestion.authorAgentId.isEmpty;
     if (!accept && own && thread.comments.every((c) => c.draft)) {
@@ -830,8 +833,12 @@ class CommentsController extends ChangeNotifier {
       });
     }
     return _run(
-      () =>
-          backend.decideSuggestion(thread.id, accept: accept, comment: comment),
+      () => backend.decideSuggestion(
+        thread.id,
+        accept: accept,
+        comment: comment,
+        reply: reply,
+      ),
     );
   }
 
@@ -1992,8 +1999,9 @@ class _Suggestion extends StatelessWidget {
   }
 }
 
-/// A suggestion not decided yet: the agent's to accept or reject, with a
-/// comment for it either way; the person's own to apply or take back.
+/// A suggestion not decided yet: the agent's to accept or reject, or, once
+/// a comment is typed, to answer with it (Submit, or Return: #370), the
+/// suggestion left open; the person's own to apply or take back.
 /// Accepting needs the text as it was.
 class _Decide extends StatefulWidget {
   const _Decide({required this.controller, required this.thread});
@@ -2019,6 +2027,18 @@ class _DecideState extends State<_Decide> {
     accept: accept,
     comment: _comment.text.trim(),
   );
+
+  /// The comment into the thread, as a reply: nothing accepted or
+  /// rejected. Sent, the field empties for the next.
+  Future<void> _reply() async {
+    final sent = await widget.controller.decide(
+      widget.thread,
+      accept: false,
+      comment: _comment.text.trim(),
+      reply: true,
+    );
+    if (sent && mounted) _comment.clear();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2046,19 +2066,41 @@ class _DecideState extends State<_Decide> {
         ),
       ],
     );
+    final name = agent?.name ?? 'The agent';
     return Unselectable(
       child: own
           ? buttons
           : Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Align(
-                  alignment: AlignmentDirectional.centerStart,
-                  child: buttons,
+                // A comment typed: one Submit, saying what it does.
+                CommentTyped(
+                  controller: _comment,
+                  builder: (context, typed) => typed
+                      ? Wrap(
+                          spacing: Space.s,
+                          runSpacing: Space.xs,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            SubmitButton(onPressed: () => unawaited(_reply())),
+                            Text(
+                              'The change stays open, and $name gets your '
+                              'comment.',
+                              style: TextStyles.caption.copyWith(
+                                color: Palette.of(context).textFaint,
+                              ),
+                            ),
+                          ],
+                        )
+                      : Align(
+                          alignment: AlignmentDirectional.centerStart,
+                          child: buttons,
+                        ),
                 ),
                 DecisionComment(
                   controller: _comment,
-                  agent: agent?.name ?? 'The agent',
+                  agent: name,
+                  onSubmit: () => unawaited(_reply()),
                 ),
               ],
             ),

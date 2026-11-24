@@ -6,7 +6,7 @@
 //! What's waiting for an agent and which agents are working are read back
 //! from here when Factory starts, so work carries on across restarts.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -88,7 +88,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 70] = [
+const MIGRATIONS: [&str; 90] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -222,6 +222,31 @@ ALTER TABLE messages ADD COLUMN checklist_item TEXT;
     crate::apps::changes::SCHEMA,
     crate::usage_switch::SCHEMA,
     crate::extensions::models::SCHEMA,
+    crate::keep_awake::SCHEMA,
+    crate::pipes::groups::SCHEMA,
+    crate::fork::history::SCHEMA,
+    crate::usage_switch::HOLD,
+    crate::usage_switch::AUTO,
+    crate::extensions::ask::REPLIED,
+    crate::proposals::REPLIED,
+    crate::lid_closed::SCHEMA,
+    crate::user_apps::REPLIED,
+    crate::apps::access::REPLIED,
+    crate::pipes::REPLIED,
+    crate::catalog::SCHEMA,
+    crate::pipes::SELECTED,
+    crate::pipes::groups::LAST,
+    crate::extensions::ask::CLEARS,
+    crate::extensions::ask::CLEARS_INCARNATION,
+    crate::repeats::INDEX,
+    "
+-- The background tasks still running, found without reading every task
+-- (#402): what the vault shows as each grant's running tasks, read every
+-- time the Workspace is built.
+CREATE INDEX tasks_running ON tasks (agent, task) WHERE ended IS NULL;
+",
+    crate::upgrades::SCHEMA,
+    crate::upgrades::CATCH_UP,
 ];
 
 /// A background task as recorded.
@@ -406,14 +431,17 @@ impl Store {
         let mut waiting: BTreeMap<String, Vec<Queued>> = BTreeMap::new();
         while let Some(row) = rows.next()? {
             let source: String = row.get(2)?;
-            // An agent's message keeps where it stands (`provenance`).
+            // An agent's message keeps where it stands (`provenance`), and
+            // a quiet one from Claktory stays quiet (a conversation taken
+            // back's note, `crate::fork`).
             let reply_to: Option<String> = row.get(12)?;
+            let quiet = row.get::<_, Option<i64>>(14)?.is_some();
             let provenance = match reply_to {
-                Some(reply_to) if source == "agent" => Some(factory_agent::Provenance {
+                Some(reply_to) if source == "agent" || quiet => Some(factory_agent::Provenance {
                     message: u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default(),
                     reply_to: serde_json::from_str(&reply_to).unwrap_or_default(),
                     intent: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
-                    quiet: row.get::<_, Option<i64>>(14)?.is_some(),
+                    quiet,
                     quiet_note: String::new(),
                 }),
                 _ => None,
@@ -518,6 +546,12 @@ impl Store {
             .query_row("SELECT 1 FROM tasks WHERE agent = ?1 AND task = ?2 AND ended IS NULL", [agent, task], |_| Ok(()))
             .optional()
             .is_ok_and(|found| found.is_some())
+    }
+
+    /// Every background task still running, as (agent, task): what
+    /// `task_running` says of each, in one read.
+    pub(crate) fn running_set(&self) -> Result<HashSet<(String, String)>, rusqlite::Error> {
+        Ok(query(&self.db(), "SELECT agent, task FROM tasks WHERE ended IS NULL", [], row2)?.into_iter().collect())
     }
 
     pub(crate) fn running_tasks(&self) -> Result<Vec<(String, Task)>, rusqlite::Error> {

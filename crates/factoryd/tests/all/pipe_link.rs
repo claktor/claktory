@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use factory_protocol::v1::{self, client_message::Body as Request};
 use factoryd::Factory;
-use factoryd::pipe_link::{self, Incoming, LinkStatus, OutFile, Outgoing, Peer, PipeError, Side, Via};
+use factoryd::pipe_link::{self, Incoming, Liaison, LinkStatus, OutFile, Outgoing, Peer, PipeError, Side, Via};
 
 use crate::common::{Client, View, apply_request, temp_dir};
 
@@ -25,6 +25,8 @@ enum Event {
     Refused { pipe: String, msg_id: String, reason: String },
     PeerClosed { pipe: String },
     Identity { pipe: String, endpoint: String, identity: String },
+    PeerLiaison { pipe: String, liaison: Liaison },
+    LiaisonTold { pipe: String, liaison: Liaison },
 }
 
 fn events() -> &'static Mutex<Vec<(String, Event)>> {
@@ -81,6 +83,12 @@ impl pipe_link::Store for TestStore {
     /// Who this Factory is, by its home: a stand-in for its statement.
     fn own_identity(&self, factory: &Arc<Factory>) -> Option<String> {
         Some(format!("vouched:{}", factory.home().root().display()))
+    }
+    fn peer_liaison(&self, factory: &Arc<Factory>, pipe: &str, liaison: Liaison) {
+        record(factory, Event::PeerLiaison { pipe: pipe.to_owned(), liaison });
+    }
+    fn liaison_told(&self, factory: &Arc<Factory>, pipe: &str, liaison: Liaison) {
+        record(factory, Event::LiaisonTold { pipe: pipe.to_owned(), liaison });
     }
     fn holds_agents(&self, factory: &Arc<Factory>, pipe: &str) -> bool {
         holding().lock().expect("holding").contains(&of(factory, pipe))
@@ -284,6 +292,48 @@ async fn a_message_waits_out_the_peer_being_away_and_a_wrong_secret_gets_nothing
     wait_for(&a, |event| matches!(event, Event::Delivered { pipe, msg_id } if pipe == "pipe" && msg_id == "m1").then_some(())).await;
 }
 
+/// Whether the pipe's link shows its peer online (`want`), polled for up to
+/// a minute.
+async fn shows_online(factory: &Factory, want: bool) -> bool {
+    for _ in 0..600 {
+        if pipe_link::status(factory, "pipe").online == want {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// Polpo's pipe-redial.md: a worker waiting a long time before it tries an
+/// away peer again still shows the peer online the moment it's back, since
+/// the peer's ping wakes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_back_is_online_at_once_even_during_a_long_backoff() {
+    let (dir_a, dir_b) = (temp_dir(), temp_dir());
+    let a = claktory(&dir_a).await;
+    // Matt's worker waits 10 minutes after a failed try, from the start.
+    pipe_link::set_first_backoff(&a, Duration::from_secs(600));
+    let b = claktory(&dir_b).await;
+    let (code, _) = pipe_link::invite(&a, "pipe", &side("Matt")).await.expect("a code");
+    pipe_link::join(&b, "pipe", &code, &side("Ana")).await.expect("joined");
+    pipe_link::approve(&a, "pipe").expect("approved");
+    pipe_link::approve(&b, "pipe").expect("approved");
+    wait_for(&a, |event| matches!(event, Event::PeerApproved { pipe } if pipe == "pipe").then_some(())).await;
+    wait_for(&b, |event| matches!(event, Event::PeerApproved { pipe } if pipe == "pipe").then_some(())).await;
+    assert!(shows_online(&a, true).await, "Ana's Claktory is reached");
+
+    // Ana's Claktory goes away: Matt's next ping fails, and his worker waits.
+    pipe_link::set_away(&b, true);
+    assert!(shows_online(&a, false).await, "Ana's Claktory shows as away");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Back, it pings Matt's, which shows it online at once, not 10 minutes on.
+    let back = std::time::Instant::now();
+    pipe_link::set_away(&b, false);
+    assert!(shows_online(&a, true).await, "Ana's Claktory is online again");
+    assert!(back.elapsed() < Duration::from_secs(30), "{:?}", back.elapsed());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agents_messages_wait_while_the_peer_is_another_account() {
     let (dir_a, dir_b) = (temp_dir(), temp_dir());
@@ -414,6 +464,58 @@ async fn a_join_that_cannot_reach_the_inviter_keeps_trying_until_it_can() {
     let pipe = view.workspace.pipes.first().expect("the pipe");
     assert!(pipe.offline_reason.is_empty() && pipe.offline_since_ms == 0, "connected, the reason clears: {pipe:?}");
     wait_for(&a, |event| matches!(event, Event::Knocked { pipe, .. } if pipe == "p-a").then_some(())).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_join_the_inviter_turns_away_closes_saying_the_code_no_longer_works() {
+    let (dir_a, dir_b) = (temp_dir(), temp_dir());
+    let a = claktory(&dir_a).await;
+    pipe_link::set_dial(Duration::from_millis(1500));
+    let (code, _) = pipe_link::invite(&a, "p-a", &side("Matt")).await.expect("a code");
+    // The code ends there (used, or expired by its clock), while the
+    // inviter stays reachable (a device of its person's is being added):
+    // its gate turns the joiner's key away ("isn't paired").
+    pipe_link::cancel_invite(&a, "p-a");
+    factoryd::remote::pair(a.home(), "Phone").expect("a device being added");
+    // Its expiry forged a year ahead (or the joiner's clock behind): the
+    // joiner can't tell from the code that it no longer works.
+    let forged = format!("x={}", epoch_ms() + 365 * 24 * 3600 * 1000);
+    let doctored: Vec<String> =
+        code.split('&').map(|part| if part.starts_with("x=") { forged.clone() } else { part.to_owned() }).collect();
+    let doctored = doctored.join("&");
+
+    let (addr_b, b) = crate::common::start(&dir_b).await;
+    b.set_tunnel_online_wait(Duration::from_millis(100));
+    let (mut client, workspace, _) = Client::connect(addr_b).await;
+    let mut view = View { workspace, ..View::default() };
+    let dead_relay = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    apply_request(&mut client, &mut view, Request::SetRemoteAccess(dead_relay)).await;
+    apply_request(&mut client, &mut view, crate::common::create_project("Site", &dir_b.join("site"))).await;
+    let project = view.workspace.projects.first().expect("the project").id.clone();
+    let accept = v1::AcceptPipeInvite { code: doctored, project_id: project, purpose: "testing".to_owned(), ..Default::default() };
+    let started = std::time::Instant::now();
+    apply_request(&mut client, &mut view, Request::AcceptPipeInvite(accept)).await;
+
+    // A few refusals, and the pipe closes, saying why, well within a minute.
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        view.follow(&mut client, |view| view.workspace.pipes.iter().any(|pipe| pipe.state() == v1::PipeState::Closed)),
+    )
+    .await
+    .expect("the pipe should close once the inviter keeps turning the code away");
+    assert!(started.elapsed() < Duration::from_secs(30), "closed after {:?}", started.elapsed());
+    let pipe = view.workspace.pipes.first().expect("the pipe").id.clone();
+    let lines: Vec<String> = factoryd::pipes::messages_for_test(&b, &pipe).into_iter().map(|message| message.text).collect();
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("Couldn't connect: This code has expired or was already used. Ask for a new one."),
+        "{lines:?}"
+    );
+    assert!(lines.iter().any(|line| line.contains("(it turned the code away)")), "{lines:?}");
+}
+
+fn epoch_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("time").as_millis() as i64
 }
 
 // -- Hostile-peer regressions: a pipe's other end is an outside party --
@@ -582,4 +684,133 @@ async fn a_name_the_other_side_chose_never_says_claktory_in_claktorys_own_places
     view.follow(&mut client, |view| !view.workspace.pipes.is_empty()).await;
     let pipe = view.workspace.pipes.first().expect("the pipe");
     assert!(pipe.name.starts_with("Pipe joined ") && !pipe.name.to_lowercase().contains("aktory"), "{}", pipe.name);
+}
+
+/// What this Factory's store heard of `pipe`'s peer's liaison, in order.
+fn liaisons(factory: &Factory, pipe: &str) -> Vec<Liaison> {
+    let home = factory.home().root().display().to_string();
+    events()
+        .lock()
+        .expect("events")
+        .iter()
+        .filter(|(of, _)| *of == home)
+        .filter_map(|(_, event)| match event {
+            Event::PeerLiaison { pipe: of, liaison } if of == pipe => Some(*liaison),
+            _ => None,
+        })
+        .collect()
+}
+
+/// #343 U18 (Fugo's ruling): what a peer says of its liaison is taken only
+/// on an open pipe, at most one a pace, its time only a number in the
+/// future at most 8 days ahead; and a real peer's word reaches the other
+/// side's store, which hears back that it was heard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peers_word_on_its_liaison_is_checked_and_paced() {
+    pipe_link::set_liaison_every(Duration::from_millis(600));
+    let dir_a = temp_dir();
+    let a = claktory(&dir_a).await;
+    let (code, _) = pipe_link::invite(&a, "p-a", &side("Matt")).await.expect("a code");
+    let wire = code_value(&code, "w");
+    let key = iroh::SecretKey::generate();
+    let client = iroh::endpoint::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .secret_key(key.clone())
+        .bind()
+        .await
+        .expect("a client endpoint");
+    let mut addr = iroh::EndpointAddr::new(code_value(&code, "e").parse().expect("an endpoint id"));
+    for address in code_values(&code, "a") {
+        if let Ok(address) = address.parse() {
+            addr = addr.with_ip_addr(address);
+        }
+    }
+    let connection = client.connect(addr, pipe_link::ALPN_PIPE).await.expect("connected");
+    let join = serde_json::json!({
+        "v": 1, "wire": wire, "kind": "join", "secret": code_value(&code, "s"), "sent_at": 1,
+        "side": {"claktory": "Eve's Claktory", "owner_name": "Eve"}, "relays": [], "addresses": [],
+    });
+    assert_eq!(ask(&connection, &raw_frame(&key, &join)).await["code"], "ok");
+    let pace = || tokio::time::sleep(Duration::from_millis(700));
+    let say = |until: serde_json::Value| {
+        let mut frame = serde_json::json!({"v": 1, "wire": wire, "kind": "waiting", "sent_at": 1});
+        if !until.is_null() {
+            frame["until_ms"] = until;
+        }
+        raw_frame(&key, &frame)
+    };
+    let settle = || tokio::time::sleep(Duration::from_millis(200));
+
+    // Before both people approved: answered, and dropped.
+    let soon = factoryd::transcript::now_ms() + 3_600_000;
+    assert_eq!(ask(&connection, &say(serde_json::json!(soon))).await["code"], "ok");
+    settle().await;
+    assert!(liaisons(&a, "p-a").is_empty());
+
+    // Open: taken.
+    let approve = serde_json::json!({"v": 1, "wire": wire, "kind": "approve", "seq": 1, "sent_at": 1});
+    assert_eq!(ask(&connection, &raw_frame(&key, &approve)).await["code"], "ok");
+    pipe_link::approve(&a, "p-a").expect("Matt approves");
+    pace().await;
+    assert_eq!(ask(&connection, &say(serde_json::json!(soon))).await["code"], "ok");
+    // A flood right after: answered, and dropped.
+    for _ in 0..5 {
+        let awake = serde_json::json!({"v": 1, "wire": wire, "kind": "awake", "sent_at": 1});
+        assert_eq!(ask(&connection, &raw_frame(&key, &awake)).await["code"], "ok");
+    }
+    settle().await;
+    assert_eq!(liaisons(&a, "p-a"), [Liaison::Waiting { until_ms: soon }]);
+
+    // A time in the past, a year ahead, or not a number: waiting, no time.
+    let year = factoryd::transcript::now_ms() + 365 * 86_400_000;
+    for until in [serde_json::json!(1_000), serde_json::json!(year), serde_json::json!("Friday"), serde_json::Value::Null] {
+        pace().await;
+        assert_eq!(ask(&connection, &say(until)).await["code"], "ok");
+    }
+    settle().await;
+    assert_eq!(liaisons(&a, "p-a")[1..], [Liaison::Waiting { until_ms: 0 }; 4]);
+    pace().await;
+    let awake = serde_json::json!({"v": 1, "wire": wire, "kind": "awake", "sent_at": 1});
+    assert_eq!(ask(&connection, &raw_frame(&key, &awake)).await["code"], "ok");
+    settle().await;
+    assert_eq!(liaisons(&a, "p-a").last(), Some(&Liaison::Awake));
+
+    // Paused: dropped.
+    pipe_link::pause(&a, "p-a").expect("paused");
+    pace().await;
+    assert_eq!(ask(&connection, &say(serde_json::json!(soon))).await["code"], "ok");
+    settle().await;
+    assert_eq!(liaisons(&a, "p-a").last(), Some(&Liaison::Awake));
+}
+
+/// Between two Claktories: what one tells of its liaison reaches the other,
+/// and the teller hears it was heard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_liaisons_wait_reaches_the_other_side() {
+    pipe_link::set_liaison_every(Duration::from_millis(600));
+    let (dir_a, dir_b) = (temp_dir(), temp_dir());
+    let a = claktory(&dir_a).await;
+    let b = claktory(&dir_b).await;
+    let (code, _) = pipe_link::invite(&a, "w-a", &side("Matt")).await.expect("a code");
+    pipe_link::join(&b, "w-b", &code, &side("Ana")).await.expect("joined");
+    wait_for(&a, |event| matches!(event, Event::Knocked { pipe, .. } if pipe == "w-a").then_some(())).await;
+    pipe_link::approve(&b, "w-b").expect("Ana approves");
+    pipe_link::approve(&a, "w-a").expect("Matt approves");
+    wait_for(&a, |event| matches!(event, Event::PeerApproved { pipe } if pipe == "w-a").then_some(())).await;
+    wait_for(&b, |event| matches!(event, Event::PeerApproved { pipe } if pipe == "w-b").then_some(())).await;
+
+    let until = factoryd::transcript::now_ms() + 2 * 3_600_000;
+    assert!(pipe_link::tell_liaison(&a, "w-a", Liaison::Waiting { until_ms: until }));
+    let heard = wait_for(&b, |event| match event {
+        Event::PeerLiaison { pipe, liaison } if pipe == "w-b" => Some(*liaison),
+        _ => None,
+    })
+    .await;
+    assert_eq!(heard, Liaison::Waiting { until_ms: until });
+    let told = wait_for(&a, |event| match event {
+        Event::LiaisonTold { pipe, liaison } if pipe == "w-a" => Some(*liaison),
+        _ => None,
+    })
+    .await;
+    assert_eq!(told, heard);
+    assert!(!pipe_link::tell_liaison(&a, "no-such-pipe", Liaison::Awake), "no link at work");
 }

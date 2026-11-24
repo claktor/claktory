@@ -196,6 +196,53 @@ fn the_person_over_asked_and_idle_agents_and_wake_ups() {
     assert_eq!(red, ["over_asked", "wake_cost", "idle:idle"]);
 }
 
+/// Rivet's report (Bruno 25299): new agents were judged over 3 days they
+/// hadn't lived, and agents working on request over the wake-ups they
+/// answered.
+#[test]
+fn new_agents_and_agents_that_answer_their_wake_ups_arent_idle() {
+    let records = records();
+    let db = records.store.db();
+    let team = team(&[("lead", ""), ("newborn", ""), ("young", ""), ("writer", ""), ("copied", ""), ("slacker", "")]);
+    let woken = |to: &str, from_hours_ago: i64| {
+        for i in 0..40 {
+            message(&db, "lead", to, END - from_hours_ago * HOUR_MS + i * 30 * MIN);
+        }
+    };
+    // Under a day old: not judged yet.
+    woken("newborn", 20);
+    // 30 hours old and busy 3 of them: 10% of its life (4% of 3 days).
+    woken("young", 30);
+    run(&db, "young", END - 10 * HOUR_MS, END - 7 * HOUR_MS);
+    // Woken 40 times over 2 and a half days, never busy long, but each
+    // time it answers within minutes: it works on request.
+    woken("writer", 60);
+    for i in 0..40 {
+        message(&db, "writer", "lead", END - 60 * HOUR_MS + i * 30 * MIN + 5 * MIN);
+    }
+    // Copied in quietly 40 times: that doesn't wake it.
+    for i in 0..40 {
+        db.execute(
+            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, quiet) VALUES ('copied', 'agent', 'lead', 'lead', '', '', ?1, 1)",
+            [END - 60 * HOUR_MS + i * 30 * MIN],
+        )
+        .expect("quiet");
+    }
+    // 40 hours old, never busy, never answering: idle over its own life.
+    woken("slacker", 40);
+    let (red, _) = signs(&db, &team);
+    assert_eq!(red, ["idle:slacker"]);
+    let (red, _) = signs::red(&db, &team, END, END, &HashMap::new()).expect("signs");
+    assert_eq!(
+        red[0].says,
+        "Idle: slacker was busy 0% of the 40 hours since it started with nothing ready, yet was woken 40 times by messages and events not from the person, and answered 0 of them within the hour."
+    );
+
+    // Wake-ups answered only a day and more later weren't answered.
+    db.execute("UPDATE messages SET created = ?1 WHERE sender_id = 'writer'", [END - HOUR_MS]).expect("later");
+    assert_eq!(signs(&db, &team).0, ["idle:writer", "idle:slacker"]);
+}
+
 #[test]
 fn questions_a_clear_closed_are_neither_decided_nor_dismissed() {
     let records = records();

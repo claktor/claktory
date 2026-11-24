@@ -85,7 +85,7 @@ fn incarnation(dir: &Path, agent: &str) -> Option<String> {
 }
 
 async fn decide(client: &mut Client, view: &mut View, seq: u64, approve: bool, comment: &str) -> v1::server_message::Body {
-    let decision = v1::DecideAppGrant { agent_id: "rivet".into(), seq, approve, comment: comment.into() };
+    let decision = v1::DecideAppGrant { agent_id: "rivet".into(), seq, approve, comment: comment.into(), ..Default::default() };
     apply_request(client, view, Request::DecideAppGrant(decision)).await
 }
 
@@ -169,6 +169,31 @@ async fn rivet_proposes_app_access_and_only_the_persons_approval_gives_it() {
     ));
     assert!(held(&dir).is_empty());
 
+    // Submit (#370): a comment instead of Approve gives nothing; Rivet gets
+    // the comment, to propose again with it in mind.
+    call(&mut client, &mut view, &proposal("mike", &["dm.read", "dm.send"], "c-4")).await;
+    let (answered, _) = card(&view);
+    let reply = |comment: &str| v1::DecideAppGrant {
+        agent_id: "rivet".into(),
+        seq: answered,
+        approve: true,
+        comment: comment.into(),
+        reply: true,
+    };
+    let empty = apply_request(&mut client, &mut view, Request::DecideAppGrant(reply(" "))).await;
+    let v1::server_message::Body::Error(error) = empty else { panic!("expected a refusal, got {empty:?}") };
+    assert_eq!(error.message, "Write a reply, or approve or decline it.");
+    let replied = apply_request(&mut client, &mut view, Request::DecideAppGrant(reply("Read only, please."))).await;
+    assert!(matches!(replied, v1::server_message::Body::Ack(_)), "{replied:?}");
+    view.follow(&mut client, |view| told(view, "Read only, please.") && idle(view, "rivet")).await;
+    let shown = card_at(&view, answered);
+    assert_eq!((shown.state(), shown.replied, shown.comment.as_str()), (State::Declined, true, "Read only, please."));
+    assert!(told(
+        &view,
+        "The person replied about giving Mike access to Direct messages; nothing was given yet. They say:\n\nRead only, please.\n\nIf it still fits, propose it again with that in mind."
+    ));
+    assert!(held(&dir).is_empty(), "a reply gives nothing");
+
     // Approved: the service holds the grant, for Mike's incarnation. Mike
     // read a web page after this card was shown, so the first approval is
     // refused and the card warns; the next is informed.
@@ -228,7 +253,10 @@ async fn rivet_proposes_app_access_and_only_the_persons_approval_gives_it() {
     let v1::server_message::Body::NeedsYouHistory(history) = history else { panic!("expected the history, got {history:?}") };
     let decided: Vec<(u64, v1::NeedsYouOutcome)> = history.records.iter().map(|record| (record.seq, record.outcome())).collect();
     use v1::NeedsYouOutcome as Outcome;
-    assert_eq!(decided, [(stale, Outcome::Failed), (seq, Outcome::Approved), (declined, Outcome::Denied)]);
+    assert_eq!(
+        decided,
+        [(stale, Outcome::Failed), (seq, Outcome::Approved), (answered, Outcome::Replied), (declined, Outcome::Denied)]
+    );
 
     // /clear closes what waits, as cleared, not as the person's decline.
     assert!(!view.agent("rivet").waiting_seqs.is_empty());
@@ -243,7 +271,7 @@ async fn rivet_proposes_app_access_and_only_the_persons_approval_gives_it() {
         .expect("sql")
         .map(|row| row.expect("a row"))
         .collect();
-    assert_eq!(states, ["granted", "declined", "failed", "cleared"]);
+    assert_eq!(states, ["granted", "declined", "declined", "failed", "cleared"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

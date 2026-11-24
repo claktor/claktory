@@ -605,7 +605,8 @@ void main() {
       await settle(tester);
       expect(harness.backend.sent.last.decideSuggestion.accept, isFalse);
 
-      // A comment for the agent goes with either.
+      // A comment is a reply (#370): one Submit, which neither accepts
+      // nor rejects; the change stays open.
       await tester.tap(
         find.descendant(
           of: find.byType(Commented),
@@ -613,19 +614,43 @@ void main() {
         ),
       );
       await settle(tester);
-      await tester.enterText(
-        find.descendant(
-          of: find.byType(DecisionComment),
-          matching: find.byType(EditableText),
-        ),
-        'Keep the old word.',
+      final field = find.descendant(
+        of: find.byType(DecisionComment),
+        matching: find.byType(EditableText),
       );
-      await tester.tap(button('Reject'));
-      await settle(tester);
+      await tester.enterText(field, 'Keep the old word.');
+      await tester.pump();
+      expect(button('Accept'), findsNothing);
+      expect(button('Reject'), findsNothing);
       expect(
-        harness.backend.sent.last.decideSuggestion.comment,
-        'Keep the old word.',
+        button('The change stays open, and Builder gets your comment.'),
+        findsOneWidget,
       );
+      await tester.tap(button('Submit'));
+      await settle(tester);
+      var sent = harness.backend.sent.last.decideSuggestion;
+      expect(sent.comment, 'Keep the old word.');
+      expect(sent.reply, isTrue);
+      expect(sent.accept, isFalse);
+      // Sent, the field empties and the choices are back.
+      expect(tester.widget<EditableText>(field).controller.text, isEmpty);
+      expect(button('Accept'), findsOneWidget);
+
+      // Return is Submit too.
+      final before = harness.backend.sent.length;
+      await tester.enterText(field, 'Or say “claims”.');
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await settle(tester);
+      final replies = harness.backend.sent
+          .skip(before)
+          .where((m) => m.hasDecideSuggestion())
+          .toList();
+      expect(replies, hasLength(1));
+      sent = replies.single.decideSuggestion;
+      expect(sent.comment, 'Or say “claims”.');
+      expect(sent.reply, isTrue);
+      expect(sent.accept, isFalse);
     });
 
     testWidgets('once its text changed it can only be rejected', (

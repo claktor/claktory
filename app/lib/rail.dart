@@ -19,6 +19,7 @@ import 'forms.dart';
 import 'history.dart';
 import 'identity.dart';
 import 'login.dart';
+import 'mobile/back.dart';
 import 'mobile/drawer.dart' show PhoneDrawerHost;
 import 'mobile/haptics.dart';
 import 'mobile/input.dart' show InputKind;
@@ -32,6 +33,7 @@ import 'selection.dart';
 import 'usage_wait.dart' show atWork;
 import 'inbox.dart' show needsYouCount;
 import 'waiting.dart' show waitingLabel;
+import 'your_claktories.dart' show DeviceSignInDialog;
 
 /// The rail of Claktories at the window's far left, as thin as the
 /// extension bar.
@@ -430,16 +432,14 @@ class _Glance {
             'your Claktory account.',
       ),
       AccountCheck.signedOut => (
-        label: "Can't check whose it is",
-        meaning:
-            'Sign in to your Claktory account on this device to check whose '
-            'it is.',
+        label: 'This $thisDeviceKind is signed out',
+        meaning: 'Sign in to check that this Claktory is yours.',
       ),
       AccountCheck.unreadable => (
-        label: "Can't check whose it is",
+        label: "Couldn't check your account",
         meaning:
-            "Claktory couldn't read your account to check. It tries again "
-            'when it can.',
+            "Couldn't reach your Claktory account to check that this "
+            'Claktory is yours. Claktory tries again by itself.',
       ),
       AccountCheck.theirs || null => null,
     };
@@ -464,10 +464,16 @@ class OffAccountMark extends StatelessWidget {
     super.key,
     required this.claktory,
     this.explained = false,
+    this.signIn = false,
   });
 
   final Claktory claktory;
   final bool explained;
+
+  /// Signed out, "Sign in…" under it, to sign this device in (#388): where
+  /// it can be tapped (a phone's drawer, the Claktory's form), never on a
+  /// row or tile that's a button itself.
+  final bool signIn;
 
   @override
   Widget build(BuildContext context) {
@@ -516,12 +522,34 @@ class OffAccountMark extends StatelessWidget {
                 words.meaning,
                 style: caption.copyWith(color: palette.textMuted),
               ),
+            if (signIn && check == AccountCheck.signedOut)
+              Padding(
+                padding: const EdgeInsets.only(top: Space.xs),
+                child: Button(
+                  label: 'Sign in…',
+                  onPressed: () => showAccountSignIn(context),
+                ),
+              ),
           ],
         );
       },
     );
   }
 }
+
+/// Signs this device in to the person's Claktory account, from a
+/// Claktory's mark while signed out (#388): it closes once signed in, and
+/// the marks follow.
+Future<void> showAccountSignIn(BuildContext context) => showModal(
+  context,
+  (context, close) => DeviceSignInDialog(
+    title: 'Sign in to your Claktory account',
+    intro:
+        'So Claktory can check that the Claktories you connect to are '
+        'yours.',
+    close: close,
+  ),
+);
 
 /// Up to two letters for [name]: "mac-mini" is "MM", "nixos" "N".
 String claktoryInitials(String name) {
@@ -993,7 +1021,11 @@ class _ClaktoryFormState extends State<ClaktoryForm> {
         body: 'Connect to $name to change its name or color.',
         fields: [
           if (widget.claktory.offAccount)
-            OffAccountMark(claktory: widget.claktory, explained: true),
+            OffAccountMark(
+              claktory: widget.claktory,
+              explained: true,
+              signIn: true,
+            ),
         ],
         error: null,
         submitLabel: 'Done',
@@ -1007,7 +1039,11 @@ class _ClaktoryFormState extends State<ClaktoryForm> {
       title: name,
       fields: [
         if (widget.claktory.offAccount)
-          OffAccountMark(claktory: widget.claktory, explained: true),
+          OffAccountMark(
+            claktory: widget.claktory,
+            explained: true,
+            signIn: true,
+          ),
         Field(
           label: 'Name',
           note: 'Shown on every device connected to it.',
@@ -1192,7 +1228,14 @@ class PhoneConnectionWord extends StatelessWidget {
   final Backend backend;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ListenableBuilder(
+    // Follows the connection itself: the drawer's header rebuilds only
+    // with the Workspace (#388).
+    listenable: Connection.of(backend),
+    builder: (context, _) => _word(context),
+  );
+
+  Widget _word(BuildContext context) {
     final palette = Palette.of(context);
     final connection = Connection(backend);
     return Semantics(
@@ -1260,6 +1303,18 @@ class PhoneClaktories extends StatefulWidget {
   /// The chosen Claktory's window.
   final Widget shell;
 
+  /// Something outside the tree chose what to show: leave the list/add
+  /// screen and bring the selected conversation in front of drawer/pages.
+  static void showConversation() {
+    for (final host in _PhoneClaktoriesState._live.toList()) {
+      host._go(_PhoneScreen.claktory);
+    }
+    // The drawer may only be built as the list/add screen leaves.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      PhoneDrawerHost.showConversation();
+    });
+  }
+
   @override
   State<PhoneClaktories> createState() => _PhoneClaktoriesState();
 }
@@ -1267,30 +1322,105 @@ class PhoneClaktories extends StatefulWidget {
 enum _PhoneScreen { claktory, list, adding }
 
 class _PhoneClaktoriesState extends State<PhoneClaktories> {
+  static final _live = <_PhoneClaktoriesState>{};
+
+  @override
+  void initState() {
+    super.initState();
+    _live.add(this);
+  }
+
   var _screen = _PhoneScreen.claktory;
   Claktory? _shown;
+  Claktory? _returnTo;
+  Claktories? _claktories;
+  PhoneBack? _windowBack;
+  PhoneBack? _screenBack;
+  BackHandle? _screenBackHandle;
+  _PhoneScreen? _backScreen;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     // A new one paired: it shows. (One removed from the list leaves the
     // list showing, with the next one chosen.)
-    final selected = ClaktoriesScope.of(context)?.selected;
+    final claktories = _claktories = ClaktoriesScope.of(context);
+    final selected = claktories?.selected;
     if (_shown != null &&
         selected != _shown &&
         _screen == _PhoneScreen.adding) {
       _screen = _PhoneScreen.claktory;
     }
     _shown = selected;
+    final policy = PhonePlatformPolicy.of(context);
+    _windowBack = policy.touch && !policy.drawerEdgeSwipe
+        ? context.dependOnInheritedWidgetOfExactType<PhoneBackScope>()?.back
+        : null;
+    _syncBack();
   }
 
-  void _go(_PhoneScreen screen) => setState(() => _screen = screen);
+  void _syncBack() {
+    final hasList = _claktories?.all.isNotEmpty ?? false;
+    final screen = hasList ? _screen : _PhoneScreen.claktory;
+    final next = _windowBack?.branch(screen);
+    if (identical(next, _screenBack) && screen == _backScreen) return;
+    _screenBackHandle?.release();
+    _screenBackHandle = null;
+    _screenBack = next;
+    _backScreen = screen;
+    if (next == null || !hasList || screen == _PhoneScreen.claktory) return;
+    _screenBackHandle = next.registerNavigation(
+      CallbackBackToken(
+        onBack: () {
+          if (!mounted || _screen != screen) return;
+          screen == _PhoneScreen.adding
+              ? _go(_PhoneScreen.list)
+              : _returnFromList();
+        },
+      ),
+    );
+  }
+
+  void _returnFromList() {
+    final claktories = _claktories;
+    if (claktories == null || claktories.all.isEmpty) return;
+    final all = claktories.all;
+    final destination = all.contains(_returnTo)
+        ? _returnTo!
+        : all.contains(claktories.selected)
+        ? claktories.selected
+        : all.first;
+    claktories.select(destination);
+    _go(_PhoneScreen.claktory);
+  }
+
+  void _go(_PhoneScreen screen) {
+    if (_screen == _PhoneScreen.claktory && screen != _PhoneScreen.claktory) {
+      _returnTo = _claktories?.selected;
+    }
+    setState(() {
+      _screen = screen;
+      // Retire the outgoing screen synchronously, before its animation ends.
+      _syncBack();
+    });
+  }
+
+  @override
+  void dispose() {
+    _live.remove(this);
+    _screenBackHandle?.release();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final claktories = ClaktoriesScope.of(context);
     // Nothing paired yet: the window pairs the first.
-    if (claktories == null || claktories.all.isEmpty) return widget.shell;
+    if (claktories == null || claktories.all.isEmpty) {
+      return _screenBack == null
+          ? widget.shell
+          : PhoneBackScope(back: _screenBack!, child: widget.shell);
+    }
     final Widget child;
     switch (_screen) {
       case _PhoneScreen.claktory:
@@ -1335,7 +1465,9 @@ class _PhoneClaktoriesState extends State<PhoneClaktories> {
       duration: Motion.base,
       switchInCurve: Curves.easeOut,
       switchOutCurve: Curves.easeIn,
-      child: child,
+      child: _screenBack == null
+          ? child
+          : PhoneBackScope(key: child.key, back: _screenBack!, child: child),
     );
   }
 }

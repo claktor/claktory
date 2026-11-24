@@ -23,6 +23,7 @@ import 'controls.dart';
 import 'conversation_find.dart';
 import 'decision.dart';
 import 'conversation_scrollbar.dart';
+import 'conversation_versions.dart' show canGoBackTo, goBackTo;
 import 'explorer.dart' show openFile;
 import 'find.dart';
 import 'extensions.dart' show logTime;
@@ -33,6 +34,7 @@ import 'mobile/message_actions.dart';
 import 'mobile/metrics.dart';
 import 'mobile/platform_policy.dart';
 import 'mobile/navigation.dart';
+import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'message_time.dart';
 import 'markdown.dart';
 import 'outbox.dart';
@@ -679,6 +681,13 @@ class _TranscriptViewState extends State<TranscriptView>
       });
     });
   }
+
+  /// Whether this is an agent's own conversation, which can go back to an
+  /// earlier message (friend bug #9): not a chat's, nor a pipe's view.
+  bool get _goesBack =>
+      widget.pipeFind == null &&
+      widget.transcript.agentId.isNotEmpty &&
+      ChatScope.chatIdOf(context) == null;
 
   /// Quotes [message] into this conversation's message box: an agent's,
   /// or a chat's.
@@ -1649,8 +1658,13 @@ class _TranscriptViewState extends State<TranscriptView>
                   if (outgoing != null && failure != null)
                     _NotSent(
                       why: failure,
+                      waiting: outgoing.waiting,
                       onRetry: () => widget.outbox?.retry(outgoing),
-                      onEdit: () => _edit(outgoing),
+                      // A voice message can't be edited: its recording,
+                      // kept on the device until sent, can be deleted.
+                      edit: outgoing.voice == null
+                          ? ('Edit', () => _edit(outgoing))
+                          : ('Delete', () => unawaited(_deleteVoice(outgoing))),
                     ),
                 ],
               ),
@@ -1659,6 +1673,19 @@ class _TranscriptViewState extends State<TranscriptView>
         ),
       ),
     );
+  }
+
+  /// Deletes a voice message that wasn't sent, once the person says so:
+  /// its recording goes from the device (#401).
+  Future<void> _deleteVoice(Outgoing outgoing) async {
+    final sure = await showActions<bool>(
+      context,
+      title: 'Delete this voice message?',
+      message: "It hasn't been sent. This can't be undone.",
+      actions: const [SheetAction('Delete', true, destructive: true)],
+    );
+    if (sure != true) return;
+    widget.outbox?.takeBack(outgoing);
   }
 
   /// Takes a message that wasn't sent back to the message box, to change
@@ -1726,6 +1753,14 @@ class _TranscriptViewState extends State<TranscriptView>
                       ),
                     ),
                   ],
+                  // Back to this message (friend bug #9), where the
+                  // conversation can go back to it.
+                  if (_pointed.value?.entry case final entry?
+                      when _goesBack && canGoBackTo(widget.transcript, entry))
+                    MenuItem(
+                      'Go back to here…',
+                      () => goBackTo(context, widget.transcript, entry),
+                    ),
                   if (_pointed.value?.report case final seq?)
                     MenuItem(
                       'Report…',
@@ -1742,6 +1777,7 @@ class _TranscriptViewState extends State<TranscriptView>
                   child: _ReplyScope(
                     pointed: _pointed,
                     reply: _reply,
+                    back: _goesBack ? widget.transcript : null,
                     child: ConversationScrollbar(
                       controller: _controller,
                       heights: _heights,
@@ -2444,8 +2480,13 @@ class _EntryViewState extends State<EntryView> {
   VoidCallback? _replyTo(String text, String? from) {
     final scope = context.getInheritedWidgetOfExactType<_ReplyScope>();
     if (scope == null) return null;
-    return () =>
-        scope.reply((text: text, from: from, report: null, markdown: true));
+    return () => scope.reply((
+      text: text,
+      from: from,
+      report: null,
+      markdown: true,
+      entry: null,
+    ));
   }
 
   Widget _build() {
@@ -2604,6 +2645,9 @@ class _EntryViewState extends State<EntryView> {
     };
     // The agent's own reply can be reported to Claktory's team.
     final report = entry.whichKind() == Entry_Kind.assistant ? seq : null;
+    // The agent's conversation it can go back to (friend bug #9); null in
+    // a chat or a pipe's view.
+    final back = context.getInheritedWidgetOfExactType<_ReplyScope>()?.back;
     final from = entry.whichKind() == Entry_Kind.event
         ? senderName(
             entry.event,
@@ -2619,10 +2663,15 @@ class _EntryViewState extends State<EntryView> {
               from: from,
               report: report,
               markdown: entry.whichKind() != Entry_Kind.user,
+              entry: entry,
               child: MessageActions(
                 text: words,
                 markdown: entry.whichKind() != Entry_Kind.user,
                 onReply: _replyTo(words, from),
+                onGoBack: back == null
+                    ? null
+                    : () => goBackTo(context, back, entry),
+                canGoBack: back == null ? null : () => canGoBackTo(back, entry),
                 onReport: report == null
                     ? null
                     : () => reportReply(context, _reportedIn(context, report)),
@@ -2960,12 +3009,19 @@ class _NotSent extends StatelessWidget {
   const _NotSent({
     required this.why,
     required this.onRetry,
-    required this.onEdit,
+    required this.edit,
+    this.waiting = false,
   });
 
   final String why;
   final VoidCallback onRetry;
-  final VoidCallback onEdit;
+
+  /// The second action: Edit, or a voice message's Delete.
+  final (String, VoidCallback) edit;
+
+  /// It waits for the connection and goes by itself once it's back: "Not
+  /// sent yet", not in the danger color.
+  final bool waiting;
 
   @override
   Widget build(BuildContext context) {
@@ -2990,15 +3046,16 @@ class _NotSent extends StatelessWidget {
             end: true,
             card: (context) => Text(why),
             child: Text(
-              'Not sent',
-              style: TypeScale.of(context).caption
-                  .copyWith(color: palette.danger),
+              waiting ? 'Not sent yet' : 'Not sent',
+              style: TypeScale.of(context).caption.copyWith(
+                color: waiting ? palette.textMuted : palette.danger,
+              ),
             ),
           ),
           const SizedBox(width: Space.s),
           action('Retry', onRetry),
           const SizedBox(width: Space.s),
-          action('Edit', onEdit),
+          action(edit.$1, edit.$2),
         ],
       ),
     );
@@ -3092,8 +3149,10 @@ class _ProposalCardState extends State<ProposalCard> {
     super.dispose();
   }
 
-  Future<void> _decide({required bool approve}) async {
-    if (_deciding) return;
+  /// [approve] or dismiss; with [reply] (#370), what's typed is the
+  /// person's answer for Rivet to act on, neither.
+  Future<void> _decide({required bool approve, bool reply = false}) async {
+    if (_deciding || (reply && !commentTyped(_comment))) return;
     final scope = AppScope.of(context);
     setState(() {
       _deciding = true;
@@ -3109,6 +3168,7 @@ class _ProposalCardState extends State<ProposalCard> {
         approve: approve,
         comment: _comment.text.trim(),
         chatId: chatId,
+        reply: reply,
       );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
@@ -3116,6 +3176,8 @@ class _ProposalCardState extends State<ProposalCard> {
       if (mounted) setState(() => _deciding = false);
     }
   }
+
+  void _reply() => unawaited(_decide(approve: false, reply: true));
 
   @override
   Widget build(BuildContext context) {
@@ -3172,36 +3234,55 @@ class _ProposalCardState extends State<ProposalCard> {
           ),
           const SizedBox(height: Space.m),
           if (pending) ...[
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _error ?? 'If you approve, $name gets it as your message.',
-                    style: TypeScale.of(context).caption.copyWith(
-                      color: _error == null
-                          ? palette.textFaint
-                          : palette.danger,
+            // Once a comment is typed, one Submit in place of both: the
+            // proposal goes to Rivet with the person's words as what to do
+            // (#370).
+            CommentTyped(
+              controller: _comment,
+              builder: (context, typed) => Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _error ??
+                          (typed
+                              ? '$name gets the proposal with your comment '
+                                    'and does what you say.'
+                              : 'If you approve, $name gets it as your '
+                                    'message.'),
+                      style: TypeScale.of(context).caption.copyWith(
+                        color: _error == null
+                            ? palette.textFaint
+                            : palette.danger,
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: Space.s),
-                Button(
-                  label: 'Dismiss',
-                  onPressed: _deciding ? null : () => _decide(approve: false),
-                ),
-                const SizedBox(width: Space.s),
-                Button(
-                  label: 'Approve',
-                  primary: true,
-                  onPressed: _deciding ? null : () => _decide(approve: true),
-                ),
-              ],
+                  const SizedBox(width: Space.s),
+                  if (typed)
+                    SubmitButton(onPressed: _deciding ? null : _reply)
+                  else ...[
+                    Button(
+                      label: 'Dismiss',
+                      onPressed: _deciding
+                          ? null
+                          : () => _decide(approve: false),
+                    ),
+                    const SizedBox(width: Space.s),
+                    Button(
+                      label: 'Approve',
+                      primary: true,
+                      onPressed: _deciding
+                          ? null
+                          : () => _decide(approve: true),
+                    ),
+                  ],
+                ],
+              ),
             ),
             DecisionComment(
               controller: _comment,
               agent: name,
               enabled: !_deciding,
-              onSubmitted: () => _decide(approve: true),
+              onSubmit: _reply,
             ),
           ] else ...[
             // Who decided: the person.
@@ -3217,7 +3298,9 @@ class _ProposalCardState extends State<ProposalCard> {
                     TextSpan(
                       children: [
                         TextSpan(
-                          text: dismissed
+                          text: proposal.replied
+                              ? 'Answered · sent to $name'
+                              : dismissed
                               ? 'Dismissed'
                               : 'Approved, sent to $name',
                           style: TextStyle(
@@ -3242,8 +3325,10 @@ class _ProposalCardState extends State<ProposalCard> {
               const SizedBox(height: Space.xs),
               Text(
                 proposal.comment,
-                style: TypeScale.of(context).body
-                    .copyWith(color: palette.textMuted),
+                style: TypeScale.of(context).body.copyWith(
+                  // An answer is what Rivet acts on: in full.
+                  color: proposal.replied ? palette.text : palette.textMuted,
+                ),
               ),
             ],
           ],
@@ -3391,8 +3476,15 @@ ReportedReply _reportedIn(BuildContext context, int seq) {
 
 /// A message in the conversation, its words and who sent it when it's
 /// another agent (null for the agent's own and the person's), and, for
-/// the agent's own reply, its seq, to report it.
-typedef _Pointed = ({String text, String? from, int? report, bool markdown});
+/// the agent's own reply, its seq, to report it; and its entry, to go back
+/// to it (friend bug #9).
+typedef _Pointed = ({
+  String text,
+  String? from,
+  int? report,
+  bool markdown,
+  Entry? entry,
+});
 
 /// What copying the whole of a message puts on the clipboard: what a
 /// selection of all of it copies, Markdown's words without its markers
@@ -3421,14 +3513,19 @@ class _ReplyScope extends InheritedWidget {
     required this.pointed,
     required this.reply,
     required super.child,
+    this.back,
   });
 
   final ValueNotifier<_Pointed?> pointed;
   final void Function(_Pointed message) reply;
 
+  /// The agent's conversation a message's Go back to here… takes back;
+  /// null where there's none (a chat, a pipe's view).
+  final TranscriptStore? back;
+
   @override
   bool updateShouldNotify(_ReplyScope old) =>
-      old.pointed != pointed || old.reply != reply;
+      old.pointed != pointed || old.reply != reply || old.back != back;
 }
 
 /// A message that can be replied to: on a Mac it says when the pointer is
@@ -3440,10 +3537,14 @@ class _Repliable extends StatelessWidget {
     required this.child,
     this.report,
     this.markdown = true,
+    this.entry,
   });
 
   final String text;
   final String? from;
+
+  /// The message's entry, to go back to it.
+  final Entry? entry;
 
   /// Whether [text] is Markdown (anything but the person's own).
   final bool markdown;
@@ -3456,7 +3557,13 @@ class _Repliable extends StatelessWidget {
   Widget build(BuildContext context) {
     final scope = context.getInheritedWidgetOfExactType<_ReplyScope>();
     if (scope == null) return child;
-    final me = (text: text, from: from, report: report, markdown: markdown);
+    final me = (
+      text: text,
+      from: from,
+      report: report,
+      markdown: markdown,
+      entry: entry,
+    );
     return MouseRegion(
       opaque: false,
       hitTestBehavior: HitTestBehavior.translucent,

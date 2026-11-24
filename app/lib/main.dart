@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
+import 'android/incoming_share_host.dart';
+import 'android/window_back_host.dart';
 import 'backend.dart';
 import 'browser/browser_view.dart' show BrowserHost, BrowserScope;
 import 'connections.dart';
@@ -11,6 +13,7 @@ import 'drop.dart';
 import 'identity.dart';
 import 'ipad/workbench.dart' show WorkbenchFocus, WorkbenchScope;
 import 'licenses.dart';
+import 'lid_closed.dart' show LidClosedWatcher;
 import 'links.dart' show appLinks;
 import 'mobile/device.dart' show loadDeviceCapabilities;
 import 'mobile/platform_policy.dart';
@@ -21,6 +24,7 @@ import 'rail.dart';
 import 'scope.dart';
 import 'setup.dart';
 import 'shell.dart';
+import 'sight.dart';
 import 'state.dart';
 import 'unreadable.dart';
 import 'update.dart';
@@ -28,6 +32,8 @@ import 'zoom.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Whether the Mac's window can be seen, and its Reduce motion (sight.dart).
+  Sight.start();
   // The Mac draws Claktory Dev's mark itself, over the whole window
   // (MainFlutterWindow.swift): see [DevMark].
   if (isDevBuild && nativeDevMark) {
@@ -175,6 +181,14 @@ class _FactoryAppState extends State<FactoryApp> {
     // Chrome's tabs reach an agent only through a Mac's app.
     if (defaultTargetPlatform == TargetPlatform.macOS) {
       _browser = BrowserHost.of(_claktories);
+      // This Mac's own Claktory hears what macOS says of its lid-closed
+      // helper (#371, lid_closed.dart).
+      _lidClosed = LidClosedWatcher(
+        changes: _claktories,
+        local: () => _claktories.localBackend
+            ? _claktories.all.firstWhere((each) => each.target == null).backend
+            : null,
+      );
     }
     // An iPhone registers with each Claktory for pushes, once the person
     // allows notifications (mobile/push.dart).
@@ -191,6 +205,9 @@ class _FactoryAppState extends State<FactoryApp> {
 
   /// This Mac's browser control (browser/browser_view.dart).
   BrowserHost? _browser;
+
+  /// This Mac's lid-closed helper, told to its own Claktory.
+  LidClosedWatcher? _lidClosed;
 
   /// The window, as an overlay entry: the root layer the phone's list of
   /// Claktories and its dialogs float in.
@@ -222,6 +239,7 @@ class _FactoryAppState extends State<FactoryApp> {
     _notifications?.dispose();
     _pushes?.dispose();
     _browser?.dispose();
+    _lidClosed?.dispose();
     _claktories.dispose();
     for (final focus in _focuses.values) {
       focus.dispose();
@@ -256,12 +274,16 @@ class _FactoryAppState extends State<FactoryApp> {
     // The rail sits inside it, so its dialogs cover the whole window. Its
     // focus sits above both, so a window narrowed to the phone's routes
     // and widened again keeps what was being read.
-    return WorkbenchScope(
+    final window = WorkbenchScope(
       focus: _focusFor(claktories, shown),
       child: isPhoneLayout(context)
           ? PhoneClaktories(shell: Shell(key: ObjectKey(shown)))
           : Shell(key: ObjectKey(shown), rail: const ClaktoryRail()),
     );
+    // What other apps share to Claktory on Android (#366 A6): one queue for
+    // the window, inside its overlay so the picker can show, the same
+    // whichever Claktory and layout show.
+    return _androidPolicy ? AndroidIncomingShareHost(child: window) : window;
   }
 
   @override
@@ -272,51 +294,58 @@ class _FactoryAppState extends State<FactoryApp> {
       // The words of the iPhone's text selection menu (Copy, Paste…).
       localizationsDelegates: PhonePlatformPolicy.current.localizations,
       debugShowCheckedModeBanner: false,
-      builder: (context, _) => ClaktoriesScope(
-        claktories: _claktories,
-        child: Builder(
-          builder: (context) {
-            final shown = ClaktoriesScope.of(context)!.selected;
-            final scope = AppScope(
-              backend: shown.backend,
-              login: shown.login,
-              page: shown.page,
-              appBuild: _appBuild,
-              drafts: shown.drafts,
-              history: shown.history,
-              connections: widget.connections,
-              child: ScrollConfiguration(
-                behavior: const _ScrollBehavior(),
-                child: DevMark(
-                  child: AppZoom(
-                    child: Stack(
-                      children: [
-                        Positioned.fill(
-                          child: Overlay(initialEntries: [_window]),
+      builder: (context, _) => SightScope(
+        child: ClaktoriesScope(
+          claktories: _claktories,
+          child: Builder(
+            builder: (context) {
+              final shown = ClaktoriesScope.of(context)!.selected;
+              final scope = AppScope(
+                backend: shown.backend,
+                login: shown.login,
+                page: shown.page,
+                appBuild: _appBuild,
+                drafts: shown.drafts,
+                history: shown.history,
+                connections: widget.connections,
+                child: ScrollConfiguration(
+                  behavior: const _ScrollBehavior(),
+                  child: DevMark(
+                    child: AppZoom(
+                      child: _androidBack(
+                        shown,
+                        Stack(
+                          children: [
+                            Positioned.fill(
+                              child: Overlay(initialEntries: [_window]),
+                            ),
+                            // Files dragged over the window from the Finder.
+                            const Positioned.fill(child: WindowDropOverlay()),
+                            // A change to what this device keeps that wasn't
+                            // saved says so.
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              child: Center(
+                                child: UnsavedNote(
+                                  connections: widget.connections,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                        // Files dragged over the window from the Finder.
-                        const Positioned.fill(child: WindowDropOverlay()),
-                        // A change to what this device keeps that wasn't
-                        // saved says so.
-                        Positioned(
-                          left: 0,
-                          right: 0,
-                          bottom: 0,
-                          child: Center(
-                            child: UnsavedNote(connections: widget.connections),
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
-              ),
-            );
-            return SetupScope(
-              setup: _setup,
-              child: BrowserScope(host: _browser, child: scope),
-            );
-          },
+              );
+              return SetupScope(
+                setup: _setup,
+                child: BrowserScope(host: _browser, child: scope),
+              );
+            },
+          ),
         ),
       ),
     );
@@ -324,6 +353,21 @@ class _FactoryAppState extends State<FactoryApp> {
 }
 
 /// Thin, quiet scrollbars on vertical scroll views; no overscroll glow.
+/// Android's Back (the button, the gesture): one dispatcher above the whole
+/// window, its dialogs, sheets and pages, after AppZoom, never keyed by the
+/// Claktory shown ([AndroidWindowBackHost]). Only where Android's policy is
+/// the app's, the same test the phone's drawer borrows it by; elsewhere the
+/// tree is as it was.
+Widget _androidBack(Object shown, Widget child) =>
+    _androidPolicy ? AndroidWindowBackHost(window: shown, child: child) : child;
+
+/// Whether Android's policy is the app's: the same test the phone's drawer
+/// borrows the window's Back by.
+bool get _androidPolicy {
+  final policy = PhonePlatformPolicy.current;
+  return policy.touch && !policy.drawerEdgeSwipe;
+}
+
 class _ScrollBehavior extends ScrollBehavior {
   const _ScrollBehavior();
 

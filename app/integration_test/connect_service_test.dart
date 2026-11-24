@@ -340,7 +340,8 @@ void main() {
       return now().remote.pendingDevices.isNotEmpty || other.connected.value;
     });
     for (final pending in now().remote.pendingDevices) {
-      await backend.approveDevice(pending.deviceId);
+      // The number its screen shows, as a person would type it.
+      await backend.approveDevice(pending.deviceId, pending.number);
     }
     await until(
       'the other device connected',

@@ -1,6 +1,7 @@
 import 'package:factory_app/account.dart' show signInPutOff;
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/controls.dart' show TextField, Toggle;
+import 'package:factory_app/loopback_forward.dart' show linkLauncher;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/secrets.dart';
@@ -616,8 +617,8 @@ void main() {
     );
   });
 
-  testWidgets("a request like none of the person's secrets: New secret, filled "
-      'in from it', (tester) async {
+  testWidgets("a request like none of the person's secrets: the card is the "
+      'form, filled in from it (#360 K2)', (tester) async {
     final harness = Harness(_workspace());
     final request = resend();
     await _show(tester, harness, SecretRequestCard(request));
@@ -632,7 +633,7 @@ void main() {
     await tester.tap(find.text('Add and give to June'));
     await tester.pump();
     expect(find.text('Enter a value for each variable.'), findsOneWidget);
-    await tester.enterText(field('Paste the value'), 're_123456789');
+    await tester.enterText(field('Paste it here'), 're_123456789');
     await tester.enterText(find.byType(EditableText).first, 'Resend mail');
     await tester.tap(find.text('Add and give to June'));
     await pumpFrames(tester);
@@ -658,6 +659,7 @@ void main() {
           ..state = SecretRequestState.SECRET_REQUEST_STATE_GRANTED
           ..givenSecretId = 's9'
           ..givenSecretName = 'Resend mail'
+          ..added = true
           ..decidedMs = Int64(
             DateTime(2026, 11, 20, 14, 2).millisecondsSinceEpoch,
           ),
@@ -666,7 +668,7 @@ void main() {
     expect(find.text('Add and give to June'), findsNothing);
     expect(find.text('Add a comment'), findsNothing);
     expect(
-      find.textContaining('Gave Resend mail to June · ', findRichText: true),
+      find.textContaining('Added and given to June · ', findRichText: true),
       findsOneWidget,
     );
   });
@@ -676,7 +678,7 @@ void main() {
     final semantics = tester.ensureSemantics();
     final harness = Harness(_workspace());
     await _show(tester, harness, SecretRequestCard(resend()));
-    await tester.enterText(field('Paste the value'), 're_123456789');
+    await tester.enterText(field('Paste it here'), 're_123456789');
     await tester.tap(find.text('Add a comment'));
     await tester.pump();
     await tester.enterText(field(_comment), 'Not yet');
@@ -698,13 +700,15 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('a request like one of them: Your secrets, picked, Give it', (
+  testWidgets('a secret that fits, as Claktory found it: Give it (#360 K4)', (
     tester,
   ) async {
     final harness = Harness(_workspace());
     final request = resend()
       ..newSecret.name = 'AWS deploy'
-      ..secretName = 'AWS deploy';
+      ..secretName = 'AWS deploy'
+      ..fittingSecretId = 's1'
+      ..fittingSecretName = 'AWS';
     await _show(tester, harness, SecretRequestCard(request));
     expect(
       find.text(
@@ -735,6 +739,8 @@ void main() {
       variables: [SecretVariable(name: 'CLOUDFLARE_API_TOKEN')],
     ),
     state: SecretRequestState.SECRET_REQUEST_STATE_PENDING,
+    fittingSecretId: 'cf',
+    fittingSecretName: 'CF_CLAKTORY_DNS',
   );
 
   Workspace dns() => _workspace(
@@ -818,6 +824,7 @@ void main() {
       harness,
       SecretRequestCard(
         resend()
+          ..fittingSecretId = 'aws'
           ..newSecret.name = 'AWS deploy'
           ..newSecret.variables.clear()
           ..newSecret.variables.addAll([
@@ -934,21 +941,19 @@ void main() {
   group('with an admin agent to pass it to', () {
     SecretRequest approval() => resend()..adminAgentId = 'mike';
 
-    testWidgets('the need is approved, not matched: Approve passes it on', (
-      tester,
-    ) async {
+    testWidgets('nothing fits: the form, no Approve; Let Mike choose is under '
+        'Give one of yours… (#360 K2, K4)', (tester) async {
       final harness = Harness(_workspace());
       await _show(tester, harness, SecretRequestCard(approval()));
       expect(find.text('June needs a secret: Resend'), findsOneWidget);
-      expect(find.text('Sets RESEND_API_KEY'), findsOneWidget);
-      expect(
-        find.text('Mike finds the right one, or asks you to add it.'),
-        findsOneWidget,
-      );
-      // No matching on this card.
+      expect(find.text('Approve'), findsNothing);
       expect(find.text('Your secrets'), findsNothing);
-      expect(find.text('Paste the value'), findsNothing);
-      await tester.tap(find.text('Approve'));
+      expect(find.text('Add and give to June'), findsOneWidget);
+      expect(field('Paste it here'), findsOneWidget);
+      await tester.tap(find.text('Give one of yours…'));
+      await pumpFrames(tester);
+      expect(find.text('Add a new one'), findsNothing, reason: 'it is one');
+      await tester.tap(find.text('Let Mike choose'));
       await pumpFrames(tester);
       final decided = _sent(
         harness,
@@ -960,35 +965,40 @@ void main() {
       expect(decided.entries, isEmpty);
     });
 
-    testWidgets('approved, it says who is on it and keeps Dismiss and the '
-        'direct way', (tester) async {
-      final harness = Harness(_workspace());
+    testWidgets('one fits: Give it; Give another… for the others, a new one '
+        'or Mike\'s choice', (tester) async {
+      final harness = Harness(
+        _workspace(
+          secrets: [
+            _aws(),
+            SecretInfo(
+              id: 's2',
+              name: 'Resend old',
+              variables: [SecretVariable(name: 'RESEND_API_KEY')],
+            ),
+          ],
+        ),
+      );
       await _show(
         tester,
         harness,
         SecretRequestCard(
           approval()
-            ..state = SecretRequestState.SECRET_REQUEST_STATE_APPROVED
-            ..approvedMs = Int64(1000),
+            ..fittingSecretId = 's2'
+            ..fittingSecretName = 'Resend old',
         ),
       );
-      expect(find.text('Approved. Mike is finding it.'), findsOneWidget);
-      expect(find.text('Approve'), findsNothing);
-      expect(find.text('Dismiss'), findsOneWidget);
-      expect(find.text('Choose a secret…'), findsOneWidget);
-    });
-
-    testWidgets("Choose a secret… gives one directly, in a dialog that "
-        'closes once given', (tester) async {
-      final harness = Harness(_workspace());
-      await _show(tester, harness, SecretRequestCard(approval()));
-      await tester.tap(find.text('Choose a secret…'));
+      expect(find.text('Give Resend old to June'), findsOneWidget);
+      expect(find.text('Sets RESEND_API_KEY'), findsOneWidget);
+      expect(field('Paste it here'), findsNothing);
+      await tester.tap(find.text('Give another…'));
       await pumpFrames(tester);
-      expect(find.text('Choose a secret for June'), findsOneWidget);
-      expect(find.text('Your secrets'), findsOneWidget);
-      await tester.tap(find.text('Your secrets'));
+      expect(find.text('Let Mike choose'), findsOneWidget);
+      expect(find.text('Resend old'), findsNothing, reason: 'on the button');
+      await tester.tap(find.text('Add a new one'));
       await pumpFrames(tester);
-      await tester.tap(find.text('Choose a secret'));
+      expect(find.text('Add and give to June'), findsOneWidget);
+      await tester.tap(find.text('Give one of yours…'));
       await pumpFrames(tester);
       await tester.tap(find.text('AWS').last);
       await pumpFrames(tester);
@@ -1000,7 +1010,156 @@ void main() {
       ).single.decideSecretRequest;
       expect(decided.secretId, 's1');
       expect(decided.approveOnly, isFalse);
-      expect(find.text('Choose a secret for June'), findsNothing);
+    });
+
+    testWidgets('a connected service that can make it: Approve, and Mike makes '
+        'one, as before', (tester) async {
+      final harness = Harness(
+        _workspace(
+          secrets: [
+            SecretInfo(
+              id: 'cfc',
+              name: 'Cloudflare',
+              connection: SecretConnection(connectorId: 'cloudflare'),
+            ),
+          ],
+        ),
+      );
+      await _show(
+        tester,
+        harness,
+        SecretRequestCard(
+          approval()
+            ..fittingSecretId = 'cfc'
+            ..fittingSecretName = 'Cloudflare',
+        ),
+      );
+      expect(
+        find.text('Mike finds the right one, or asks you to add it.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Approve'));
+      await pumpFrames(tester);
+      expect(
+        _sent(
+          harness,
+          (m) => m.hasDecideSecretRequest(),
+        ).single.decideSecretRequest.approveOnly,
+        isTrue,
+      );
+    });
+
+    for (final (name, admin, line) in [
+      (
+        'idle',
+        Agent(id: 'mike', name: 'Mike'),
+        'Approved. Mike is finding it.',
+      ),
+      (
+        'working',
+        Agent(
+          id: 'mike',
+          name: 'Mike',
+          status: AgentStatus.AGENT_STATUS_WORKING,
+        ),
+        "Mike will do this when it finishes what it's doing.",
+      ),
+      (
+        'waiting for usage',
+        Agent(
+          id: 'mike',
+          name: 'Mike',
+          status: AgentStatus.AGENT_STATUS_WORKING,
+          usageWait: 'Waiting for your Claude usage to reset',
+        ),
+        'Mike is waiting for your Claude usage to reset.',
+      ),
+    ]) {
+      testWidgets('approved, with Mike $name: says so, and Do it here opens '
+          'the form (#360 K5)', (tester) async {
+        final workspace = _workspace();
+        workspace.agents[1] = admin;
+        final harness = Harness(workspace);
+        await _show(
+          tester,
+          harness,
+          SecretRequestCard(
+            approval()
+              ..state = SecretRequestState.SECRET_REQUEST_STATE_APPROVED
+              ..approvedMs = Int64(1000),
+          ),
+        );
+        expect(find.text(line), findsOneWidget);
+        expect(find.text('Approve'), findsNothing);
+        expect(find.text('Dismiss'), findsOneWidget);
+        expect(field('Paste it here'), findsNothing);
+        await tester.tap(find.text('Do it here'));
+        await pumpFrames(tester);
+        await tester.enterText(field('Paste it here'), 're_1');
+        await tester.tap(find.text('Add and give to June'));
+        await pumpFrames(tester);
+        final decided = _sent(
+          harness,
+          (m) => m.hasDecideSecretRequest(),
+        ).single.decideSecretRequest;
+        expect(decided.approveOnly, isFalse);
+        expect(decided.entries.single.value, 're_1');
+      });
+    }
+
+    testWidgets("the agent's link: Get it on its host, its steps quoted as "
+        "the agent's; never a link that isn't https (#360 K3)", (tester) async {
+      final opened = <Uri>[];
+      linkLauncher = (url) async {
+        opened.add(url);
+        return true;
+      };
+      addTearDown(() => linkLauncher = null);
+      final harness = Harness(_workspace(secrets: []));
+      const link =
+          'https://github.com/settings/tokens/new?scopes=repo&description=June';
+      await _show(
+        tester,
+        harness,
+        SecretRequestCard(
+          approval()
+            ..link = link
+            ..linkHost = 'github.com'
+            ..steps = 'Tick repo, then Generate.',
+        ),
+      );
+      expect(find.text('June: “Tick repo, then Generate.”'), findsOneWidget);
+      await tester.tap(find.text('Get it on github.com'));
+      await pumpFrames(tester);
+      expect(opened, [Uri.parse(link)]);
+
+      await tester.pumpWidget(const SizedBox());
+      await _show(
+        tester,
+        harness,
+        SecretRequestCard(
+          approval()
+            ..link = 'http://github.com/settings/tokens/new'
+            ..linkHost = 'github.com',
+        ),
+      );
+      expect(find.textContaining('Get it on'), findsNothing);
+    });
+
+    test("a link goes only where its button says (Fugo)", () {
+      bool opens(String link, String host) =>
+          opensLink(SecretRequest(link: link, linkHost: host));
+      expect(
+        opens('https://github.com/settings/tokens/new', 'github.com'),
+        isTrue,
+      );
+      expect(
+        opens('http://github.com/settings/tokens/new', 'github.com'),
+        isFalse,
+      );
+      expect(opens('https://evil.example/github.com', 'github.com'), isFalse);
+      expect(opens('https://github.com/x', ''), isFalse);
+      expect(opens('', 'github.com'), isFalse);
     });
 
     testWidgets("in the admin agent's conversation, the secret it collects: "
@@ -1124,69 +1283,60 @@ void main() {
     );
   });
 
-  testWidgets('Your secrets with nothing chosen says what to do', (
-    tester,
-  ) async {
-    final harness = Harness(_workspace());
-    await _show(tester, harness, SecretRequestCard(resend()));
-    await tester.tap(find.text('Your secrets'));
-    await tester.pump();
-    expect(find.text('Choose a secret'), findsOneWidget);
-    await tester.tap(find.text('Give'));
-    await tester.pump();
-    expect(find.text('Choose a secret, or add a new one.'), findsOneWidget);
-    expect(_sent(harness, (m) => m.hasDecideSecretRequest()), isEmpty);
-    await tester.tap(find.text('Choose a secret'));
-    await pumpFrames(tester);
-    await tester.tap(find.text('AWS').last);
-    await pumpFrames(tester);
-    await tester.tap(find.text('Give AWS to June'));
-    await pumpFrames(tester);
-    expect(
-      _sent(
-        harness,
-        (m) => m.hasDecideSecretRequest(),
-      ).single.decideSecretRequest.secretId,
-      's1',
-    );
-  });
-
-  testWidgets("no secrets: Your secrets says so, and it starts on New secret", (
-    tester,
-  ) async {
+  testWidgets('no secrets: the form, and nothing else to give', (tester) async {
     final harness = Harness(_workspace(secrets: []));
     await _show(tester, harness, SecretRequestCard(resend()));
     expect(find.text('Add and give to June'), findsOneWidget);
-    await tester.tap(find.text('Your secrets'));
-    await tester.pump();
-    expect(
-      find.text("You don't have any secrets yet. Add one under New secret."),
-      findsOneWidget,
-    );
+    expect(find.text('Give one of yours…'), findsNothing);
+    expect(find.text('Your secrets'), findsNothing);
   });
 
-  testWidgets('a note goes to the agent with the secret given', (tester) async {
+  testWidgets('a typed comment: one Submit, a reply that gives nothing '
+      '(#370)', (tester) async {
     final harness = Harness(_workspace());
     await _show(tester, harness, SecretRequestCard(resend()));
-    await tester.enterText(field('Paste the value'), 're_123456789');
+    await tester.enterText(field('Paste it here'), 're_123456789');
     await tester.tap(find.text('Add a comment'));
     await tester.pump();
-    await tester.enterText(field(_comment), 'Check the sender domain first.');
-    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.enterText(field(_comment), ' Use the test account. ');
     await pumpFrames(tester);
+    expect(find.text('Add and give to June'), findsNothing);
+    expect(find.text('Give one of yours…'), findsNothing);
+    expect(find.text('Dismiss'), findsNothing);
     expect(
-      _sent(harness, (m) => m.hasDecideSecretRequest()),
-      isEmpty,
-      reason: 'Enter in the note decides nothing',
+      find.text('Nothing is given. June gets your comment and can ask again.'),
+      findsOneWidget,
     );
-    await tester.tap(find.text('Add and give to June'));
+    await tester.ensureVisible(find.text('Submit'));
+    await tester.tap(find.text('Submit'));
     await pumpFrames(tester);
     final decided = _sent(
       harness,
       (m) => m.hasDecideSecretRequest(),
     ).single.decideSecretRequest;
-    expect(decided.approve, isTrue);
-    expect(decided.comment, 'Check the sender domain first.');
+    expect(decided.reply, isTrue);
+    // An older backend that ignores reply dismisses it.
+    expect(decided.approve, isFalse);
+    expect(decided.entries, isEmpty);
+    expect(decided.comment, 'Use the test account.');
+  });
+
+  testWidgets('Return in the comment is Submit, never Give', (tester) async {
+    final harness = Harness(_workspace());
+    await _show(tester, harness, SecretRequestCard(resend()));
+    await tester.enterText(field('Paste it here'), 're_123456789');
+    await tester.tap(find.text('Add a comment'));
+    await tester.pump();
+    await tester.enterText(field(_comment), 'Check the sender domain first.');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await pumpFrames(tester);
+    final decided = _sent(
+      harness,
+      (m) => m.hasDecideSecretRequest(),
+    ).single.decideSecretRequest;
+    expect(decided.reply, isTrue);
+    expect(decided.approve, isFalse);
+    expect(decided.entries, isEmpty);
   });
 
   SecretRequest sshKey({bool nobody = false}) => SecretRequest(
@@ -1241,9 +1391,14 @@ void main() {
     expect(tester.widget<EditableText>(name).controller.text, 'deploy-key');
     await tester.enterText(name, 'deploy-key-2');
     await tester.tap(_labeled(askEachTimeLabel));
+    // A typed comment hides Generate (#370): Submit replies instead.
     await tester.tap(find.text('Add a comment'));
     await tester.pump();
     await tester.enterText(field(_comment), 'Only main.');
+    await tester.pump();
+    expect(find.text('Generate'), findsNothing);
+    await tester.enterText(field(_comment), '');
+    await tester.pump();
     await tester.tap(find.text('Generate'));
     await pumpFrames(tester);
     final decided = _sent(
@@ -1251,9 +1406,10 @@ void main() {
       (m) => m.hasDecideSecretRequest(),
     ).single.decideSecretRequest;
     expect(decided.approve, isTrue);
+    expect(decided.reply, isFalse);
     expect(decided.name, 'deploy-key-2');
     expect(decided.askEachTime, isTrue, reason: 'turned on in the card');
-    expect(decided.comment, 'Only main.');
+    expect(decided.comment, isEmpty);
     expect(decided.entries, isEmpty);
     expect(decided.approveOnly, isFalse);
   });
@@ -1383,8 +1539,10 @@ void main() {
   testWidgets('a length chosen in the conversation stays when the card '
       'scrolls out of view and back (row 189)', (tester) async {
     final harness = Harness(_workspace());
-    Entry said(int seq) =>
-        Entry(seq: Int64(seq), user: UserText(text: 'message $seq'));
+    Entry said(int seq) => Entry(
+      seq: Int64(seq),
+      user: UserText(text: 'message $seq'),
+    );
     harness.backend.transcript.load(
       Transcript(
         agentId: 'june',
@@ -1436,8 +1594,8 @@ void main() {
     expect(decided.passwordLength, 30);
   });
 
-  testWidgets('a generated key shows to whom it went and its public key, '
-      'with Copy', (tester) async {
+  testWidgets('a generated key: to whom it went, then where to add it, with '
+      'Copy key, the link and Done (#360 K6)', (tester) async {
     final copied = <String>[];
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       SystemChannels.platform,
@@ -1472,14 +1630,59 @@ void main() {
       findsOneWidget,
     );
     expect(find.text(line), findsOneWidget);
+    expect(find.text('Next, add it where June will use it'), findsOneWidget);
+    expect(
+      find.text("June can't use the key until it's added there."),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Open '), findsNothing, reason: 'no link');
+    await tester.tap(find.text('Copy key'));
+    await tester.pump();
+    expect(copied, [line]);
+    expect(find.text('Copied'), findsOneWidget);
+    await tester.tap(find.text('Done'));
+    await pumpFrames(tester);
+    expect(
+      _sent(harness, (m) => m.hasSecretRequestDone()).single.secretRequestDone,
+      SecretRequestDone(agentId: 'june', requestId: 'r2'),
+    );
+
+    // With where it goes and a link; then done.
+    await tester.pumpWidget(const SizedBox());
+    await _show(
+      tester,
+      harness,
+      SecretRequestCard(
+        sshKey()
+          ..state = SecretRequestState.SECRET_REQUEST_STATE_GRANTED
+          ..publicKey = line
+          ..place = 'claktory/factory'
+          ..link = 'https://github.com/claktory/factory/settings/keys/new'
+          ..linkHost = 'github.com',
+      ),
+    );
+    expect(
+      find.text("Next, add it to claktory/factory's deploy keys"),
+      findsOneWidget,
+    );
+    expect(find.text('Open github.com'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    await _show(
+      tester,
+      harness,
+      SecretRequestCard(
+        sshKey()
+          ..state = SecretRequestState.SECRET_REQUEST_STATE_GRANTED
+          ..publicKey = line
+          ..doneMs = Int64(5000),
+      ),
+    );
+    expect(find.text('Done. June knows the key is in place.'), findsOneWidget);
+    expect(find.text('Next, add it where June will use it'), findsNothing);
     expect(
       find.text('Public key: safe to share, such as with GitHub or a server.'),
       findsOneWidget,
     );
-    await tester.tap(find.text('Copy'));
-    await tester.pump();
-    expect(copied, [line]);
-    expect(find.text('Copied'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox());
     await _show(
@@ -1551,8 +1754,8 @@ void main() {
       find.byWidgetPredicate((w) => w is Toggle && w.label == label),
     );
 
-    testWidgets('each file in full, to no one and nothing deleted unless '
-        'turned on, then Import', (tester) async {
+    testWidgets('each file in full, nothing deleted unless turned on, then '
+        'Import only (#360 K7)', (tester) async {
       final harness = Harness(_workspace());
       await _show(tester, harness, SecretRequestCard(importing()));
       expect(find.text('June asks to import 2 files'), findsOneWidget);
@@ -1575,13 +1778,13 @@ void main() {
       ]) {
         expect(find.text(gone), findsNothing, reason: gone);
       }
-      expect(toggle(tester, 'Give it to June').value, isFalse);
+      expect(find.text('Import and give to June'), findsOneWidget);
       expect(
         toggle(tester, 'Delete the originals after they’re imported').value,
         isFalse,
       );
       expect(toggle(tester, askEachTimeLabel).value, isFalse);
-      await tester.tap(find.text('Import'));
+      await tester.tap(find.text('Import only'));
       await pumpFrames(tester);
       final decided = _sent(
         harness,
@@ -1595,24 +1798,13 @@ void main() {
       expect(decided.approveOnly, isFalse);
     });
 
-    testWidgets('given to June and the originals deleted when turned on', (
-      tester,
-    ) async {
+    testWidgets('Import and give to June, the originals deleted when turned '
+        'on', (tester) async {
       final harness = Harness(_workspace());
       await _show(tester, harness, SecretRequestCard(importing()));
-      await tester.tap(_labeled('Give it to June'));
-      await tester.tap(
-        _labeled('Delete the originals after they’re imported'),
-      );
+      await tester.tap(_labeled('Delete the originals after they’re imported'));
       await tester.pump();
-      expect(
-        find.text(
-          'No one sees the contents here. June can use them in '
-          'commands.',
-        ),
-        findsOneWidget,
-      );
-      await tester.tap(find.text('Import'));
+      await tester.tap(find.text('Import and give to June'));
       await pumpFrames(tester);
       final decided = _sent(
         harness,
@@ -1646,6 +1838,35 @@ void main() {
       );
     });
 
+    testWidgets('asked to go to no one: Import only, never a way to give it', (
+      tester,
+    ) async {
+      final harness = Harness(_workspace());
+      await _show(
+        tester,
+        harness,
+        SecretRequestCard(importing()..grantToNobody = true),
+      );
+      expect(find.text('Import and give to June'), findsNothing);
+      // Never says it's given (Abbacchio's row 730).
+      expect(find.textContaining('Given to June'), findsNothing);
+      expect(
+        find.text(
+          "No one sees what's in it. No agent gets it until you give it to one.",
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Import only'));
+      await pumpFrames(tester);
+      expect(
+        _sent(
+          harness,
+          (m) => m.hasDecideSecretRequest(),
+        ).single.decideSecretRequest.grantToAsker,
+        isFalse,
+      );
+    });
+
     testWidgets("a file that can't be imported says why, and Import is off", (
       tester,
     ) async {
@@ -1657,7 +1878,8 @@ void main() {
       );
       expect(find.text('It changed since June asked.'), findsOneWidget);
       expect(find.text("It can't be imported as it is."), findsOneWidget);
-      await tester.tap(find.text('Import'));
+      await tester.tap(find.text('Import only'));
+      await tester.tap(find.text('Import and give to June'));
       await pumpFrames(tester);
       expect(_sent(harness, (m) => m.hasDecideSecretRequest()), isEmpty);
     });
@@ -1671,14 +1893,14 @@ void main() {
           importing(state: SecretRequestState.SECRET_REQUEST_STATE_GENERATED),
         ),
       );
-      expect(find.text('Imported, given to no one'), findsOneWidget);
+      expect(find.text('Imported. No agent has it yet'), findsOneWidget);
       expect(
         find.text(
           '/Users/me/keys/release.p12 · 4.1 KB · fingerprint 3f9a 21c0 7d44',
         ),
         findsOneWidget,
       );
-      expect(find.text('Import'), findsNothing);
+      expect(find.text('Import only'), findsNothing);
     });
 
     testWidgets('a file changed since: the refusal shows, and it can be '
@@ -1688,11 +1910,11 @@ void main() {
       harness.backend.refuse =
           '/Users/me/keys/release.p12 changed since it was asked for, so it '
           "wasn't imported. Ask for it again.";
-      await tester.tap(find.text('Import'));
+      await tester.tap(find.text('Import and give to June'));
       await pumpFrames(tester);
       expect(find.textContaining("so it wasn't imported"), findsOneWidget);
       harness.backend.refuse = null;
-      await tester.tap(find.text('Import'));
+      await tester.tap(find.text('Import and give to June'));
       await pumpFrames(tester);
       expect(_sent(harness, (m) => m.hasDecideSecretRequest()), hasLength(2));
     });
@@ -1707,15 +1929,11 @@ void main() {
     });
   });
 
-  testWidgets('Dismiss tells the agent why, and the card shows it', (
-    tester,
-  ) async {
+  testWidgets('Dismiss dismisses, and the card shows a comment from '
+      'before, or Replied for a reply', (tester) async {
     final harness = Harness(_workspace());
     final request = resend();
     await _show(tester, harness, SecretRequestCard(request));
-    await tester.tap(find.text('Add a comment'));
-    await tester.pump();
-    await tester.enterText(field(_comment), 'Use the test account.');
     await tester.tap(find.text('Dismiss'));
     await pumpFrames(tester);
     final decided = _sent(
@@ -1723,7 +1941,8 @@ void main() {
       (m) => m.hasDecideSecretRequest(),
     ).single.decideSecretRequest;
     expect(decided.approve, isFalse);
-    expect(decided.comment, 'Use the test account.');
+    expect(decided.reply, isFalse);
+    expect(decided.comment, isEmpty);
 
     await tester.pumpWidget(const SizedBox());
     await _show(
@@ -1742,6 +1961,27 @@ void main() {
       find.textContaining('Dismissed · ', findRichText: true),
       findsOneWidget,
     );
+    expect(find.text('“Use the test account.”'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    await _show(
+      tester,
+      harness,
+      SecretRequestCard(
+        request.deepCopy()
+          ..state = SecretRequestState.SECRET_REQUEST_STATE_DISMISSED
+          ..replied = true
+          ..comment = 'Use the test account.'
+          ..decidedMs = Int64(
+            DateTime(2026, 11, 20, 14, 2).millisecondsSinceEpoch,
+          ),
+      ),
+    );
+    expect(
+      find.textContaining('Replied · ', findRichText: true),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Dismissed'), findsNothing);
     expect(find.text('“Use the test account.”'), findsOneWidget);
   });
 

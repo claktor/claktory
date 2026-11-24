@@ -259,6 +259,8 @@ void main() {
     await _stream(tester, store, 299, 10);
   });
 
+  // A Mac window keeps its composition at 600; an Android window this
+  // narrow takes the phone's layout instead.
   testWidgets('scrolled up, a resize keeps what was shown on screen', (
     tester,
   ) async {
@@ -277,7 +279,7 @@ void main() {
     expect(position.pixels, greaterThan(position.minScrollExtent + 1000));
     expect(position.pixels, lessThan(position.maxScrollExtent - 1000));
     expect(pixels, isNot(position.minScrollExtent));
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
   testWidgets('scrolled up, a button at the bottom right goes back down, '
       'saying how many replies came in; there, following resumes', (

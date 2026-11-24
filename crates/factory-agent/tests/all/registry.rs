@@ -102,6 +102,7 @@ fn fake_provider(oauth: Option<Arc<dyn OAuthFlow>>, api: Option<Arc<dyn Api>>) -
         identity: None,
         reset: None,
         check_key: None,
+        credit: None,
     }
 }
 
@@ -399,6 +400,7 @@ async fn a_cancelled_login_reports_the_abort_signal_text() {
         identity: None,
         reset: None,
         check_key: None,
+        credit: None,
     };
     let registry = Registry::with_providers(FileCredentialStore::new(dir.path().join("auth.json")), env(&[]), vec![provider]);
     let waiting = Waiting { cancel: CancellationToken::new() };

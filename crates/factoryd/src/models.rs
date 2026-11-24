@@ -83,11 +83,42 @@ pub trait Models: Send + Sync {
     fn plan<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<String, Error>> {
         Box::pin(async { Ok(String::new()) })
     }
+    /// Whether the provider says what its keys have to spend (`account_credit`).
+    fn reads_credit(&self, _provider: &str) -> bool {
+        false
+    }
+    /// Reads what one of the provider's keys (`provider.accounts`' id;
+    /// empty: its first) has to spend, as the provider says; None when it
+    /// can't say (`crate::credit`).
+    fn account_credit<'a>(
+        &'a self,
+        _provider: &'a str,
+        _account: &'a str,
+    ) -> BoxFuture<'a, Result<Option<factory_agent::providers::keys::KeyCredit>, Error>> {
+        Box::pin(async { Ok(None) })
+    }
     /// Forgets that one of the provider's accounts (empty: all of them) is
     /// at its usage limits or out of credit, so the next request asks the
     /// provider itself again: for when usage may be back without a sign-in
     /// changing. True when any account was marked.
     fn forget_spent<'a>(&'a self, _provider: &'a str, _account: &'a str) -> BoxFuture<'a, Result<bool, Error>> {
+        Box::pin(async { Ok(false) })
+    }
+    /// Whether a request for `model` ("anthropic/claude-opus-4-8") would go
+    /// to one of its provider's accounts now, judged by the model's own
+    /// limits (an Opus-only one, say). False with no accounts listed.
+    fn room_for<'a>(&'a self, _model: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+    /// `forget_spent` for one account by its usage read: the marks of the
+    /// pools whose limits aren't among `full` (the windows at 100%), so a
+    /// model's own weekly limit doesn't hold the others back.
+    fn forget_spent_with_room<'a>(
+        &'a self,
+        _provider: &'a str,
+        _account: &'a str,
+        _full: &'a [String],
+    ) -> BoxFuture<'a, Result<bool, Error>> {
         Box::pin(async { Ok(false) })
     }
     /// The file its sign-ins are kept in, `auth.json`; None when they're
@@ -107,6 +138,62 @@ pub trait Models: Send + Sync {
     fn sign_ins_locked<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, bool> {
         Box::pin(async { false })
     }
+    /// Whether the provider's model list is read from the provider itself
+    /// (`crate::catalog`): at its own address, not a scripted one.
+    fn fetches_models(&self, _provider: &str) -> bool {
+        false
+    }
+    /// Reads the provider's model list from the provider, as it came; None
+    /// when there's none to read (not signed in, or a scripted provider).
+    fn fetch_models<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+    /// Takes a model list `fetch_models` brought, checked whole, in place of
+    /// the bundled one: whether the provider's models changed. One that
+    /// fails its checks changes nothing.
+    fn take_models(&self, _provider: &str, _body: &[u8]) -> Result<bool, String> {
+        Ok(false)
+    }
+    /// Asks the provider whether it has the model `model` (its own id) for
+    /// this sign-in and an agent can run on it: the model to add, as kept
+    /// (`add_model`), or why not in a sentence to show. None when it can't
+    /// be asked here.
+    fn check_model<'a>(&'a self, _provider: &'a str, _model: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+    /// Adds a model `check_model` found (or kept from before) to the
+    /// provider's list; whether it's new.
+    fn add_model(&self, _provider: &str, _model: &[u8]) -> Result<bool, String> {
+        Ok(false)
+    }
+    /// When a request next tries one of the provider's keys out of credit
+    /// again by itself, in ms since 1970; None when none is out of credit.
+    fn credit_retry_at<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, Option<u64>> {
+        Box::pin(async { None })
+    }
+
+    /// Deletes at the provider the files of the images of `digests`, which
+    /// a conversation let go of (#382: Anthropic's).
+    fn forget_images(&self, _digests: Vec<String>) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+}
+
+/// The digests of the images in `messages` that may have gone to a
+/// provider as files (#382).
+pub(crate) fn image_digests(messages: &[factory_agent::types::Message]) -> std::collections::HashSet<String> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            factory_agent::types::Message::ToolResult(result) => Some(&result.content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|part| match part {
+            factory_agent::ToolResultPart::Image { digest, .. } => digest.clone(),
+            factory_agent::ToolResultPart::Text { .. } => None,
+        })
+        .collect()
 }
 
 /// An account id as `Registry` takes it: None for the first.
@@ -117,6 +204,30 @@ fn account_arg(account: &str) -> Option<&str> {
 pub use factory_agent::Registry;
 
 impl Models for Registry {
+    fn fetches_models(&self, provider: &str) -> bool {
+        Registry::fetches_models(self, provider)
+    }
+
+    fn fetch_models<'a>(&'a self, provider: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+        Box::pin(Registry::fetch_models(self, provider))
+    }
+
+    fn take_models(&self, provider: &str, body: &[u8]) -> Result<bool, String> {
+        Registry::take_models(self, provider, body)
+    }
+
+    fn check_model<'a>(&'a self, provider: &'a str, model: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+        Box::pin(async move {
+            let Some(model) = Registry::check_model(self, provider, model).await? else { return Ok(None) };
+            serde_json::to_vec(&model).map(Some).map_err(|error| error.to_string())
+        })
+    }
+
+    fn add_model(&self, provider: &str, model: &[u8]) -> Result<bool, String> {
+        let model: Model = serde_json::from_slice(model).map_err(|error| format!("a kept model can't be read: {error}"))?;
+        Ok(Registry::add_model(self, provider, model))
+    }
+
     fn list(&self) -> BoxFuture<'_, Vec<v1::Model>> {
         Box::pin(async move {
             let available = match self.models().await {
@@ -138,6 +249,7 @@ impl Models for Registry {
                     context_window: model.context_window,
                     efforts,
                     image_input: model.image_input,
+                    added: model.added,
                 });
             }
             models
@@ -203,6 +315,9 @@ impl Models for Registry {
                         out_of_credit: account.out_of_credit,
                         method_id: account.kind.to_owned(),
                         sign_in_again: account.sign_in_again,
+                        credit: None,
+                        fable_exhausted_until: i64::try_from(account.fable_exhausted_until).unwrap_or(0),
+                        fable_in_use: account.fable_in_use,
                     });
                 }
                 providers.push(v1::Provider {
@@ -217,6 +332,9 @@ impl Models for Registry {
                     cache_ttl: String::new(),
                     cache_lifetime: String::new(),
                     cache_ttl_choices: Vec::new(),
+                    agents: 0,
+                    // Filled in by the Workspace (`crate::catalog`).
+                    ..Default::default()
                 });
             }
             providers
@@ -264,6 +382,18 @@ impl Models for Registry {
         retry: bool,
     ) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(Registry::update_account(self, provider, account, label, retry))
+    }
+
+    fn reads_credit(&self, provider: &str) -> bool {
+        Registry::reads_credit(self, provider)
+    }
+
+    fn account_credit<'a>(
+        &'a self,
+        provider: &'a str,
+        account: &'a str,
+    ) -> BoxFuture<'a, Result<Option<factory_agent::providers::keys::KeyCredit>, Error>> {
+        Box::pin(Registry::account_credit(self, provider, account))
     }
 
     fn usage<'a>(&'a self, provider: &'a str, account: &'a str) -> BoxFuture<'a, Result<Option<v1::ProviderUsage>, Error>> {
@@ -331,6 +461,17 @@ impl Models for Registry {
         Box::pin(Registry::forget_spent(self, provider, account_arg(account)))
     }
 
+    fn room_for<'a>(&'a self, model: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            let Some((provider, id)) = model.split_once('/') else { return false };
+            Registry::room_for(self, provider, id).await
+        })
+    }
+
+    fn forget_spent_with_room<'a>(&'a self, provider: &'a str, account: &'a str, full: &'a [String]) -> BoxFuture<'a, Result<bool, Error>> {
+        Box::pin(Registry::forget_spent_with_room(self, provider, account_arg(account), full))
+    }
+
     fn auth_path(&self) -> Option<PathBuf> {
         Some(Registry::auth_path(self).to_path_buf())
     }
@@ -345,5 +486,18 @@ impl Models for Registry {
 
     fn sign_ins_locked<'a>(&'a self, provider: &'a str) -> BoxFuture<'a, bool> {
         Box::pin(self.is_locked(provider))
+    }
+
+    fn forget_images(&self, digests: Vec<String>) -> BoxFuture<'_, ()> {
+        Box::pin(async move { Registry::forget_images(self, &digests).await })
+    }
+
+    fn credit_retry_at<'a>(&'a self, provider: &'a str) -> BoxFuture<'a, Option<u64>> {
+        Box::pin(async move {
+            Registry::credit_retry_at(self, provider).await.unwrap_or_else(|error| {
+                tracing::warn!(%provider, %error, "could not read when a key out of credit is tried again");
+                None
+            })
+        })
     }
 }

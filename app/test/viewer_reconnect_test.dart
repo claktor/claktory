@@ -1,6 +1,6 @@
 // A viewer opened before the window's Claktory is connected (an iPad or
 // iPhone opened cold over the tunnel, a Mac starting up) reads its file
-// again once it connects, rather than saying "Not connected" for good;
+// again once it connects, saying meanwhile that it waits for it;
 // and only on connecting, not on every word from the connection.
 import 'package:flutter_test/flutter_test.dart';
 
@@ -16,7 +16,14 @@ void main() {
     harness.backend.refuse = 'Not connected to the backend.';
     await harness.show(tester);
     await settle(tester);
-    expect(find.text('Not connected to the backend.'), findsOneWidget);
+    // It waits for the connection, rather than saying it failed (#375).
+    expect(find.text('Not connected to the backend.'), findsNothing);
+    expect(
+      find.text(
+        "Waiting for the connection. It carries on from here when it's back.",
+      ),
+      findsOneWidget,
+    );
     expect(find.text('fn main() {}'), findsNothing);
 
     harness.backend.refuse = null;

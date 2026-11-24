@@ -79,8 +79,10 @@ void main() {
     final harness = Harness(workspace()..selectedAgentId = '');
     await harness.show(tester, size: const Size(390, 844));
     await settle(tester);
+    // The hold picks the row up to move it; let go where it was, the menu
+    // slides in.
     await tester.longPress(find.text('Site'));
-    await settle(tester);
+    await pumpFrames(tester);
     await tester.tap(find.text('Project settings'));
     await settle(tester);
     expect(find.byType(ProjectSettingsForm), findsOneWidget);

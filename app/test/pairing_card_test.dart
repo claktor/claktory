@@ -1,5 +1,6 @@
 import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/devices.dart' show QrCode;
+import 'package:factory_app/pairing.dart' show DeviceNumberField;
 import 'package:factory_app/pairing_card.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
@@ -236,17 +237,40 @@ void main() {
       _pairing(DevicePairingState.DEVICE_PAIRING_STATE_ASKING),
     );
     expect(find.text('Copy code'), findsNothing);
+    // Typed off its screen, never shown here (#352 P4).
     expect(
       find.text(
-        'Laptop used the code. Allow it only if its screen shows the '
-        'same number.',
+        'Laptop used the code. To allow it, type the number its screen '
+        'shows.',
       ),
       findsOneWidget,
     );
-    expect(find.text('0427'), findsOneWidget);
-    await tester.tap(find.text('Allow'));
+    expect(find.text('0427'), findsNothing);
+    final allow = find.widgetWithText(Button, 'Allow');
+    expect(tester.widget<Button>(allow).onPressed, isNull);
+    await tester.enterText(_numberField, '04x2');
+    await pumpFrames(tester);
+    expect(tester.widget<Button>(allow).onPressed, isNull, reason: '3 digits');
+    // A wrong number: the backend's words, and typed again.
+    harness.backend.refuse =
+        "That's not the number Laptop shows. 2 tries left.";
+    await tester.enterText(_numberField, '0428');
+    await pumpFrames(tester);
+    await tester.tap(allow);
+    await pumpFrames(tester);
+    expect(harness.last.approveDevice.number, '0428');
+    expect(
+      find.text("That's not the number Laptop shows. 2 tries left."),
+      findsOneWidget,
+    );
+    expect(tester.widget<Button>(allow).onPressed, isNull, reason: 'cleared');
+    harness.backend.refuse = null;
+    await tester.enterText(_numberField, '0427');
+    await pumpFrames(tester);
+    await tester.tap(allow);
     await pumpFrames(tester);
     expect(harness.last.approveDevice.deviceId, 'd9');
+    expect(harness.last.approveDevice.number, '0427');
 
     await _becomes(
       tester,
@@ -346,3 +370,9 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 }
+
+/// The field the number is typed in.
+Finder get _numberField => find.descendant(
+  of: find.byType(DeviceNumberField),
+  matching: find.byType(EditableText),
+);

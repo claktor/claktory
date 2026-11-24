@@ -120,8 +120,13 @@ fn home(service: &Service, call: &Call, notice: Option<&str>, grants: Option<&ap
         let unlocks = if unlocks.is_empty() {
             "<p class=\"muted\">No unlocks in the last 30 days.</p>".to_owned()
         } else {
-            let items: String =
-                unlocks.iter().map(|(time, ip)| format!("<li>{} from {}</li>", escape(&format_time(*time)), escape(ip))).collect();
+            let items: String = unlocks
+                .iter()
+                .map(|(time, ip, mailed)| {
+                    let mailed = if *mailed { " <span class=\"muted\">· emailed you</span>" } else { "" };
+                    format!("<li>{} from {}{mailed}</li>", escape(&format_time(*time)), escape(ip))
+                })
+                .collect();
             format!("<p class=\"muted\">Unlocked its secrets after a restart:</p><ul>{items}</ul>")
         };
         let sent = sent(&conn, claktory, service.now());

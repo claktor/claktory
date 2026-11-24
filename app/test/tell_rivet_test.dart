@@ -1,9 +1,11 @@
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/tell_rivet.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/widgets.dart' show Size;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+import 'phone_sizes_test.dart' show loadGeist;
 import 'rivet_test.dart' show admin, box, selecting, snapshot;
 
 const _broken = 'config.json line 3: expected `,` or `}`';
@@ -129,5 +131,93 @@ void main() {
         about: 'Updating to Claktory 2026.11.18-1700 was undone.',
       ),
     );
+  });
+
+  group('while Rivet waits out a usage limit (U5)', () {
+    const said = 'Waiting for your Claude usage to reset at Fri 18:57';
+    Agent waiting({bool alternative = true}) {
+      final rivet = admin()
+        ..status = AgentStatus.AGENT_STATUS_WORKING
+        ..usageWait = said
+        ..usageWaitNoOtherProvider = !alternative;
+      if (alternative) {
+        rivet.usageWaitAlternative = UsageWaitAlternative(
+          providerName: 'OpenRouter',
+          modelName: 'Claude Opus 4.8',
+          sameModel: true,
+        );
+      }
+      return rivet;
+    }
+
+    List<Agent> agents({bool alternative = true}) => [
+      waiting(alternative: alternative),
+      Agent(id: 'a1', projectId: 'p1', name: 'Builder', modelAvailable: true),
+    ];
+    testWidgets("a broken settings file says Rivet's wait, without Ask "
+        'Rivet to fix, and without Continue on OpenRouter, which would '
+        'change the broken file', (tester) async {
+      await tester.runAsync(loadGeist);
+      final harness = selecting(broken(agents: agents()));
+      await harness.show(tester, size: const Size(1200, 800));
+      await openConfigError(tester);
+      expect(find.text('Ask Rivet to fix'), findsNothing);
+      expect(
+        find.text(
+          'Rivet is waiting for your Claude usage to reset at Fri 18:57',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Continue on OpenRouter'), findsNothing);
+      expect(find.text('Restore last working settings'), findsOneWidget);
+      expect(
+        harness.backend.sent.where((m) => m.hasContinueOnAlternative()),
+        isEmpty,
+      );
+    });
+
+    testWidgets('with no other provider, Sign in… instead', (tester) async {
+      await selecting(broken(agents: agents(alternative: false))).show(tester);
+      await openConfigError(tester);
+      expect(find.text('Sign in…'), findsOneWidget);
+      expect(find.text('Continue on OpenRouter'), findsNothing);
+      expect(find.text('Ask Rivet to fix'), findsNothing);
+    });
+
+    testWidgets("an error line's link becomes the wait, with its own link", (
+      tester,
+    ) async {
+      final harness = selecting(snapshot(selected: 'a1', agents: agents()));
+      harness.backend.transcript.load(
+        Transcript(
+          agentId: 'a1',
+          entries: [
+            Entry(
+              seq: Int64(1),
+              notice: Notice(
+                level: NoticeLevel.NOTICE_LEVEL_ERROR,
+                text: 'The model refused: 529 overloaded',
+              ),
+            ),
+          ],
+        ),
+      );
+      await harness.show(tester);
+      expect(find.text('Ask Rivet to fix'), findsNothing);
+      expect(
+        find.text(
+          'Rivet is waiting for your Claude usage to reset at Fri 18:57',
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Continue on OpenRouter'));
+      await settle(tester);
+      expect(harness.last.continueOnAlternative.agentId, 'rivet');
+      expect(harness.last.continueOnAlternative.allWaiting, isFalse);
+      harness.backend.refuse = "Rivet isn't waiting anymore.";
+      await tester.tap(find.text('Continue on OpenRouter'));
+      await settle(tester);
+      expect(find.text("Rivet isn't waiting anymore."), findsOneWidget);
+    });
   });
 }

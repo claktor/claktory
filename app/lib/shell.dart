@@ -6,19 +6,22 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'agent_view.dart';
-import 'backend.dart' show fireAndLog;
+import 'android/pair_step.dart';
+import 'backend.dart' show Backend, fireAndLog;
 import 'characters/clock.dart';
 import 'changelog.dart';
 import 'chats.dart' show ChatView, selectedChat;
 import 'compatibility.dart';
 import 'connect_step.dart';
 import 'connection.dart' show Connection;
-import 'devices.dart' show FactoryChooser;
+import 'devices.dart' show FactoryChooser, thisDeviceKind;
 import 'map.dart';
+import 'monitors_overview.dart' show MonitorsOverview;
 import 'pairing.dart';
 import 'marketplace.dart';
 import 'account.dart';
 import 'model_step.dart';
+import 'mobile/back.dart' show BackHandle, CallbackBackToken, PhoneBack;
 import 'mobile/presentation.dart' show SheetOverlay;
 import 'move.dart' show BackendMove, MoveGate;
 import 'name_step.dart';
@@ -28,7 +31,8 @@ import 'controls.dart';
 import 'extensions.dart';
 import 'forms.dart';
 import 'identity.dart';
-import 'ipad/workbench.dart' show Workbench, workbenchRailWidth;
+import 'ipad/pair_step.dart';
+import 'ipad/workbench.dart' show WindowKeyboard, Workbench, workbenchRailWidth;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart' show railWidth;
 import 'scope.dart';
@@ -141,9 +145,15 @@ class _ShellState extends State<Shell> {
       // first launch's questions until it's closed. First of them: this
       // app and its Claktory can't work together (compatibility.dart).
       final mismatch = mismatchIn(context);
-      // A Mac with no Claktory of its own connects to one first.
+      // A Mac with no Claktory of its own connects to one first; an iPad
+      // the phone's way, which scans and signs in too (#363 F3).
       final question = asksToConnect(context)
-          ? const ConnectStep()
+          ? defaultTargetPlatform == TargetPlatform.iOS &&
+                    deviceIdiom(context) == Idiom.pad
+                ? const IPadPairStep()
+                : defaultTargetPlatform == TargetPlatform.android
+                ? const AndroidPairStep()
+                : const ConnectStep()
           : AppScope.pageShown(context, AppPage.changelog)
           ? null
           : mismatch != null
@@ -356,15 +366,35 @@ class _ShellState extends State<Shell> {
                     ),
                   );
                 }
-                final row = Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (railView != null) part(railView),
-                    part(behind(Sidebar(width: sidebar))),
-                    part(behind(ExtensionBar(agent: agent))),
-                    Expanded(child: part(content)),
-                    if (pane != null) part(behind(pane)),
-                  ],
+                // An on-screen keyboard (an Android tablet's) covers the
+                // rail and the sidebar, as on an iPad; the content and the
+                // pane end above it, so the message box being written in
+                // and Send stay in sight. What's inside sees no keyboard
+                // left to avoid; what fills the window from inside (an
+                // expanded pane) still knows it. Always wrapped, even with
+                // no keyboard (a Mac), so its coming and going never
+                // rebuilds the conversation and takes the focus away.
+                final keyboard = MediaQuery.viewInsetsOf(context).bottom;
+                Widget aboveKeyboard(Widget child) => Padding(
+                  padding: EdgeInsets.only(bottom: keyboard),
+                  child: child,
+                );
+                final row = WindowKeyboard(
+                  height: keyboard,
+                  child: MediaQuery.removeViewInsets(
+                    context: context,
+                    removeBottom: true,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        if (railView != null) part(railView),
+                        part(behind(Sidebar(width: sidebar))),
+                        part(behind(ExtensionBar(agent: agent))),
+                        Expanded(child: aboveKeyboard(part(content))),
+                        if (pane != null) aboveKeyboard(part(behind(pane))),
+                      ],
+                    ),
+                  ),
                 );
                 return _History(
                   back: back,
@@ -520,6 +550,7 @@ class _Content extends StatelessWidget {
         backend.connected,
         backend.pairing,
         backend.signInRequired,
+        backend.refused,
         scope.page,
       ]),
       builder: (context, _) {
@@ -540,21 +571,20 @@ class _Content extends StatelessWidget {
             onCancel: () => scope.connections.forget(waiting),
           );
         }
-        switch (scope.page.value) {
-          case AppPage.settings:
-            return const SettingsView();
-          case AppPage.marketplace:
-            return const MarketplaceView();
-          case AppPage.changelog:
-            return const ChangelogView();
-          case AppPage.map:
-            return const MapView();
-          case AppPage.usage:
-            return const UsageView();
-          case AppPage.inbox:
-            return const InboxView();
-          case AppPage.agent:
-        }
+        final page = switch (scope.page.value) {
+          AppPage.settings => const SettingsView(),
+          AppPage.marketplace => const MarketplaceView(),
+          AppPage.changelog => const ChangelogView(),
+          AppPage.map => const MapView(),
+          AppPage.usage => const UsageView(),
+          AppPage.monitors => const MonitorsOverview(),
+          AppPage.inbox => const InboxView(),
+          AppPage.agent => null,
+        };
+        if (page != null) return _PageBack(child: page);
+        // Turned away: what was open can't be used any more, so it says
+        // so instead (Zucchero's row 232).
+        if (turnedAway(backend)) return const NoAgentView();
         final store = backend.workspace;
         final workspace = store.workspace;
         // One of the person's chats, in place of a conversation.
@@ -584,6 +614,54 @@ class _Content extends StatelessWidget {
   }
 }
 
+/// A page (Settings, Usage…) in place of the conversation on a wide
+/// window: Android's Back closes it, back to the conversation, after any
+/// dialog or sheet over it. A phone's pages are its drawer's own.
+class _PageBack extends StatefulWidget {
+  const _PageBack({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_PageBack> createState() => _PageBackState();
+}
+
+class _PageBackState extends State<_PageBack> {
+  PhoneBack? _back;
+  BackHandle? _handle;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final back = isPhoneLayout(context) ? null : PhoneBack.maybeOf(context);
+    if (identical(back, _back)) return;
+    _handle?.release();
+    _back = back;
+    _handle = back?.registerNavigation(
+      CallbackBackToken(
+        onBack: () {
+          if (mounted) AppScope.closePage(context);
+        },
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _handle?.release();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+/// Whether the Claktory turned this device away (a code that expired, a
+/// device removed there): it won't connect by trying, and nothing it shows
+/// can be used until the person adds this device again.
+bool turnedAway(Backend backend) =>
+    backend.refused.value != null && !backend.connected.value;
+
 /// What shows with no agent chosen: "Connecting…", how to start when
 /// there are no agents, or "Select an agent", with signing in when no
 /// model can run.
@@ -604,11 +682,14 @@ class NoAgentView extends StatelessWidget {
         // Turned away (a code that expired, a device removed there): it
         // won't connect by trying, so it says so, as the drawer does, with
         // the way to another Claktory (Zucchero's row 220).
-        if (backend.refused.value case final refused?
-            when !backend.connected.value) {
+        if (turnedAway(backend)) {
+          final connection = Connection(backend);
           return _EmptyState(
-            title: Connection(backend).line,
-            body: refused,
+            title: connection.line,
+            // The app's own words, not the tunnel's (Trish).
+            body:
+                'To use it again, add this $thisDeviceKind in Settings → '
+                'Devices on ${connection.machine ?? 'this Claktory'}.',
             action: 'Switch Claktory…',
             onAction: () => showModal(
               context,

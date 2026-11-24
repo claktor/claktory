@@ -10,6 +10,7 @@ import 'package:factory_app/people/people_view.dart' show contactsApi;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/user_apps/session.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -199,13 +200,8 @@ void main() {
     expect(harness.last.decideAppGrant.approve, isTrue);
   });
 
-  testWidgets('Approve sends the decision for its seq, with the comment', (
-    tester,
-  ) async {
+  testWidgets('Approve sends the decision for its seq', (tester) async {
     final harness = await _card(tester, _grant());
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
-    await tester.enterText(_comment, ' Only for the trip. ');
     await tester.tap(find.text('Approve'));
     await settle(tester);
     final decide = harness.last.decideAppGrant;
@@ -213,19 +209,60 @@ void main() {
     expect(decide.agentId, 'rivet');
     expect(decide.seq, Int64(12));
     expect(decide.approve, isTrue);
-    expect(decide.comment, 'Only for the trip.');
+    expect(decide.reply, isFalse);
+    expect(decide.comment, isEmpty);
   });
 
-  testWidgets('Decline sends the comment for Rivet', (tester) async {
+  testWidgets('Decline declines', (tester) async {
     final harness = await _card(tester, _grant());
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
-    await tester.enterText(_comment, '  Not yet.  ');
     await tester.tap(find.text('Decline'));
     await settle(tester);
     final decide = harness.last.decideAppGrant;
     expect(decide.approve, isFalse);
-    expect(decide.comment, 'Not yet.');
+    expect(decide.reply, isFalse);
+  });
+
+  testWidgets('a typed comment: one Submit, a reply that gives nothing '
+      '(#370)', (tester) async {
+    final harness = await _card(tester, _grant());
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
+    await tester.enterText(_comment, ' Only Ana, and only reading. ');
+    await settle(tester);
+    expect(find.text('Approve'), findsNothing);
+    expect(find.text('Decline'), findsNothing);
+    expect(
+      find.text(
+        'Nothing is given. Rivet gets your comment and can suggest it again.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Submit'));
+    await settle(tester);
+    final decide = harness.last.decideAppGrant;
+    expect(decide.reply, isTrue);
+    // An older backend that ignores reply declines it.
+    expect(decide.approve, isFalse);
+    expect(decide.comment, 'Only Ana, and only reading.');
+
+    // Cleared, the buttons are back.
+    await tester.enterText(_comment, '  ');
+    await settle(tester);
+    expect(find.text('Approve'), findsOneWidget);
+    expect(find.text('Submit'), findsNothing);
+  });
+
+  testWidgets('Return in the comment is Submit, never Approve', (tester) async {
+    final harness = await _card(tester, _grant());
+    await tester.tap(find.text('Add a comment'));
+    await settle(tester);
+    await tester.enterText(_comment, 'Read only, please.');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await settle(tester);
+    final decide = harness.last.decideAppGrant;
+    expect(decide.reply, isTrue);
+    expect(decide.approve, isFalse);
+    expect(decide.comment, 'Read only, please.');
   });
 
   testWidgets('a refusal shows, and the card can be approved again', (
@@ -260,6 +297,17 @@ void main() {
       ),
     );
     expect(find.textContaining('Declined'), findsOneWidget);
+    expect(find.text('Not yet.'), findsOneWidget);
+  });
+
+  testWidgets('decided: replied, with the reply', (tester) async {
+    await _card(
+      tester,
+      _grant(state: AppGrantState.APP_GRANT_STATE_DECLINED, comment: 'Not yet.')
+        ..replied = true,
+    );
+    expect(find.textContaining('Replied'), findsOneWidget);
+    expect(find.textContaining('Declined'), findsNothing);
     expect(find.text('Not yet.'), findsOneWidget);
   });
 

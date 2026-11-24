@@ -3,7 +3,8 @@
 //! for every device (tenet 7).
 //!
 //! Three kinds notify: a new Needs-you item (a seq added to an agent's,
-//! pipe's or chat's waiting seqs), an agent's alert (`notify_person`, in
+//! pipe's or chat's waiting seqs, or agents starting to wait on a
+//! provider's usage limit or credit), an agent's alert (`notify_person`, in
 //! `tool`) and an agent's reply to a message the person sent from a phone or
 //! tablet (from a computer too, when they ask for it). Needs-you items and
 //! replies are found in one place, `observe`, which sees every Workspace as
@@ -41,15 +42,25 @@ use rusqlite::OptionalExtension;
 /// Past it they're counted, and one more says how many.
 pub(crate) const PER_HOUR: usize = 6;
 const HOUR_MS: i64 = 3_600_000;
+const DAY_MS: i64 = 24 * HOUR_MS;
 /// For this long after the person was last using Claktory on a device,
 /// nothing is pushed to the others: they're probably still at it.
 pub(crate) const ACTIVE_GRACE_MS: i64 = 120_000;
 /// The longest a notification's body gets, in characters.
 pub(crate) const MAX_BODY: usize = 300;
+/// The source of the one notification when quiet hours end (O3).
+const QUIET: &str = "quiet";
 /// What a notification says when it may say nothing more.
 pub(crate) const GENERIC: &str = "Claktory has something for you";
 /// How soon pushes the relay couldn't take are tried again.
 const RETRY: Duration = Duration::from_secs(30);
+/// How long a provider wait (Workspace.provider_waits) must have been over
+/// before it notifies again when it comes back: Try now, a message or a
+/// usage read wake the waiters for a moment, and they wait again.
+const WAIT_AGAIN_MS: i64 = 10 * 60_000;
+/// How many devices waiting to be allowed notify in an hour, all of them
+/// together (#352 P4, Fugo): past it they show only in Needs you.
+pub(crate) const DEVICES_PER_HOUR: usize = 3;
 
 // ---- Settings ----
 
@@ -299,6 +310,8 @@ struct Data {
     /// Each connection's device id, and whether its app is in front, by
     /// number.
     connections: HashMap<u64, (String, bool)>,
+    /// The connections whose apps show notifications (`shows_notifications`).
+    showing: BTreeSet<u64>,
     next_connection: u64,
     /// When each device last stopped being active, in ms since 1970.
     last_active: HashMap<String, i64>,
@@ -311,12 +324,49 @@ struct Data {
     /// Agents' direct messages waiting for review, by proposal id, as last
     /// seen.
     dm_sends: BTreeSet<String>,
+    /// Provider waits as last noted, by provider id; read from factory.db
+    /// at the first look (None until then).
+    provider_waits: Option<BTreeMap<String, Noted>>,
+    /// Devices waiting to be allowed, as noted; read from factory.db at the
+    /// first look (None until then).
+    devices: Option<DevicesNoted>,
+    /// Needs-you items that came during quiet hours, by `waiting_keys`'
+    /// names; read from factory.db at the first look (None until then).
+    quiet: Option<BTreeSet<String>>,
+    /// What waits for the person now, by `waiting_keys`' names.
+    waiting: BTreeSet<String>,
     /// The first Workspace was seen: what waits then isn't new.
     started: bool,
     /// How many items wait for the person, as last seen: a push's badge.
     badge: u32,
     /// What each source sent this hour, by `Note::source`.
     sent: HashMap<String, Sent>,
+}
+
+/// Devices waiting to be allowed, as noted, kept in factory.db
+/// (notify_settings' row 'devices') so a restart notifies none of them
+/// again, nor more than the hour's `DEVICES_PER_HOUR`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct DevicesNoted {
+    /// Each request seen, "<id>:<requested_ms>", by its requested_ms: kept a
+    /// day, past any code's life, so one missing from a Workspace for a
+    /// moment (at a start) isn't new when it's back.
+    seen: BTreeMap<String, i64>,
+    /// When devices waiting to be allowed notified, this hour.
+    times: VecDeque<i64>,
+}
+
+/// A provider wait as last noted (Workspace.provider_waits), kept in
+/// factory.db (notify_settings' row 'provider_waits') so a restart, which
+/// ends every wait for a moment, doesn't notify it again.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct Noted {
+    credit: bool,
+    until_ms: i64,
+    /// When it was over, in ms since 1970; 0 while it lasts.
+    gone_ms: i64,
 }
 
 /// An agent as last seen.
@@ -350,12 +400,20 @@ impl State {
     /// The presence of a connection of `device` (its id; "local" for this
     /// computer's app), inactive until it says otherwise (SetActive); it
     /// goes when the connection closes.
-    pub(crate) fn connect(&self, device: &str) -> Presence {
+    pub(crate) fn connect(&self, device: &str, platform: &str) -> Presence {
         let mut data = self.data();
         data.next_connection += 1;
         let id = data.next_connection;
         data.connections.insert(id, (device.to_owned(), false));
+        if shows_notifications(platform) {
+            data.showing.insert(id);
+        }
         Presence { data: self.data.clone(), id }
+    }
+
+    /// How many connected apps show a Notify as a notification.
+    fn showing(&self) -> usize {
+        self.data().showing.len()
     }
 
     /// The person is using Claktory on some device right now.
@@ -371,9 +429,9 @@ impl State {
     /// it can't show a Notify any more.
     pub(crate) fn push_waits(&self, device: &str, now: i64) -> bool {
         let data = self.data();
-        data.connections.values().any(|(other, active)| {
-            *active || (other != device && data.last_active.get(other).is_some_and(|at| now - at < ACTIVE_GRACE_MS))
-        })
+        data.connections
+            .values()
+            .any(|(other, active)| *active || (other != device && data.last_active.get(other).is_some_and(|at| now - at < ACTIVE_GRACE_MS)))
     }
 
     /// How many items wait for the person.
@@ -384,7 +442,14 @@ impl State {
     fn wake(&self) {
         self.wake.notify_one();
     }
+}
 
+/// Whether an app on `platform` (Hello.platform) shows a Notify as a
+/// notification: the Mac's, the iPhone's and the iPad's do; Android's
+/// can't yet (#366 A2), nor Linux's or Windows'. Apps from before
+/// platform was sent were the Mac's and the iPhone's.
+fn shows_notifications(platform: &str) -> bool {
+    matches!(platform, "" | "macos" | "ios" | "ipados")
 }
 
 /// One connection's say in whether the person is using Claktory.
@@ -409,6 +474,7 @@ impl Presence {
 impl Drop for Presence {
     fn drop(&mut self) {
         let mut data = lock(&self.data);
+        data.showing.remove(&self.id);
         if let Some((device, true)) = data.connections.remove(&self.id) {
             data.last_active.insert(device, now_ms());
         }
@@ -441,6 +507,11 @@ pub(crate) struct Note {
     pub pipe_id: String,
     pub chat_id: String,
     pub seq: u64,
+    /// A device waiting to be allowed, whose Needs you item a tap opens.
+    pub device_id: String,
+    /// The Needs-you item it's about, as `waiting_keys` names it: held
+    /// through quiet hours while it waits (O3).
+    pub waits: String,
 }
 
 impl Note {
@@ -458,6 +529,8 @@ impl Note {
             pipe_id: String::new(),
             chat_id: String::new(),
             seq: 0,
+            device_id: String::new(),
+            waits: String::new(),
         }
     }
 }
@@ -503,6 +576,10 @@ pub(crate) fn text(note: &Note, preview: Preview) -> (String, String) {
         return ("Claktory".to_owned(), GENERIC.to_owned());
     }
     let who = note.who.clone();
+    // Claktory's own words when quiet hours end, which say nothing private.
+    if note.source == QUIET {
+        return (who, note.what.clone());
+    }
     if note.tainted {
         return (who.clone(), format!("{who} has something for you"));
     }
@@ -569,6 +646,8 @@ fn save(factory: &Factory, settings: NotificationsConfig) -> Result<(), RequestE
         [json],
     )?;
     *factory.notify.settings.lock().unwrap_or_else(PoisonError::into_inner) = Some(settings);
+    // Quiet hours may have ended (O3).
+    factory.notify.wake();
     factory.broadcast_workspace(&factory.lock());
     Ok(())
 }
@@ -615,13 +694,36 @@ pub(crate) fn observe(factory: &Factory, inner: &Inner, workspace: &v1::Workspac
         let waiting = workspace.agents.iter().map(|agent| agent.waiting_seqs.len()).sum::<usize>()
             + workspace.pipes.iter().map(|pipe| pipe.waiting_seqs.len()).sum::<usize>()
             + workspace.chats.iter().map(|chat| chat.waiting_seqs.len()).sum::<usize>()
-            + workspace.dm_sends.len();
+            + workspace.dm_sends.len()
+            + workspace.provider_waits.len()
+            + workspace.remote.as_ref().map_or(0, |remote| remote.pending_devices.len());
         data.badge = u32::try_from(waiting).unwrap_or(u32::MAX);
+        data.waiting = waiting_keys(workspace);
         notes
     };
     for note in notes {
         let _ = deliver(factory, &inner.config, &settings, note);
     }
+}
+
+/// What waits for the person in `workspace`, each named as its note's
+/// `waits`.
+fn waiting_keys(workspace: &v1::Workspace) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    for agent in &workspace.agents {
+        keys.extend(agent.waiting_seqs.iter().map(|seq| format!("agent:{}:{seq}", agent.id)));
+    }
+    for pipe in &workspace.pipes {
+        keys.extend(pipe.waiting_seqs.iter().map(|seq| format!("pipe:{}:{seq}", pipe.id)));
+    }
+    for chat in &workspace.chats {
+        keys.extend(chat.waiting_seqs.iter().map(|seq| format!("chat:{}:{seq}", chat.id)));
+    }
+    keys.extend(workspace.dm_sends.iter().map(|waiting| format!("dm:{}", waiting.proposal_id)));
+    keys.extend(workspace.provider_waits.iter().map(|wait| format!("provider:{}", wait.provider_id)));
+    let pending = workspace.remote.as_ref().map_or(&[][..], |remote| &remote.pending_devices[..]);
+    keys.extend(pending.iter().map(|device| format!("device:{}", device.device_id)));
+    keys
 }
 
 /// What changed since the last Workspace that notifies.
@@ -632,10 +734,9 @@ fn changes(data: &mut Data, factory: &Factory, inner: &Inner, settings: &Notific
         let Some(transcript) = inner.agents.get(&agent.id).and_then(|runtime| runtime.transcript.as_ref()) else { continue };
         let waiting: BTreeSet<u64> = agent.waiting_seqs.iter().copied().collect();
         let working = agent.status() == v1::AgentStatus::Working;
-        let entries = transcript.entries();
         let mut seen = match data.agents.remove(&agent.id) {
             // Just loaded: what waits in it isn't new.
-            None => Seen { waiting: waiting.clone(), working, looked: entries.len() as u64 },
+            None => Seen { waiting: waiting.clone(), working, looked: transcript.len() },
             Some(seen) => seen,
         };
         let mode = settings.mode(&agent.id);
@@ -648,22 +749,24 @@ fn changes(data: &mut Data, factory: &Factory, inner: &Inner, settings: &Notific
             note
         };
         for &seq in waiting.difference(&seen.waiting) {
-            let Some(entry) = entries.get(seq as usize) else { continue };
+            let Some(entry) = transcript.entry(seq) else { continue };
             let mut note = note(Kind::NeedsYou);
             note.seq = seq;
+            note.waits = format!("agent:{}:{seq}", agent.id);
             (note.what, note.tainted) = waiting_text(entry.kind.as_ref(), tainted);
             notes.push(note);
         }
         if seen.working
             && !working
-            && let Some((seq, what, from_phone)) = reply(entries, seen.looked)
+            && let (base, held) = transcript.window()
+            && let Some((seq, what, from_phone)) = reply(held, base, seen.looked)
         {
             let mut note = note(Kind::Reply);
             (note.seq, note.what, note.from_phone) = (seq, what, from_phone);
             notes.push(note);
         }
         if !working {
-            seen.looked = entries.len() as u64;
+            seen.looked = transcript.len();
         }
         (seen.waiting, seen.working) = (waiting, working);
         agents.insert(agent.id.clone(), seen);
@@ -679,6 +782,7 @@ fn changes(data: &mut Data, factory: &Factory, inner: &Inner, settings: &Notific
                 let (who, what) = held_text(factory, pipe);
                 let mut note = Note::new(Kind::NeedsYou, format!("pipe:{}", pipe.id), who);
                 (note.pipe_id, note.seq, note.what) = (pipe.id.clone(), seq, what);
+                note.waits = format!("pipe:{}:{seq}", pipe.id);
                 notes.push(note);
             }
         }
@@ -692,9 +796,10 @@ fn changes(data: &mut Data, factory: &Factory, inner: &Inner, settings: &Notific
         let waiting: BTreeSet<u64> = chat.waiting_seqs.iter().copied().collect();
         if let Some(seen) = data.chats.get(&chat.id) {
             for &seq in waiting.difference(seen) {
-                let Some(entry) = transcript.entries().get(seq as usize) else { continue };
+                let Some(entry) = transcript.entry(seq) else { continue };
                 let mut note = Note::new(Kind::NeedsYou, format!("chat:{}", chat.id), chat.title.clone());
                 (note.chat_id, note.seq) = (chat.id.clone(), seq);
+                note.waits = format!("chat:{}:{seq}", chat.id);
                 note.what = waiting_text(entry.kind.as_ref(), false).0;
                 notes.push(note);
             }
@@ -713,11 +818,147 @@ fn changes(data: &mut Data, factory: &Factory, inner: &Inner, settings: &Notific
             note.agent_id = agent.id.clone();
             note.mode = settings.mode(&agent.id);
             note.what = "Wants to send a message to a friend".to_owned();
+            note.waits = format!("dm:{}", waiting.proposal_id);
             notes.push(note);
         }
     }
     data.dm_sends = dm_sends;
+
+    notes.extend(provider_waits(data, factory, inner, settings, workspace));
+    notes.extend(devices(data, factory, inner, workspace));
     notes
+}
+
+/// Devices that started waiting to be allowed (#352 P4, Fugo's rules): in
+/// Claktory's words only, never the name the device gave itself, which an
+/// account thief chooses; one per device, never again, and at most
+/// `DEVICES_PER_HOUR` an hour in all. A notification can't allow it: a tap
+/// opens its Needs you item, where the person types the digits it shows.
+fn devices(data: &mut Data, factory: &Factory, inner: &Inner, workspace: &v1::Workspace) -> Vec<Note> {
+    let started = data.started;
+    let noted = data.devices.get_or_insert_with(|| read_row(factory, "devices"));
+    let before = noted.clone();
+    let now = now_ms();
+    noted.seen.retain(|_, requested| now - *requested < DAY_MS);
+    while noted.times.front().is_some_and(|time| now - time >= HOUR_MS) {
+        noted.times.pop_front();
+    }
+    let pending = workspace.remote.as_ref().map_or(&[][..], |remote| &remote.pending_devices[..]);
+    let machine = inner.config.claktory_name();
+    let mut notes = Vec::new();
+    for device in pending {
+        let key = format!("{}:{}", device.device_id, device.requested_ms);
+        if noted.seen.insert(key, device.requested_ms).is_some() || !started {
+            continue;
+        }
+        if noted.times.len() >= DEVICES_PER_HOUR {
+            tracing::info!(device = %device.device_id, "a device waits to be allowed; past the hour's notifications, it shows only in Needs you");
+            continue;
+        }
+        noted.times.push_back(now);
+        let mut note = Note::new(Kind::NeedsYou, "devices".to_owned(), machine.clone());
+        note.what = format!("A device is waiting to be allowed on {machine}.");
+        note.device_id = device.device_id.clone();
+        note.waits = format!("device:{}", device.device_id);
+        notes.push(note);
+    }
+    if *noted != before {
+        save_row(factory, "devices", noted);
+    }
+    notes
+}
+
+/// Providers agents and chats started waiting on, for a usage limit or
+/// credit: one note each, from Claktory rather than an agent, in its own
+/// words. Not again while the wait lasts, nor when it's back within
+/// `WAIT_AGAIN_MS` of ending, unless it's for something else now (credit
+/// instead of a limit, or a later reset once the earlier one passed).
+fn provider_waits(
+    data: &mut Data,
+    factory: &Factory,
+    inner: &Inner,
+    settings: &NotificationsConfig,
+    workspace: &v1::Workspace,
+) -> Vec<Note> {
+    let noted = data.provider_waits.get_or_insert_with(|| read_row(factory, "provider_waits"));
+    let before = noted.clone();
+    let now = now_ms();
+    noted.retain(|_, old| old.gone_ms == 0 || now - old.gone_ms < WAIT_AGAIN_MS);
+    let mut notes = Vec::new();
+    for wait in &workspace.provider_waits {
+        let new = noted.get(&wait.provider_id).is_none_or(|old| {
+            old.credit != wait.credit || (!wait.credit && old.until_ms != 0 && old.until_ms <= now && wait.until_ms > old.until_ms)
+        });
+        noted.insert(wait.provider_id.clone(), Noted { credit: wait.credit, until_ms: wait.until_ms, gone_ms: 0 });
+        if !new {
+            continue;
+        }
+        let mut note = Note::new(Kind::NeedsYou, format!("provider:{}", wait.provider_id), inner.config.claktory_name());
+        note.what = format!("{}. {}", wait.title, wait.text);
+        note.waits = format!("provider:{}", wait.provider_id);
+        // Opens the first of them, whose wait line offers the ways forward.
+        match wait.agent_ids.first() {
+            Some(agent) => note.agent_id = agent.clone(),
+            None => note.chat_id = wait.chat_ids.first().cloned().unwrap_or_default(),
+        }
+        // Their "Notify me": Always if any says so, Never if all of them do.
+        let modes: Vec<Mode> = wait.agent_ids.iter().map(|agent| settings.mode(agent)).collect();
+        note.mode = if modes.contains(&Mode::Always) {
+            Mode::Always
+        } else if wait.chat_ids.is_empty() && !modes.is_empty() && modes.iter().all(|mode| *mode == Mode::Never) {
+            Mode::Never
+        } else {
+            Mode::Default
+        };
+        notes.push(note);
+    }
+    for (provider, old) in noted.iter_mut() {
+        if old.gone_ms == 0 && !workspace.provider_waits.iter().any(|wait| wait.provider_id == *provider) {
+            old.gone_ms = now;
+        }
+    }
+    if *noted != before {
+        save_row(factory, "provider_waits", noted);
+    }
+    notes
+}
+
+/// What notifications noted, kept in factory.db (notify_settings' row
+/// `key`: 'provider_waits', 'devices'); empty when there's none or it
+/// can't be read.
+fn read_row<T: serde::de::DeserializeOwned + Default>(factory: &Factory, key: &str) -> T {
+    let read = factory
+        .store
+        .db()
+        .query_row("SELECT value FROM notify_settings WHERE key = ?1", [key], |row| row.get::<_, String>(0))
+        .optional();
+    match read {
+        Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_else(|error| {
+            tracing::warn!(%error, key, "what notifications noted can't be read; starting afresh");
+            T::default()
+        }),
+        Ok(None) => T::default(),
+        Err(error) => {
+            tracing::warn!(%error, key, "could not read what notifications noted");
+            T::default()
+        }
+    }
+}
+
+fn save_row<T: Serialize>(factory: &Factory, key: &str, noted: &T) {
+    let saved = serde_json::to_string(noted).map_err(|error| error.to_string()).and_then(|json| {
+        factory
+            .store
+            .db()
+            .execute(
+                "INSERT INTO notify_settings (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                [key, json.as_str()],
+            )
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = saved {
+        tracing::warn!(%error, key, "could not keep what notifications noted");
+    }
 }
 
 /// What a Needs-you item says, and whether it carries a taint of its own
@@ -764,10 +1005,12 @@ fn held_text(factory: &Factory, pipe: &v1::Pipe) -> (String, String) {
 
 /// The agent's reply among the entries from `looked` on: its last text, if
 /// any text there answers the person's message, and whether they sent it
-/// from a phone or tablet. With the seq of the last text.
-fn reply(entries: &[v1::Entry], looked: u64) -> Option<(u64, String, bool)> {
-    let new = entries.get(looked as usize..)?;
-    let answered = new.iter().filter_map(|entry| entry.replied_to).filter_map(|seq| entries.get(seq as usize)).next_back()?;
+/// from a phone or tablet. With the seq of the last text. `entries` are the
+/// ones held, from seq `base` on.
+fn reply(entries: &[v1::Entry], base: u64, looked: u64) -> Option<(u64, String, bool)> {
+    let at = |seq: u64| entries.get(usize::try_from(seq.checked_sub(base)?).ok()?);
+    let new = entries.get(usize::try_from(looked.saturating_sub(base)).ok()?..)?;
+    let answered = new.iter().filter_map(|entry| entry.replied_to).filter_map(at).next_back()?;
     let Some(EntryKind::User(message)) = &answered.kind else { return None };
     let kind = message.sent_from.as_ref().map_or(v1::DeviceKind::Unspecified, v1::SentFrom::kind);
     let from_phone = matches!(kind, v1::DeviceKind::Phone | v1::DeviceKind::Tablet);
@@ -795,6 +1038,17 @@ pub(crate) enum Delivered {
 /// source's hourly share let it.
 pub(crate) fn deliver(factory: &Factory, config: &Config, settings: &NotificationsConfig, note: Note) -> Delivered {
     if let Err(skipped) = allowed(settings, &note, local_minute()) {
+        // A Needs-you item that came during quiet hours waits for their end
+        // (O3), counted in one notification then if it still waits.
+        if skipped == Skipped::Quiet && note.kind == Kind::NeedsYou && !note.waits.is_empty() {
+            let mut data = factory.notify.data();
+            let held = data.quiet.get_or_insert_with(|| read_row(factory, "quiet"));
+            if held.insert(note.waits.clone()) {
+                save_row(factory, "quiet", held);
+            }
+            drop(data);
+            factory.notify.wake();
+        }
         return Delivered::Skipped(skipped);
     }
     let now = now_ms();
@@ -840,12 +1094,14 @@ fn send(factory: &Factory, config: &Config, settings: &NotificationsConfig, note
         pipe_id: note.pipe_id.clone(),
         chat_id: note.chat_id.clone(),
         seq: note.seq,
+        device_id: note.device_id.clone(),
         urgent: note.urgent && settings.urgent_breaks_quiet,
         collapse,
         thread: note.source.clone(),
         sent_ms: now,
     };
-    let apps = factory.clients();
+    // Only apps that show it count as reaching the person (#366 A2).
+    let apps = factory.notify.showing();
     factory.send(Body::Notify(notify.clone()));
     let pushed = push::queue(factory, config, settings, &notify, now);
     tracing::info!(kind = ?note.kind, source = %note.source, apps, pushed, "notified the person");
@@ -874,7 +1130,7 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
     loop {
         let Some(strong) = factory.upgrade() else { return };
         let wake = strong.notify.wake.clone();
-        let next = summarize(&strong);
+        let next = [summarize(&strong), morning(&strong)].into_iter().flatten().min();
         let retry = push::flush(&strong).await;
         drop(strong);
         let mut wait =
@@ -887,6 +1143,45 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
             () = tokio::time::sleep(wait) => {}
         }
     }
+}
+
+/// When quiet hours have ended and Needs-you items that came during them
+/// still wait, one notification says how many (O3; Trish's words): "2
+/// things need you", "They came during your quiet hours.". A tap opens
+/// Needs you. When the next look is due while they last.
+fn morning(factory: &Factory) -> Option<i64> {
+    let settings = settings(factory);
+    let now = now_ms();
+    let count = {
+        let mut data = factory.notify.data();
+        // What waits is known from the first Workspace on.
+        let started = data.started;
+        let held = data.quiet.get_or_insert_with(|| read_row(factory, "quiet"));
+        if held.is_empty() {
+            return None;
+        }
+        let time = jiff::ZonedDateTime::now().time();
+        let minute = u32::try_from(time.hour()).unwrap_or(0) * 60 + u32::try_from(time.minute()).unwrap_or(0);
+        if settings.quiet_at(minute) {
+            let minutes = i64::from((settings.quiet_end + DAY_MINUTES - minute) % DAY_MINUTES);
+            return Some(now + minutes * 60_000 - i64::from(time.second()) * 1000);
+        }
+        if !started {
+            return Some(now + 1000);
+        }
+        let held = std::mem::take(held);
+        save_row(factory, "quiet", &BTreeSet::<String>::new());
+        held.intersection(&data.waiting).count()
+    };
+    if count > 0 {
+        let config = factory.lock().config.clone();
+        let title = if count == 1 { "1 thing needs you".to_owned() } else { format!("{count} things need you") };
+        let mut note = Note::new(Kind::NeedsYou, QUIET.to_owned(), title);
+        note.what = if count == 1 { "It came during your quiet hours." } else { "They came during your quiet hours." }.to_owned();
+        let delivered = deliver(factory, &config, &settings, note);
+        tracing::info!(count, ?delivered, "quiet hours ended with Needs-you items that came during them");
+    }
+    None
 }
 
 /// Sends the summaries that are due; when the next is, if any.

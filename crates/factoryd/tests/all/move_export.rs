@@ -73,7 +73,7 @@ async fn claktory(dir: &Path) -> (std::sync::Arc<factoryd::Factory>, std::net::S
     let home = dir.join("home");
     assert_eq!(checkout(&home), "home/builder");
     std::fs::write(home.join("auth.json"), "{\"scripted\": {}}").expect("write");
-    for left_out in ["bin", "releases", "models/speech", "trash", "dm"] {
+    for left_out in ["bin", "releases", "models/speech", "trash", "dm", "cache/previews"] {
         std::fs::create_dir_all(home.join(left_out)).expect("mkdir");
         std::fs::write(home.join(left_out).join("big"), "not moved").expect("write");
     }
@@ -133,7 +133,7 @@ async fn a_live_export_carries_the_claktory_its_folders_and_checkouts_and_change
             .starts_with("segment-"))
     );
     assert_eq!(std::fs::read_to_string(home.join(format!("annotations/blobs/{}", "b".repeat(64)))).unwrap(), "drawing");
-    for gone in ["bin", "releases", "models", "trash", "dm", "trees", "factoryd.log", "factory.db-wal", "factory.db-shm", "annotations/staging"] {
+    for gone in ["bin", "releases", "models", "cache", "trash", "dm", "trees", "factoryd.log", "factory.db-wal", "factory.db-shm", "annotations/staging"] {
         assert!(!home.join(gone).exists(), "{gone} isn't moved");
     }
 

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 
 import 'app_grant_card.dart' show appGrantReadPipes;
@@ -6,7 +8,7 @@ import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
-import 'decision.dart' show DecisionComment;
+import 'decision.dart' show CommentTyped, DecisionComment, SubmitButton;
 import 'extensions.dart' show logTime;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
@@ -96,7 +98,10 @@ class _AppAccessCardState extends State<AppAccessCard> {
     super.dispose();
   }
 
-  Future<void> _decide({required bool approve}) async {
+  /// [reply]: Submit (#370), the comment going to Rivet as the person's
+  /// reply, and nothing allowed; Rivet can suggest it again. Sent with
+  /// approve off, so a backend that doesn't know replies declines it.
+  Future<void> _decide({required bool approve, bool reply = false}) async {
     if (_deciding != null) return;
     final backend = AppScope.of(context);
     setState(() {
@@ -110,6 +115,7 @@ class _AppAccessCardState extends State<AppAccessCard> {
         approve: approve,
         digest: widget.access.digest,
         comment: _comment.text.trim(),
+        reply: reply,
       );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
@@ -117,6 +123,8 @@ class _AppAccessCardState extends State<AppAccessCard> {
       if (mounted) setState(() => _deciding = null);
     }
   }
+
+  void _submit() => unawaited(_decide(approve: false, reply: true));
 
   @override
   Widget build(BuildContext context) {
@@ -298,34 +306,47 @@ class _AppAccessCardState extends State<AppAccessCard> {
   List<Widget> _pending(Palette palette, TypeScale type, String rivetName) {
     final busy = _deciding != null;
     return [
-      ActionLine(
-        lead: Text(
-          _error ??
-              (_deciding == true
-                  ? 'Approving…'
-                  : 'Approving allows exactly this, and nothing more.'),
-          style: type.caption.copyWith(
-            color: _error == null ? palette.textFaint : palette.danger,
+      // Once a comment is typed, one Submit: a reply, allowing nothing.
+      CommentTyped(
+        controller: _comment,
+        builder: (context, typed) => ActionLine(
+          lead: Text(
+            _error ??
+                (typed
+                    ? 'Nothing is allowed. $rivetName gets your comment and '
+                          'can suggest it again.'
+                    : _deciding == true
+                    ? 'Approving…'
+                    : 'Approving allows exactly this, and nothing more.'),
+            style: type.caption.copyWith(
+              color: _error == null ? palette.textFaint : palette.danger,
+            ),
           ),
-        ),
-        action: ControlsLine(
-          children: [
-            Button(
-              label: 'Decline',
-              onPressed: busy ? null : () => _decide(approve: false),
-            ),
-            Button(
-              label: 'Approve',
-              primary: true,
-              onPressed: busy ? null : () => _decide(approve: true),
-            ),
-          ],
+          action: typed
+              ? SubmitButton(onPressed: busy ? null : _submit)
+              : ControlsLine(
+                  children: [
+                    Button(
+                      label: 'Decline',
+                      onPressed: busy ? null : () => _decide(approve: false),
+                    ),
+                    Button(
+                      label: 'Approve',
+                      primary: true,
+                      onPressed: busy ? null : () => _decide(approve: true),
+                    ),
+                  ],
+                ),
         ),
       ),
-      // The shared Add a comment, with either answer. No Enter: it's
-      // approved only with the button.
+      // The shared Add a comment: typed, it's Submit's, Return too.
       const SizedBox(height: Space.xs),
-      DecisionComment(controller: _comment, agent: rivetName, enabled: !busy),
+      DecisionComment(
+        controller: _comment,
+        agent: rivetName,
+        enabled: !busy,
+        onSubmit: _submit,
+      ),
     ];
   }
 
@@ -339,6 +360,8 @@ class _AppAccessCardState extends State<AppAccessCard> {
         "Approved, but it couldn't be done",
         palette.danger,
       ),
+      // Answered with a comment (#370): nothing allowed.
+      _ when access.replied => ('Replied', palette.textMuted),
       _ => ('Declined', palette.textMuted),
     };
     return [

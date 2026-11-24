@@ -73,10 +73,11 @@ pub(crate) async fn report(factory: &Arc<Factory>, request: v1::ReportReply) -> 
         _ => return Err(invalid("Name the agent or the chat whose reply to report.")),
     };
     factory.ensure_loaded(id).await?;
+    let entry = crate::transcript::entries_of(factory, id, &[request.seq]).await.remove(&request.seq);
     let (text, model) = {
         let inner = factory.lock();
         let transcript = inner.agents.get(id).and_then(|runtime| runtime.transcript.as_ref());
-        let Some(entry) = transcript.and_then(|transcript| transcript.entries().get(request.seq as usize)) else {
+        let Some(entry) = entry else {
             return Err(not_found("That reply isn't in the conversation."));
         };
         let Some(Kind::Assistant(reply)) = &entry.kind else {

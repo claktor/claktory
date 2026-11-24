@@ -19,7 +19,6 @@
 //!   among those that ran with this, `sign-ins-backends`); then it's
 //!   emptied, and stays so.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -83,17 +82,7 @@ fn digest(bytes: &[u8]) -> String {
 
 /// A file's hash; None when it can't be read.
 fn file_digest(path: &Path) -> Option<String> {
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1 << 16];
-    loop {
-        let read = file.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Some(crypto::hex(&hasher.finalize()))
+    crate::encoding::sha256_file(path, 1 << 16).ok()
 }
 
 /// The sign-ins as kept; none when there are none yet.
@@ -293,8 +282,10 @@ pub(crate) async fn monitor(factory: Weak<Factory>, sign_ins: Arc<SignIns>) {
                 Ok(false) => {}
                 Err(error) => tracing::error!(%error, "could not move the sign-ins into the vault"),
             }
-            // Requests waiting for the sign-ins go again.
+            // Requests waiting for the sign-ins go again, and their usage
+            // is read (`usage::check_usage` skips it while they're locked).
             strong.capacity_changed();
+            strong.usage_wake.notify_one();
             strong.broadcast_workspace(&strong.lock());
         }
         was_open = open;

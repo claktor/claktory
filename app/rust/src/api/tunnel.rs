@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use flutter_rust_bridge::frb;
 
 use crate::forward;
-use crate::tunnel::{self, Failure, Path, Phase};
+use crate::tunnel::{self, Failure, Path, Phase, RelayTrouble};
 
 /// The tunnels' own runtime: iroh's tasks outlive any one call from Dart.
 /// Made on first use, and made afresh by [fresh_runtime] when it stops
@@ -136,6 +136,16 @@ impl TunnelHandle {
                 Failure::Other => TunnelFailure::Other,
             },
             relay_connected: status.relay_connected,
+            relay_up_ms: status.relay_up_ms,
+            relay_trouble: match status.relay_trouble {
+                RelayTrouble::None => TunnelRelayTrouble::None,
+                RelayTrouble::Unchosen => TunnelRelayTrouble::Unchosen,
+                RelayTrouble::Dns => TunnelRelayTrouble::Dns,
+                RelayTrouble::Timeout => TunnelRelayTrouble::Timeout,
+                RelayTrouble::Tls => TunnelRelayTrouble::Tls,
+                RelayTrouble::Network => TunnelRelayTrouble::Network,
+                RelayTrouble::Other => TunnelRelayTrouble::Other,
+            },
         }
     }
 
@@ -240,6 +250,27 @@ pub struct TunnelStatus {
     pub failure: TunnelFailure,
     /// Whether this device reaches its relay now.
     pub relay_connected: bool,
+    /// How long its relay took to come up, in ms, from when it was last
+    /// lost (or the tunnel's endpoint made); 0 while it's down.
+    pub relay_up_ms: u32,
+    /// Why its relay can't be reached, roughly, while it can't.
+    pub relay_trouble: TunnelRelayTrouble,
+}
+
+/// Why this device's relay can't be reached, in a word.
+pub enum TunnelRelayTrouble {
+    None,
+    /// No relay chosen yet: none answered iroh's last measurement.
+    Unchosen,
+    /// Its name couldn't be looked up.
+    Dns,
+    /// Nothing answered in time.
+    Timeout,
+    /// The secure connection to it failed.
+    Tls,
+    /// The network turned it away: refused, reset or unreachable.
+    Network,
+    Other,
 }
 
 pub enum TunnelPhase {

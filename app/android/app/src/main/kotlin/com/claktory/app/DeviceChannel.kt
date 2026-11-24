@@ -1,11 +1,13 @@
 package com.claktory.app
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import androidx.core.content.pm.PackageInfoCompat
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -15,7 +17,8 @@ import java.util.concurrent.Executors
 
 /**
  * factory/device, as on the iPhone (ios/Runner/AppDelegate.swift): what
- * this phone keeps (connections, drafts) and what it is (capabilities).
+ * this phone keeps (connections, drafts) and what it is (capabilities),
+ * and which build of the app is installed (appVersionCode).
  * The stores read and write off the main thread, one call at a time, and
  * answer on it. The attach menu and its pickers are [AttachmentPicker]'s,
  * the camera's permission [CameraAccess]'s, QR codes [QrCodes]', web
@@ -55,6 +58,11 @@ class DeviceChannel(
                 null
             }
             "capabilities" -> result.success(capabilities(context.resources.configuration))
+            "appVersionCode" -> try {
+                result.success(appVersionCode(context))
+            } catch (error: Exception) {
+                result.error("unavailable", error.javaClass.simpleName, null)
+            }
             "cameraAccess" -> result.success(camera?.access() ?: "unavailable")
             "requestCamera" -> camera?.request(result) ?: result.success(false)
             "openCameraSettings" -> {
@@ -102,6 +110,23 @@ class DeviceChannel(
     }
 
     companion object {
+        /**
+         * The installed app's versionCode, as Android has it (MAJOR×10,000,000
+         * + MINOR×100,000 + PATCH×100 + REBUILD for a release; DESIGN.md §6),
+         * read from the package each time: nothing kept. Before Android 9,
+         * the int versionCode.
+         */
+        fun appVersionCode(context: Context): Long {
+            val manager = context.packageManager
+            val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                manager.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0))
+            } else {
+                @Suppress("DEPRECATION")
+                manager.getPackageInfo(context.packageName, 0)
+            }
+            return PackageInfoCompat.getLongVersionCode(info)
+        }
+
         /**
          * The same map on every platform (app/lib/mobile/device.dart, the
          * fixtures in app/test/ipad/fixtures/bridge): a phone or, with a

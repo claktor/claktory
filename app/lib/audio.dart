@@ -174,6 +174,13 @@ class VoicePlayer extends ChangeNotifier {
     }
   }
 
+  /// Plays [path], a recording on this device (one kept until it's sent),
+  /// from where it was paused; pauses it if it's playing.
+  Future<void> toggleHere(Backend backend, String path) {
+    _copies[path] = path;
+    return toggle(backend, path);
+  }
+
   /// Stops what's playing.
   Future<void> stop() async {
     if (_current == null) return;

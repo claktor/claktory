@@ -22,7 +22,10 @@ impl Factory {
     pub(crate) fn begin_run(&self, id: &str, runtime: &mut Runtime) -> Option<i64> {
         if runtime.run.is_none() {
             match self.store.start_run(id, VERSION) {
-                Ok(run) => runtime.run = Some(run),
+                Ok(run) => {
+                    runtime.run = Some(run);
+                    self.keep_awake.runs_changed();
+                }
                 Err(error) => tracing::error!(agent = %id, %error, "could not record a run"),
             }
         }
@@ -43,7 +46,9 @@ impl Factory {
         // The run reached them, whether or not it got to save them.
         self.delivered(runtime, None);
         runtime.failed = false;
+        runtime.used_ms = crate::transcript::now_ms();
         let Some(run) = runtime.run.take() else { return false };
+        self.keep_awake.runs_changed();
         match self.store.end_run(run, outcome) {
             Ok(Some((agent, presence))) => self.ran(&agent, presence),
             Ok(None) => {}

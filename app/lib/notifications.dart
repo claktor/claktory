@@ -54,8 +54,9 @@ class PostedNotification {
 }
 
 /// What a click on a notification opens: a Claktory, and in it an agent
-/// (at its Needs-you item), a pipe (at its held message) or a chat; none
-/// of them, just that Claktory.
+/// (at its Needs-you item), a pipe (at its held message), a chat, or Needs
+/// you for a device waiting to be allowed; none of them, just that
+/// Claktory.
 @immutable
 class NotificationTarget {
   const NotificationTarget({
@@ -64,6 +65,8 @@ class NotificationTarget {
     this.pipeId = '',
     this.chatId = '',
     this.seq = 0,
+    this.deviceId = '',
+    this.kind = '',
   });
 
   /// [Claktory] by [claktoryId].
@@ -73,12 +76,23 @@ class NotificationTarget {
   final String chatId;
   final int seq;
 
+  /// A device waiting to be allowed (Notify.device_id): Needs you, where
+  /// it's allowed, never the notification itself (#352 P4).
+  final String deviceId;
+
+  /// "needs_you" for a Needs-you notification, else empty: one about no
+  /// agent, pipe, chat or device (what came during quiet hours, #364 O3)
+  /// opens Needs you.
+  final String kind;
+
   Map<String, Object> toMap() => {
     'claktory': claktory,
     'agentId': agentId,
     'pipeId': pipeId,
     'chatId': chatId,
     'seq': seq,
+    'deviceId': deviceId,
+    'kind': kind,
   };
 
   static NotificationTarget? fromMap(Object? map) {
@@ -91,6 +105,8 @@ class NotificationTarget {
       pipeId: text('pipeId'),
       chatId: text('chatId'),
       seq: seq is int ? seq : 0,
+      deviceId: text('deviceId'),
+      kind: text('kind'),
     );
   }
 }
@@ -194,6 +210,10 @@ class ClaktoryNotifications {
             pipeId: notify.pipeId,
             chatId: notify.chatId,
             seq: notify.seq.toInt(),
+            deviceId: notify.deviceId,
+            kind: notify.kind == NotifyKind.NOTIFY_KIND_NEEDS_YOU
+                ? 'needs_you'
+                : '',
           ),
         ),
       ),
@@ -209,9 +229,15 @@ class ClaktoryNotifications {
     if (claktory == null) return;
     claktories.select(claktory);
     final backend = claktory.backend;
+    if (target.deviceId.isNotEmpty) {
+      claktory.page.value = AppPage.inbox;
+      return;
+    }
     if (target.agentId.isEmpty &&
         target.pipeId.isEmpty &&
         target.chatId.isEmpty) {
+      // About no one thing (what waited out quiet hours): Needs you.
+      if (target.kind == 'needs_you') claktory.page.value = AppPage.inbox;
       return;
     }
     claktory.page.value = AppPage.agent;

@@ -11,8 +11,13 @@
 // iOS view with nothing drawing (ink_surface.dart's surface, its drawing
 // policy none): a finger scrolls, zooms and selects. Search is in More,
 // and opens the same find, whose bar the phone's page shows at its foot.
+//
+// On both, ink saved on an iPad shows over its page, only read (#368): each
+// page's latest layer of the version shown, loaded into the native view as
+// the iPad loads it ([_PdfInk]), and again as it's saved anywhere.
 import 'dart:async';
 
+import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -25,14 +30,24 @@ import '../find.dart';
 import '../identity.dart';
 import '../ipad/ink_bridge.dart';
 import '../ipad/ink_surface.dart';
+import '../ipad/ink_sync.dart' show InkBlobs;
 import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
+import '../mobile/metrics.dart' show TypeScale;
+import '../paced.dart' show FilePreviews;
+import '../resources.dart' show formatBytes;
 import '../scope.dart';
+import 'loading_progress.dart';
+import 'previews.dart';
 import 'registry.dart';
 
 /// How much of a PDF one read brings (the backend's cap).
 @visibleForTesting
 var pdfChunk = 8 * 1024 * 1024;
+
+/// Over this, a PDF on a phone (or on a slow link) shows its pages as
+/// images made for the screen while it comes (#379 step 3).
+const pdfPagesFrom = 5 * 1000 * 1000;
 
 /// Opens a link from a PDF (tests replace it).
 @visibleForTesting
@@ -53,10 +68,16 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
   @override
   String get path => widget.path;
 
+  @override
+  String get loadingLabel => 'Loading PDF…';
+
   /// The page's surface: a new one for each version of the file, since
   /// native opens its document once.
   InkSurfaceController? _controller;
   StreamSubscription<InkEvent>? _events;
+
+  /// The iPad's ink over this version's pages.
+  _PdfInk? _ink;
   InkParams? _params;
   Key? _surfaceKey;
 
@@ -68,6 +89,17 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
   /// Brings the file again whenever asked to reload.
   var _generation = 0;
 
+  /// A big PDF's pages as images while the PDF itself comes (#379); null
+  /// once it's shown, or when it isn't big.
+  _PagePreviews? _pages;
+
+  /// Page images were due, but this Claktory can't make them.
+  var _noPreview = false;
+
+  /// Search was asked for while only the images show: it says when.
+  var _searchEarly = false;
+  Timer? _searchEarlyFor;
+
   /// Find's engine: PDFKit's search in the page's surface.
   late final _find = _PdfFind(() => _controller);
 
@@ -77,6 +109,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
 
   @override
   void dispose() {
+    _searchEarlyFor?.cancel();
     _find.dispose();
     _generation++;
     _drop();
@@ -84,6 +117,8 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
   }
 
   void _drop() {
+    _ink?.dispose();
+    _ink = null;
     unawaited(_events?.cancel());
     _events = null;
     _controller?.dispose();
@@ -100,6 +135,8 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
     setState(() {
       _problem = null;
       failure = null;
+      _pages = null;
+      _noPreview = false;
     });
     try {
       // A file that changes as it comes is read again from its start, with
@@ -156,7 +193,15 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
     int generation,
   ) async {
     bool stale() => !mounted || generation != _generation;
-    final first = await backend.readFile(path, maxBytes: pdfChunk);
+    void progress(int through, int size) {
+      if (!stale()) {
+        setState(() => _progress = (received: through, size: size));
+      }
+    }
+
+    // What it is first (its size and version), so one already in the
+    // render cache isn't brought over the link again.
+    final first = await backend.readFile(path, maxBytes: 1);
     if (stale()) return null;
     // What the header and FileLoading compare a change with, without the
     // bytes.
@@ -176,6 +221,30 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
       name: name,
     );
     if (stale()) return null;
+    // A big one on a phone, or on a slow link: its pages as images at
+    // once, while the PDF comes behind them.
+    if (cached == null &&
+        size > pdfPagesFrom &&
+        (touchDevice || slowFor(backend, size))) {
+      final pages = _PagePreviews(
+        backend: backend,
+        path: path,
+        sha256: sha,
+        changed: () {
+          if (stale()) return;
+          final pages = _pages;
+          setState(() {
+            _noPreview = pages?.unavailable ?? false;
+            final count = pages?.count;
+            if (count != null) {
+              _page = (page: _page?.page ?? 1, count: count);
+            }
+          });
+        },
+      );
+      _pages = pages;
+      unawaited(pages.want(_page?.page ?? 1));
+    }
     if (cached == null) {
       final writer = await InkRenderCache.begin(
         backend: claktory,
@@ -183,8 +252,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
         name: name,
       );
       try {
-        await writer.append(Uint8List.fromList(first.data));
-        var offset = first.data.length;
+        var offset = 0;
         while (offset < size) {
           if (stale()) throw const _Problem('');
           setState(() => _progress = (received: offset, size: size));
@@ -193,6 +261,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
             maxBytes: pdfChunk,
             offset: offset,
             expectedSha256: sha,
+            onProgress: progress,
           );
           if (stale()) throw const _Problem('');
           if (chunk.error == 'changed' || chunk.sha256 != sha) {
@@ -243,7 +312,15 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
       return;
     }
     _drop();
+    _pages = null;
+    _searchEarly = false;
     final controller = InkSurfaceController();
+    _ink = _PdfInk(
+      backend: AppScope.of(context),
+      path: path,
+      sha256: params.source.sha256 ?? '',
+      controller: controller,
+    );
     setState(() {
       _controller = controller;
       _events = controller.events.listen(_on);
@@ -258,6 +335,8 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
     if (!mounted) return;
     switch (event) {
       case InkReady(:final pageCount):
+        // A view made (or made again) has no ink yet.
+        _ink?.ready();
         if (pageCount > 0) {
           setState(() => _page = (page: _page?.page ?? 1, count: pageCount));
         }
@@ -322,19 +401,40 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
     final Widget body;
     if (problem != null) {
       body = problem;
+    } else if ((params == null || controller == null) &&
+        _pages?.count != null) {
+      // A big PDF's pages as images while it comes (#379).
+      body = _PagesWhileLoading(
+        pages: _pages!,
+        page: page?.page ?? 1,
+        onPage: (shown) => setState(
+          () => _page = (page: shown, count: _pages?.count ?? shown),
+        ),
+        progress: _progress,
+        searchEarly: _searchEarly,
+      );
     } else if (params == null || controller == null) {
       final progress = _progress;
-      body = Center(
-        child: Text(
-          progress == null || progress.size == 0
-              ? 'Opening…'
-              : 'Opening… ${(100 * progress.received / progress.size).floor()}%',
-          style: TextStyles.caption.copyWith(
-            color: palette.textMuted,
-            fontFeatures: const [FontFeature.tabularFigures()],
-          ),
-        ),
-      );
+      // Coming over the link, a piece at a time (#375); then opening it.
+      body = progress != null
+          ? LoadingProgress(
+              label: 'Loading PDF…',
+              received: progress.received,
+              size: progress.size,
+              connected: AppScope.of(context).connected,
+              note: _noPreview
+                  ? "Full size: this Claktory can't make a smaller copy."
+                  : null,
+            )
+          : Center(
+              child: Text(
+                'Opening…',
+                style: TextStyles.caption.copyWith(
+                  color: palette.textMuted,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            );
     } else {
       body = Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -363,20 +463,211 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
       );
     }
     final showing = params != null && problem == null;
+    final previewing = !showing && problem == null && _pages?.count != null;
     void openFind() => _session?.open();
+    // Search is there while the pages are images, and says when it works.
+    void searchEarly() {
+      _searchEarlyFor?.cancel();
+      setState(() => _searchEarly = true);
+      _searchEarlyFor = Timer(const Duration(seconds: 4), () {
+        if (mounted) setState(() => _searchEarly = false);
+      });
+    }
+
     return PaneScaffold(
       details: details(
-        page == null || !showing
+        page == null || !(showing || previewing)
             ? ''
             : 'Page ${_count(page.page)} of ${_count(page.count)}',
       ),
       controls: [
         if (showing) HeaderTextButton('Search', openFind),
+        if (previewing) HeaderTextButton('Search', searchEarly),
         reloadButton(),
       ],
-      actions: [PaneAction('Reload', reload)],
+      actions: [
+        if (previewing) PaneAction('Search', searchEarly),
+        PaneAction('Reload', reload),
+      ],
       body: ColoredBox(color: palette.canvas, child: body),
     );
+  }
+}
+
+/// The latest ink layer of each page of a PDF's version [sha256], by page:
+/// the page's own (not a copy kept beside another after a conflict), at its
+/// latest revision.
+@visibleForTesting
+Map<int, InkLayer> pdfInkLayers(Iterable<InkLayer> layers, String sha256) {
+  final best = <int, InkLayer>{};
+  for (final layer in layers) {
+    final page = layer.space.page1based;
+    if (layer.sourceSha256 != sha256 ||
+        layer.conflictOf.isNotEmpty ||
+        layer.space.kind != 'pdf_page' ||
+        page < 1 ||
+        layer.drawing.sha256.isEmpty) {
+      continue;
+    }
+    final had = best[page];
+    if (had == null ||
+        layer.revision > had.revision ||
+        (layer.revision == had.revision && layer.updatedMs > had.updatedMs)) {
+      best[page] = layer;
+    }
+  }
+  return best;
+}
+
+/// The ink saved on [path]'s pages (on an iPad), version [sha256], in the
+/// native view: each page's latest layer, loaded once the view is ready
+/// and again whenever one is saved or deleted, on any device. Only read:
+/// nothing draws here. Nothing on a Claktory that keeps no drawings, and a
+/// page whose drawing can't be read shows none.
+class _PdfInk {
+  _PdfInk({
+    required this.backend,
+    required this.path,
+    required this.sha256,
+    required this.controller,
+  }) {
+    backend.inkLayerLists.addListener(_listed);
+    backend.connected.addListener(_connectedChanged);
+    unawaited(_list());
+  }
+
+  final Backend backend;
+  final String path;
+  final String sha256;
+  final InkSurfaceController controller;
+
+  /// [path] as the backend names it, from its first answer.
+  String? _canonical;
+  InkLayerList? _layers;
+
+  /// The native view is ready for drawings.
+  var _ready = false;
+
+  /// What each page shows now: its layer's id and revision.
+  final _shown = <int, String>{};
+  var _loading = false;
+  var _again = false;
+  var _retry = false;
+  var _unsupported = false;
+  var _disposed = false;
+
+  void dispose() {
+    _disposed = true;
+    backend.inkLayerLists.removeListener(_listed);
+    backend.connected.removeListener(_connectedChanged);
+  }
+
+  /// The view was made, or made again: none of the ink is on it.
+  void ready() {
+    _ready = true;
+    _shown.clear();
+    unawaited(_load());
+  }
+
+  Future<void> _list() async {
+    if (_unsupported || _disposed) return;
+    try {
+      final list = await backend.listInkLayers(path);
+      if (_disposed) return;
+      _retry = false;
+      _canonical = list.path;
+      _layers = list;
+      unawaited(_load());
+    } on RequestFailure catch (failure) {
+      // A Claktory before ink layers: nothing to show, ever.
+      if (failure.code == ErrorCode.ERROR_CODE_UNKNOWN_MESSAGE) {
+        _unsupported = true;
+      } else {
+        _retry = true;
+      }
+    } on Object {
+      _retry = true;
+    }
+  }
+
+  void _connectedChanged() {
+    if (backend.connected.value && _retry) unawaited(_list());
+  }
+
+  /// A layer of this file was saved or deleted, on any device.
+  void _listed() {
+    final list = backend.inkLayerLists.value;
+    if (list == null || _disposed) return;
+    if (list.path != (_canonical ?? path)) return;
+    _layers = list;
+    unawaited(_load());
+  }
+
+  /// Brings the view to the latest layers: the pages whose layer changed,
+  /// and none on a page whose layer went. One load at a time; a change
+  /// meanwhile loads again after it.
+  Future<void> _load() async {
+    final list = _layers;
+    if (!_ready || list == null || _disposed) return;
+    if (_loading) {
+      _again = true;
+      return;
+    }
+    _loading = true;
+    try {
+      final wanted = pdfInkLayers(list.layers, sha256);
+      final changes = <InkLayerDrawing>[];
+      final shown = <int, String>{};
+      for (final MapEntry(key: page, value: layer) in wanted.entries) {
+        final id = '${layer.id}@${layer.revision}';
+        if (_shown[page] == id) continue;
+        final InkDrawingData drawing;
+        try {
+          final bytes = await InkBlobs(backend).read(layer.drawing.sha256);
+          drawing = InkDrawingData.bytes(
+            bytes,
+            sha256: layer.drawing.sha256,
+            contentVersion: layer.drawing.contentVersion,
+          );
+        } on Object {
+          // Unreadable now: the next save tries again.
+          continue;
+        }
+        if (_disposed) return;
+        changes.add(
+          InkLayerDrawing(
+            page1based: page,
+            inkLayerId: layer.id,
+            revision: layer.revision,
+            drawing: drawing,
+          ),
+        );
+        shown[page] = id;
+      }
+      final gone = [
+        for (final page in _shown.keys)
+          if (!wanted.containsKey(page)) page,
+      ];
+      for (final page in gone) {
+        changes.add(InkLayerDrawing.cleared(page1based: page));
+      }
+      if (changes.isEmpty) return;
+      try {
+        await controller.loadDrawing(changes);
+      } on Object {
+        // The view went, or can't show ink: its next ready loads it all.
+        return;
+      }
+      if (_disposed) return;
+      gone.forEach(_shown.remove);
+      _shown.addAll(shown);
+    } finally {
+      _loading = false;
+      if (_again && !_disposed) {
+        _again = false;
+        unawaited(_load());
+      }
+    }
   }
 }
 
@@ -562,4 +853,212 @@ class _Changed implements Exception {
 class _Problem implements Exception {
   const _Problem(this.text);
   final String text;
+}
+
+/// A big PDF's pages as images made for this screen (#379 step 3), each
+/// asked for when it's first wanted. [changed] when one comes, or when
+/// it's clear none will.
+class _PagePreviews {
+  _PagePreviews({
+    required this.backend,
+    required this.path,
+    required this.sha256,
+    required this.changed,
+  });
+
+  final Backend backend;
+  final String path;
+  final String sha256;
+  final VoidCallback changed;
+
+  /// How many pages it has, once a page has said.
+  int? count;
+
+  /// This Claktory can't make page images.
+  var unavailable = false;
+
+  final images = <int, Uint8List>{};
+
+  /// Each page's size in PDF points, as it shows, for its shape.
+  final sizes = <int, Size>{};
+  final _asked = <int>{};
+
+  /// Asks for [page]'s image, once.
+  Future<void> want(int page) async {
+    if (unavailable || page < 1 || !_asked.add(page)) return;
+    if (count case final count? when page > count) return;
+    try {
+      final read = await backend.readFile(
+        path,
+        expectedSha256: sha256,
+        preview: previewScreen(),
+        previewPage: page,
+        // No image (a Claktory that can't make them, or one from before):
+        // the answer is the PDF's start instead, wanted only from the
+        // PDF's own read, so none of it is read here past one piece.
+        onFirst: (first) => first.isPreview,
+      );
+      if (read.pageCount > 0) count = read.pageCount;
+      if (read.isPreview && read.data.isNotEmpty) {
+        images[page] = Uint8List.fromList(read.data);
+        if (read.originalPixelWidth > 0 && read.originalPixelHeight > 0) {
+          sizes[page] = Size(
+            read.originalPixelWidth.toDouble(),
+            read.originalPixelHeight.toDouble(),
+          );
+        }
+      } else if (read.preview == FilePreview.FILE_PREVIEW_UNAVAILABLE ||
+          (read.error.isEmpty && !read.isPreview)) {
+        // None from this Claktory (or one before page images): the PDF
+        // alone, as before.
+        unavailable = true;
+      } else {
+        _asked.remove(page);
+      }
+    } on RequestFailure {
+      _asked.remove(page);
+    }
+    changed();
+  }
+}
+
+/// The pages as images, one under another a screen at a time, while the
+/// PDF comes: "Preview · Loading the full PDF… 2.1 MB of 22.4 MB" at the
+/// foot, over its progress.
+class _PagesWhileLoading extends StatefulWidget {
+  const _PagesWhileLoading({
+    required this.pages,
+    required this.page,
+    required this.onPage,
+    required this.progress,
+    required this.searchEarly,
+  });
+
+  final _PagePreviews pages;
+  final int page;
+  final ValueChanged<int> onPage;
+  final ({int received, int size})? progress;
+  final bool searchEarly;
+
+  @override
+  State<_PagesWhileLoading> createState() => _PagesWhileLoadingState();
+}
+
+class _PagesWhileLoadingState extends State<_PagesWhileLoading> {
+  late final _controller = PageController(initialPage: widget.page - 1);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final pages = widget.pages;
+    final style = TypeScale.of(context).caption.copyWith(
+      color: palette.textMuted,
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
+    final progress = widget.progress;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: PageView.builder(
+            controller: _controller,
+            scrollDirection: Axis.vertical,
+            itemCount: pages.count ?? 1,
+            onPageChanged: (index) {
+              widget.onPage(index + 1);
+              // This one, and the next, so it's there when it's turned to.
+              unawaited(pages.want(index + 1));
+              unawaited(pages.want(index + 2));
+            },
+            itemBuilder: (context, index) {
+              final image = pages.images[index + 1];
+              if (image == null) {
+                return Center(
+                  child: Text(
+                    'Loading page ${_count(index + 1)}…',
+                    style: style,
+                  ),
+                );
+              }
+              return InteractiveViewer(
+                maxScale: 4,
+                child: Padding(
+                  padding: const EdgeInsets.all(Space.s),
+                  child: Center(
+                    child: Image.memory(
+                      image,
+                      fit: BoxFit.contain,
+                      gaplessPlayback: true,
+                      semanticLabel: 'Page ${_count(index + 1)}',
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        Container(
+          key: const ValueKey('pdf-pages-bar'),
+          padding: const EdgeInsets.fromLTRB(
+            Space.l,
+            Space.s,
+            Space.l,
+            Space.s,
+          ),
+          decoration: BoxDecoration(
+            color: palette.sidebar,
+            border: Border(top: BorderSide(color: palette.hairline)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Semantics(
+                liveRegion: widget.searchEarly,
+                child: Text(
+                  widget.searchEarly
+                      ? 'You can search once the full PDF has loaded.'
+                      : progress == null || progress.size == 0
+                      ? 'Preview · Loading the full PDF…'
+                      : 'Preview · Loading the full PDF… '
+                            '${formatBytes(Int64(progress.received))} of '
+                            '${formatBytes(Int64(progress.size))}',
+                  style: style,
+                ),
+              ),
+              const SizedBox(height: Space.xs),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: SizedBox(
+                  height: 4,
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: ColoredBox(color: palette.selected),
+                      ),
+                      FractionallySizedBox(
+                        widthFactor: progress == null || progress.size == 0
+                            ? 0
+                            : (progress.received / progress.size).clamp(
+                                0.0,
+                                1.0,
+                              ),
+                        child: ColoredBox(color: palette.signal),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
 }

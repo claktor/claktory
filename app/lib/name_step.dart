@@ -270,22 +270,30 @@ class StepCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     if (isPhoneLayout(context)) return _page(context, palette);
+    // Centred in what an on-screen keyboard leaves (an Android tablet's,
+    // an iPad's), so the field and the button under it stay in sight.
+    final safe = MediaQuery.paddingOf(context).bottom;
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom;
     return ColoredBox(
       color: const Color(0xFF000000).withValues(alpha: 0.4),
       child: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(Space.l),
-            child: Container(
-              width: 400,
-              padding: const EdgeInsets.all(Space.xl),
-              decoration: BoxDecoration(
-                color: palette.sidebar,
-                borderRadius: BorderRadius.circular(Radii.floating),
-                border: Border.all(color: palette.hairline),
-                boxShadow: floatingShadow,
+        bottom: false,
+        child: Padding(
+          padding: EdgeInsets.only(bottom: math.max(safe, keyboard)),
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(Space.l),
+              child: Container(
+                width: 400,
+                padding: const EdgeInsets.all(Space.xl),
+                decoration: BoxDecoration(
+                  color: palette.sidebar,
+                  borderRadius: BorderRadius.circular(Radii.floating),
+                  border: Border.all(color: palette.hairline),
+                  boxShadow: floatingShadow,
+                ),
+                child: child,
               ),
-              child: child,
             ),
           ),
         ),

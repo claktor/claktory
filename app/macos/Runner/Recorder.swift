@@ -6,7 +6,8 @@
 // restricted), "request" (asks the person; true if allowed), "openSettings"
 // (the iPhone's Settings for this app; nothing on the Mac), "start" (a file
 // path; errors "denied", "busy" or "failed"), "stop" ({path, durationMs}),
-// "cancel" (stops and deletes the file).
+// "cancel" (stops and deletes the file), "voiceFolder" (where recordings
+// are made and kept until their Claktory has them: see voiceFolder()).
 // factory/recorder/events: while recording, about every 50 ms, {level 0…1,
 // ms elapsed}; then once {ended: "limit" | "interrupted" | "error"} if it
 // stops by itself (at ten minutes; a call or Siri on the iPhone; a
@@ -105,9 +106,49 @@ final class Recorder: NSObject, AVAudioRecorderDelegate, FlutterStreamHandler {
       cancelled?.stop()
       cancelled?.deleteRecording()
       result(nil)
+    case "voiceFolder":
+      do {
+        result(try Self.voiceFolder().path)
+      } catch {
+        result(FlutterError(code: "failed", message: error.localizedDescription, details: nil))
+      }
     default:
       result(FlutterMethodNotImplemented)
     }
+  }
+
+  /// Where recordings are made and kept until their Claktory confirms it
+  /// has them (#401, Matt's: an unsent recording stays on the device until
+  /// then, and is deleted once it's confirmed). In this app's Application
+  /// Support (the Mac's: a folder of its own, by bundle id, so Claktory Dev
+  /// keeps its own), this user's only (0700), never backed up (iCloud
+  /// backups on the iPhone, Time Machine on the Mac) and, on the iPhone,
+  /// readable once the phone has been unlocked after starting, so a send
+  /// can be retried while it's locked. Files made in it take its
+  /// protection.
+  static func voiceFolder() throws -> URL {
+    let fm = FileManager.default
+    let support = try fm.url(
+      for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+    #if os(macOS)
+      let base = support.appendingPathComponent(
+        Bundle.main.bundleIdentifier ?? "Claktory", isDirectory: true)
+    #else
+      let base = support
+    #endif
+    var folder = base.appendingPathComponent("Voice not sent", isDirectory: true)
+    try fm.createDirectory(
+      at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+    #if os(iOS)
+      try fm.setAttributes(
+        [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+        ofItemAtPath: folder.path)
+    #endif
+    var values = URLResourceValues()
+    values.isExcludedFromBackup = true
+    try folder.setResourceValues(values)  // `var`: setResourceValues is mutating
+    return folder
   }
 
   private func start(_ path: String, _ result: @escaping FlutterResult) {

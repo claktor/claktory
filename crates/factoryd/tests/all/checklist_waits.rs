@@ -549,3 +549,55 @@ async fn a_request_for_a_secret_or_a_proposal_about_an_item_shows_as_it_in_needs
          it now, do, and update #2. If not, propose again with propose_to_rivet (item: \"2\"), saying in a line why it's needed."
     );
 }
+
+/// Submit (#370): a reply to a question about an item counts as answered.
+/// The agent is told to update the item if it settles it, and nothing has it
+/// asked again.
+#[tokio::test]
+async fn a_reply_to_a_question_about_an_item_counts_as_answered_and_is_never_asked_again() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_nudge_after(std::time::Duration::from_millis(150));
+    factory.set_nudge_minute(std::time::Duration::from_millis(1));
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Worker", "")).await;
+    ack(apply_request(&mut client, &mut view, checklist_on("worker")).await);
+    let quiet = v1::ChecklistSettings {
+        agent_blocked_minutes: 10080,
+        person_blocked_minutes: 10080,
+        external_retry_minutes: 1000,
+        reask_minutes: 15,
+        overdue_minutes: 10080,
+    };
+    ack(apply_request(&mut client, &mut view, intervals(quiet)).await);
+    call(&mut client, &mut view, "worker", "checklist_add", r#"{"items":["Pick the database"]}"#).await;
+    call(&mut client, &mut view, "worker", "checklist_update", r#"{"updates":[{"id":1,"status":"blocked","waits_on":"person_decision"}]}"#)
+        .await;
+    call(&mut client, &mut view, "worker", "ask_person", r#"{"title":"Use the shared staging DB?","body":"For the tests.","item":"1"}"#)
+        .await;
+    let waiting = |view: &View| view.agent("worker").waiting_items.clone();
+    view.follow(&mut client, |view| waiting(view).len() == 1).await;
+    let card = waiting(&view)[0].card_seq;
+    let reply =
+        v1::AnswerAsk { agent_id: "worker".into(), seq: card, reply: true, text: "No, spin up a fresh one.".into(), ..Default::default() };
+    ack(apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(reply)).await);
+    let replied = told(&mut client, &mut view, "worker", "The person replied").await;
+    assert!(
+        replied.text.starts_with("The person replied to your question \"Use the shared staging DB?\":\n\nNo, spin up a fresh one.")
+            && replied.text.ends_with(
+                "It was about #1 \"Pick the database\", still blocked on the person. If this settles it, update #1 now; \
+                 if something is still missing, say what in a note."
+            ),
+        "{}",
+        replied.text
+    );
+    view.follow(&mut client, |view| waiting(view).is_empty()).await;
+    let item = panel(&mut client, &mut view, "worker").await[0].clone();
+    assert_eq!((item.dismissed_ms, item.reask_at_ms), (0, 0), "{item:?}");
+    // Past the re-ask interval (15ms here), nothing asks it again.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    apply_request(&mut client, &mut view, select("worker")).await;
+    assert!(events(&view, "Ask the person again").is_empty());
+}

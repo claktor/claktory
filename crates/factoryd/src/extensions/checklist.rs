@@ -15,7 +15,7 @@ use rusqlite::{OptionalExtension, params, params_from_iter};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{Extension, Manifest, OptionKind, OptionSpec, PromptKind, PromptSection, factory_tool};
+use super::{Extension, Manifest, OptionKind, OptionSpec, PromptSection, factory_tool};
 use crate::config::AgentConfig;
 use crate::factory::{Factory, Inner};
 use crate::store::Store;
@@ -960,7 +960,7 @@ pub(crate) fn asked_about(factory: &Factory, agent: &str, key: &str) -> bool {
 /// The seq of `card`'s entry in `transcript`, if it shows it.
 pub(crate) fn seq_of(transcript: &crate::transcript::Transcript, card: &Card) -> Option<u64> {
     use v1::entry::Kind;
-    transcript.entries().iter().rev().find_map(|entry| {
+    transcript.in_memory().rev().find_map(|entry| {
         let shows = match (&entry.kind, card) {
             (Some(Kind::AskPerson(ask)), Card::Ask(id)) => ask.id == id.to_string(),
             (Some(Kind::SecretRequest(request)), Card::Secret(id)) => request.id == *id,
@@ -1687,7 +1687,7 @@ impl Extension for Checklist {
     }
 
     fn prompt(&self, _factory: &Factory, _inner: &Inner, _agent: &AgentConfig) -> Vec<PromptSection> {
-        vec![PromptSection { kind: PromptKind::Static, text: PROMPT.to_owned() }]
+        vec![PromptSection::static_text(PROMPT)]
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
@@ -2355,7 +2355,7 @@ pub(crate) fn person_add_goal(factory: &Arc<Factory>, request: &v1::AddGoal) -> 
     }
     let ids = add_goals(&factory.store, &request.agent_id, "", &[text.to_owned()])?;
     factory.refresh_view(&request.agent_id);
-    let person = factory.lock().config.person_capitalized().to_owned();
+    let person = factory.person_capitalized();
     let id = ids.first().copied().unwrap_or_default();
     let said = format!(
         "{person} added a goal to your checklist: G{id} \"{text}\". Link the items that serve it with goal: {id} on checklist_add or checklist_update, and add items for what it still needs."
@@ -2391,7 +2391,7 @@ pub(crate) fn person_update_goal(factory: &Arc<Factory>, request: &v1::UpdateGoa
     if said.iter().any(|said| said.ends_with("nothing to change")) {
         return Ok(());
     }
-    let person = factory.lock().config.person_capitalized().to_owned();
+    let person = factory.person_capitalized();
     let mut what = Vec::new();
     if request.remove {
         what.push(format!("removed goal G{id} \"{}\"; the items that served it serve no goal now", before.text));

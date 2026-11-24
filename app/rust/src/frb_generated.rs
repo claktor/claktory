@@ -4572,6 +4572,23 @@ impl SseDecode for crate::api::tunnel::TunnelPhase {
     }
 }
 
+impl SseDecode for crate::api::tunnel::TunnelRelayTrouble {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::tunnel::TunnelRelayTrouble::None,
+            1 => crate::api::tunnel::TunnelRelayTrouble::Unchosen,
+            2 => crate::api::tunnel::TunnelRelayTrouble::Dns,
+            3 => crate::api::tunnel::TunnelRelayTrouble::Timeout,
+            4 => crate::api::tunnel::TunnelRelayTrouble::Tls,
+            5 => crate::api::tunnel::TunnelRelayTrouble::Network,
+            6 => crate::api::tunnel::TunnelRelayTrouble::Other,
+            _ => unreachable!("Invalid variant for TunnelRelayTrouble: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for crate::api::tunnel::TunnelStatus {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4580,12 +4597,16 @@ impl SseDecode for crate::api::tunnel::TunnelStatus {
         let mut var_error = <String>::sse_decode(deserializer);
         let mut var_failure = <crate::api::tunnel::TunnelFailure>::sse_decode(deserializer);
         let mut var_relayConnected = <bool>::sse_decode(deserializer);
+        let mut var_relayUpMs = <u32>::sse_decode(deserializer);
+        let mut var_relayTrouble = <crate::api::tunnel::TunnelRelayTrouble>::sse_decode(deserializer);
         return crate::api::tunnel::TunnelStatus {
             phase: var_phase,
             path: var_path,
             error: var_error,
             failure: var_failure,
             relay_connected: var_relayConnected,
+            relay_up_ms: var_relayUpMs,
+            relay_trouble: var_relayTrouble,
         };
     }
 }
@@ -5413,6 +5434,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::tunnel::TunnelPhase> for crat
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::tunnel::TunnelRelayTrouble {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::None => 0.into_dart(),
+            Self::Unchosen => 1.into_dart(),
+            Self::Dns => 2.into_dart(),
+            Self::Timeout => 3.into_dart(),
+            Self::Tls => 4.into_dart(),
+            Self::Network => 5.into_dart(),
+            Self::Other => 6.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::tunnel::TunnelRelayTrouble {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::tunnel::TunnelRelayTrouble> for crate::api::tunnel::TunnelRelayTrouble {
+    fn into_into_dart(self) -> crate::api::tunnel::TunnelRelayTrouble {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::tunnel::TunnelStatus {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -5421,6 +5463,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::tunnel::TunnelStatus {
             self.error.into_into_dart().into_dart(),
             self.failure.into_into_dart().into_dart(),
             self.relay_connected.into_into_dart().into_dart(),
+            self.relay_up_ms.into_into_dart().into_dart(),
+            self.relay_trouble.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -6212,6 +6256,27 @@ impl SseEncode for crate::api::tunnel::TunnelPhase {
     }
 }
 
+impl SseEncode for crate::api::tunnel::TunnelRelayTrouble {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::tunnel::TunnelRelayTrouble::None => 0,
+                crate::api::tunnel::TunnelRelayTrouble::Unchosen => 1,
+                crate::api::tunnel::TunnelRelayTrouble::Dns => 2,
+                crate::api::tunnel::TunnelRelayTrouble::Timeout => 3,
+                crate::api::tunnel::TunnelRelayTrouble::Tls => 4,
+                crate::api::tunnel::TunnelRelayTrouble::Network => 5,
+                crate::api::tunnel::TunnelRelayTrouble::Other => 6,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for crate::api::tunnel::TunnelStatus {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -6220,6 +6285,8 @@ impl SseEncode for crate::api::tunnel::TunnelStatus {
         <String>::sse_encode(self.error, serializer);
         <crate::api::tunnel::TunnelFailure>::sse_encode(self.failure, serializer);
         <bool>::sse_encode(self.relay_connected, serializer);
+        <u32>::sse_encode(self.relay_up_ms, serializer);
+        <crate::api::tunnel::TunnelRelayTrouble>::sse_encode(self.relay_trouble, serializer);
     }
 }
 

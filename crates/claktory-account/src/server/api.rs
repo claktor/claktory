@@ -288,14 +288,22 @@ pub(super) async fn share(service: &Service, call: &Call) -> Result<Reply, ApiEr
         let share = derive_share(&service.secrets.k_share, &claktory.id, epoch);
         let sealed_share =
             seal_share(&share, &eph_pub, &claktory.id, epoch).ok_or_else(|| ApiError::invalid("eph_pub isn't a key to seal to."))?;
-        db::record_release(&conn, &claktory.id, now, &call.ip, epoch)?;
+        // Mailed only when it doesn't look like this Claktory restarting
+        // where it runs (#412): every restart mailed was noise.
+        let unusual = db::unusual_release(&conn, &claktory, &call.ip, epoch, now)?;
+        let email = match unusual {
+            Some(_) => db::account_email(&conn, &claktory.account_id)?,
+            None => None,
+        };
+        db::record_release(&conn, &claktory.id, now, &call.ip, epoch, email.is_some())?;
         db::touch(&conn, &claktory, service.locate(&call.ip).as_ref(), now)?;
-        tracing::info!("share released: Claktory {}, epoch {epoch}", claktory.id);
-        (db::account_email(&conn, &claktory.account_id)?, sealed_share)
+        tracing::info!("share released: Claktory {}, epoch {epoch}, {}", claktory.id, if email.is_some() { "emailed" } else { "usual" });
+        (email.zip(unusual), sealed_share)
     };
     let (email, sealed_share) = account_email;
-    if let Some(email) = email {
-        let notice = mail::unlock_mail(&service.config.mail_domain, &email, &claktory.name, now, &call.ip, &service.config.account_page);
+    if let Some((email, unusual)) = email {
+        let notice =
+            mail::unlock_mail(&service.config.mail_domain, &email, &claktory.name, unusual, now, &call.ip, &service.config.account_page);
         // The share goes either way: a mail outage mustn't keep a Claktory
         // locked. `send` logs a failure.
         let _ = service.send(&notice, false).await;

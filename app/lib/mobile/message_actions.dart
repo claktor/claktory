@@ -34,6 +34,8 @@ class MessageActions extends StatelessWidget {
     required this.child,
     this.onReply,
     this.onReport,
+    this.onGoBack,
+    this.canGoBack,
     this.markdown = true,
   });
 
@@ -52,6 +54,18 @@ class MessageActions extends StatelessWidget {
   /// Reports the message to Claktory's team: the agent's own reply only;
   /// null for anything else.
   final VoidCallback? onReport;
+
+  /// Takes the conversation back to this message, asking first (friend
+  /// bug #9); null where it can't (a chat, a pipe's view).
+  final VoidCallback? onGoBack;
+
+  /// Whether [onGoBack] is offered now: the conversation can go back to
+  /// this message as it stands (asked as the actions open); always, when
+  /// null.
+  final bool Function()? canGoBack;
+
+  /// [onGoBack], when it's offered now.
+  VoidCallback? get _goBack => (canGoBack?.call() ?? true) ? onGoBack : null;
 
   final Widget child;
 
@@ -72,6 +86,7 @@ class MessageActions extends StatelessWidget {
             copyMessage(_copied(context)),
         const CustomSemanticsAction(label: 'Select text'): () =>
             showMessageText(context, text, markdown: markdown),
+        const CustomSemanticsAction(label: 'Go back to here'): ?_goBack,
         const CustomSemanticsAction(label: 'Report'): ?onReport,
       },
       child: selecting == null
@@ -106,6 +121,8 @@ class MessageActions extends StatelessWidget {
         if (onReply != null) const SheetAction('Reply', _Action.reply),
         const SheetAction('Copy', _Action.copy),
         const SheetAction('Select text', _Action.select),
+        if (_goBack != null)
+          const SheetAction('Go back to here…', _Action.back),
         if (onReport != null) const SheetAction('Report…', _Action.report),
       ],
     );
@@ -117,6 +134,8 @@ class MessageActions extends StatelessWidget {
         await copyMessage(_copied(context));
       case _Action.select:
         await showMessageText(context, text, markdown: markdown);
+      case _Action.back:
+        onGoBack?.call();
       case _Action.report:
         onReport?.call();
       case null:
@@ -124,7 +143,7 @@ class MessageActions extends StatelessWidget {
   }
 }
 
-enum _Action { reply, copy, select, report }
+enum _Action { reply, copy, select, back, report }
 
 /// Whether words are selected in the conversation around a message
 /// ([selecting]): once a selection has started, a touch and hold belongs to

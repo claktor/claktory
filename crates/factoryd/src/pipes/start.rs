@@ -383,9 +383,27 @@ pub(crate) fn list(factory: &Factory, project: Option<&str>) -> Result<String, S
         return Err(format!("There's no project \"{}\".", wanted.unwrap_or_default()));
     }
     let mut lines = Vec::new();
+    let grouped = super::groups::members(factory);
+    let groups = super::groups::all(factory);
     for (id, project_name) in projects {
         for record in factory.pipes.all().into_iter().filter(|record| &record.project == id) {
-            lines.push(format!("- {} (id {}), in {project_name}: {}", shown_name(&record), record.id, standing(&record, &person)));
+            let group = grouped
+                .get(&record.id)
+                .and_then(|group| groups.iter().find(|known| &known.id == group))
+                .map(|group| format!(", in the group {} (id {})", group.name, group.id))
+                .unwrap_or_default();
+            lines.push(format!("- {} (id {}), in {project_name}{group}: {}", shown_name(&record), record.id, standing(&record, &person)));
+        }
+        let mine: Vec<String> = groups
+            .iter()
+            .filter(|group| &group.project == id)
+            .map(|group| {
+                let count = grouped.values().filter(|known| **known == group.id).count();
+                format!("{} (id {}, {count} {})", group.name, group.id, if count == 1 { "pipe" } else { "pipes" })
+            })
+            .collect();
+        if !mine.is_empty() {
+            lines.push(format!("- Groups in {project_name}: {}", mine.join(", ")));
         }
     }
     if lines.is_empty() {

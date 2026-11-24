@@ -65,6 +65,13 @@ CREATE TABLE app_access_proposals (
 CREATE INDEX app_access_proposals_by_agent ON app_access_proposals (agent, created);
 ";
 
+/// The migration that added replies (#370 Submit): 1 when the person
+/// answered the card with a comment instead (state 'declined': nothing was
+/// given).
+pub(crate) const REPLIED: &str = "
+ALTER TABLE app_access_proposals ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
+";
+
 /// The tool whose result showed a card, before apps_set_access.
 pub(crate) const TOOL: &str = "apps_propose_access";
 /// Rivet's tools: what the apps are, and changing what they read and who
@@ -96,9 +103,11 @@ struct Row {
     decided: Option<i64>,
     comment: String,
     error: String,
+    /// Declined by a reply (#370): the comment is what to do instead.
+    replied: bool,
 }
 
-const COLUMNS: &str = "id, agent, app, version, key, incarnations, card, digest, state, created, decided, comment, error";
+const COLUMNS: &str = "id, agent, app, version, key, incarnations, card, digest, state, created, decided, comment, error, replied";
 
 impl Row {
     fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
@@ -116,6 +125,7 @@ impl Row {
             decided: row.get(10)?,
             comment: row.get(11)?,
             error: row.get(12)?,
+            replied: row.get(13)?,
         })
     }
 
@@ -135,6 +145,7 @@ impl Row {
             decided_ms: self.decided.unwrap_or_default(),
             comment: self.comment.clone(),
             error: self.error.clone(),
+            replied: self.replied,
             ..self.card.clone()
         }
     }
@@ -175,7 +186,7 @@ fn digest(card: &v1::AppAccessProposal, version: &str, key: &str, incarnations: 
         bound["rules"] = json!(card.card_rules);
     }
     let hash = Sha256::digest(bound.to_string().as_bytes());
-    hash.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::encoding::hex(&hash)
 }
 
 /// The agent named, by id or else by name, of this Claktory's agents.
@@ -528,7 +539,7 @@ fn file(
         ));
     }
     db.execute(
-        &format!("INSERT INTO app_access_proposals ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, NULL, '', '')"),
+        &format!("INSERT INTO app_access_proposals ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, NULL, '', '', 0)"),
         params![
             card.id,
             rivet,
@@ -737,6 +748,16 @@ pub(crate) fn cleared(store: &Store, agent: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Rivet's conversation went back to before `since` (`crate::fork`): its
+/// proposals made since then close as /clear's do.
+pub(crate) fn cleared_since(store: &Store, agent: &str, since: i64) -> rusqlite::Result<()> {
+    store.db().execute(
+        "UPDATE app_access_proposals SET state = 'cleared', decided = ?3 WHERE agent = ?1 AND state = 'pending' AND created >= ?2",
+        params![agent, since, now_ms()],
+    )?;
+    Ok(())
+}
+
 /// Rivet is deleted: its proposals go with its conversation.
 pub(crate) fn forget(store: &Store, agent: &str) -> rusqlite::Result<()> {
     store.db().execute("DELETE FROM app_access_proposals WHERE agent = ?1", [agent])?;
@@ -760,7 +781,7 @@ fn reshow(factory: &Factory, row: &Row) {
 
 /// Ends a waiting proposal, shows it as it is now, and returns it; None if
 /// it wasn't waiting.
-fn end(factory: &Factory, id: &str, state: State, comment: &str, error: &str) -> Option<Row> {
+fn end(factory: &Factory, id: &str, state: State, comment: &str, error: &str, replied: bool) -> Option<Row> {
     let word = match state {
         State::Granted => "granted",
         State::Declined => "declined",
@@ -770,8 +791,9 @@ fn end(factory: &Factory, id: &str, state: State, comment: &str, error: &str) ->
         .store
         .db()
         .execute(
-            "UPDATE app_access_proposals SET state = ?2, decided = ?3, comment = ?4, error = ?5 WHERE id = ?1 AND state = 'pending'",
-            params![id, word, now_ms(), comment, error],
+            "UPDATE app_access_proposals SET state = ?2, decided = ?3, comment = ?4, error = ?5, replied = ?6
+             WHERE id = ?1 AND state = 'pending'",
+            params![id, word, now_ms(), comment, error, replied],
         )
         .unwrap_or(0);
     if changed == 0 {
@@ -785,7 +807,7 @@ fn end(factory: &Factory, id: &str, state: State, comment: &str, error: &str) ->
 /// Tells Rivet how the person decided, and each agent given the app what
 /// it can do now.
 fn tell(factory: &Arc<Factory>, row: &Row) {
-    let person = factory.lock().config.person_capitalized().to_owned();
+    let person = factory.person_capitalized();
     let app = &row.card.app_name;
     let note = crate::decisions::note(&person, &row.comment);
     let (summary, text) = match row.state() {
@@ -800,6 +822,14 @@ fn tell(factory: &Arc<Factory>, row: &Row) {
                 given.push(format!("{} has {}", agent_name(factory, &grant.agent_id), grant.scopes.join(", ")));
             }
             (summary.clone(), format!("{summary}: {}.{note}", given.join("; ")))
+        }
+        State::Declined if row.replied => {
+            let summary = format!("{person} replied to your proposal for {app}");
+            let text = format!(
+                "{summary}; nothing was given yet. They say:\n\n{}\n\nIf it still fits, propose it again with that in mind.",
+                row.comment
+            );
+            (summary, text)
         }
         State::Declined => {
             let summary = format!("{person} declined your proposal for {app}");
@@ -879,6 +909,9 @@ fn changed(factory: &Factory, row: &Row) -> Option<String> {
 pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppAccess) -> Result<(), RequestError> {
     let agent = request.agent_id.as_str();
     let comment = crate::decisions::comment(&request.comment)?;
+    if request.reply && comment.is_empty() {
+        return Err(RequestError::Proposal("Write a reply, or approve or decline it.".to_owned()));
+    }
     factory.known_agent(agent)?;
     factory.ensure_loaded(agent).await?;
     let id = {
@@ -887,7 +920,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppAccess
             .agents
             .get(agent)
             .and_then(|runtime| runtime.transcript.as_ref())
-            .and_then(|transcript| transcript.entries().iter().find(|entry| entry.seq == request.seq).cloned());
+            .and_then(|transcript| transcript.entry(request.seq).cloned());
         match entry.and_then(|entry| entry.kind) {
             Some(v1::entry::Kind::AppAccess(proposal)) => proposal.id,
             _ => return Err(RequestError::Proposal("There's no such proposal in this conversation.".to_owned())),
@@ -902,8 +935,9 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppAccess
         reshow(factory, &found);
         return Ok(());
     }
-    if !request.approve {
-        if let Some(row) = end(factory, &id, State::Declined, comment, "") {
+    // A reply (#370 Submit) gives nothing: Rivet gets the comment.
+    if !request.approve || request.reply {
+        if let Some(row) = end(factory, &id, State::Declined, comment, "", request.reply) {
             tell(factory, &row);
         }
         return Ok(());
@@ -913,7 +947,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppAccess
         return Err(RequestError::Proposal("This suggestion changed after you opened it. Look at it again.".to_owned()));
     }
     if let Some(why) = changed(factory, &found) {
-        if let Some(row) = end(factory, &id, State::Failed, comment, &why) {
+        if let Some(row) = end(factory, &id, State::Failed, comment, &why, false) {
             tell(factory, &row);
         }
         return Ok(());
@@ -941,12 +975,12 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppAccess
     let given = give(factory, &found).await;
     if let Err(error) = given {
         let why = format!("It couldn't be given: {error}");
-        if let Some(row) = end(factory, &id, State::Failed, comment, &why) {
+        if let Some(row) = end(factory, &id, State::Failed, comment, &why, false) {
             tell(factory, &row);
         }
         return Ok(());
     }
-    if let Some(row) = end(factory, &id, State::Granted, comment, "") {
+    if let Some(row) = end(factory, &id, State::Granted, comment, "", false) {
         tell(factory, &row);
     }
     Ok(())

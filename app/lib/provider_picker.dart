@@ -11,6 +11,7 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart';
 import 'tell_rivet.dart' show ErrorLine;
+import 'usage_wait.dart' show UsageAutoContinueSetting;
 
 /// Settings → Providers: a card for each provider signed in or being
 /// signed in to, then [ProviderPicker] to add another. With none, the
@@ -89,6 +90,12 @@ class _ProviderSettingsState extends State<ProviderSettings> {
             flow: flow?.providerId == provider.id ? flow : null,
           ),
           const SizedBox(height: Space.s),
+        ],
+        // Once a provider is signed in.
+        if (added.isNotEmpty) ...[
+          const SizedBox(height: Space.s),
+          UsageAutoContinueSetting(on: workspace.usageAutoContinue),
+          const SizedBox(height: Space.l),
         ],
         if (added.isEmpty) ...[
           Text(

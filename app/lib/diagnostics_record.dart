@@ -99,7 +99,10 @@ enum ConnectionKey implements DiagnosticKey {
   attempt,
 
   /// Whether the try was welcomed before it ended.
-  welcomed;
+  welcomed,
+
+  /// Why the relay can't be reached, roughly: [RelayTrouble] (#388).
+  err;
 
   @override
   String get wire => switch (this) {
@@ -109,6 +112,28 @@ enum ConnectionKey implements DiagnosticKey {
 }
 
 enum AppLife implements DiagnosticWord { started, background, back }
+
+/// Why this device's relay can't be reached, in a word: the class of the
+/// tunnel's last error for it, never the error itself (it can name hosts).
+enum RelayTrouble implements DiagnosticWord {
+  /// None chosen yet: none answered the device's last measurement of the
+  /// network.
+  unchosen,
+
+  /// Its name couldn't be looked up.
+  dns,
+
+  /// Nothing answered in time.
+  timeout,
+
+  /// The secure connection to it failed.
+  tls,
+
+  /// The network turned it away: refused, reset or unreachable.
+  network,
+
+  other,
+}
 
 enum NetKind implements DiagnosticWord { wifi, cellular, wired, other, none }
 

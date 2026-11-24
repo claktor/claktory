@@ -6,6 +6,7 @@
 // (with ▶ to play it back); and Settings → Voice. The recording and
 // playing are native (recorder.dart, audio.dart).
 import 'dart:async';
+import 'dart:io' show File, FileSystemException;
 import 'dart:math' as math;
 
 import 'package:fixnum/fixnum.dart';
@@ -22,7 +23,10 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'recorder.dart';
 import 'resources.dart' show formatBytes;
 import 'scope.dart';
+import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'settings_view.dart' show SettingRequests, SettingRow;
+import 'usage.dart' show formatAge;
+import 'voice_keep.dart';
 
 /// Where to allow the microphone once it's refused for good, on this
 /// platform: the Settings page Open Settings opens beside it.
@@ -34,8 +38,7 @@ String micRefusedForGood() => switch (defaultTargetPlatform) {
     'To record, allow microphone access in Settings → Claktory.',
   TargetPlatform.android =>
     'To record, allow Claktory to use the microphone in Settings.',
-  _ =>
-    "Claktory can't use the microphone. Allow it in this device's settings.",
+  _ => "Claktory can't use the microphone. Allow it in this device's settings.",
 };
 
 /// One recording in an agent's message box, from the mic button: asked
@@ -91,9 +94,7 @@ class VoiceRecording extends ChangeNotifier {
         // Refused, it's asked again rather than assumed for good: Android
         // can still ask after a first no (undetermined), and only a
         // second one, or an iPhone's or a Mac's, is for good (denied).
-        access = await _mic.request()
-            ? MicAccess.granted
-            : await _mic.access();
+        access = await _mic.request() ? MicAccess.granted : await _mic.access();
       }
       switch (access) {
         case MicAccess.granted:
@@ -117,18 +118,23 @@ class VoiceRecording extends ChangeNotifier {
       }
       _levels.clear();
       _elapsed = Duration.zero;
+      // Straight into the folder it's kept in until sent (#401).
+      final into = await newRecordingPath(now());
+      _into = into;
       _events = _mic.events.listen(_heard);
       try {
-        await _mic.start(voiceFilePath(now()));
+        await _mic.start(into.path);
       } on RecordingFailure catch (failure) {
         await _events?.cancel();
         _events = null;
         _error = failure.message;
+        _dropFolder();
         return false;
       }
       if (_disposed) {
         // Its message box went while the microphone started.
         await _mic.cancel();
+        _dropFolder();
         return false;
       }
       _recording = true;
@@ -172,6 +178,26 @@ class VoiceRecording extends ChangeNotifier {
     notifyListeners();
     await events?.cancel();
     await _mic.cancel();
+    _dropFolder();
+  }
+
+  /// Where the recording goes, and whether that's the kept folder.
+  ({String path, bool kept})? _into;
+
+  /// Whether the last recording was made in the folder recordings are
+  /// kept in until sent.
+  bool get kept => _into?.kept ?? false;
+
+  /// A recording thrown away: its own folder in the kept one goes too.
+  void _dropFolder() {
+    final into = _into;
+    if (into == null || !into.kept) return;
+    try {
+      final folder = File(into.path).parent;
+      if (folder.existsSync()) folder.deleteSync(recursive: true);
+    } on FileSystemException {
+      // Swept at the next launch.
+    }
   }
 
   var _disposed = false;
@@ -182,7 +208,7 @@ class VoiceRecording extends ChangeNotifier {
     // Gone with its message box.
     if (_recording) {
       _recording = false;
-      unawaited(_mic.cancel());
+      unawaited(_mic.cancel().then((_) => _dropFolder()));
     }
     unawaited(_events?.cancel());
     _events = null;
@@ -721,27 +747,148 @@ class _VoiceSettingsState extends State<VoiceSettings> with SettingRequests {
         ],
       ),
     };
-    return SettingRow(
-      label: 'Speech model',
-      top: true,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(status, style: TextStyles.body.copyWith(color: palette.text)),
-          if (actions.isNotEmpty) ...[
-            const SizedBox(height: Space.s),
-            Wrap(spacing: Space.s, runSpacing: Space.s, children: actions),
-          ],
-          if (model.attribution.isNotEmpty) ...[
-            const SizedBox(height: Space.xs),
-            Text(
-              model.attribution,
-              style: TextStyles.caption.copyWith(color: palette.textFaint),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SettingRow(
+          label: 'Speech model',
+          top: true,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                status,
+                style: TextStyles.body.copyWith(color: palette.text),
+              ),
+              if (actions.isNotEmpty) ...[
+                const SizedBox(height: Space.s),
+                Wrap(spacing: Space.s, runSpacing: Space.s, children: actions),
+              ],
+              if (model.attribution.isNotEmpty) ...[
+                const SizedBox(height: Space.xs),
+                Text(
+                  model.attribution,
+                  style: TextStyles.caption.copyWith(color: palette.textFaint),
+                ),
+              ],
+              failureLine(palette),
+            ],
+          ),
+        ),
+        const KeptRecordings(),
+      ],
+    );
+  }
+}
+
+/// Settings → Voice: recordings said for an answer and not sent, kept on
+/// this device (#401), whose card has gone (answered elsewhere, say) or
+/// isn't open now: each to play, or delete. One whose card opens goes back
+/// to it, and is sent.
+class KeptRecordings extends StatelessWidget {
+  const KeptRecordings({super.key, this.now = DateTime.now});
+
+  final DateTime Function() now;
+
+  @override
+  Widget build(BuildContext context) {
+    final backend = AppScope.of(context);
+    final voices = KeptVoices.of(backend);
+    return ListenableBuilder(
+      listenable: Listenable.merge([voices, voicePlayer]),
+      builder: (context, _) {
+        final loose = voices.loose;
+        if (loose.isEmpty) return const SizedBox.shrink();
+        final palette = Palette.of(context);
+        return Padding(
+          padding: const EdgeInsets.only(top: Space.m),
+          child: SettingRow(
+            label: 'Not sent',
+            top: true,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  "Answers you said that haven't been sent. Open the "
+                  'question again to send one, or delete it.',
+                  style: TextStyles.caption.copyWith(color: palette.textMuted),
+                ),
+                for (final voice in loose) ...[
+                  const SizedBox(height: Space.s),
+                  _KeptRow(key: ValueKey(voice.path), voice: voice, now: now()),
+                ],
+              ],
             ),
-          ],
-          failureLine(palette),
-        ],
-      ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// A kept recording: ▶, what it was for, its length and age, and Delete.
+class _KeptRow extends StatelessWidget {
+  const _KeptRow({super.key, required this.voice, required this.now});
+
+  final KeptVoice voice;
+  final DateTime now;
+
+  Future<void> _delete(BuildContext context) async {
+    final backend = AppScope.of(context);
+    final sure = await showActions<bool>(
+      context,
+      title: 'Delete this recording?',
+      message: "It hasn't been sent. This can't be undone.",
+      actions: const [SheetAction('Delete', true, destructive: true)],
+    );
+    if (sure != true) return;
+    if (voicePlayer.current == voice.path) await voicePlayer.stop();
+    await KeptVoices.of(backend).forget(voice);
+    if (backend.connected.value) {
+      fireAndLog(backend.cancelUpload(voice.uploadId));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final playing = voicePlayer.current == voice.path && voicePlayer.playing;
+    final label = voice.label.isEmpty ? 'A recording' : voice.label;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        GlyphButton(
+          label: playing ? 'Pause' : 'Play',
+          active: false,
+          onTap: () => unawaited(
+            voicePlayer.toggleHere(AppScope.of(context), voice.path),
+          ),
+          glyph: (color) => ExtensionGlyph(
+            icon: playing ? 'pause' : 'play',
+            name: playing ? 'Pause' : 'Play',
+            color: color,
+          ),
+        ),
+        const SizedBox(width: Space.s),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label, style: TextStyles.body.copyWith(color: palette.text)),
+              Text(
+                '${voiceDuration(voice.duration)} · '
+                '${formatAge(voice.made.millisecondsSinceEpoch, now)}',
+                style: TextStyles.caption.copyWith(
+                  color: palette.textMuted,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: Space.s),
+        Button(label: 'Delete', onPressed: () => unawaited(_delete(context))),
+      ],
     );
   }
 }

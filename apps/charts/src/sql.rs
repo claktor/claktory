@@ -143,7 +143,7 @@ pub fn time(text: &str, now: i64) -> Option<i64> {
     Some(now - duration(ago)?)
 }
 
-/// "15m", "6h", "7d" or "2w", in milliseconds.
+/// "15m", "6h", "7d", "2w" or "1y" (365 days), in milliseconds.
 pub fn duration(text: &str) -> Option<i64> {
     let (count, unit) = text.split_at(text.len().checked_sub(1)?);
     let count: i64 = count.parse().ok().filter(|count| *count > 0 && *count <= 100_000)?;
@@ -152,6 +152,7 @@ pub fn duration(text: &str) -> Option<i64> {
         "h" => 3_600_000,
         "d" => 86_400_000,
         "w" => 7 * 86_400_000,
+        "y" => 365 * 86_400_000,
         _ => return None,
     };
     Some(count * unit)
@@ -213,7 +214,8 @@ mod tests {
         assert_eq!(time("now-7d", now), Some(now - 7 * 86_400_000));
         assert_eq!(time("now-2w", now), Some(now - 14 * 86_400_000));
         assert_eq!(time("12345", now), Some(12345));
-        for wrong in ["now-", "now-7", "now-7y", "now+1d", "yesterday", "now-0d", "-5"] {
+        assert_eq!(time("now-1y", now), Some(now - 365 * 86_400_000));
+        for wrong in ["now-", "now-7", "now-7x", "now+1d", "yesterday", "now-0d", "-5"] {
             assert_eq!(time(wrong, now), None, "{wrong}");
         }
         assert_eq!(step_s(3_600_000), 60);

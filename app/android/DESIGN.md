@@ -627,6 +627,14 @@ over FILE's `storeFile` (Gradle's `claktoryKeyStore`). It's for builds
 from the vault, which hands a command both files at fresh temporary
 paths, so no `storeFile` written into FILE can point at the keystore.
 
+The app reads its own `versionCode` through `factory/device`'s
+`appVersionCode` (no arguments). It answers a Long, read from the package
+manager each time, with nothing kept, so the Android update notice can
+compare it with claktory.com's `android/latest.json`. The rebuild count
+matters there, so it's never guessed from the version name. A failure
+answers `unavailable`. `AppVersionCodeTest` checks it against
+`dumpsys package`.
+
 An update keeps the pairing (2026-11-22, android36-ps16k, a QA sandbox).
 The friend APK exactly as published (0.1.15, 101502, hash-checked)
 paired by code, allowed with its number, and connected directly. Then
@@ -668,6 +676,65 @@ phone is still owed.
 - Anything sensitive the app copies (a pairing code) is marked
   `ClipDescription.EXTRA_IS_SENSITIVE` (API 33+), so it isn't previewed
   or synced.
+
+### Shares from other apps (#366 A6)
+
+Claktory is in Android's share sheet for text, links, images and any file
+(`ACTION_SEND` and `ACTION_SEND_MULTIPLE`, `*/*`). `ShareActivity` shows
+nothing. It reads the share with typed getters and starts the app's one
+screen with a fresh, explicit intent. That intent holds only the text,
+the subject, the files' addresses (in `ClipData`) and a token, with
+`FLAG_GRANT_READ_URI_PERMISSION` and nothing else. The incoming intent is
+never forwarded, so other extras, nested intents, pending intents and
+write or persistable grants never reach the app. Fugo reviewed this
+(#366).
+
+`factory/shared` (`SharedContent.kt`):
+
+- **`listen`** answers the shares that came before the app asked. After
+  that, each share comes as **`received`**, in order. A share is
+  `{id, text, text_cut, subject, files, error}`:
+  - `id` is positive and rises for the process's life.
+  - `text` is at most 100,000 characters, and `subject` at most 1,000.
+    Neither cuts a character in two.
+  - `files` are copies in the cache's Attachments folder, as
+    `pickAttachments` makes them and prunes them after a day.
+  - `error` is `too_many` (more than 20 files, none taken), `refused`,
+    `too_large`, `no_space` or `copy_failed`. A share whose files all
+    failed still comes, with its error. Only an empty share is dropped.
+- **`discard {id}`** removes a share's copies.
+- **What's read:** only `content://` from another app's provider. That
+  excludes `file://` and every other scheme, this app's own provider, an
+  authority that doesn't resolve, and an authority with a user or a
+  port. Each file is read once into its copy, capped at 2 GB whatever its
+  provider says.
+- **A provider that hangs:** one that sends nothing for 30 s has what's
+  being read closed, and its share fails with `copy_failed`. A read that
+  doesn't end even then is left on a thread of its own, so the next
+  share isn't held up.
+- **Names:** names lose control, bidi and format characters (as
+  factoryd's `shown_name`), and the picker's names do too.
+- **What the app keeps:** shares wait in memory only, never on the
+  device. If the process ends before the app uses one, it's gone.
+- **Never sends:** the app lets the person choose an agent or chat and
+  fills its message box as a draft.
+
+Proofs:
+
+- `ShareIntakeTest` (JVM).
+- `SharedContentTest` (instrumentation). Its files come from the test
+  APK's own providers, another package. In one case, a file of a
+  provider that isn't exported is shared by the test APK's
+  `ShareSender`, so only the grant can read it. With the copy held past
+  `ShareActivity`'s life, that share fails if the forwarded grant is
+  taken out, and passes with it.
+
+Still owed: sharing from real apps (Photos, Files, Chrome) on a phone.
+
+While the release app is installed beside Claktory Dev on the same
+emulator, `factory://` has two handlers. Android then shows a chooser,
+so `WebLinksTest`'s pairing-code case can't pass. The chooser left open
+also blocks the next test's launch.
 
 Viktor reviewed §4 and §5 on paper (no changes to §5) and keeps them in
 the threat model as "design reviewed, proofs owed in A.2". Private DNS is

@@ -34,6 +34,8 @@ class NetworkPath(messenger: BinaryMessenger, context: Context) : EventChannel.S
     // Counts listenings, so a stopped callback's late events are dropped.
     private var generation = 0
     private var heard = false
+    // The last event sent: the same again says nothing new, and isn't sent.
+    private var last: Map<String, Any>? = null
 
     init {
         channel.setStreamHandler(this)
@@ -44,6 +46,7 @@ class NetworkPath(messenger: BinaryMessenger, context: Context) : EventChannel.S
         sink = events
         val listening = ++generation
         heard = false
+        last = null
         // The default-network callback reports the network now as soon as
         // it's registered, then each change. Not getActiveNetwork() first:
         // while Doze or a background limit still blocks the app it answers
@@ -103,6 +106,10 @@ class NetworkPath(messenger: BinaryMessenger, context: Context) : EventChannel.S
         main.post {
             if (generation != listening) return@post
             heard = heard || network != null
+            // Before Android 8 a new network comes as onAvailable and then
+            // its capabilities, and a loss can come twice: one event each.
+            if (event == last) return@post
+            last = event
             // What the app was told, for reading a reconnect afterwards: no
             // address, only the kind of network and Android's number for it.
             Log.i(TAG, "network: ${summary(event)}${network?.let { " net=${it.networkHandle}" } ?: ""}")

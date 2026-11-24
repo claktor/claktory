@@ -1,5 +1,7 @@
-// Every extension's icon, as factoryd names it, is one the app draws: one
-// it doesn't shows as a bare letter (Sorbet: Comments showed "C").
+// Every extension's icon, as factoryd names it, and every icon Claktory's
+// own apps name (their Icon components and their own icon), is one the app
+// draws: one it doesn't shows as a bare letter (Sorbet: Comments showed
+// "C"), or in an app's view as a dot (Scolippi: Charts' menus' chevrons).
 import 'dart:io';
 
 import 'package:factory_app/controls.dart';
@@ -17,10 +19,31 @@ void main() {
         r'\bicon:\s*"([a-z0-9-]+)"',
       ).allMatches(file.readAsStringSync()))
         match.group(1)!,
+    // Claktory's own apps: what their views name, and their own icon.
+    for (final file
+        in Directory('../apps')
+            .listSync(recursive: true)
+            .whereType<File>()
+            .where(
+              (file) =>
+                  file.path.endsWith('.rs') && !file.path.contains('/target/'),
+            ))
+      for (final match in RegExp(
+        r'"component":\s*"Icon",\s*"name":\s*"([a-z0-9-]+)"|"icon":\s*"([a-z0-9-]+)"',
+      ).allMatches(file.readAsStringSync()))
+        (match.group(1) ?? match.group(2))!,
+    // The chevrons, every way.
+    'chevron-left',
+    'chevron-right',
+    'chevron-up',
+    'chevron-down',
   };
 
-  test('factoryd names its extensions\' icons', () {
+  test('factoryd and Claktory\'s apps name their icons', () {
     expect(icons, contains('message-square-text'));
+    // Charts' menus.
+    expect(icons, contains('chevron-down'));
+    expect(icons, contains('chart-column'));
     expect(icons.length, greaterThan(10));
   });
 

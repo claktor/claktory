@@ -81,8 +81,8 @@ Each prints one JSON line with --json; exit 0 done, 2 the next step is the perso
   settings set KEY VALUE                   user.name, name, color, default_model, default_effort
   pair [NAME] [--no-wait]                  a code to add a device with; without --no-wait or --json, waits for it and asks here;
                                            without NAME, the device that uses it gives its own name
-  devices | allow DEVICE [--number DIGITS] | deny DEVICE | unpair DEVICE
-                                           --number: allow it only if it shows these digits
+  devices | allow DEVICE --number DIGITS | deny DEVICE | unpair DEVICE
+                                           --number: the 4 digits the device's screen shows
   provider key PROVIDER --stdin [--label LABEL]   an API key, read from stdin
   login [PROVIDER]                         sign in in a browser; with --json, paste the code or address on stdin
   export [--final] [--out FILE] [--skip FOLDER]   this Claktory in one encrypted file, to move it to another computer;
@@ -239,8 +239,9 @@ impl Flags {
         let ours = match command {
             "status" | "account" | "settings" | "provider" | "help" => true,
             "pair" | "deny" | "unpair" | "devices" => flags.json || flags.no_wait,
-            // With the number the device shows, only the backend can check it.
-            "allow" => flags.json || flags.no_wait || flags.number.is_some(),
+            // The backend checks the number the person typed (#352 P4), and
+            // refuses a device that has one without it.
+            "allow" => true,
             "login" => flags.json,
             _ => false,
         };
@@ -641,13 +642,14 @@ fn devices(workspace: &v1::Workspace, home: &Home) -> Vec<Value> {
             let pending = remote.pending_devices.iter().find(|pending| pending.device_id == device.id);
             let mut value = json!({
                 "id": device.id,
-                "name": device.name,
+                "name": crate::remote::shown_name(&device.name),
                 "connected": device.connected,
                 "last_seen_ms": device.last_seen_ms,
             });
             let state = match pending {
+                // Never its number (#352 P4, Fugo): the person reads it off
+                // the device's own screen and types it.
                 Some(pending) => {
-                    value["number"] = json!(pending.number);
                     value["endpoint_id"] = json!(keys.get(&device.id).cloned().unwrap_or_default());
                     value["expires_in"] = json!((pending.expires_ms - now).max(0) / 1000);
                     "waiting"
@@ -665,6 +667,15 @@ fn devices(workspace: &v1::Workspace, home: &Home) -> Vec<Value> {
         .collect()
 }
 
+/// What the CLI says of a device waiting to be allowed, `name` as
+/// `remote::shown_name` shows it: never its number (#352 P4, Fugo), which
+/// the person reads off the device's own screen.
+pub fn waiting_sentence(id: &str, name: &str) -> String {
+    format!(
+        "A device calling itself \"{name}\" is waiting. Allow it only if its screen shows the number you type: factoryd allow {id} --number <the 4 digits on its screen>."
+    )
+}
+
 fn devices_text(devices: &[Value]) -> String {
     if devices.is_empty() {
         return "No devices yet.".to_owned();
@@ -674,10 +685,7 @@ fn devices_text(devices: &[Value]) -> String {
         .map(|device| {
             let id = device["id"].as_str().unwrap_or_default();
             let what = match device["state"].as_str().unwrap_or_default() {
-                "waiting" => format!(
-                    "waiting to be allowed: allow it with factoryd allow {id} if it shows {}",
-                    device["number"].as_str().unwrap_or_default()
-                ),
+                "waiting" => return format!("{id}  {}", waiting_sentence(id, device["name"].as_str().unwrap_or_default())),
                 "code_unused" => "its code hasn't been used yet".to_owned(),
                 "code_expired" => "its code expired".to_owned(),
                 _ if device["connected"].as_bool() == Some(true) => "connected".to_owned(),
@@ -738,56 +746,230 @@ fn has_devices(workspace: &v1::Workspace) -> bool {
     workspace.remote.as_ref().is_some_and(|remote| remote.devices.iter().any(|device| device.code_expires_ms == 0))
 }
 
+/// The App Store review box's one exception to `HAS_DEVICES` (#365 R3,
+/// Fugo's ruling): there a program (review-pair, as the `review` user) may
+/// allow a device proven through the Claktory's own signed-in account, so a
+/// reviewer can add an iPad after their iPhone. Only while root has put
+/// `MARKER` there, only for a CLI that isn't root (root could put it there
+/// itself), only on Linux, and still with the device's four digits, which
+/// the backend checks. Everywhere else, and for code-paired devices, the
+/// rule holds as it is.
+mod review_box {
+    // Off the Linux box only the tests use the check.
+    #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    use std::path::Path;
+
+    /// Root's switch, on the review box alone. Never from the environment,
+    /// the settings or an argument.
+    pub(super) const MARKER: &str = "/etc/claktory/review-allow-account";
+    /// The folders above it, each of which must be root's alone too.
+    pub(super) const FOLDERS: [&str; 2] = ["/etc/claktory", "/etc"];
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum Kind {
+        File,
+        Folder,
+        /// A link (never followed), or anything else.
+        Other,
+    }
+
+    /// What lstat says of a path.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct Stat {
+        pub kind: Kind,
+        pub uid: u32,
+        pub mode: u32,
+    }
+
+    /// lstat: a link is a link, not what it points to. None when it isn't there.
+    pub(super) fn stat(path: &Path) -> Option<Stat> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        let kind = match meta.file_type() {
+            kind if kind.is_file() => Kind::File,
+            kind if kind.is_dir() => Kind::Folder,
+            _ => Kind::Other,
+        };
+        Some(Stat { kind, uid: meta.uid(), mode: meta.mode() })
+    }
+
+    /// Root's, and writable by no one else.
+    fn roots(stat: Option<Stat>, kind: Kind) -> bool {
+        stat.is_some_and(|stat| stat.kind == kind && stat.uid == 0 && stat.mode & 0o022 == 0)
+    }
+
+    /// Whether a program may allow this waiting device although the
+    /// Claktory has devices: it proved it's the Claktory's own account's
+    /// (`signed_in`, from the backend), the marker and every folder above it
+    /// are root's alone, and this CLI isn't root.
+    pub(super) fn lets_in(signed_in: bool, marker: Option<Stat>, folders: &[Option<Stat>], euid: u32) -> bool {
+        signed_in && euid != 0 && roots(marker, Kind::File) && !folders.is_empty() && folders.iter().all(|folder| roots(*folder, Kind::Folder))
+    }
+
+    /// `lets_in` on this machine.
+    #[cfg(target_os = "linux")]
+    pub(super) fn here(signed_in: bool) -> bool {
+        let folders = FOLDERS.map(|folder| stat(Path::new(folder)));
+        // SAFETY: geteuid has no preconditions and can't fail.
+        let euid = unsafe { libc::geteuid() };
+        lets_in(signed_in, stat(Path::new(MARKER)), &folders, euid)
+    }
+
+    /// Off: the exception is the Linux review box's alone.
+    #[cfg(not(target_os = "linux"))]
+    pub(super) fn here(_signed_in: bool) -> bool {
+        false
+    }
+
+    /// One line in the system log (and on stderr) for each device it let in.
+    pub(super) fn log(id: &str) {
+        let line = format!("allowed {id} under the review box's account exception");
+        eprintln!("factoryd: {line}");
+        #[cfg(target_os = "linux")]
+        if let Ok(line) = std::ffi::CString::new(line) {
+            // SAFETY: a constant format with one C string argument.
+            unsafe { libc::syslog(libc::LOG_AUTH | libc::LOG_NOTICE, c"%s".as_ptr(), line.as_ptr()) };
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const ROOTS_FILE: Stat = Stat { kind: Kind::File, uid: 0, mode: 0o100644 };
+        const ROOTS_FOLDER: Stat = Stat { kind: Kind::Folder, uid: 0, mode: 0o040755 };
+        const USER: u32 = 1000;
+
+        fn folders() -> [Option<Stat>; 2] {
+            [Some(ROOTS_FOLDER), Some(ROOTS_FOLDER)]
+        }
+
+        #[test]
+        fn only_roots_marker_for_an_account_proven_device_and_a_cli_that_isnt_root() {
+            // Every condition holds: on.
+            assert!(lets_in(true, Some(ROOTS_FILE), &folders(), USER));
+            // No marker.
+            assert!(!lets_in(true, None, &folders(), USER));
+            // A code-paired device, never.
+            assert!(!lets_in(false, Some(ROOTS_FILE), &folders(), USER));
+            // A root CLI proves nothing.
+            assert!(!lets_in(true, Some(ROOTS_FILE), &folders(), 0));
+            // Someone else's, a link, a folder.
+            assert!(!lets_in(true, Some(Stat { uid: USER, ..ROOTS_FILE }), &folders(), USER));
+            assert!(!lets_in(true, Some(Stat { kind: Kind::Other, mode: 0o120777, ..ROOTS_FILE }), &folders(), USER));
+            assert!(!lets_in(true, Some(Stat { kind: Kind::Folder, ..ROOTS_FILE }), &folders(), USER));
+            // Writable by its group or by anyone.
+            for mode in [0o100664, 0o100646, 0o100666] {
+                assert!(!lets_in(true, Some(Stat { mode, ..ROOTS_FILE }), &folders(), USER), "{mode:o}");
+            }
+            // A folder above it that isn't root's alone, or isn't there.
+            for bad in [
+                Some(Stat { mode: 0o040775, ..ROOTS_FOLDER }),
+                Some(Stat { mode: 0o041777, ..ROOTS_FOLDER }),
+                Some(Stat { uid: USER, ..ROOTS_FOLDER }),
+                Some(Stat { kind: Kind::Other, ..ROOTS_FOLDER }),
+                None,
+            ] {
+                assert!(!lets_in(true, Some(ROOTS_FILE), &[Some(ROOTS_FOLDER), bad], USER), "{bad:?}");
+                assert!(!lets_in(true, Some(ROOTS_FILE), &[bad, Some(ROOTS_FOLDER)], USER), "{bad:?}");
+            }
+            assert!(!lets_in(true, Some(ROOTS_FILE), &[], USER));
+        }
+
+        /// What a test (or anyone but root) can make: a marker of its own,
+        /// in a folder of its own, plain or a link to a root's file. Off.
+        #[test]
+        fn a_marker_anyone_but_root_can_make_is_off() {
+            let dir = std::env::temp_dir().join(format!("claktory-review-box-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let marker = dir.join("review-allow-account");
+            std::fs::write(&marker, "").unwrap();
+            let euid = unsafe { libc::geteuid() };
+            let mine = stat(&marker).unwrap();
+            assert_eq!(mine.kind, Kind::File);
+            let roots_folders = folders();
+            if euid != 0 {
+                assert_ne!(mine.uid, 0);
+                assert!(!lets_in(true, Some(mine), &roots_folders, euid));
+            }
+            // A link to a file of root's is a link, not that file.
+            let link = dir.join("link");
+            std::os::unix::fs::symlink("/etc/hosts", &link).unwrap();
+            let linked = stat(&link).unwrap();
+            assert_eq!(linked.kind, Kind::Other);
+            assert!(!lets_in(true, Some(linked), &roots_folders, USER));
+            // The folder it's in is the test's.
+            assert!(!lets_in(true, Some(ROOTS_FILE), &[stat(&dir)], USER) || euid == 0);
+            assert_eq!(stat(&dir.join("missing")), None);
+            std::fs::remove_dir_all(&dir).unwrap();
+            // And the real switch isn't there on a machine that isn't the review box.
+            if stat(Path::new(MARKER)).is_none() {
+                assert!(!here(true));
+            }
+            assert!(!here(false));
+        }
+    }
+}
+
 async fn decide_device(client: &mut Client, verb: &str, wanted: &str, flags: &Flags) -> Answer {
     let number = flags.number.as_deref();
     let device = match find_device(&client.workspace, wanted) {
         Ok(device) => device,
         Err(answer) => return answer,
     };
+    // As the device calls itself, so without what could reach the terminal.
+    let name = crate::remote::shown_name(&device.name);
     let pending =
         client.workspace.remote.as_ref().and_then(|remote| remote.pending_devices.iter().find(|pending| pending.device_id == device.id));
-    let shows = pending.map(|pending| pending.number.clone()).unwrap_or_default();
     let waiting = pending.is_some();
-    // Only the first device may be let in by a program (a setup over SSH).
+    // Only the first device may be let in by a program (a setup over SSH),
+    // but on the review box (`review_box`).
+    let mut review_exception = false;
     if verb == "allow" && waiting && (flags.json || flags.no_wait || !flags.interactive) && has_devices(&client.workspace) {
-        return Answer::refused("has_devices", HAS_DEVICES);
+        if !pending.is_some_and(|pending| review_box::here(pending.signed_in)) {
+            return Answer::refused("has_devices", HAS_DEVICES);
+        }
+        review_exception = true;
     }
-    // Allowed only if it shows the digits the person sees on the device.
-    if let (true, Some(number)) = (verb == "allow" && waiting, number)
-        && number.trim() != shows
-    {
-        return Answer::refused(
-            "wrong_number",
-            format!("{} shows {shows}, not {}: it may not be the device you mean. Nothing was allowed.", device.name, number.trim()),
-        );
+    // Allowed only with the digits the person reads off the device's own
+    // screen, which the backend checks (#352 P4, Fugo): never read here.
+    let number = number.map(str::trim).unwrap_or_default();
+    if verb == "allow" && waiting && number.is_empty() {
+        return Answer::refused("needs_number", waiting_sentence(&device.id, &name));
     }
     let id = device.id.clone();
     let request = match verb {
-        "allow" if waiting => client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone() }),
+        "allow" if waiting => client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), number: number.to_owned() }),
         "allow" if device.code_expires_ms > crate::transcript::now_ms() => {
             return Answer::fail(
                 Exit::NeedsHuman,
                 "not_waiting",
-                format!("{} hasn't used its code yet: open the code on the device, then allow it.", device.name),
+                format!("{name} hasn't used its code yet: open the code on the device, then allow it."),
             );
         }
         "allow" if device.code_expires_ms == 0 => {
-            return Answer::ok(json!({"allowed": id, "already": true}), format!("{} is already allowed.", device.name));
+            return Answer::ok(json!({"allowed": id, "already": true}), format!("{name} is already allowed."));
         }
-        "allow" => return Answer::refused("code_expired", format!("{}'s code expired: make a new one with factoryd pair.", device.name)),
+        "allow" => return Answer::refused("code_expired", format!("{name}'s code expired: make a new one with factoryd pair.")),
         "deny" if waiting => client_message::Body::DenyDevice(v1::DenyDevice { device_id: id.clone() }),
-        "deny" => return Answer::refused("not_waiting", format!("{} isn't waiting to be allowed.", device.name)),
+        "deny" => return Answer::refused("not_waiting", format!("{name} isn't waiting to be allowed.")),
         _ => client_message::Body::UnpairDevice(v1::UnpairDevice { device_id: id.clone() }),
     };
     match client.request(request).await {
         Ok(_) => match verb {
-            "allow" => Answer::ok(
-                json!({"allowed": id, "number": shows}),
-                format!("Allowed {} (it showed {shows}): it can connect now.", device.name),
-            ),
-            "deny" => Answer::ok(json!({"denied": id}), format!("Not allowed. {} can't connect.", device.name)),
-            _ => Answer::ok(json!({"unpaired": id}), format!("Removed {}: it can't connect any more.", device.name)),
+            "allow" if review_exception => {
+                review_box::log(&id);
+                Answer::ok(json!({"allowed": id, "exception": "review_box_account"}), format!("Allowed {name}: it can connect now."))
+            }
+            "allow" => Answer::ok(json!({"allowed": id}), format!("Allowed {name}: it can connect now.")),
+            "deny" => Answer::ok(json!({"denied": id}), format!("Not allowed. {name} can't connect.")),
+            _ => Answer::ok(json!({"unpaired": id}), format!("Removed {name}: it can't connect any more.")),
         },
+        // A wrong number, as the backend says it (tries left, or turned away).
+        Err(answer) if verb == "allow" && answer.json["error"].as_str() == Some("invalid") => {
+            Answer::refused("wrong_number", answer.text.clone())
+        }
         Err(answer) => answer,
     }
 }
@@ -1072,7 +1254,7 @@ mod tests {
         assert!(Flags::parse(&args("--dev account sign-in --email a@b.c --json")).is_some_and(|flags| flags.dev && flags.json));
         // As before without --json: waits in the terminal, works offline.
         assert!(Flags::parse(&args("pair Matt's iPhone")).is_none());
-        assert!(Flags::parse(&args("allow d-1")).is_none());
+        assert!(Flags::parse(&args("allow d-1")).is_some(), "the running Claktory checks the number");
         assert!(Flags::parse(&args("login anthropic")).is_none());
         assert!(Flags::parse(&args("pair iPhone --no-wait")).is_some_and(|flags| flags.words == ["pair", "iPhone"]));
         assert!(Flags::parse(&args("supervise")).is_none());

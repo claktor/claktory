@@ -34,7 +34,9 @@ Harness proposing() {
 }
 
 void main() {
-  testWidgets('a proposal is approved with a comment by Enter', (tester) async {
+  testWidgets('a typed comment is an answer: Approve and Dismiss give way '
+      'to Submit, and Submit or Return sends it as a reply, never an '
+      'approval (#370)', (tester) async {
     final harness = proposing();
     await harness.show(tester);
     expect(find.text('Proposal to Rivet'), findsOneWidget);
@@ -44,27 +46,69 @@ void main() {
     await tester.tap(find.text('Add a comment'));
     await settle(tester);
     expect(find.text('Rivet gets it with your answer.'), findsOneWidget);
-    await tester.enterText(_commentField, 'Yes, do it ');
+    await tester.enterText(_commentField, 'Just one, on Sonnet ');
+    await settle(tester);
+    expect(find.text('Approve'), findsNothing);
+    expect(find.text('Dismiss'), findsNothing);
+    expect(
+      find.text(
+        'Rivet gets the proposal with your comment and does what you say.',
+      ),
+      findsOneWidget,
+    );
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await settle(tester);
     final decide = harness.last.decideProposal;
     expect(decide.agentId, 'a1');
     expect(decide.proposalId, 'p7');
-    expect(decide.approve, isTrue);
-    expect(decide.comment, 'Yes, do it');
+    expect(decide.reply, isTrue);
+    // A Claktory from before Submit reads it as no approval.
+    expect(decide.approve, isFalse);
+    expect(decide.comment, 'Just one, on Sonnet');
   });
 
-  testWidgets('Dismiss sends the comment too', (tester) async {
+  testWidgets('Submit sends the same; cleared, Approve is back and '
+      'approves', (tester) async {
     final harness = proposing();
     await harness.show(tester);
     await tester.tap(find.text('Add a comment'));
     await settle(tester);
     await tester.enterText(_commentField, 'Not now, next week');
-    await tester.tap(find.text('Dismiss'));
+    await settle(tester);
+    await tester.tap(find.text('Submit'));
+    await settle(tester);
+    expect(harness.last.decideProposal.reply, isTrue);
+
+    await tester.enterText(_commentField, '');
+    await settle(tester);
+    await tester.tap(find.text('Approve'));
     await settle(tester);
     final decide = harness.last.decideProposal;
-    expect(decide.approve, isFalse);
-    expect(decide.comment, 'Not now, next week');
+    expect(decide.approve, isTrue);
+    expect(decide.reply, isFalse);
+  });
+
+  testWidgets('answered, it says so with the comment', (tester) async {
+    final harness = proposing();
+    await harness.show(tester);
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'a1',
+        entries: [
+          proposal()
+            ..proposal.state = ProposalState.PROPOSAL_STATE_APPROVED
+            ..proposal.replied = true
+            ..proposal.comment = 'Just one, on Sonnet',
+        ],
+      ),
+    );
+    await settle(tester);
+    expect(
+      find.text('Answered · sent to Rivet', findRichText: true),
+      findsOneWidget,
+    );
+    expect(find.text('Just one, on Sonnet'), findsOneWidget);
+    expect(find.text('Submit'), findsNothing);
   });
 
   testWidgets('Dismiss with nothing typed sends no comment', (tester) async {

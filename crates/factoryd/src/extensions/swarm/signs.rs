@@ -247,17 +247,35 @@ pub(crate) fn signs(db: &Connection, team: &Team, end: i64, now: i64, names: &Ha
         }
     }
 
-    // Idle agents.
-    let received = metrics::received(db, team, three_days)?;
+    // Idle agents: busy over the 3 days, or over its own life when it's
+    // younger (an agent under a day old isn't judged yet), and woken often
+    // with most of its wake-ups left unanswered. One that answers them is
+    // working on request, however rarely it's woken.
+    let woken = metrics::woken(db, team, three_days)?;
+    let first_seen = metrics::first_seen(db, team)?;
     for member in &team.members {
-        let messages = received.get(&member.id).copied().unwrap_or(0);
-        if busy(&load72, &member.id) < 0.05 && ready.get(&member.id).copied().unwrap_or(0) == 0 && messages >= 30 {
+        let Some(woken) = woken.get(&member.id) else { continue };
+        let since = first_seen.get(&member.id).map_or(three_days.t0, |first| (*first).max(three_days.t0));
+        let lived = end - since;
+        if lived < 24 * HOUR_MS {
+            continue;
+        }
+        let share = busy(&load72, &member.id) * (three_days.t1 - three_days.t0) as f64 / lived as f64;
+        let unanswered = woken.answered * 2 < woken.wakes;
+        if share < 0.05 && ready.get(&member.id).copied().unwrap_or(0) == 0 && woken.wakes >= 30 && unanswered {
+            let over = if since > three_days.t0 {
+                format!("the {:.0} hours since it started", lived as f64 / HOUR_MS as f64)
+            } else {
+                "the last 3 days".to_owned()
+            };
             signs.push(Sign {
                 key: format!("idle:{}", member.id),
                 says: format!(
-                    "Idle: {} was busy {} of the last 3 days with nothing ready, yet was woken by {messages} messages and events not from the person.",
+                    "Idle: {} was busy {} of {over} with nothing ready, yet was woken {} times by messages and events not from the person, and answered {} of them within the hour.",
                     member.id,
-                    percent(busy(&load72, &member.id))
+                    percent(share),
+                    woken.wakes,
+                    woken.answered
                 ),
                 means: "Park it: stop copying it in and pause its monitors. Remove it only if its role is duplicated. An idle agent costs nothing; its wake-ups do.",
             });

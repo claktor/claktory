@@ -554,8 +554,13 @@ async fn a_request_left_unanswered_expires_and_the_agent_is_told() {
         apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
         view.follow(&mut client, |view| view.entries.len() > before + 1 && idle(view, "builder")).await;
     }
+    // A minute on (the first check) and 11 hours on, it still waits; a
+    // request round trip brings any change the checks made.
+    factory.expire_secret_requests_after(60_000);
     factory.expire_secret_requests_after(11 * 3_600_000);
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
     assert_eq!(waiting(&view).len(), 1, "waiting after 12 runs and 11 hours");
+    assert_eq!(requests(&view), [format!("secret request {} (Pending): To take payments.", asked.id)]);
 
     // 12 hours on: expired, and the agent is told.
     factory.expire_secret_requests_after(12 * 3_600_000);
@@ -564,6 +569,45 @@ async fn a_request_left_unanswered_expires_and_the_agent_is_told() {
     assert_eq!(requests(&view), [format!("secret request {} (Expired): To take payments.", asked.id)]);
     let late = client.request(Request::DecideSecretRequest(decide("builder", &asked.id, false, Vec::new(), ""))).await;
     assert_eq!(failure(&late.body).1, "This request expired.");
+}
+
+/// K1 (#358): a secret given in Settings → Secrets answers the request it
+/// was asked for, as giving it on the card would: the card closes and the
+/// agent is told, idle or not. A secret for none of its requests wakes it
+/// all the same, and closes nothing.
+#[tokio::test]
+async fn a_secret_given_in_settings_answers_the_request_waiting_for_it() {
+    let dir = temp_dir();
+    let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    let github = r#"{"name":"GitHub token","description":"Push to the repo.","variables":[{"name":"GITHUB_TOKEN"}],"reason":"To push."}"#;
+    call(&mut client, &mut view, "builder", "secrets_request", github).await;
+    let stripe = r#"{"name":"Stripe","description":"Payments.","variables":[{"name":"STRIPE_KEY"}],"reason":"To take payments."}"#;
+    call(&mut client, &mut view, "builder", "secrets_request", stripe).await;
+    let asked = waiting(&view);
+    assert_eq!(asked.len(), 2);
+
+    // Named otherwise, but it sets what the agent asked for.
+    let id = add(&mut client, "GitHub", "GITHUB_TOKEN", TOKEN).await;
+    let grant = v1::GrantSecret { id, agent_id: "builder".into(), proof: None };
+    apply_request(&mut client, &mut view, Request::GrantSecret(grant)).await;
+    view.follow(&mut client, |view| events(view).iter().any(|line| line.contains("gave you GitHub")) && idle(view, "builder")).await;
+    assert_eq!(requests(&view)[0], format!("secret request {} (Granted): To push.", asked[0].id));
+    assert_eq!(waiting(&view).iter().map(|request| request.id.clone()).collect::<Vec<_>>(), [asked[1].id.clone()]);
+
+    // Another secret: Stripe's request still waits, and the agent hears.
+    let fly = add(&mut client, "Fly", "FLY_API_TOKEN", "fly-test").await;
+    let grant = v1::GrantSecret { id: fly, agent_id: "builder".into(), proof: None };
+    apply_request(&mut client, &mut view, Request::GrantSecret(grant)).await;
+    view.follow(&mut client, |view| events(view).iter().any(|line| line.contains("gave you Fly")) && idle(view, "builder")).await;
+    let told = events(&view).into_iter().find(|line| line.contains("gave you Fly")).expect("told");
+    assert_eq!(waiting(&view).len(), 1, "{told}");
+    // Each give is said once: the answer, not also the note of what changed.
+    let notes: Vec<String> = events(&view).into_iter().filter(|line| line.contains("You can now use the secrets")).collect();
+    assert!(notes.is_empty(), "{notes:?}");
 }
 
 /// Matt's bug: an agent's Secrets panel shows its grants from the vault's

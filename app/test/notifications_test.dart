@@ -168,6 +168,31 @@ void main() {
       Notify(id: 'n3', title: 'Pericolo', body: 'Down', collapse: 'alert:p'),
     );
     expect(system.posted.last.id, 'local:alert:p');
+
+    // A device waiting to be allowed: its click goes to Needs you.
+    local().notifies.add(
+      Notify(
+        id: 'n4',
+        kind: NotifyKind.NOTIFY_KIND_NEEDS_YOU,
+        title: 'Studio',
+        body: 'A device is waiting to be allowed on Studio.',
+        deviceId: 'd4',
+      ),
+    );
+    expect(system.posted.last.target.deviceId, 'd4');
+
+    // What waited out quiet hours (#364 O3): Needs you, about no one thing.
+    local().notifies.add(
+      Notify(
+        id: 'n5',
+        kind: NotifyKind.NOTIFY_KIND_NEEDS_YOU,
+        title: '2 things need you',
+        body: 'They came during your quiet hours.',
+        thread: 'quiet',
+      ),
+    );
+    expect(system.posted.last.target.kind, 'needs_you');
+    expect(system.posted.last.target.agentId, isEmpty);
   });
 
   testWidgets('a click shows its Claktory at what it is about: an agent at '
@@ -190,6 +215,35 @@ void main() {
     system.clicks.add(NotificationTarget(claktory: 'local', chatId: '3'));
     await tester.pump();
     expect(local().sent.last.selectChat.chatId, '3');
+
+    // A device waiting to be allowed: Needs you, where it's allowed.
+    system.clicks.add(NotificationTarget(claktory: 'c' * 64, deviceId: 'd4'));
+    await tester.pump();
+    expect(claktories.selected.backend, same(nixos()));
+    expect(page.value, AppPage.inbox);
+
+    // What waited out quiet hours: Needs you too (#364 O3). A Needs-you
+    // click about an agent still goes to the agent.
+    page.value = AppPage.settings;
+    system.clicks.add(
+      NotificationTarget(claktory: 'c' * 64, kind: 'needs_you'),
+    );
+    await tester.pump();
+    expect(page.value, AppPage.inbox);
+    system.clicks.add(
+      NotificationTarget(
+        claktory: 'c' * 64,
+        agentId: 'rivet',
+        kind: 'needs_you',
+      ),
+    );
+    await tester.pump();
+    expect(page.value, AppPage.agent);
+    // Nothing to go to and not Needs you (a test): the window only.
+    page.value = AppPage.settings;
+    system.clicks.add(NotificationTarget(claktory: 'c' * 64));
+    await tester.pump();
+    expect(page.value, AppPage.settings);
 
     // One that's gone: nothing changes.
     final sent = local().sent.length;
@@ -244,6 +298,8 @@ void main() {
         'pipeId': '',
         'chatId': '',
         'seq': 0,
+        'deviceId': '',
+        'kind': '',
       },
     });
 

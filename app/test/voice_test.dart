@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:factory_app/audio.dart';
-import 'package:factory_app/controls.dart' show ExtensionGlyph;
+import 'package:factory_app/chats.dart' show ChatView;
+import 'package:factory_app/controls.dart' show ExtensionGlyph, GlyphButton;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/recorder.dart';
 import 'package:factory_app/scope.dart';
@@ -15,6 +16,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'app_test.dart' show workspace;
+import 'chats_test.dart' show chat, chatting;
 import 'harness.dart';
 
 /// A microphone that records nothing, set as the test says.
@@ -232,6 +234,49 @@ void main() {
       );
       expect(find.byType(RecordingStrip), findsNothing);
       expect(find.byType(EditableText), findsOneWidget);
+    });
+
+    testWidgets('a chat takes a voice message as an agent does (#367): '
+        'its recording uploaded for the chat, then sent as voice', (
+      tester,
+    ) async {
+      final start = chatting([chat()])
+        ..speechModel = SpeechModel(
+          state: SpeechModelState.SPEECH_MODEL_STATE_READY,
+        );
+      final harness = Harness(start);
+      harness.backend.chatTranscript.load(Transcript(agentId: 'c1'));
+      await harness.show(tester);
+      await settle(tester);
+      expect(find.byType(ChatView), findsOneWidget);
+      await tester.tap(
+        find.byWidgetPredicate(
+          (w) => w is GlyphButton && w.label == 'Record a voice message',
+        ),
+      );
+      await io(tester);
+      expect(recorder.recordingInto, isNotNull);
+      recorder.hear(0.6, const Duration(milliseconds: 1500));
+      await tester.pump();
+      await tester.tap(find.text('Send'));
+      await io(tester);
+      expect(
+        harness.backend.sent
+            .where((m) => m.hasStartUpload())
+            .single
+            .startUpload
+            .agentId,
+        'c1',
+      );
+      final sent = harness.backend.sent
+          .where((m) => m.hasSendChatMessage())
+          .single
+          .sendChatMessage;
+      expect(sent.chatId, 'c1');
+      expect(sent.voice, isTrue);
+      expect(sent.text, '');
+      expect(sent.attachments.single.name, endsWith('.m4a'));
+      expect(harness.backend.sent.where((m) => m.hasSendMessage()), isEmpty);
     });
 
     testWidgets('Esc cancels a recording', (tester) async {

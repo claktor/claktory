@@ -2,7 +2,8 @@
 // person allows notifications, each Claktory it connects to gets this
 // iPhone's handle at the push relay and its key, on every connect; the relay
 // is asked again only when something it was asked with changed. The person
-// is asked the first time they send something, never at launch.
+// is asked right after pairing a Claktory, or the first time they send
+// something, never at launch.
 import 'dart:async';
 import 'dart:typed_data';
 
@@ -175,6 +176,29 @@ void main() {
 
     // Asked once only.
     await registrar.askInContext();
+    expect(device.asked, 1);
+  });
+
+  testWidgets('a Claktory paired since the app started asks once, as it '
+      'first connects; those it started with never do', (tester) async {
+    await start(tester);
+    await connect(tester, studio());
+    expect(device.asked, 0, reason: 'paired before: never at launch');
+
+    connections.use(parsePairingCode(_home));
+    await tester.pump();
+    final home = backends[_home]!;
+    expect(device.asked, 0, reason: 'not before it lets this iPhone in');
+    await connect(tester, home);
+    expect(device.asked, 1);
+    // A yes registers with both.
+    expect(home.registered, hasLength(1));
+    expect(studio().registered, hasLength(1));
+
+    // Reconnected later: not again.
+    home.connectedSince.value = null;
+    await tester.pump();
+    await connect(tester, home);
     expect(device.asked, 1);
   });
 

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use factory_protocol::v1::{self, server_message::Body};
 
 use crate::config::AgentConfig;
-use crate::factory::{Factory, RequestError, transcript_of, write_atomic};
+use crate::factory::{Factory, RequestError, transcript_of};
 use crate::store::Outcome;
 use crate::transcript::{Transcript, now_ms};
 
@@ -48,7 +48,7 @@ impl Factory {
         }
         match command.name {
             "clear" => self.clear_conversation(id).await,
-            "compact" => self.compact_now(id, &agent.name).await,
+            "compact" => self.compact_now(id, &agent.name, false).await.map(|_| ()),
             _ => unreachable!("every built-in command is handled"),
         }
     }
@@ -96,10 +96,20 @@ impl Factory {
         crate::vault::requests::forget_admin(self, id);
         // Its browser sessions were the old conversation's.
         self.browser_forget(id, "agent_changed");
+        // The files its images went as (#382) go with it.
+        let forgotten: Vec<String> = {
+            let inner = self.lock();
+            let runtime = inner.agents.get(id).and_then(|runtime| runtime.transcript.as_ref());
+            runtime.map(|transcript| crate::models::image_digests(transcript.messages()).into_iter().collect()).unwrap_or_default()
+        };
+        if !forgotten.is_empty() {
+            let models = self.models.clone();
+            tokio::spawn(async move { models.forget_images(forgotten).await });
+        }
         let dir = self.home.agent_dir(id);
         archive(&dir).await?;
-        let (transcript, persist) = Transcript::cleared(dir, id.to_owned())?;
-        write_atomic(&persist.path, &persist.bytes).await?;
+        let (transcript, persist) = Transcript::cleared(dir, id.to_owned(), self.old_segments.clone());
+        persist.write().await?;
         let mut inner = self.lock();
         if let Some(runtime) = inner.agents.get_mut(id) {
             runtime.transcript = Some(transcript);
@@ -113,27 +123,36 @@ impl Factory {
         Ok(())
     }
 
-    /// /compact: summarizes an idle agent's conversation now.
-    async fn compact_now(self: &Arc<Self>, id: &str, name: &str) -> Result<(), RequestError> {
+    /// /compact: summarizes an idle agent's conversation now. With `later`
+    /// (an admin agent's agents_compact), a working agent's is summarized as
+    /// soon as its current work ends, before it reads anything new. True
+    /// when it starts now.
+    pub(crate) async fn compact_now(self: &Arc<Self>, id: &str, name: &str, later: bool) -> Result<bool, RequestError> {
         self.ensure_loaded(id).await?;
         let mut inner = self.lock();
         let runtime = inner.agents.entry(id.to_owned()).or_default();
-        if runtime.running {
-            return Err(RequestError::Command(format!("{name} is working; stop it or wait, then /compact.")));
-        }
-        if runtime.transcript.as_ref().is_none_or(|transcript| transcript.messages().is_empty()) {
+        if runtime.transcript.as_ref().is_none_or(|transcript| transcript.messages().is_empty()) && !runtime.running {
             return Err(RequestError::Command("Nothing to compact yet.".to_owned()));
+        }
+        if runtime.running {
+            if !later {
+                return Err(RequestError::Command(format!("{name} is working; stop it or wait, then /compact.")));
+            }
+            // Its run takes it up when what it's doing now ends (`next_job`).
+            runtime.compact = Some(factory_agent::compaction::Reason::Requested);
+            return Ok(false);
         }
         runtime.compact = Some(factory_agent::compaction::Reason::Requested);
         runtime.stopped = false;
         runtime.running = true;
         tokio::spawn(self.clone().run(id.to_owned()));
         self.broadcast_workspace(&inner);
-        Ok(())
+        Ok(true)
     }
 }
 
-/// Moves the conversation's files into a new `archive/<ms>/` folder.
+/// Moves the conversation's files into a new `archive/<ms>/` folder, with
+/// its other versions (`crate::fork`).
 async fn archive(dir: &Path) -> std::io::Result<()> {
     let mut files = match tokio::fs::read_dir(dir).await {
         Ok(files) => files,
@@ -144,13 +163,18 @@ async fn archive(dir: &Path) -> std::io::Result<()> {
     let mut made = false;
     while let Some(file) = files.next_entry().await? {
         let name = file.file_name();
-        if name.to_str().is_some_and(|name| name.starts_with("segment-") && name.ends_with(".json")) {
+        if crate::transcript::log::number(&name).is_some() {
             if !made {
                 tokio::fs::create_dir_all(&into).await?;
                 made = true;
             }
             tokio::fs::rename(file.path(), into.join(&name)).await?;
         }
+    }
+    let branches = dir.join(crate::fork::BRANCHES);
+    if tokio::fs::try_exists(&branches).await? {
+        tokio::fs::create_dir_all(&into).await?;
+        tokio::fs::rename(&branches, into.join(crate::fork::BRANCHES)).await?;
     }
     Ok(())
 }

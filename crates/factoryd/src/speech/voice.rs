@@ -2,7 +2,8 @@
 //! The app uploads the recording and sends it (SendMessage.voice); it waits
 //! in the agent's queue, PENDING, while `claktory-speech` transcribes it on
 //! this computer, then the agent gets its words as the person's message,
-//! with `voice="42s"` on its `<sent>` tag.
+//! with `voice="42s"` on its `<sent>` tag. A chat takes them the same way
+//! (SendChatMessage.voice, #367), its recordings in its own folder.
 //!
 //! The person's messages after a PENDING one wait behind it, so the agent
 //! reads them in the order they were sent; events don't. One that FAILED
@@ -143,8 +144,28 @@ fn usable(factory: &Arc<Factory>) -> Result<(), RequestError> {
     }
 }
 
-/// SendMessage with `voice`: queues the recording, PENDING, to transcribe.
+/// An agent, or a chat (#367): both take voice messages.
+fn known(factory: &Factory, id: &str) -> Result<(), RequestError> {
+    if crate::chats::is_chat(id) { crate::chats::known(factory, id) } else { factory.known_agent(id) }
+}
+
+/// SendMessage with `voice`, or SendChatMessage's: queues the recording,
+/// PENDING, to transcribe.
 pub(crate) fn send(
+    factory: &Arc<Factory>,
+    agent: &str,
+    text: &str,
+    sent_from: Option<factory_agent::SentFrom>,
+    client_id: &str,
+    attached: &[v1::Attachment],
+) -> Result<(), RequestError> {
+    // Sent again after a lost answer: delivered once, and its recording,
+    // already moved to the agent's uploads, isn't asked for again
+    // (`crate::repeats`).
+    crate::repeats::once(factory, agent, client_id, || send_once(factory, agent, text, sent_from, client_id, attached))
+}
+
+fn send_once(
     factory: &Arc<Factory>,
     agent: &str,
     text: &str,
@@ -158,7 +179,7 @@ pub(crate) fn send(
     if attached.len() != 1 {
         return Err(refused("A voice message carries one recording."));
     }
-    factory.known_agent(agent)?;
+    known(factory, agent)?;
     let attachments = factory.attachments(agent, attached)?;
     usable(factory)?;
     let queued =
@@ -170,7 +191,7 @@ pub(crate) fn send(
 
 /// RetryVoiceMessage: transcribes a FAILED voice message again.
 pub(crate) fn retry(factory: &Arc<Factory>, agent: &str, id: i64) -> Result<(), RequestError> {
-    factory.known_agent(agent)?;
+    known(factory, agent)?;
     usable(factory)?;
     let mut inner = factory.lock();
     let queued = inner
@@ -190,9 +211,10 @@ pub(crate) fn retry(factory: &Arc<Factory>, agent: &str, id: i64) -> Result<(), 
 }
 
 /// DiscardVoiceMessage: drops a PENDING or FAILED voice message,
-/// undelivered; its recording stays in the agent's uploads.
+/// undelivered; its recording stays in an agent's uploads, and goes from a
+/// chat's.
 pub(crate) fn discard(factory: &Arc<Factory>, agent: &str, id: i64) -> Result<(), RequestError> {
-    factory.known_agent(agent)?;
+    known(factory, agent)?;
     let mut inner = factory.lock();
     let runtime = inner.agents.get_mut(agent).ok_or_else(|| refused("That voice message isn't waiting any more."))?;
     let at =
@@ -201,10 +223,28 @@ pub(crate) fn discard(factory: &Arc<Factory>, agent: &str, id: i64) -> Result<()
         return Err(refused("Only a voice message that's waiting to be transcribed, or couldn't be, can be discarded."));
     }
     let dropped = runtime.queue.remove(at);
+    forget_chat_recording(agent, &dropped);
     factory.settle(&[dropped], crate::store::Outcome::Dropped);
     // The person's messages after it no longer wait for it.
     factory.wake(&mut inner, agent);
     Ok(())
+}
+
+/// A chat's voice message that was discarded or dropped never reaches the
+/// conversation, and a chat has no files of its own to keep it among: its
+/// recording goes. An agent's stays in its uploads, where it and the
+/// person can still find it.
+fn forget_chat_recording(id: &str, dropped: &Queued) {
+    if !crate::chats::is_chat(id) {
+        return;
+    }
+    for attachment in &dropped.attachments {
+        if let Err(error) = std::fs::remove_file(&attachment.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(chat = %id, %error, "could not delete a dropped voice message's recording");
+        }
+    }
 }
 
 /// The model came or went: voice messages waiting for it are transcribed
@@ -411,6 +451,7 @@ fn finish(factory: &Arc<Factory>, job: &Job, outcome: Result<Heard, Failure>) {
     {
         tracing::info!(agent = %job.agent, duration_ms = voice.duration_ms, "a short voice message with no speech was dropped");
         let dropped = runtime.queue.remove(at);
+        forget_chat_recording(&job.agent, &dropped);
         factory.settle(&[dropped], crate::store::Outcome::Dropped);
         // The person's messages after it no longer wait for it.
         factory.wake(&mut inner, &job.agent);
@@ -422,6 +463,9 @@ fn finish(factory: &Arc<Factory>, job: &Job, outcome: Result<Heard, Failure>) {
             // No secret's value reaches an agent, as in any message.
             queued.text = if redactor.is_empty() { heard.text } else { redactor.redact(&heard.text).into_owned() };
             *voice = Voice { state: State::Done, duration_ms: heard.duration_ms, language: heard.language, ..Voice::pending() };
+            if crate::chats::is_chat(&job.agent) {
+                crate::chats::heard(factory, &job.agent, &queued.text);
+            }
         }
         Err(failure) => {
             tracing::warn!(agent = %job.agent, code = failure.code, error = failure.error, "a voice message wasn't transcribed");
@@ -471,6 +515,9 @@ impl Sidecar {
             .map_err(|_| Failure::dead("transcribe_failed", "Speech recognition took too long to start."))?;
         let answer: serde_json::Value = first.ok().flatten().and_then(|line| serde_json::from_str(&line).ok()).unwrap_or_default();
         if answer["ready"] != true {
+            if let Some(detail) = answer["detail"].as_str().filter(|detail| !detail.is_empty()) {
+                tracing::info!(code = %code(&answer), detail, "why speech recognition didn't start");
+            }
             return Err(Failure::dead(&code(&answer), message(&answer, "Speech recognition didn't start.")));
         }
         tracing::info!(device = %answer["device"], load_ms = %answer["load_ms"], "speech recognition started");
@@ -514,6 +561,10 @@ impl Sidecar {
                     duration_ms: answer["duration_ms"].as_u64().unwrap_or_default(),
                 });
             } else {
+                // What the decoder said is for the log, never the person.
+                if let Some(detail) = answer["detail"].as_str().filter(|detail| !detail.is_empty()) {
+                    tracing::info!(code = %code(&answer), detail, "why a recording wasn't transcribed");
+                }
                 return Err(Failure::new(&code(&answer), message(&answer, "Couldn't transcribe the recording.")));
             }
         }

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod files;
 pub mod oauth;
 #[cfg(any(test, feature = "qa-provider"))]
 pub mod qa;
@@ -154,7 +155,15 @@ fn image_block(data: &str, mime_type: &str) -> Value {
     json!({"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": data}})
 }
 
-fn convert_content_blocks(content: &[ToolResultPart]) -> Value {
+/// The file id each image already at Anthropic goes as, by digest (#382,
+/// `files`); the others go inline.
+type FileRefs = HashMap<String, String>;
+
+fn file_block(file_id: &str) -> Value {
+    json!({"type": "image", "source": {"type": "file", "file_id": file_id}})
+}
+
+fn convert_content_blocks(content: &[ToolResultPart], refs: &FileRefs) -> Value {
     if !content.iter().any(|part| matches!(part, ToolResultPart::Image { .. })) {
         let (text, _) = tool_text(content);
         return json!(text);
@@ -163,7 +172,10 @@ fn convert_content_blocks(content: &[ToolResultPart]) -> Value {
         .iter()
         .map(|part| match part {
             ToolResultPart::Text { text } => text_block(text),
-            ToolResultPart::Image { data, mime_type } => image_block(data, mime_type),
+            ToolResultPart::Image { data, mime_type, digest } => match digest.as_ref().and_then(|digest| refs.get(digest)) {
+                Some(file_id) => file_block(file_id),
+                None => image_block(data, mime_type),
+            },
         })
         .collect();
     if !blocks.iter().any(|block| block["type"] == "text") {
@@ -235,7 +247,7 @@ struct ThinkingEdit {
     keep: &'static str,
 }
 
-fn convert_messages(messages: &[Message], oauth: bool, allow_empty_signature: bool) -> Result<Vec<Value>, String> {
+fn convert_messages(messages: &[Message], oauth: bool, allow_empty_signature: bool, refs: &FileRefs) -> Result<Vec<Value>, String> {
     let mut params = Vec::new();
     let mut index = 0;
     while index < messages.len() {
@@ -272,7 +284,7 @@ fn convert_messages(messages: &[Message], oauth: bool, allow_empty_signature: bo
             Message::ToolResult(_) => {
                 let mut results = Vec::new();
                 while let Some(Message::ToolResult(result)) = messages.get(index) {
-                    results.push(json!({"type": "tool_result", "tool_use_id": result.tool_call_id, "content": convert_content_blocks(&result.content), "is_error": result.is_error}));
+                    results.push(json!({"type": "tool_result", "tool_use_id": result.tool_call_id, "content": convert_content_blocks(&result.content, refs), "is_error": result.is_error}));
                     index += 1;
                 }
                 params.push(user_content(results));
@@ -380,13 +392,20 @@ fn set_cache_ttl(params: &mut Value, ttl: CacheTtl) {
 }
 
 /// `buildParams` with the default short cache retention.
-fn build_params(model: &Model, context: &LlmContext, oauth: bool, max_tokens: u64, thinking: &Thinking) -> Result<Value, String> {
+fn build_params(
+    model: &Model,
+    context: &LlmContext,
+    oauth: bool,
+    max_tokens: u64,
+    thinking: &Thinking,
+    refs: &FileRefs,
+) -> Result<Value, String> {
     let normalize = |id: &str, _source: &AssistantMessage| normalize_tool_call_id(id);
     let transformed = transform_messages(&context.messages, model, Some(&normalize));
     let control = ephemeral();
     let mut params = model_params(model);
     params
-        .insert("messages".into(), Value::Array(convert_messages(&transformed, oauth, compat_flag(model, "allowEmptySignature", false))?));
+        .insert("messages".into(), Value::Array(convert_messages(&transformed, oauth, compat_flag(model, "allowEmptySignature", false), refs)?));
     params.insert("max_tokens".into(), json!(max_tokens));
     params.insert("stream".into(), json!(true));
     let prompt = context.system_prompt.as_deref().filter(|prompt| !prompt.is_empty());
@@ -784,6 +803,60 @@ pub fn usage_limit(status: u16, headers: &reqwest::header::HeaderMap) -> Option<
     Some(header("anthropic-ratelimit-unified-reset").and_then(|reset| reset.parse::<f64>().ok()).map(|seconds| (seconds * 1000.0) as u64))
 }
 
+/// Which limit a usage limit's refusal is (`usage_limit`), as Anthropic
+/// names it: "five_hour", "seven_day", or a weekly limit of some models
+/// alone, "seven_day_opus" or "seven_day_sonnet", which refuses only those
+/// models' requests (as Claude Code reads it, and its stand-in for
+/// Anthropic's limits sends it). When several are reached, the one that
+/// resets last.
+pub fn limit_claim(headers: &reqwest::header::HeaderMap) -> Option<&str> {
+    headers.get("anthropic-ratelimit-unified-representative-claim").and_then(|value| value.to_str().ok()).map(str::trim)
+}
+
+/// The images of `context` that can go as files (#382): read since, in a
+/// request to Anthropic that keeps files, for a model that takes images.
+fn file_images<'a>(model: &Model, context: &'a LlmContext, options: &StreamOptions) -> Vec<files::Image<'a>> {
+    if options.image_files.is_none() || !model.input.iter().any(|input| input == "image") {
+        return Vec::new();
+    }
+    context
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::ToolResult(result) => Some(&result.content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|part| match part {
+            ToolResultPart::Image { data, mime_type, digest: Some(digest) } if !data.is_empty() => {
+                Some(files::Image { digest, data, mime_type })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The file id each of `images` goes as, uploading the new ones first, and
+/// whether any was uploaded now.
+async fn image_refs(model: &Model, options: &StreamOptions, oauth: bool, images: &[files::Image<'_>]) -> (FileRefs, bool) {
+    let Some(files) = options.image_files.as_ref().filter(|_| !images.is_empty()) else { return (FileRefs::new(), false) };
+    let headers = file_headers(model, options, oauth);
+    files.files.refs(&files.account, images, &model.base_url, &headers, &options.cancel).await
+}
+
+/// The headers of a request to Anthropic's Files API: a request's, with
+/// no conversation.
+pub fn file_headers(model: &Model, options: &StreamOptions, oauth: bool) -> Vec<(String, String)> {
+    request_headers(model, &LlmContext::default(), options, oauth)
+}
+
+/// Whether Anthropic refused a request for a file it names: one it no
+/// longer has, or files it won't read from this account. A limit, an
+/// outage or anything else about the request isn't one.
+fn file_refused(status: u16, text: &str) -> bool {
+    matches!(status, 400 | 403 | 404) && text.to_ascii_lowercase().contains("file")
+}
+
 async fn request(
     model: &Model,
     context: &LlmContext,
@@ -794,23 +867,45 @@ async fn request(
     sink: &EventSink,
 ) -> Result<(), String> {
     let oauth = options.api_key.as_deref().is_some_and(|key| key.contains("sk-ant-oat"));
-    let mut params = build_params(model, context, oauth, max_tokens, thinking)?;
-    // The only lifetime it can ask for beyond its own 5 minutes.
-    if options.cache_ttl == CacheTtl::OneHour {
-        set_cache_ttl(&mut params, options.cache_ttl);
-    }
-    let mut builder = client().post(format!("{}/v1/messages", model.base_url.trim_end_matches('/')));
-    for (name, value) in request_headers(model, context, options, oauth) {
-        builder = builder.header(name, value);
-    }
-    builder = builder.header("content-type", "application/json").body(params.to_string());
-    let response = send_request(builder, options).await?;
-    let status = response.status().as_u16();
-    if !(200..300).contains(&status) {
-        if let Some(resets_at) = usage_limit(status, response.headers()) {
-            crate::accounts::mark_usage_limit(&mut parser.output, resets_at);
+    // Images read since #382 go as files Anthropic already has, uploaded
+    // the first time; a request Anthropic refuses for one of them (another
+    // conversation let go of it, or files refused) is sent again once, with
+    // them inline.
+    let images = file_images(model, context, options);
+    let (mut refs, fresh) = image_refs(model, options, oauth, &images).await;
+    check_cancelled(options)?;
+    let mut retried = false;
+    let response = loop {
+        let mut params = build_params(model, context, oauth, max_tokens, thinking, &refs)?;
+        // The only lifetime it can ask for beyond its own 5 minutes.
+        if options.cache_ttl == CacheTtl::OneHour {
+            set_cache_ttl(&mut params, options.cache_ttl);
         }
+        let mut builder = client().post(format!("{}/v1/messages", model.base_url.trim_end_matches('/')));
+        for (name, value) in request_headers(model, context, options, oauth) {
+            builder = builder.header(name, value);
+        }
+        builder = builder.header("content-type", "application/json").body(params.to_string());
+        let response = send_request(builder, options).await?;
+        let status = response.status().as_u16();
+        if (200..300).contains(&status) {
+            break response;
+        }
+        let limit = usage_limit(status, response.headers()).map(|resets_at| (resets_at, limit_claim(response.headers()).map(str::to_owned)));
         let text = response_text(response).await;
+        if let Some(files) = options.image_files.as_ref().filter(|_| !retried && !refs.is_empty() && file_refused(status, &text)) {
+            tracing::info!(account = %files.account, status, "Anthropic refused a request naming images as files; sending them inline");
+            files.files.refuse(&files.account, &refs, fresh);
+            refs.clear();
+            retried = true;
+            continue;
+        }
+        if let Some((resets_at, claim)) = limit {
+            crate::accounts::mark_usage_limit(&mut parser.output, resets_at);
+            if let Some(claim) = claim {
+                crate::accounts::mark_usage_limit_claim(&mut parser.output, &claim);
+            }
+        }
         if crate::accounts::credit_error(status, &text) {
             crate::accounts::mark_out_of_credit(&mut parser.output);
         } else if crate::accounts::refused_error(status, &text) {
@@ -819,7 +914,7 @@ async fn request(
         let parsed = serde_json::from_str::<Value>(&text).ok().filter(truthy);
         let fallback = if parsed.is_some() { None } else { Some(text.as_str()) };
         return Err(api_error_message(Some(status), &parsed.unwrap_or(Value::Null), fallback));
-    }
+    };
     sink.push(StreamEvent::Start { partial: parser.output.clone() });
     let mut body = response.bytes_stream();
     let mut decoder = SseDecoder::new();

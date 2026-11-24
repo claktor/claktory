@@ -15,6 +15,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart'
 import 'package:factory_app/recorder.dart';
 import 'package:factory_app/voice.dart' show voiceMessagesOn;
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -54,7 +55,14 @@ void main() {
     expect(find.text('Builder gets it with your answer.'), findsOneWidget);
     await tester.enterText(_field, 'Looks right');
     await tester.pump();
-    await tester.tap(find.text('Send'));
+    // A comment is a reply (#370): Submit alone, saying so.
+    expect(find.text('Approve'), findsNothing);
+    expect(find.text('Dismiss'), findsNothing);
+    expect(
+      find.text('Builder gets your comment and carries on from it.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Submit'));
     await settle(tester);
 
     // The pages in order, whole (no region), with their ink.
@@ -86,14 +94,16 @@ void main() {
     final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
     expect(answer.seq, Int64(7));
     expect(answer.text, 'Looks right');
-    expect(answer.dismiss, isFalse);
+    expect(answer.reply, isTrue);
+    // An older Claktory reads no yes in it.
+    expect(answer.dismiss, isTrue);
     expect(
       [for (final a in answer.attachments) a.name],
       ['paper-p1.png', 'paper-p3.png'],
     );
   });
 
-  testWidgets('Dismiss sends the drawings and the comment too', (tester) async {
+  testWidgets('Dismiss sends the drawings too', (tester) async {
     asIPad();
     final native = DocumentNative();
     final harness = await showDocument(tester);
@@ -103,13 +113,46 @@ void main() {
       find.text('Your drawing on 1 page goes with your answer.'),
       findsOneWidget,
     );
+    // Typed and cleared: Approve and Dismiss are back.
     await tester.enterText(_field, 'Not this week');
+    await tester.pump();
+    expect(find.text('Dismiss'), findsNothing);
+    await tester.enterText(_field, '');
+    await tester.pump();
     await tester.tap(find.text('Dismiss'));
     await settle(tester);
     final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
     expect(answer.dismiss, isTrue);
-    expect(answer.text, 'Not this week');
+    expect(answer.reply, isFalse);
+    expect(answer.text, isEmpty);
     expect([for (final a in answer.attachments) a.name], ['paper-p2.png']);
+  });
+
+  testWidgets('a reply whose drawings can\'t go up keeps its words', (
+    tester,
+  ) async {
+    asIPad();
+    final native = DocumentNative();
+    readComposite = (file) async => throw StateError('gone');
+    final harness = await showDocument(tester);
+    await native.drew(1, 1);
+    await settle(tester);
+    await tester.enterText(_field, 'See the circle');
+    await tester.pump();
+    await tester.tap(find.text('Submit'));
+    await settle(tester);
+    expect(sentOf(harness, (m) => m.hasAnswerAsk()), isEmpty);
+    expect(
+      find.text(
+        "Couldn't send your drawings, so your answer wasn't sent. Try again.",
+      ),
+      findsOneWidget,
+    );
+    expect(
+      tester.widget<EditableText>(_field).controller.text,
+      'See the circle',
+    );
+    expect(find.text('Submit'), findsOneWidget);
   });
 
   testWidgets('the bar stays above the home indicator', (tester) async {
@@ -120,6 +163,41 @@ void main() {
     await showDocument(tester);
     final bar = tester.getRect(find.byKey(const ValueKey('document-review')));
     expect(bar.bottom, lessThanOrEqualTo(1024 - 20));
+  });
+
+  testWidgets('a narrow window at the largest text: Submit fits on one '
+      'line in the bar', (tester) async {
+    asIPad();
+    DocumentNative();
+    tester.platformDispatcher.textScaleFactorTestValue = 3.1;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    // Half of a 1032-point-wide Split View, the tallest iPad.
+    await showDocument(tester, size: const Size(516, 1366));
+    // The panes are tabs at this width: the paper's.
+    if (find.text('paper.pdf').evaluate().isNotEmpty) {
+      await tester.tap(find.text('paper.pdf').first);
+      await settle(tester);
+    }
+    await tester.enterText(_field, 'See page 2');
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    final submit = find.byKey(const ValueKey('review-send'));
+    expect(
+      find.descendant(of: submit, matching: find.text('Submit')),
+      findsOneWidget,
+    );
+    final bar = tester.getRect(find.byKey(const ValueKey('document-review')));
+    final button = tester.getRect(submit);
+    expect(button.left, greaterThanOrEqualTo(bar.left));
+    expect(button.right, lessThanOrEqualTo(bar.right));
+    // One line.
+    final label = tester.renderObject<RenderParagraph>(
+      find.descendant(of: submit, matching: find.text('Submit')),
+    );
+    final boxes = label.getBoxesForSelection(
+      const TextSelection(baseOffset: 0, extentOffset: 6),
+    );
+    expect({for (final box in boxes) box.top}, hasLength(1));
   });
 
   testWidgets('at the largest text in a short window the page keeps its '
@@ -267,14 +345,17 @@ void main() {
         {'page_1based': 3, 'scope': 'all'},
       ]);
       expect(comment(tester), 'why page 1?\nwhy page 3?');
-      expect(find.text('Builder gets it with your answer.'), findsOneWidget);
+      expect(
+        find.text('Builder gets your comment and carries on from it.'),
+        findsOneWidget,
+      );
       expect(sentOf(harness, (m) => m.hasAnswerAsk()), isEmpty);
       // Offered again, for more.
       expect(offer(all), findsOneWidget);
 
       await tester.enterText(_field, '${comment(tester)} and the axis');
       await tester.pump();
-      await tester.tap(find.text('Send'));
+      await tester.tap(find.text('Submit'));
       await settle(tester);
       final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
       expect(answer.text, 'why page 1?\nwhy page 3? and the axis');
@@ -301,7 +382,10 @@ void main() {
       // is the offer's, not the field's.
       await tester.tapAt(Offset(read.left + 24, read.top + 1));
       await settle(tester);
-      expect(find.text('Builder gets it with your answer.'), findsOneWidget);
+      expect(
+        find.text('Builder gets your comment and carries on from it.'),
+        findsOneWidget,
+      );
       expect(comment(tester), 'why page 1?');
     });
 
@@ -454,10 +538,10 @@ void main() {
     ];
     expect(turns, [3]);
     expect(find.text('Page 3 adds up'), findsOneWidget);
-    expect(find.text('Send'), findsOneWidget);
+    expect(find.text('Submit'), findsOneWidget);
 
     // Answered: nothing is kept for it.
-    await tester.tap(find.text('Send'));
+    await tester.tap(find.text('Submit'));
     await settle(tester);
     expect(
       sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk.text,
@@ -511,13 +595,14 @@ void main() {
 
       await tester.enterText(_field, 'I like the second one better');
       await tester.pump();
-      expect(find.text('Send'), findsOneWidget);
+      expect(find.text('Submit'), findsOneWidget);
       expect(find.text('Approve'), findsNothing);
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await settle(tester);
       final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
       expect(answer.text, 'I like the second one better');
-      expect(answer.dismiss, isFalse);
+      // A reply, never a yes (#370).
+      expect(answer.reply, isTrue);
       // The paper's pane is gone: only the conversation is left.
       final layout = closed(harness)!;
       expect(layout.agentId, 'a1');
@@ -546,6 +631,7 @@ void main() {
       final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
       expect(answer.text, isEmpty);
       expect(answer.dismiss, isFalse);
+      expect(answer.reply, isFalse);
     });
 
     testWidgets('an agent that wants words: Send waits for them', (
@@ -565,10 +651,10 @@ void main() {
       await tester.pump();
       await tester.tap(find.text('Send'));
       await settle(tester);
-      expect(
-        sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk.text,
-        'The second',
-      );
+      final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
+      expect(answer.text, 'The second');
+      // The words it asked for are an answer, not a reply.
+      expect(answer.reply, isFalse);
     });
 
     testWidgets('an answer that fails keeps its words and the pane', (
@@ -580,7 +666,7 @@ void main() {
       harness.backend.refuse = 'Not connected to the backend.';
       await tester.enterText(_field, 'The second');
       await tester.pump();
-      await tester.tap(find.text('Send'));
+      await tester.tap(find.text('Submit'));
       await settle(tester);
       expect(
         find.text("Couldn't send your answer. Try again."),
@@ -608,7 +694,7 @@ void main() {
     });
 
     testWidgets('the mic at the answer records; Done puts the words in at '
-        'the caret, nothing sent until Send', (tester) async {
+        'the caret, nothing sent until Submit', (tester) async {
       transcribeRecording = (backend, recording) async => 'except page 3';
       asIPad();
       DocumentNative();
@@ -634,7 +720,7 @@ void main() {
       await settle(tester);
       expect(find.text('Fine except page 3'), findsOneWidget);
       expect(sentOf(harness, (m) => m.hasAnswerAsk()), isEmpty);
-      await tester.tap(find.text('Send'));
+      await tester.tap(find.text('Submit'));
       await settle(tester);
       expect(
         sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk.text,

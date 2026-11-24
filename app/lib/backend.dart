@@ -21,6 +21,8 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'highlights.dart';
 import 'network.dart';
 import 'outbox.dart';
+import 'voice_keep.dart' show KeptKind, KeptVoices, keptClaktoryKey;
+import 'paced.dart';
 import 'pairing.dart';
 import 'state.dart';
 import 'tunnel_client.dart';
@@ -172,7 +174,12 @@ class Backend implements AppViewTransport {
   final attachments = AttachmentDrafts();
 
   /// The person's messages on their way, shown in the conversation at once.
-  late final outbox = Outbox(BackendOutbox(this));
+  late final outbox = Outbox(
+    BackendOutbox(this),
+    connected: connected,
+    claktory: () => keptClaktoryKey(target),
+    kind: KeptKind.agent,
+  );
 
   /// What glows as state changes, and what's said beside it.
   final HighlightStore highlights;
@@ -193,7 +200,12 @@ class Backend implements AppViewTransport {
   /// messages on their way to it. Chat ids never meet agents' ids.
   final chatTranscript = ChatTranscriptStore();
   final chatQueued = QueuedStore();
-  late final chatOutbox = Outbox(_ChatOutbox(this));
+  late final chatOutbox = Outbox(
+    _ChatOutbox(this),
+    connected: connected,
+    claktory: () => keptClaktoryKey(target),
+    kind: KeptKind.chat,
+  );
 
   /// Opens a screen an agent asked to show (its show_screen tool) in the
   /// window showing this Claktory, answering whether it did
@@ -208,9 +220,17 @@ class Backend implements AppViewTransport {
   /// Marketplace switches to it and clears it.
   final marketplaceTab = ValueNotifier<String?>(null);
 
+  /// Needs you opens on History next, once: a History row was opened, so
+  /// coming back finds the list it was opened from (row 684).
+  var needsYouHistoryNext = false;
+
   /// The app to open in the Marketplace's Apps tab next, by its id, once:
   /// its row opens, comes into view and clears it.
   final marketplaceApp = ValueNotifier<String?>(null);
+
+  /// Counts the backend's word that some agent's monitors changed
+  /// (MonitorsChanged): the Monitors page asks again on each.
+  final monitorsChanged = ValueNotifier<int>(0);
 
   /// The last file in any agent's panes the backend said changed.
   final fileChanged = ValueNotifier<FileChanged?>(null);
@@ -228,8 +248,15 @@ class Backend implements AppViewTransport {
   bool askForPatches = true;
 
   /// Whether this connection has had a whole Workspace, which its patches
-  /// change: the first state after connecting always is one.
+  /// change: the first state after connecting always is one, from a
+  /// backend before revisions.
   var _wholeWorkspace = false;
+
+  /// The revision of the Workspace [workspace] holds, exactly as this
+  /// Claktory sent it (ServerMessage.workspace_revision); '' when none.
+  /// Hello sends it, so a connection that comes back gets only what changed
+  /// while it was away (#378), as a patch to it. Kept in memory only.
+  var _workspaceRevision = '';
 
   /// When the backend last welcomed this connection; null while it's down.
   final connectedSince = ValueNotifier<DateTime?>(null);
@@ -417,9 +444,7 @@ class Backend implements AppViewTransport {
   /// This Claktory's direct-message leaf, for one of the person's devices
   /// to certify (DmLeafOfferRequest; dms-e2ee §2, Claktories).
   Future<DmLeafOffer> dmLeafOffer() async {
-    final reply = await _call(
-      ClientMessage(dmLeafOffer: DmLeafOfferRequest()),
-    );
+    final reply = await _call(ClientMessage(dmLeafOffer: DmLeafOfferRequest()));
     if (!reply.hasDmLeafOffer()) {
       throw const RequestFailure('Claktory sent no leaf.');
     }
@@ -428,12 +453,11 @@ class Backend implements AppViewTransport {
 
   /// Enrolls this Claktory's leaf: the [certificate] a device signed for
   /// the offered key, and its [pins] (JSON) (DmEnrollLeaf).
-  Future<void> dmEnrollLeaf(List<int> certificate, List<int> pins) =>
-      _request(
-        ClientMessage(
-          dmEnrollLeaf: DmEnrollLeaf(certificate: certificate, pins: pins),
-        ),
-      );
+  Future<void> dmEnrollLeaf(List<int> certificate, List<int> pins) => _request(
+    ClientMessage(
+      dmEnrollLeaf: DmEnrollLeaf(certificate: certificate, pins: pins),
+    ),
+  );
 
   /// Turns advanced diagnostics on or off, or deletes what they kept
   /// (SetDiagnostics).
@@ -990,6 +1014,8 @@ class Backend implements AppViewTransport {
 
   Future<void> run() async {
     _watchSleep();
+    // Recordings kept on this device from before, sent once connected.
+    KeptVoices.of(this);
     _note(ConnectionKind.lifecycle, {ConnectionKey.app: AppLife.started});
     _network ??= deviceNetworkMoves.listen((path) {
       _note(ConnectionKind.network, {ConnectionKey.net: netKind(path)});
@@ -1103,7 +1129,7 @@ class Backend implements AppViewTransport {
           await _let(socket);
           continue;
         }
-        socket.pingInterval = const Duration(seconds: 5);
+        socket.pingInterval = _pingEvery;
         _socket = socket;
         // Welcomed within [connectWithin], or it starts again; a device
         // waiting to be allowed waits as long as its code lasts.
@@ -1166,6 +1192,8 @@ class Backend implements AppViewTransport {
               platform: platform,
               // Changes come as patches to the last Workspace, not whole.
               workspacePatches: askForPatches,
+              // Back, it carries on from the Workspace it holds.
+              workspaceRevision: askForPatches ? _workspaceRevision : '',
             ),
           ),
         );
@@ -1414,6 +1442,8 @@ class Backend implements AppViewTransport {
   /// old one showed goes at once, so nothing of it shows as the new one's.
   void connectTo(RemoteFactory? target) {
     _target = target;
+    // Decisions made on the last one aren't this one's.
+    _whenBack.clear();
     diagnostics?.select(
       target == null
           ? 'local'
@@ -1429,6 +1459,7 @@ class Backend implements AppViewTransport {
     _retryDelay = _minRetryDelay;
     // Unknown until this one's Workspace arrives, not empty.
     workspace.clear();
+    _workspaceRevision = '';
     move.value = null;
     highlights.forgetKnown();
     transcript.load(Transcript());
@@ -1511,6 +1542,8 @@ class Backend implements AppViewTransport {
         error: "This Mac couldn't start the private tunnel: $error",
         failure: TunnelFailure.other,
         relayConnected: false,
+        relayUpMs: 0,
+        relayTrouble: TunnelRelayTrouble.none,
       );
       throw TunnelOpenFailure('$error');
     }
@@ -1548,11 +1581,32 @@ class Backend implements AppViewTransport {
         shown.path == status.path &&
         shown.error == status.error &&
         shown.failure == status.failure &&
-        shown.relayConnected == status.relayConnected) {
+        shown.relayConnected == status.relayConnected &&
+        shown.relayTrouble == status.relayTrouble) {
       return;
     }
-    if (shown?.relayConnected != status.relayConnected) {
-      _note(ConnectionKind.relay, {ConnectionKey.up: status.relayConnected});
+    // Up: how long it took (since the tunnel's endpoint was made, or the
+    // relay was lost). Down: why, roughly, and again when that changes
+    // (#388); a tunnel just opened whose relay isn't up yet, with nothing
+    // wrong, says nothing until it's up (Zucchero: every launch began
+    // with a bare up=0).
+    final trouble = _relayTrouble(status.relayTrouble);
+    if (((shown != null || status.relayConnected) &&
+            shown?.relayConnected != status.relayConnected) ||
+        (!status.relayConnected &&
+            trouble != null &&
+            shown?.relayTrouble != status.relayTrouble)) {
+      _note(
+        ConnectionKind.relay,
+        {
+          ConnectionKey.up: status.relayConnected,
+          if (!status.relayConnected && trouble != null)
+            ConnectionKey.err: trouble,
+        },
+        status.relayConnected
+            ? Duration(milliseconds: status.relayUpMs)
+            : Duration.zero,
+      );
     }
     if (shown?.path != status.path && status.path != TunnelPath.none) {
       _note(ConnectionKind.path, {
@@ -1654,6 +1708,14 @@ class Backend implements AppViewTransport {
 
   Future<void> selectAgent(String agentId) =>
       _request(ClientMessage(selectAgent: SelectAgent(agentId: agentId)));
+
+  /// The person opened [paneId] of [agentId]'s layout: it's the newest now,
+  /// on every device (its opened time).
+  Future<void> paneOpened(String agentId, String paneId) => _request(
+    ClientMessage(
+      paneOpened: PaneOpened(agentId: agentId, paneId: paneId),
+    ),
+  );
 
   /// Sends the person's message; [clientId] comes back on the queued
   /// message and the entry it becomes (see [outbox]). A reply on a
@@ -1794,8 +1856,17 @@ class Backend implements AppViewTransport {
   }
 
   /// Sends the file's [data] from [offset]: answers how many of its bytes
-  /// the backend has.
-  Future<int> uploadChunk(String uploadId, int offset, List<int> data) async {
+  /// the backend has. It goes in pieces sized to the link ([pacedUpload],
+  /// #375), so the connection's pings aren't held up behind it.
+  Future<int> uploadChunk(String uploadId, int offset, List<int> data) =>
+      pacedUpload(
+        send: (offset, piece) => _uploadPiece(uploadId, offset, piece),
+        pace: _upPace,
+        offset: offset,
+        data: data,
+      );
+
+  Future<int> _uploadPiece(String uploadId, int offset, List<int> data) async {
     final reply = await _call(
       ClientMessage(
         uploadChunk: UploadChunk(
@@ -1965,7 +2036,9 @@ class Backend implements AppViewTransport {
   /// `error` no_model, unsupported, too_long or failed). Nothing goes to an
   /// agent, and the backend deletes the recording either way. Throws
   /// [RequestFailure] when the request is refused, or the connection drops
-  /// before the answer (upload it again: it's gone).
+  /// before the answer: asked again with the same ids, the backend attaches
+  /// to the job or answers what it heard (for about an hour), or says
+  /// no_recording when it has neither (upload it again, with new ids).
   Future<AudioTranscribed> transcribeAudio({
     required String requestId,
     required String uploadId,
@@ -2048,11 +2121,16 @@ class Backend implements AppViewTransport {
   /// approval), or [dismiss] it, leaving it to the agent's judgment.
   /// [attachments], uploaded for the agent, go with either: the pages the
   /// person drew on, answering a review of a PDF.
+  ///
+  /// With [reply] (#370), [text] is the person's reply, neither a yes nor a
+  /// no: sent as a dismissal too, so a Claktory from before Submit tells
+  /// the agent their comment, never "yes, go ahead" (Ghiaccio's rule).
   Future<void> answerAsk(
     String agentId,
     int seq, {
     String text = '',
     bool dismiss = false,
+    bool reply = false,
     List<Attachment> attachments = const [],
     int? step,
   }) => _request(
@@ -2061,7 +2139,8 @@ class Backend implements AppViewTransport {
         agentId: agentId,
         seq: Int64(seq),
         text: text,
-        dismiss: dismiss,
+        dismiss: dismiss || reply,
+        reply: reply,
         attachments: attachments,
         // A procedure's step (0-based): Done, or with [dismiss], Can't do
         // this.
@@ -2117,25 +2196,45 @@ class Backend implements AppViewTransport {
     ),
   );
 
+  /// Puts [chatId] on [model] (an id from Workspace.models), from its next
+  /// model call.
+  Future<void> setChatModel(String chatId, String model) => _request(
+    ClientMessage(
+      setChatModel: SetChatModel(chatId: chatId, model: model),
+    ),
+  );
+
+  /// Turns Continue automatically on or off (Workspace.usage_auto_continue,
+  /// friend bug #8 A2).
+  Future<void> setUsageAutoContinue(bool on) => _request(
+    ClientMessage(setUsageAutoContinue: SetUsageAutoContinue(on: on)),
+  );
+
   /// Approves or dismisses [agentId]'s proposal to Rivet. Approving sends
   /// Rivet [comment] and the proposal as the person's message; the entry
   /// comes back decided. Refused when it's already decided, or there's no
   /// Rivet that can run.
   /// A chat's proposal names the chat ([chatId]) instead of an agent.
+  ///
+  /// With [reply] (#370), [comment] is the person's answer for Rivet to act
+  /// on, never an approval: sent as not approved, for a Claktory from
+  /// before Submit.
   Future<void> decideProposal(
     String agentId,
     String proposalId, {
     required bool approve,
     String comment = '',
     String chatId = '',
+    bool reply = false,
   }) => _request(
     ClientMessage(
       decideProposal: DecideProposal(
         agentId: chatId.isEmpty ? agentId : '',
         chatId: chatId,
         proposalId: proposalId,
-        approve: approve,
+        approve: approve && !reply,
         comment: comment,
+        reply: reply,
       ),
     ),
   );
@@ -2164,6 +2263,50 @@ class Backend implements AppViewTransport {
     ),
   );
 
+  /// Every agent's monitors (`ListMonitors`), only [agentId]'s, those in
+  /// [projectId] or in [states] when given; by agent, then number.
+  Future<MonitorList> listMonitors({
+    String agentId = '',
+    String projectId = '',
+    List<MonitorState> states = const [],
+  }) async {
+    final reply = await _call(
+      ClientMessage(
+        listMonitors: ListMonitors(
+          agentId: agentId,
+          projectId: projectId,
+          states: states,
+        ),
+      ),
+    );
+    if (!reply.hasMonitorList()) {
+      throw const RequestFailure("Couldn't list the monitors. Try again.");
+    }
+    return reply.monitorList;
+  }
+
+  /// What happened to [agentId]'s monitor [monitorId], newest first: a
+  /// page of the backend's 50, older than [beforeSeq] when set.
+  Future<MonitorHistory> monitorHistory(
+    String agentId,
+    int monitorId, {
+    Int64 beforeSeq = Int64.ZERO,
+  }) async {
+    final reply = await _call(
+      ClientMessage(
+        listMonitorHistory: ListMonitorHistory(
+          agentId: agentId,
+          monitorId: monitorId,
+          beforeSeq: beforeSeq,
+        ),
+      ),
+    );
+    if (!reply.hasMonitorHistory()) {
+      throw const RequestFailure("Couldn't read its history. Try again.");
+    }
+    return reply.monitorHistory;
+  }
+
   Future<void> updateSettings(UpdateSettings update) =>
       _request(ClientMessage(updateSettings: update));
 
@@ -2178,6 +2321,19 @@ class Backend implements AppViewTransport {
 
   Future<void> cancelLogin() =>
       _request(ClientMessage(cancelLogin: CancelLogin()));
+
+  /// Reads [providerId]'s model list from the provider now (empty: every
+  /// provider that can be read), answered once Workspace has the new list
+  /// (friend bug #14). Its failure is a sentence to show.
+  Future<void> refreshModels([String providerId = '']) => _request(
+    ClientMessage(refreshModels: RefreshModels(providerId: providerId)),
+  );
+
+  /// Adds [model] (`provider/model id`) to Workspace.models once its
+  /// provider says this sign-in has it and an agent can run on it; done
+  /// already when it's there. A refusal is a sentence to show.
+  Future<void> addModel(String model) =>
+      _request(ClientMessage(addModel: AddModel(model: model)));
 
   /// Signs out of [accountId] (`Account.id`), or of all the provider's
   /// accounts when it's empty.
@@ -2367,6 +2523,7 @@ class Backend implements AppViewTransport {
     int passwordLength = 0,
     bool deleteOriginals = false,
     bool grantToAsker = false,
+    bool reply = false,
   }) => _request(
     ClientMessage(
       decideSecretRequest: DecideSecretRequest(
@@ -2385,6 +2542,7 @@ class Backend implements AppViewTransport {
         passwordLength: passwordLength,
         deleteOriginals: deleteOriginals,
         grantToAsker: grantToAsker,
+        reply: reply,
       ),
     ),
   );
@@ -2436,11 +2594,13 @@ class Backend implements AppViewTransport {
   Future<void> dismissConnectProposal(
     String proposalId, {
     String comment = '',
+    bool reply = false,
   }) => _request(
     ClientMessage(
       dismissConnectProposal: DismissConnectProposal(
         proposalId: proposalId,
         comment: comment,
+        reply: reply,
       ),
     ),
   );
@@ -2521,6 +2681,59 @@ class Backend implements AppViewTransport {
     }
     return reply.appAccessUndone;
   }
+
+  /// The person added a generated key where it goes (#360 K6): the agent
+  /// is told it's in place.
+  Future<void> secretRequestDone(String agentId, String requestId) => _request(
+    ClientMessage(
+      secretRequestDone: SecretRequestDone(
+        agentId: agentId,
+        requestId: requestId,
+      ),
+    ),
+  );
+
+  /// Takes [agentId]'s conversation back to just before entry [seq] (on the
+  /// agent's reply, to the end of the run it belongs to); what came after
+  /// is kept as another version (friend bug #9). [timestampMs] is the
+  /// entry's, so a conversation that changed meanwhile is refused rather
+  /// than cut in the wrong place.
+  Future<void> forkConversation(String agentId, Int64 seq, Int64 timestampMs) =>
+      _request(
+        ClientMessage(
+          forkConversation: ForkConversation(
+            agentId: agentId,
+            seq: seq,
+            timestampMs: timestampMs,
+          ),
+        ),
+      );
+
+  /// [agentId]'s other versions of its conversation.
+  Future<Branches> listBranches(String agentId) async {
+    final reply = await _call(
+      ClientMessage(listBranches: ListBranches(agentId: agentId)),
+    );
+    if (!reply.hasBranches()) {
+      throw const RequestFailure("Couldn't list the versions. Try again.");
+    }
+    return reply.branches;
+  }
+
+  /// Makes [branchId] [agentId]'s conversation; the one it has now is kept
+  /// as another version.
+  Future<void> switchBranch(String agentId, String branchId) => _request(
+    ClientMessage(
+      switchBranch: SwitchBranch(agentId: agentId, branchId: branchId),
+    ),
+  );
+
+  /// Deletes [agentId]'s other version [branchId], for good.
+  Future<void> deleteBranch(String agentId, String branchId) => _request(
+    ClientMessage(
+      deleteBranch: DeleteBranch(agentId: agentId, branchId: branchId),
+    ),
+  );
 
   /// The CSV and TSV files [appId] could be given (Add a file…), newest
   /// first, those whose names hold every word of [query].
@@ -2670,9 +2883,14 @@ class Backend implements AppViewTransport {
   Future<void> accountSignIn(String email) =>
       _request(ClientMessage(accountSignIn: AccountSignIn(email: email)));
 
-  /// The emailed code: signs this Claktory in.
-  Future<void> accountVerify(String code) =>
-      _request(ClientMessage(accountVerify: AccountVerify(code: code)));
+  /// The emailed code: signs this Claktory in. Typed on this device, it
+  /// confirms this device as the owner's too (#365 R5), so a Claktory
+  /// elsewhere no longer asks it to: the next Welcome says so again if not.
+  Future<void> accountVerify(String code) async {
+    final target = _target;
+    await _request(ClientMessage(accountVerify: AccountVerify(code: code)));
+    if (target != null && target == _target) confirmBy.value = null;
+  }
 
   /// Emails a new code to the same address.
   Future<void> accountResend() =>
@@ -2731,11 +2949,20 @@ class Backend implements AppViewTransport {
       _request(ClientMessage(installUpdate: InstallUpdate(appPath: appPath)));
 
   /// A piece of release [version]'s app archive from [offset], to update
-  /// this app from a Factory on another machine.
-  Future<AppPiece> fetchApp(String version, int offset) async {
+  /// this app from a Factory on another machine: up to [maxBytes] (0: as
+  /// much as it sends at once, 1 MiB).
+  Future<AppPiece> fetchApp(
+    String version,
+    int offset, {
+    int maxBytes = 0,
+  }) async {
     final reply = await _call(
       ClientMessage(
-        fetchApp: FetchApp(version: version, offset: Int64(offset)),
+        fetchApp: FetchApp(
+          version: version,
+          offset: Int64(offset),
+          maxBytes: Int64(maxBytes),
+        ),
       ),
     );
     if (!reply.hasAppChunk()) {
@@ -2823,6 +3050,29 @@ class Backend implements AppViewTransport {
   /// Turns highlights on or off for the person (`Workspace.highlights`).
   Future<void> setHighlights(bool on) =>
       _request(ClientMessage(setHighlights: SetHighlights(on: on)));
+
+  /// Keep this Mac awake while agents work, or not (Workspace.keep_awake):
+  /// the person's answer, from Settings or Needs you.
+  Future<void> setKeepAwake(bool on) =>
+      _request(ClientMessage(setKeepAwake: SetKeepAwake(on: on)));
+
+  /// Turns keeping agents working with the lid closed on or off (#371),
+  /// with what macOS says of the helper ([registration], and [error] when
+  /// it failed); turning it on works only from the Mac app on that Mac.
+  Future<void> setLidClosed({
+    required bool on,
+    LidClosedRegistration registration =
+        LidClosedRegistration.LID_CLOSED_REGISTRATION_UNKNOWN,
+    String error = '',
+  }) => _request(
+    ClientMessage(
+      setLidClosed: SetLidClosed(
+        on: on,
+        registration: registration,
+        error: error,
+      ),
+    ),
+  );
 
   /// An agent asked to show [request]'s screen: the window showing this
   /// Claktory opens it if it can, and the backend hears whether it did.
@@ -2997,6 +3247,50 @@ class Backend implements AppViewTransport {
   Future<void> updatePipe(UpdatePipe update) =>
       _request(ClientMessage(updatePipe: update));
 
+  /// A new pipe group at the end of [projectId]'s (#359), [pipeId] moved
+  /// into it when given.
+  Future<void> createPipeGroup(
+    String projectId,
+    String name, {
+    String pipeId = '',
+  }) => _request(
+    ClientMessage(
+      createPipeGroup: CreatePipeGroup(
+        projectId: projectId,
+        name: name,
+        pipeId: pipeId,
+      ),
+    ),
+  );
+
+  Future<void> renamePipeGroup(String groupId, String name) => _request(
+    ClientMessage(
+      renamePipeGroup: RenamePipeGroup(groupId: groupId, name: name),
+    ),
+  );
+
+  /// Deletes a pipe group; its pipes stay, outside any.
+  Future<void> deletePipeGroup(String groupId) => _request(
+    ClientMessage(deletePipeGroup: DeletePipeGroup(groupId: groupId)),
+  );
+
+  /// Puts [pipeId] in [groupId], or in none ("").
+  Future<void> setPipeGroup(String pipeId, String groupId) => _request(
+    ClientMessage(
+      setPipeGroup: SetPipeGroup(pipeId: pipeId, groupId: groupId),
+    ),
+  );
+
+  Future<void> setPipeGroupCollapsed(String groupId, bool collapsed) =>
+      _request(
+        ClientMessage(
+          setPipeGroupCollapsed: SetPipeGroupCollapsed(
+            groupId: groupId,
+            collapsed: collapsed,
+          ),
+        ),
+      );
+
   /// Accepts who [pipeId]'s other side is now, after a change
   /// (PipePeer.identity_change): pins it, and lets through what was held.
   Future<void> acceptPipeIdentity(String pipeId) => _request(
@@ -3032,12 +3326,16 @@ class Backend implements AppViewTransport {
     String chatId,
     String text, {
     String clientId = '',
+    List<Attachment> attachments = const [],
+    bool voice = false,
   }) => _request(
     ClientMessage(
       sendChatMessage: SendChatMessage(
         chatId: chatId,
         text: text,
         clientId: clientId,
+        attachments: attachments,
+        voice: voice,
       ),
     ),
   );
@@ -3134,19 +3432,24 @@ class Backend implements AppViewTransport {
     ),
   );
 
-  /// Sends or discards a held message, or lets a held incoming one in.
+  /// Sends or discards a held message, or lets a held incoming one in;
+  /// [reply], on one of this side's agents' (#370), sends it back to its
+  /// writer with [comment] instead, unsent.
   Future<void> decidePipeMessage(
     String pipeId,
     int seq,
     bool allow, {
     String comment = '',
+    bool reply = false,
   }) => _request(
     ClientMessage(
       decidePipeMessage: DecidePipeMessage(
         pipeId: pipeId,
         seq: Int64(seq),
-        allow: allow,
+        // A reply (#370) is never a yes, to an older Claktory too.
+        allow: allow && !reply,
         comment: comment,
+        reply: reply,
       ),
     ),
   );
@@ -3208,19 +3511,23 @@ class Backend implements AppViewTransport {
     ),
   );
 
-  /// The person's decision on an agent that read a pipe using a secret.
+  /// The person's decision on an agent that read a pipe using a secret;
+  /// [reply] (#370) doesn't allow it, and [comment] goes to the agent.
   Future<void> decideSecretApproval(
     String agentId,
     int seq,
     bool allow, {
     String comment = '',
+    bool reply = false,
   }) => _request(
     ClientMessage(
       decideSecretApproval: DecideSecretApproval(
         agentId: agentId,
         seq: Int64(seq),
-        allow: allow,
+        // A reply (#370) is never a yes, to an older Claktory too.
+        allow: allow && !reply,
         comment: comment,
+        reply: reply,
       ),
     ),
   );
@@ -3235,6 +3542,7 @@ class Backend implements AppViewTransport {
     int seq, {
     required bool approve,
     String comment = '',
+    bool reply = false,
   }) => _request(
     ClientMessage(
       decideAppGrant: DecideAppGrant(
@@ -3242,6 +3550,7 @@ class Backend implements AppViewTransport {
         seq: Int64(seq),
         approve: approve,
         comment: comment,
+        reply: reply,
       ),
     ),
   );
@@ -3256,6 +3565,7 @@ class Backend implements AppViewTransport {
     required bool approve,
     required String digest,
     String comment = '',
+    bool reply = false,
   }) => _request(
     ClientMessage(
       decideAppAccess: DecideAppAccess(
@@ -3264,6 +3574,7 @@ class Backend implements AppViewTransport {
         approve: approve,
         comment: comment,
         digest: approve ? digest : '',
+        reply: reply,
       ),
     ),
   );
@@ -3282,13 +3593,60 @@ class Backend implements AppViewTransport {
 
   /// The file at [path] (absolute or "~/…"), or its start when it's long,
   /// or from [offset] on (a video, a chunk at a time); a file that can't be
-  /// read comes back with `error` set.
+  /// read comes back with `error` set. It comes in pieces sized to the link
+  /// ([pacedRead], #375), [onProgress] told as each comes, and carries on
+  /// after the connection drops and comes back; [carryOn] can stop it
+  /// after a piece, [onFirst] after the first. With [preview] (this
+  /// screen's size), a smaller copy made for it may come instead, saying
+  /// so (`FileContent.preview`, #379); with [previewPage] too, that page
+  /// of a PDF as an image.
   Future<FileContent> readFile(
     String path, {
     int maxBytes = 0,
     int offset = 0,
     String expectedSha256 = '',
+    ReadProgress? onProgress,
+    ReadOnward? carryOn,
+    ReadFirst? onFirst,
+    PreviewBox? preview,
+    int previewPage = 0,
+  }) => pacedRead(
+    range: (offset, maxBytes, expected) => _readRange(
+      path,
+      maxBytes: maxBytes,
+      offset: offset,
+      expectedSha256: expected,
+      preview: preview,
+      previewPage: previewPage,
+    ),
+    connected: connected,
+    pace: _downPace,
+    maxBytes: maxBytes,
+    offset: offset,
+    expectedSha256: expectedSha256,
+    onProgress: onProgress,
+    carryOn: carryOn,
+    onFirst: onFirst,
+  );
+
+  /// About how long [bytes] of a file would take to come over this link,
+  /// as its reads so far have measured it; null before one has (#379).
+  Duration? readTime(int bytes) => _downPace.estimate(bytes);
+
+  /// How big a piece of a file to ask for, and to send, on this link.
+  final _downPace = Pace();
+  final _upPace = Pace();
+
+  /// One ReadFile.
+  Future<FileContent> _readRange(
+    String path, {
+    required int maxBytes,
+    required int offset,
+    required String expectedSha256,
+    PreviewBox? preview,
+    int previewPage = 0,
   }) async {
+    final asked = DateTime.now();
     final reply = await _call(
       ClientMessage(
         readFile: ReadFile(
@@ -3296,14 +3654,39 @@ class Backend implements AppViewTransport {
           maxBytes: Int64(maxBytes),
           offset: Int64(offset),
           expectedSha256: expectedSha256,
+          previewWidth: preview?.width,
+          previewHeight: preview?.height,
+          previewPage: previewPage == 0 ? null : previewPage,
         ),
       ),
     );
     if (!reply.hasFileContent()) {
       throw const RequestFailure('Claktory sent no file.');
     }
+    if (_qaDownlinkKbps > 0 || _qaRoundTripMs > 0) {
+      await _qaSlowRead(asked, reply.fileContent.data.length);
+    }
     return reply.fileContent;
   }
+
+  /// [_qaDownlinkKbps]' link: a read of [bytes] asked for at [asked] is
+  /// held until it would have come on that link, which reads at the same
+  /// time share, one after the other, as a real one's would.
+  static Future<void> _qaSlowRead(DateTime asked, int bytes) async {
+    final reached = asked.add(Duration(milliseconds: _qaRoundTripMs));
+    final free = _qaLinkFree.isAfter(reached) ? _qaLinkFree : reached;
+    final arrives = free.add(
+      Duration(
+        milliseconds: _qaDownlinkKbps > 0 ? bytes * 8 ~/ _qaDownlinkKbps : 0,
+      ),
+    );
+    _qaLinkFree = arrives;
+    final wait = arrives.difference(DateTime.now());
+    if (wait > Duration.zero) await Future<void>.delayed(wait);
+  }
+
+  /// When [_qaSlowRead]'s link has sent what it was given.
+  static var _qaLinkFree = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// Asks for the comments on [path]; they arrive in [threads].
   Future<void> listThreads(String path) =>
@@ -3370,17 +3753,21 @@ class Backend implements AppViewTransport {
   );
 
   /// Accepts a suggested change (Claktory makes it in the file) or rejects
-  /// it; either resolves its thread.
+  /// it; either resolves its thread. [reply] (#370) does neither: [comment]
+  /// goes into the thread, which stays open.
   Future<void> decideSuggestion(
     String threadId, {
     required bool accept,
     String comment = '',
+    bool reply = false,
   }) => _request(
     ClientMessage(
       decideSuggestion: DecideSuggestion(
         threadId: threadId,
-        accept: accept,
+        // A reply (#370) is never an accept, to an older Claktory too.
+        accept: accept && !reply,
         comment: comment,
+        reply: reply,
       ),
     ),
   );
@@ -3411,9 +3798,14 @@ class Backend implements AppViewTransport {
   );
 
   /// Lets in the device waiting with [deviceId]'s code
-  /// (RemoteAccess.pending_devices): it's paired from now on.
-  Future<void> approveDevice(String deviceId) =>
-      _request(ClientMessage(approveDevice: ApproveDevice(deviceId: deviceId)));
+  /// (RemoteAccess.pending_devices), with the [number] the person typed
+  /// off its screen: it's paired from now on. A wrong number is refused,
+  /// saying how many tries are left; the third turns the device away.
+  Future<void> approveDevice(String deviceId, String number) => _request(
+    ClientMessage(
+      approveDevice: ApproveDevice(deviceId: deviceId, number: number),
+    ),
+  );
 
   /// Turns away the device waiting with [deviceId]'s code: the code stops
   /// working, and a new one is needed to try again.
@@ -3442,7 +3834,55 @@ class Backend implements AppViewTransport {
   /// "The error handler of Future.catchError must return a value of the
   /// future's type" whenever the backend refused).
   Future<void> _request(ClientMessage message) async {
-    await _call(message);
+    try {
+      await _call(message);
+    } on RequestFailure catch (failure) {
+      if (!_decisions.contains(message.whichBody()) ||
+          !connectionLost(failure)) {
+        rethrow;
+      }
+      // A decision on a card cut off by the connection (#401): it goes
+      // again by itself once the connection is back, and the card says so.
+      _whenBack.add(message.deepCopy()..clearId());
+      throw const RequestFailure(decisionWaiting);
+    }
+  }
+
+  /// Decisions on a card or a review, each about one waiting thing (a
+  /// question, a proposal, a secret asked for…), so sent again after the
+  /// connection dropped they're done once: a repeat is refused as already
+  /// decided. What's typed with them goes along.
+  static const _decisions = {
+    ClientMessage_Body.answerAsk,
+    ClientMessage_Body.decideProposal,
+    ClientMessage_Body.decideSecretRequest,
+    ClientMessage_Body.decideSecretApproval,
+    ClientMessage_Body.decideAppGrant,
+    ClientMessage_Body.decideAppAccess,
+    ClientMessage_Body.decidePipeMessage,
+    ClientMessage_Body.decideSuggestion,
+    ClientMessage_Body.approvePipe,
+    ClientMessage_Body.dismissConnectProposal,
+    ClientMessage_Body.dismissPipeStart,
+  };
+
+  /// Decisions cut off by the connection, sent again once it's back; kept
+  /// only in memory, and only for the Claktory they were made on.
+  final _whenBack = <ClientMessage>[];
+
+  void _sendWhenBack() {
+    final waiting = [..._whenBack];
+    _whenBack.clear();
+    for (final message in waiting) {
+      // Refused now (decided meanwhile, here or elsewhere): the card shows
+      // what the Workspace says.
+      unawaited(
+        _request(message).catchError(
+          (Object error) => _log('decision sent again: $error'),
+          test: (error) => error is RequestFailure,
+        ),
+      );
+    }
   }
 
   /// Sends a request and answers the backend's reply to it.
@@ -3469,7 +3909,15 @@ class Backend implements AppViewTransport {
 
   void _send(ClientMessage message) => _socket?.add(message.writeToBuffer());
 
+  /// How often the connection is checked: a ping after this long with
+  /// nothing heard, and closed when its pong isn't back this long after.
+  static const _pingEvery = Duration(seconds: 5);
+
   void _receive(List<int> frame) {
+    // Heard from: the link is alive, so the next ping waits from now. A
+    // pong queued behind a long frame no longer closes a connection that's
+    // busy bringing it (#375).
+    _socket?.pingInterval = _pingEvery;
     final ServerMessage message;
     try {
       message = ServerMessage.fromBuffer(frame);
@@ -3502,6 +3950,7 @@ class Backend implements AppViewTransport {
         connectedSince.value = DateTime.now();
         connected.value = true;
         _log('connected to factoryd ${message.welcome.serverVersion}');
+        _sendWhenBack();
         final started = _tryStarted;
         _welcomedAt = DateTime.now();
         _note(ConnectionKind.connected, {
@@ -3556,20 +4005,31 @@ class Backend implements AppViewTransport {
         }
       case ServerMessage_Body.workspace:
         _wholeWorkspace = true;
+        _workspaceRevision = message.workspaceRevision;
         workspace.apply(message.workspace);
         _sawMove(message.workspace);
         _shareDiagnostics(message.workspace.diagnostics.share);
       case ServerMessage_Body.workspacePatch:
-        final next = _wholeWorkspace
+        // A patch names the Workspace it changes: the one held, also the one
+        // held before this connection (resumed). From a backend before
+        // revisions, the last one this connection had.
+        final base = message.workspaceBaseRevision;
+        final fits = base.isEmpty
+            ? _wholeWorkspace
+            : base == _workspaceRevision;
+        final next = fits
             ? patchWorkspace(workspace.workspace, message.workspacePatch)
             : null;
         if (next == null) {
           // It can't be applied: start again, from a whole one.
           _log('a workspace patch that does not fit: reconnecting');
           _wholeWorkspace = false;
+          _workspaceRevision = '';
           _restart(ConnectionReason.patch);
           return;
         }
+        _wholeWorkspace = true;
+        _workspaceRevision = message.workspaceRevision;
         workspace.apply(next);
         _sawMove(next);
         _shareDiagnostics(next.diagnostics.share);
@@ -3624,7 +4084,13 @@ class Backend implements AppViewTransport {
       case ServerMessage_Body.replyReport:
       case ServerMessage_Body.conversationMatches:
       case ServerMessage_Body.appFiles:
+      case ServerMessage_Body.monitorList:
+      case ServerMessage_Body.monitorHistory:
+      case ServerMessage_Body.branches:
         _pending.remove(message.replyTo.toInt())?.complete(message);
+      case ServerMessage_Body.monitorsChanged:
+        // The Monitors page asks again while it's on screen.
+        monitorsChanged.value++;
       case ServerMessage_Body.audioTranscribed:
         // To this connection alone, for its transcribeAudio.
         final heard = message.audioTranscribed;
@@ -3719,6 +4185,17 @@ class Backend implements AppViewTransport {
     }
   }
 
+  static RelayTrouble? _relayTrouble(TunnelRelayTrouble trouble) =>
+      switch (trouble) {
+        TunnelRelayTrouble.none => null,
+        TunnelRelayTrouble.unchosen => RelayTrouble.unchosen,
+        TunnelRelayTrouble.dns => RelayTrouble.dns,
+        TunnelRelayTrouble.timeout => RelayTrouble.timeout,
+        TunnelRelayTrouble.tls => RelayTrouble.tls,
+        TunnelRelayTrouble.network => RelayTrouble.network,
+        TunnelRelayTrouble.other => RelayTrouble.other,
+      };
+
   static ConnectionRoute _pathRoute(TunnelPath path) => switch (path) {
     TunnelPath.direct => ConnectionRoute.direct,
     TunnelPath.relayed => ConnectionRoute.relayed,
@@ -3799,6 +4276,10 @@ class Backend implements AppViewTransport {
 
   void _disconnected() {
     _socket = null;
+    // The next connection may be over another link: its pieces start
+    // small again (Sale's row 68).
+    _upPace.relink();
+    _downPace.relink();
     _diagnosticsTimer?.cancel();
     _diagnosticsTimer = null;
     _wholeWorkspace = false;
@@ -3857,6 +4338,19 @@ const _qaStallResume =
     bool.fromEnvironment('FACTORY_QA_STALL_RESUME') &&
     bool.fromEnvironment('FACTORY_DEV');
 
+/// QA only, in Claktory Dev (#379): files come as if over a slow link,
+/// this many kbit/s with [_qaRoundTripMs] on top of each read, so the
+/// phone's previews can be timed against the original without slowing
+/// the whole computer's network. Built in only with
+/// --dart-define=FACTORY_QA_DOWNLINK_KBPS=1000 (and
+/// FACTORY_QA_ROUND_TRIP_MS=150).
+const _qaDownlinkKbps = bool.fromEnvironment('FACTORY_DEV')
+    ? int.fromEnvironment('FACTORY_QA_DOWNLINK_KBPS')
+    : 0;
+const _qaRoundTripMs = bool.fromEnvironment('FACTORY_DEV')
+    ? int.fromEnvironment('FACTORY_QA_ROUND_TRIP_MS')
+    : 0;
+
 const _toStdout = [
   'to the background',
   'back after ',
@@ -3877,14 +4371,13 @@ class ChatTranscriptStore extends TranscriptStore {
   String get chatId => agentId;
 }
 
-/// A chat's way to the backend for the outbox: text only, so nothing is
-/// ever uploaded.
-class _ChatOutbox implements OutboxBackend {
-  _ChatOutbox(this._backend);
+/// A chat's way to the backend for the outbox: text, or a voice message
+/// (#367), its recording uploaded for the chat as an agent's is; the
+/// backend takes no other file for a chat.
+class _ChatOutbox extends BackendOutbox {
+  _ChatOutbox(this._chats) : super(_chats);
 
-  final Backend _backend;
-
-  static const _textOnly = RequestFailure('Chats take text only.');
+  final Backend _chats;
 
   @override
   Future<void> send(
@@ -3893,24 +4386,21 @@ class _ChatOutbox implements OutboxBackend {
     String clientId,
     List<SentFile> files, {
     bool voice = false,
-  }) {
-    if (files.isNotEmpty) throw _textOnly;
-    return _backend.sendChatMessage(agentId, text, clientId: clientId);
-  }
-
-  @override
-  Future<int> startUpload(String uploadId, String agentId, LocalFile file) =>
-      throw _textOnly;
-
-  @override
-  Future<int> uploadChunk(String uploadId, int offset, Uint8List data) =>
-      throw _textOnly;
-
-  @override
-  Future<SentFile> finishUpload(String uploadId) => throw _textOnly;
-
-  @override
-  Future<void> cancelUpload(String uploadId) async {}
+  }) => _chats.sendChatMessage(
+    agentId,
+    text,
+    clientId: clientId,
+    voice: voice,
+    attachments: [
+      for (final file in files)
+        Attachment(
+          path: file.path,
+          name: file.name,
+          size: Int64(file.size),
+          mime: file.mime,
+        ),
+    ],
+  );
 }
 
 /// [surface] as the app's views hold it.

@@ -176,8 +176,15 @@ fixed code opens no other email's sign-in.
 After a restart. `epoch` is optional: without it, the current epoch's share;
 with it, that epoch's, which may be the current one or the one before it
 only (else `400 invalid_request`): a backend signed in again while its vault
-was locked needs the old share once, to reseal its vault under the new one. Each release is recorded with the IP and emails the
-account ("Mac mini unlocked its secrets"). Errors: `401 unauthorized`,
+was locked needs the old share once, to reseal its vault under the new one. Each release is recorded with the IP (kept 30 days) and
+whether the account was emailed about it ("Mac mini unlocked its secrets"), which happens only when it's unusual (#412):
+- from a network none of this Claktory's releases in the last 30 days came from (an IPv4 /24, an IPv6 /48; an IPv4 address
+  mapped into IPv6 counts as the IPv4 one), which also covers the first release after 30 days or more without one;
+- or asking for the epoch before the current one after the current one's share was released (a copy of its disk from before
+  it last signed in).
+The first release after the Claktory signs in (`registered_at`, set at each sign-in) is quiet when it comes within 15 minutes
+of it: the person has just proved their email. Restarts where it runs, and the sign-in's own old-epoch, current and retried
+releases, email nothing. A mail outage still releases the share. Errors: `401 unauthorized`,
 `403 revoked` (removed at claktory.com/account), `429 rate_limited` (one a
 minute).
 
@@ -597,7 +604,7 @@ its agents a new message from the other person should wake (ids only).
 
 ### Web: `/account`
 Sign in with an emailed code; lists the account's Claktories (name, version,
-platform, last contact, recent unlocks with their IP, and what their
+platform, last contact, its last 5 unlocks with their IP, each emailed one marked "emailed you", and what their
 check-ins sent: place, counts, agent hours in the last 7 days, tokens per
 model in the last 30); **Remove** a Claktory (what `revoked` means above); the devices signed in
 (name, platform, last seen), each with **Remove** (its key is unbound, and never signs in to the account again: `403 device_removed`; the DMs' worker drops its KeyPackages);

@@ -8,6 +8,22 @@ import 'package:flutter/foundation.dart';
 import 'attachments.dart';
 import 'backend.dart';
 import 'protocol/factory/v1/factory.pb.dart' show Attachment;
+import 'voice_keep.dart';
+
+/// Whether [failure] is the connection's, not the Claktory refusing: it
+/// was lost, or wasn't there. What failed so goes again once it's back.
+bool connectionLost(RequestFailure failure) =>
+    failure.message == 'Connection lost.' ||
+    failure.message == 'Not connected to the backend.' ||
+    failure.message == decisionWaiting;
+
+/// What a decision on a card cut off by the connection fails with: the
+/// backend sends it again by itself once the connection is back.
+const decisionWaiting = "Not sent yet. It's sent when the connection is back.";
+
+/// Why a message waits, said beside "Not sent yet".
+const waitingForConnection =
+    "Claktory isn't connected. It's sent when the connection is back.";
 
 /// A file the backend has, for the agent: where it put it, under the name
 /// it gave it.
@@ -79,7 +95,14 @@ class OutgoingFile {
 /// once, until the backend's own (queued, or in the transcript) takes its
 /// place.
 class Outgoing {
-  Outgoing._(this.agentId, this.text, this.clientId, this.files, this.voice);
+  Outgoing._(
+    this.agentId,
+    this.text,
+    this.clientId,
+    this.files,
+    this.voice, {
+    this.kept,
+  });
 
   final String agentId;
   final String text;
@@ -100,17 +123,41 @@ class Outgoing {
 
   bool get failed => failure != null;
 
+  /// It wasn't sent for want of the connection: it goes by itself once
+  /// the connection is back.
+  bool waiting = false;
+
+  /// A voice message's recording, kept on this device until the Claktory
+  /// has the message (#401); null for any other message, or where the
+  /// device keeps none.
+  KeptVoice? kept;
+
   /// Its files are still uploading.
   bool get uploading => files.any((file) => file.done == null);
 }
 
 /// The person's messages on their way to the backend, per agent, in the
-/// order sent. Kept only in memory, for as long as a send takes: nothing
-/// here is the backend's state, and a message sent leaves at once.
+/// order sent. Kept in memory for as long as a send takes, nothing here
+/// being the backend's state, and a message sent leaves at once; except a
+/// voice message's recording, kept on the device until the Claktory has
+/// the message (#401: [KeptVoices] brings it back after a relaunch). What
+/// failed for want of the connection goes again by itself once it's back.
 class Outbox extends ChangeNotifier {
-  Outbox(this._backend);
+  Outbox(this._backend, {this.connected, this.claktory, this.kind})
+    : assert(claktory == null || kind != null) {
+    connected?.addListener(_connectedChanged);
+  }
 
   final OutboxBackend _backend;
+
+  /// Whether the connection is up: what waited for it goes when it is.
+  final ValueListenable<bool>? connected;
+
+  /// The Claktory's key in the kept folder ([keptClaktoryKey]), and what
+  /// its voice messages are to ([KeptKind.agent] or [KeptKind.chat]);
+  /// without them, recordings aren't kept.
+  final String Function()? claktory;
+  final KeptKind? kind;
 
   final _messages = <Outgoing>[];
   final _random = Random.secure();
@@ -138,15 +185,101 @@ class Outbox extends ChangeNotifier {
     ], voice);
     _messages.add(message);
     notifyListeners();
-    unawaited(_try(message));
+    unawaited(_keepThenTry(message));
     return message;
+  }
+
+  /// A voice message's recording is kept first (what it's for, beside it),
+  /// when it was made in the kept folder; then it's sent.
+  Future<void> _keepThenTry(Outgoing message) async {
+    final claktory = this.claktory;
+    final kind = this.kind;
+    final voice = message.voice;
+    if (voice != null && claktory != null && kind != null) {
+      final file = message.files.first;
+      final folder = await keptVoiceFolder();
+      final kept = KeptVoice(
+        path: file.file.path,
+        duration: voice,
+        claktory: claktory(),
+        kind: kind,
+        target: message.agentId,
+        clientId: message.clientId,
+        uploadId: file.uploadId,
+        kept: folder != null && file.file.path.startsWith('$folder/'),
+      );
+      await kept.save();
+      if (!_messages.contains(message)) {
+        // Taken back meanwhile.
+        await kept.delete();
+        return;
+      }
+      message.kept = kept;
+    }
+    await _go(message);
+  }
+
+  /// A voice message kept on the device from before (the app quit or was
+  /// killed before the Claktory had it): back in its conversation, and
+  /// sent again with its own ids, so it's never there twice.
+  void restore(KeptVoice kept) {
+    if (_messages.any((message) => message.clientId == kept.clientId)) return;
+    final file = File(kept.path);
+    final message = Outgoing._(
+      kept.target,
+      '',
+      kept.clientId,
+      [
+        OutgoingFile._(
+          LocalFile(
+            path: kept.path,
+            name: kept.path.split('/').last,
+            size: file.existsSync() ? file.lengthSync() : 0,
+          ),
+          kept.uploadId,
+        ),
+      ],
+      kept.duration,
+      kept: kept,
+    );
+    _messages.add(message);
+    notifyListeners();
+    unawaited(_go(message));
+  }
+
+  /// Sends [message] now if connected; otherwise it waits for the
+  /// connection.
+  Future<void> _go(Outgoing message) async {
+    final connected = this.connected;
+    if (connected != null && !connected.value) {
+      _wait(message);
+      return;
+    }
+    await _try(message);
+  }
+
+  void _wait(Outgoing message) {
+    message
+      ..failure = waitingForConnection
+      ..waiting = true;
+    notifyListeners();
+  }
+
+  /// The connection is back: what waited for it goes, in the order sent.
+  void _connectedChanged() {
+    if (connected?.value != true) return;
+    for (final message in [..._messages]) {
+      if (message.waiting) retry(message);
+    }
   }
 
   /// Sends a message that wasn't sent again, its files from where they
   /// stopped.
   void retry(Outgoing message) {
     if (!_messages.contains(message) || !message.failed) return;
-    message.failure = null;
+    message
+      ..failure = null
+      ..waiting = false;
     notifyListeners();
     unawaited(_try(message));
   }
@@ -154,15 +287,20 @@ class Outbox extends ChangeNotifier {
   /// The backend's own version of [message] arrived and takes its place: it
   /// leaves the outbox.
   void remove(Outgoing message) {
-    if (_messages.remove(message)) notifyListeners();
+    if (!_messages.remove(message)) return;
+    notifyListeners();
+    // The Claktory has it: its recording needn't be kept any more.
+    if (message.kept case final kept?) unawaited(kept.delete());
   }
 
-  /// The person takes [message], not sent, back to change it: what the
-  /// backend has of its files is dropped.
+  /// The person takes [message], not sent, back to change it, or deletes
+  /// it (a voice message): what the backend has of its files is dropped.
   void takeBack(Outgoing message) {
     remove(message);
     for (final file in message.files) {
-      if (file.done == null && file.sent > 0) {
+      // A voice message's may be there from before a relaunch, finished
+      // or not.
+      if (file.sent > 0 || message.voice != null) {
         unawaited(
           _backend
               .cancelUpload(file.uploadId)
@@ -172,7 +310,9 @@ class Outbox extends ChangeNotifier {
     }
   }
 
-  Future<void> _try(Outgoing message) async {
+  /// Sends [message]; [again] when it's tried again at once, the
+  /// connection back by the time it failed.
+  Future<void> _try(Outgoing message, {bool again = false}) async {
     try {
       for (final file in message.files) {
         if (file.done == null) await _upload(message, file);
@@ -183,6 +323,13 @@ class Outbox extends ChangeNotifier {
       ], voice: message.voice != null);
     } on RequestFailure catch (failure) {
       if (!_messages.contains(message)) return;
+      if (connectionLost(failure) && connected != null) {
+        // The connection may be back already (it dropped and came back
+        // while this was under way): then it goes again now, once.
+        if (connected!.value && !again) return _try(message, again: true);
+        _wait(message);
+        return;
+      }
       message.failure = failure.message;
       notifyListeners();
       return;
@@ -236,6 +383,12 @@ class Outbox extends ChangeNotifier {
 
   String _newId() =>
       List.generate(16, (_) => _random.nextInt(16).toRadixString(16)).join();
+
+  @override
+  void dispose() {
+    connected?.removeListener(_connectedChanged);
+    super.dispose();
+  }
 }
 
 /// The outbox's way to the backend.

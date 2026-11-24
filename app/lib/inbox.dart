@@ -27,11 +27,13 @@ import 'controls.dart';
 import 'find.dart';
 import 'forms.dart' show archivedProjectOf, rivetIn;
 import 'identity.dart';
+import 'keep_awake_card.dart';
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
 import 'move.dart' show BackendMove, MoveConfirmCard, MoveStatus, moveStatusOf;
 import 'needs_you_history.dart' show NeedsYouHistoryList, NeedsYouTabs;
+import 'pairing.dart' show AllowDeviceCard, deviceCallingItself;
 import 'pairing_card.dart' show DevicePairingCard;
 import 'pipe_start.dart' show PipeStartCard, pipeStartSummary;
 import 'pane_chrome.dart' show InPane;
@@ -39,14 +41,15 @@ import 'people/chat_view.dart' show openDmChat;
 import 'pipe_timeline.dart' show pipeItemKey, pipeLiaison;
 import 'pipes.dart';
 import 'protocol/factory/v1/factory.pb.dart';
+import 'provider_wait_card.dart';
 import 'recovery_key.dart' show SaveRecoveryKeyForm;
 import 'scope.dart';
 import 'selection.dart' show CopyShape, SelectableArea, SelectionPane;
 import 'secrets.dart'
     show SecretRequestCard, UnlockSecretsForm, secretRequestSummary;
 import 'state.dart' show TranscriptStore;
-import 'transcript.dart' show ProposalCard;
-import 'usage.dart' show formatAge;
+import 'transcript.dart' show ProposalCard, deviceGlyph;
+import 'usage.dart' show UsageRing, formatAge;
 import 'visible_codes.dart' show proseCodes;
 import 'waiting.dart' show NeedsYouMark;
 
@@ -99,6 +102,20 @@ enum NeedsYouKind {
   /// person to review them in that chat (Workspace.dm_sends), one item per
   /// agent and conversation.
   dmSend,
+
+  /// Agents and chats waiting on a provider's usage limit or credit
+  /// (Workspace.provider_waits, #343 U6), one item per provider: the ways
+  /// forward for all of them.
+  providerWait,
+
+  /// A device waiting to be allowed on this Claktory
+  /// (RemoteAccess.pending_devices): the person types the number its
+  /// screen shows, or turns it away (#352 P4).
+  device,
+
+  /// Whether to keep this Mac awake while agents work, asked once on a
+  /// laptop (Workspace.keep_awake.ask, #352 P1): yes or no, in the card.
+  keepAwake,
 }
 
 /// One thing that waits for the person's answer.
@@ -180,6 +197,27 @@ class NeedsYouItem {
       seq = 0,
       conversationId = '';
 
+  const NeedsYouItem.providerWait(this.providerId)
+    : kind = NeedsYouKind.providerWait,
+      agentId = '',
+      chatId = '',
+      pipeId = '',
+      accountId = '',
+      seq = 0,
+      sessionId = '',
+      conversationId = '';
+
+  const NeedsYouItem.keepAwake()
+    : kind = NeedsYouKind.keepAwake,
+      agentId = '',
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      seq = 0,
+      sessionId = '',
+      conversationId = '';
+
   const NeedsYouItem.dmSend(this.agentId, this.conversationId)
     : kind = NeedsYouKind.dmSend,
       chatId = '',
@@ -188,6 +226,17 @@ class NeedsYouItem {
       accountId = '',
       seq = 0,
       sessionId = '';
+
+  /// The waiting device's id is its [sessionId].
+  const NeedsYouItem.device(this.sessionId)
+    : kind = NeedsYouKind.device,
+      agentId = '',
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      seq = 0,
+      conversationId = '';
 
   final NeedsYouKind kind;
   final String agentId;
@@ -198,7 +247,7 @@ class NeedsYouItem {
   final String providerId;
   final String accountId;
 
-  /// The browser session waiting.
+  /// The browser session waiting, or the device.
   final String sessionId;
 
   /// The direct-message conversation an agent's messages wait to go to.
@@ -225,6 +274,9 @@ class NeedsYouItem {
     NeedsYouKind.recoveryKey => 'recoveryKey',
     NeedsYouKind.browser => 'browser:$sessionId',
     NeedsYouKind.dmSend => 'dm:$agentId/$conversationId',
+    NeedsYouKind.providerWait => 'usage:$providerId',
+    NeedsYouKind.device => 'device:$sessionId',
+    NeedsYouKind.keepAwake => 'keepAwake',
   };
 
   /// Done in a click, with no card to open: signing in again, unlocking
@@ -274,9 +326,14 @@ List<NeedsYouItem> needsYouItems(Workspace workspace) {
     for (final provider in workspace.providers)
       for (final account in provider.accounts)
         if (account.signInAgain) NeedsYouItem.signIn(provider.id, account.id),
+    // Everyone waiting on a provider's limit or credit, one item each.
+    for (final wait in workspace.providerWaits)
+      NeedsYouItem.providerWait(wait.providerId),
     if (workspace.vault.agentsWaiting) const NeedsYouItem.vault(),
     if (workspace.vault.recoveryKeyUnconfirmed)
       const NeedsYouItem.recoveryKey(),
+    // Asked once, on a laptop agents have worked on.
+    if (workspace.keepAwake.ask) const NeedsYouItem.keepAwake(),
     // Also floating over the window on every device (MoveGate).
     if (workspace.hasMove() && moveStatusOf(workspace.move).awaitsPerson)
       const NeedsYouItem.move(),
@@ -301,8 +358,17 @@ List<NeedsYouItem> needsYouItems(Workspace workspace) {
           (send.agentId, send.conversationId),
     })
       NeedsYouItem.dmSend(send.$1, send.$2),
+    // Devices waiting to be allowed, one item each.
+    for (final device in workspace.remote.pendingDevices)
+      NeedsYouItem.device(device.deviceId),
   ];
 }
+
+/// The device [item] is about, while it waits.
+PendingDevice? pendingDeviceOf(Workspace workspace, NeedsYouItem item) =>
+    workspace.remote.pendingDevices
+        .where((device) => device.deviceId == item.sessionId)
+        .firstOrNull;
 
 /// The messages [item] stands for, oldest first, while the backend lists
 /// them: never their text, only whom they go to.
@@ -444,8 +510,14 @@ class InboxView extends StatefulWidget {
 
 class _InboxViewState extends State<InboxView> {
   /// Whether it shows History, what the person already decided, in place
-  /// of what waits. Each opening starts at what waits.
-  var _history = false;
+  /// of what waits. Each opening starts at what waits, unless the person
+  /// just opened a History row (Backend.needsYouHistoryNext).
+  late var _history = () {
+    final backend = AppScope.of(context);
+    final next = backend.needsYouHistoryNext;
+    backend.needsYouHistoryNext = false;
+    return next;
+  }();
 
   @override
   Widget build(BuildContext context) {
@@ -565,6 +637,9 @@ class _NeedsYouListState extends State<NeedsYouList> {
   final _fetching = <String>{};
   final _failed = <String, String>{};
 
+  /// Asked for again while their fetch was under way.
+  final _again = <String, NeedsYouItem>{};
+
   /// Open bubbles, and what the person opened here: kept in the list once
   /// answered, until they leave, showing how it ended.
   final _open = <String>{};
@@ -639,7 +714,7 @@ class _NeedsYouListState extends State<NeedsYouList> {
     final items = needsYouItems(_backend.workspace.workspace);
     final now = {for (final item in items) item.key};
     for (final item in items) {
-      if (!_has(item)) _fetch(item);
+      if (!_has(item) || _stepping(item)) _fetch(item);
     }
     for (final MapEntry(key: key, value: item) in _kept.entries) {
       if (_waiting.contains(key) && !now.contains(key)) _fetch(item);
@@ -655,13 +730,35 @@ class _NeedsYouListState extends State<NeedsYouList> {
     _ => true,
   };
 
+  /// A procedure (ask_person's steps) that waits moves on a step at a time
+  /// with no change to what waits: once the Workspace comes again (its
+  /// agent told of the step, done here or on another device), what was
+  /// fetched of it may be a step behind, so it's fetched again (friend bug
+  /// #11). Not when the open conversation holds it: that copy is live.
+  bool _stepping(NeedsYouItem item) {
+    final entry = _entries[item.key];
+    if (entry == null ||
+        !entry.hasAskPerson() ||
+        entry.askPerson.steps.isEmpty ||
+        entry.askPerson.state != AskPersonState.ASK_PERSON_STATE_PENDING) {
+      return false;
+    }
+    return identical(_entryOf(item), entry);
+  }
+
   void _fetch(NeedsYouItem item) {
     final key = item.key;
     if (item.kind == NeedsYouKind.pipeApproval ||
         item.kind == NeedsYouKind.pipeLoop ||
         item.kind == NeedsYouKind.browser ||
         item.kind == NeedsYouKind.dmSend ||
-        !_fetching.add(key)) {
+        item.kind == NeedsYouKind.device) {
+      return;
+    }
+    // Already under way: once more after it, since what it brings may be
+    // older than what changed meanwhile.
+    if (!_fetching.add(key)) {
+      _again[key] = item;
       return;
     }
     Future<void> run() async {
@@ -684,7 +781,11 @@ class _NeedsYouListState extends State<NeedsYouList> {
         _failed[key] = failure.message;
       } finally {
         _fetching.remove(key);
-        if (mounted) setState(() {});
+        final again = _again.remove(key);
+        if (mounted) {
+          setState(() {});
+          if (again != null) _fetch(again);
+        }
       }
     }
 
@@ -732,6 +833,8 @@ class _NeedsYouListState extends State<NeedsYouList> {
       browserSessionOf(workspace, item)?.createdMs.toInt() ?? 0,
     NeedsYouKind.dmSend =>
       dmSendsOf(workspace, item).firstOrNull?.createdMs.toInt() ?? 0,
+    NeedsYouKind.device =>
+      pendingDeviceOf(workspace, item)?.requestedMs.toInt() ?? 0,
     _ => 0,
   };
 
@@ -817,7 +920,10 @@ class _NeedsYouListState extends State<NeedsYouList> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _find.refresh();
     });
-    _places.removeWhere((key, _) => !keys.contains(key));
+    // An item answered here keeps its place, and with it its card's state
+    // (how it ended), until it's no longer shown.
+    final shownKeys = {for (final item in items) item.key};
+    _places.removeWhere((key, _) => !shownKeys.contains(key));
     if (items.isEmpty) {
       return FindScope(
         target: _find,
@@ -902,6 +1008,12 @@ class _NeedsYouListState extends State<NeedsYouList> {
         NeedsYouKind.dmSend => workspace.agents.any(
           (agent) => agent.id == item.agentId,
         ),
+        // Over once no one waits: its answer is that they carry on.
+        NeedsYouKind.providerWait => false,
+        // Answered here: how it ended stays on its card.
+        NeedsYouKind.device => true,
+        // Answered here: it stays, saying what the Mac does now.
+        NeedsYouKind.keepAwake => workspace.keepAwake.available,
         _ => workspace.pipes.any((pipe) => pipe.id == item.pipeId),
       };
 }
@@ -942,6 +1054,8 @@ class _Bubble extends StatelessWidget {
     ].firstOrNull;
   }
 
+  ProviderWait? get _providerWait => providerWaitOf(workspace, item.providerId);
+
   MoveStatus get _move =>
       moveStatusOf(workspace.hasMove() ? workspace.move : null);
 
@@ -979,12 +1093,18 @@ class _Bubble extends StatelessWidget {
     final pipe = _pipe;
     final liaisonOf = _liaisonOf;
     final signIn = signInOf(workspace, item);
-    final who = item.kind == NeedsYouKind.signIn
+    final who = item.kind == NeedsYouKind.providerWait
+        ? providerWaitOf(workspace, item.providerId)?.title ?? ''
+        : item.kind == NeedsYouKind.signIn
         ? 'Sign in to ${signIn?.provider.name ?? 'your provider'} again'
         : item.kind == NeedsYouKind.vault
         ? 'Unlock your secrets with your recovery key'
         : item.kind == NeedsYouKind.recoveryKey
         ? 'Save your recovery key'
+        : item.kind == NeedsYouKind.device
+        ? 'Allow a new device?'
+        : item.kind == NeedsYouKind.keepAwake
+        ? keepAwakeTitle
         : liaisonOf != null
         ? '${agent!.name} · ${liaisonOf.name}'
         : agent?.name ??
@@ -1015,6 +1135,8 @@ class _Bubble extends StatelessWidget {
         browserSessionOf(workspace, item)?.createdMs.toInt() ?? 0,
       NeedsYouKind.dmSend =>
         dmSendsOf(workspace, item).firstOrNull?.createdMs.toInt() ?? 0,
+      NeedsYouKind.device =>
+        pendingDeviceOf(workspace, item)?.requestedMs.toInt() ?? 0,
       _ => 0,
     };
     final header = Semantics(
@@ -1038,12 +1160,45 @@ class _Bubble extends StatelessWidget {
                 child: Center(
                   child: agent != null
                       ? AgentCharacter(agent: agent, size: 24)
-                      : item.isAction
+                      : item.kind == NeedsYouKind.providerWait
+                      // The provider's own circle, its ring as full as it is.
+                      ? switch (_providerWait) {
+                          final wait? => switch (providerWaitMeters(
+                            workspace,
+                            wait,
+                          ).firstOrNull) {
+                            final meter? => UsageRing(meter: meter),
+                            null => ExtensionGlyph(
+                              icon: 'chart-column',
+                              name: '',
+                              color: palette.textMuted,
+                            ),
+                          },
+                          null => ExtensionGlyph(
+                            icon: 'chart-column',
+                            name: '',
+                            color: palette.textFaint,
+                          ),
+                        }
+                      : item.kind == NeedsYouKind.keepAwake
+                      ? ExtensionGlyph(
+                          icon: 'laptop-minimal',
+                          name: '',
+                          color: waiting
+                              ? palette.textMuted
+                              : palette.textFaint,
+                        )
+                      : item.isAction || item.kind == NeedsYouKind.device
                       ? ExtensionGlyph(
                           icon:
                               item.kind == NeedsYouKind.vault ||
                                   item.kind == NeedsYouKind.recoveryKey
                               ? 'key-round'
+                              : item.kind == NeedsYouKind.device
+                              ? deviceGlyph(
+                                  pendingDeviceOf(workspace, item)?.kind ??
+                                      DeviceKind.DEVICE_KIND_PHONE,
+                                )
                               : 'user',
                           name: '',
                           color: palette.textMuted,
@@ -1184,9 +1339,12 @@ class _Bubble extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     _card(context, palette),
-                    // A move's card is all there is to it, and a message
-                    // to a friend's has Open chat on it.
+                    // A move's card is all there is to it, and a device's
+                    // and keeping the Mac awake's, and a message to a
+                    // friend's has Open chat on it.
                     if (item.kind != NeedsYouKind.move &&
+                        item.kind != NeedsYouKind.device &&
+                        item.kind != NeedsYouKind.keepAwake &&
                         item.kind != NeedsYouKind.dmSend) ...[
                       const SizedBox(height: Space.s),
                       Wrap(
@@ -1199,6 +1357,11 @@ class _Bubble extends StatelessWidget {
                               NeedsYouKind.entry ||
                               NeedsYouKind.browser => 'Open conversation',
                               NeedsYouKind.chat => 'Open chat',
+                              NeedsYouKind.providerWait
+                                  when _providerWait?.agentIds.isEmpty ??
+                                      false =>
+                                'Open chat',
+                              NeedsYouKind.providerWait => 'Open conversation',
                               _ => 'Open pipe',
                             },
                             onTap: () => _openWhere(context),
@@ -1300,6 +1463,16 @@ class _Bubble extends StatelessWidget {
           NeedsYouKind.recoveryKey:
         // Done in a click; never opened.
         return const SizedBox.shrink();
+      case NeedsYouKind.providerWait:
+        final wait = providerWaitOf(workspace, item.providerId);
+        if (wait == null) return line('They carry on.');
+        return ProviderWaitCard(wait: wait);
+      case NeedsYouKind.keepAwake:
+        final keep = workspace.keepAwake;
+        if (!keep.ask) {
+          return line(keepAwakeAnswered(AppScope.of(context), keep));
+        }
+        return const KeepAwakeCard();
       case NeedsYouKind.move:
         final move = _move;
         if (!MoveConfirmCard.shows(move)) {
@@ -1336,6 +1509,12 @@ class _Bubble extends StatelessWidget {
               onPressed: () => _openWhere(context),
             ),
           ],
+        );
+      case NeedsYouKind.device:
+        // Keyed by the device, so how it ended stays once it's gone.
+        return AllowDeviceCard(
+          key: ValueKey(item.key),
+          device: pendingDeviceOf(workspace, item),
         );
       case NeedsYouKind.browser:
         final session = browserSessionOf(workspace, item);
@@ -1431,6 +1610,19 @@ class _Bubble extends StatelessWidget {
             'Save it in a password manager, then confirm you have it.';
       case NeedsYouKind.dmSend:
         return dmSendSummary(workspace, item);
+      case NeedsYouKind.providerWait:
+        return providerWaitOf(workspace, item.providerId)?.text ??
+            'They carry on.';
+      case NeedsYouKind.device:
+        final device = pendingDeviceOf(workspace, item);
+        return device == null
+            ? 'No longer waiting'
+            : '${deviceCallingItself(device)} wants to connect';
+      case NeedsYouKind.keepAwake:
+        final keep = workspace.keepAwake;
+        return keep.ask
+            ? keepAwakeSummary(backend)
+            : keepAwakeAnswered(backend, keep);
       case NeedsYouKind.browser:
         final session = browserSessionOf(workspace, item);
         if (session == null) return 'No longer needs you';
@@ -1458,7 +1650,20 @@ class _Bubble extends StatelessWidget {
     AppScope.closePage(context);
     final agent = _agent;
     final pipe = _pipe;
-    if (item.kind == NeedsYouKind.browser) {
+    if (item.kind == NeedsYouKind.providerWait) {
+      // The first that waits: its wait line has the same ways forward.
+      final wait = providerWaitOf(backend.workspace.workspace, item.providerId);
+      final waiting = wait == null ? null : firstWaiter(wait);
+      if (wait != null && wait.agentIds.isNotEmpty) {
+        fireAndLog(backend.selectAgent(waiting!));
+      } else if (waiting != null && waiting.isNotEmpty) {
+        final chat = [
+          for (final chat in backend.workspace.workspace.chats)
+            if (chat.id == waiting) chat,
+        ].firstOrNull;
+        if (chat != null) openChat(context, chat);
+      }
+    } else if (item.kind == NeedsYouKind.browser) {
       // Its card shows in the agent's conversation the whole time.
       fireAndLog(backend.selectAgent(item.agentId));
     } else if (item.kind == NeedsYouKind.entry) {

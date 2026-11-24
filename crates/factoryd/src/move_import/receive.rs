@@ -306,7 +306,9 @@ async fn bind(key: SecretKey, local_only: bool) -> Result<Endpoint, ImportError>
             .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .map_err(|error| cant(&error))?
     } else {
-        Endpoint::builder(presets::N0)
+        // n0's address lookup, and the tunnel's default relays
+        // (Claktory's first) rather than n0's, which rate-limit.
+        Endpoint::builder(presets::N0).relay_mode(RelayMode::Custom(crate::remote::default_relay_map()))
     };
     builder.secret_key(key).alpns(vec![move_wire::ALPN.to_vec()]).bind().await.map_err(|error| cant(&error))
 }

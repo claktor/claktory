@@ -22,7 +22,6 @@ use std::sync::{Mutex, OnceLock};
 
 use factory_protocol::v1;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::channel::{APP_SOURCE, Tarball, download_checked};
 use crate::factory::{Factory, RequestError};
@@ -98,17 +97,7 @@ fn ready(release: &Path) -> Option<Meta> {
 }
 
 fn sha256_of(path: &Path) -> std::io::Result<String> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0; 1 << 16];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+    crate::encoding::sha256_file(path, 1 << 16)
 }
 
 /// Makes `ARCHIVE`, its meta written first and the archive renamed into
@@ -179,19 +168,26 @@ async fn download(partial: &Path, mac: &Tarball) -> Result<Meta, String> {
     Ok(Meta { size: mac.size, sha256: mac.sha256.clone(), app_name })
 }
 
-/// Up to `CHUNK` bytes of the archive from `offset`.
-fn read_chunk(archive: &Path, offset: u64, size: u64) -> std::io::Result<Vec<u8>> {
+/// The most a chunk holds when the app asks for at most `max_bytes` (0:
+/// no smaller than usual).
+fn chunk_size(max_bytes: u64) -> u64 {
+    if max_bytes == 0 { CHUNK } else { max_bytes.min(CHUNK) }
+}
+
+/// Up to `most` bytes of the archive from `offset`.
+fn read_chunk(archive: &Path, offset: u64, size: u64, most: u64) -> std::io::Result<Vec<u8>> {
     let mut file = std::fs::File::open(archive)?;
     file.seek(SeekFrom::Start(offset))?;
     let mut data = Vec::new();
-    file.take(CHUNK.min(size - offset)).read_to_end(&mut data)?;
+    file.take(most.min(size - offset)).read_to_end(&mut data)?;
     Ok(data)
 }
 
 impl Factory {
-    /// A chunk of the app of release `version` from `offset`, or `preparing`
-    /// while its archive is being made.
-    pub(crate) async fn fetch_app(&self, version: &str, offset: u64) -> Result<v1::AppChunk, RequestError> {
+    /// A chunk of the app of release `version` from `offset`, at most
+    /// `max_bytes` (0: the usual `CHUNK`), or `preparing` while its archive
+    /// is being made.
+    pub(crate) async fn fetch_app(&self, version: &str, offset: u64, max_bytes: u64) -> Result<v1::AppChunk, RequestError> {
         let Some(release) = release_dir(&self.home.releases(), version) else {
             return Err(no_app(version, "this Claktory has no such release"));
         };
@@ -229,7 +225,8 @@ impl Factory {
         }
         let archive = release.join(ARCHIVE);
         let size = meta.size;
-        let data = tokio::task::spawn_blocking(move || read_chunk(&archive, offset, size))
+        let most = chunk_size(max_bytes);
+        let data = tokio::task::spawn_blocking(move || read_chunk(&archive, offset, size, most))
             .await
             .map_err(|error| RequestError::Io(std::io::Error::other(error)))??;
         Ok(v1::AppChunk {

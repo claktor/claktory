@@ -3,7 +3,10 @@
 //! and stored in the agent's own folder, `<home>/agents/<id>/uploads/
 //! <yyyy-mm-dd>/<name>`, for the agent to move where it belongs. While it
 //! comes in, a file is kept in `uploads/.partial/`; an upload whose connection
-//! dropped resumes from what's there as long as the backend runs.
+//! dropped resumes from what's there as long as the backend runs. One that
+//! finished is remembered for an hour (#401): asked again, after an answer
+//! lost on a weak connection, StartUpload says it's all there and
+//! FinishUpload answers as it did, so nothing is sent or stored twice.
 //!
 //! The same chunks carry ink blobs (`UploadPurpose::Ink`, `crate::ink`): for
 //! no agent, staged in `<home>/annotations/staging/` and kept by their
@@ -15,6 +18,7 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use factory_protocol::v1;
 use sha2::{Digest, Sha256};
@@ -31,9 +35,42 @@ const SPARE: u64 = 1024 * 1024 * 1024;
 /// upload for the agent starts.
 const ABANDONED_MS: u64 = 24 * 3_600_000;
 
+/// How long a finished upload's answer is kept for the app asking again.
+const FINISHED_KEPT: Duration = Duration::from_secs(3600);
+
 #[derive(Default)]
 pub(crate) struct Uploads {
     active: Mutex<HashMap<String, Active>>,
+    /// Uploads finished lately, by id.
+    finished: Mutex<HashMap<String, Finished>>,
+}
+
+/// An upload that finished: what it was, and what FinishUpload answered.
+struct Finished {
+    agent: String,
+    ink: bool,
+    dictation: bool,
+    name: String,
+    size: u64,
+    mime: String,
+    answer: v1::UploadedFile,
+    at: Instant,
+}
+
+impl Uploads {
+    /// The upload `id` finished lately, if it did: forgetting those that
+    /// finished over `FINISHED_KEPT` ago.
+    fn finished(&self, id: &str, matches: impl FnOnce(&Finished) -> bool) -> Option<v1::UploadedFile> {
+        let mut finished = self.finished.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        finished.retain(|_, upload| upload.at.elapsed() < FINISHED_KEPT);
+        let upload = finished.get(id)?;
+        if matches(upload) {
+            return Some(upload.answer.clone());
+        }
+        // The same id for another file: that's a new upload.
+        finished.remove(id);
+        None
+    }
 }
 
 /// An upload under way.
@@ -79,8 +116,26 @@ fn file_name(name: &str) -> Option<String> {
     Some(format!("{stem}{suffix}"))
 }
 
+/// The biggest recording a chat takes: 30 minutes of 16 kHz WAV fits.
+const MAX_CHAT_RECORDING: u64 = 100 * 1024 * 1024;
+
+/// Whether an upload for a chat may start: a chat takes only voice
+/// messages' recordings.
+fn check_chat_recording(mime: &str, size: u64) -> Result<(), String> {
+    if !mime.starts_with("audio/") {
+        return Err("A chat takes only voice messages: upload a recording (an audio type, such as audio/mp4).".to_owned());
+    }
+    if size == 0 || size > MAX_CHAT_RECORDING {
+        return Err(format!(
+            "A voice message's recording is 1 byte to {} MB; this one is {size} bytes.",
+            MAX_CHAT_RECORDING / (1024 * 1024)
+        ));
+    }
+    Ok(())
+}
+
 /// `name` in `folder`, or "name 2.ext", "name 3.ext"… when it's taken.
-fn free_path(folder: &Path, name: &str) -> PathBuf {
+pub(crate) fn free_path(folder: &Path, name: &str) -> PathBuf {
     let first = folder.join(name);
     if !first.exists() {
         return first;
@@ -137,7 +192,12 @@ fn sweep(partials: &Path) {
 }
 
 impl Factory {
+    /// An agent's uploads, or a chat's (its voice messages' recordings),
+    /// deleted with the chat.
     fn uploads_dir(&self, agent: &str) -> PathBuf {
+        if crate::chats::is_chat(agent) {
+            return crate::chats::dir(&self.home, agent).join("uploads");
+        }
         self.home.agent_dir(agent).join("uploads")
     }
 
@@ -158,6 +218,9 @@ impl Factory {
                     "A dictation is uploaded for no agent: leave agent_id empty."
                 }));
             }
+        } else if crate::chats::is_chat(&request.agent_id) {
+            crate::chats::known(self, &request.agent_id)?;
+            check_chat_recording(&request.mime, request.size).map_err(refused)?;
         } else if self.lock().config.agent(&request.agent_id).is_none() {
             return Err(RequestError::UnknownAgent(request.agent_id));
         }
@@ -173,6 +236,18 @@ impl Factory {
         }
         if dictation {
             crate::speech::dictation::check_upload(&request.mime, request.size).map_err(refused)?;
+        }
+        // Finished already (its answer lost): all there.
+        let same = |upload: &Finished| {
+            upload.agent == request.agent_id
+                && upload.ink == ink
+                && upload.dictation == dictation
+                && upload.mime == request.mime
+                && upload.name == name
+                && upload.size == request.size
+        };
+        if self.uploads.finished(&id, same).is_some() {
+            return Ok(v1::UploadProgress { upload_id: id, received: request.size });
         }
         let mut active = self.uploads.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(upload) = active.get(&id)
@@ -248,11 +323,16 @@ impl Factory {
         Ok(v1::UploadProgress { upload_id: request.upload_id, received: upload.received })
     }
 
-    /// Stores a whole upload in the agent's uploads folder, under the day.
+    /// Stores a whole upload in the agent's uploads folder, under the day;
+    /// asked again for one that finished lately, answers as it did.
     pub(crate) fn finish_upload(&self, request: v1::FinishUpload) -> Result<v1::UploadedFile, RequestError> {
         let upload = {
             let mut active = self.uploads.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(upload) = active.get(&request.upload_id) else {
+                drop(active);
+                if let Some(answer) = self.uploads.finished(&request.upload_id, |_| true) {
+                    return Ok(answer);
+                }
                 return Err(refused("That upload isn't under way; start it again."));
             };
             if upload.received != upload.size {
@@ -260,7 +340,25 @@ impl Factory {
             }
             active.remove(&request.upload_id).expect("just found")
         };
-        let hash: String = upload.hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+        let mut finished = Finished {
+            agent: upload.agent.clone(),
+            ink: upload.ink,
+            dictation: upload.dictation,
+            name: upload.name.clone(),
+            size: upload.size,
+            mime: upload.mime.clone(),
+            answer: v1::UploadedFile::default(),
+            at: Instant::now(),
+        };
+        finished.answer = self.store_upload(upload, &request)?;
+        let answer = finished.answer.clone();
+        self.uploads.finished.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(request.upload_id, finished);
+        Ok(answer)
+    }
+
+    /// Keeps a whole upload where it belongs: what FinishUpload answers.
+    fn store_upload(&self, upload: Active, request: &v1::FinishUpload) -> Result<v1::UploadedFile, RequestError> {
+        let hash: String = crate::encoding::hex(&upload.hash.finalize());
         let expected = request.sha256.trim();
         if upload.ink && expected.is_empty() {
             let _ = std::fs::remove_file(&upload.partial);
@@ -279,12 +377,12 @@ impl Factory {
             }
             crate::ink::keep(&self.home, &upload.partial, &hash, &upload.mime)?;
             tracing::info!(sha = %hash, size = upload.size, "ink blob kept");
-            return Ok(v1::UploadedFile { upload_id: request.upload_id, attachment: None, blob_sha256: hash });
+            return Ok(v1::UploadedFile { upload_id: request.upload_id.clone(), attachment: None, blob_sha256: hash });
         }
         if upload.dictation {
             self.voices.dictations.uploaded(&self.home, &request.upload_id, &upload.partial)?;
             tracing::info!(size = upload.size, "dictation uploaded");
-            return Ok(v1::UploadedFile { upload_id: request.upload_id, attachment: None, blob_sha256: String::new() });
+            return Ok(v1::UploadedFile { upload_id: request.upload_id.clone(), attachment: None, blob_sha256: String::new() });
         }
         let folder = self.uploads_dir(&upload.agent).join(today());
         std::fs::create_dir_all(&folder)?;
@@ -293,11 +391,12 @@ impl Factory {
         let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         tracing::info!(agent = %upload.agent, path = %path.display(), size = upload.size, "file uploaded");
         let attachment = v1::Attachment { path: path.display().to_string(), name, size: upload.size, mime: upload.mime };
-        Ok(v1::UploadedFile { upload_id: request.upload_id, attachment: Some(attachment), blob_sha256: String::new() })
+        Ok(v1::UploadedFile { upload_id: request.upload_id.clone(), attachment: Some(attachment), blob_sha256: String::new() })
     }
 
     /// Abandons an upload, deleting what came of it.
     pub(crate) fn cancel_upload(&self, request: &v1::CancelUpload) {
+        self.uploads.finished.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&request.upload_id);
         let upload = self.uploads.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&request.upload_id);
         if let Some(upload) = upload {
             let _ = std::fs::remove_file(&upload.partial);

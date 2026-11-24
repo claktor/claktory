@@ -111,7 +111,7 @@ pub(crate) fn measure(plan: &Plan, deadline: Instant) -> Vec<v1::DiskUsage> {
             .iter()
             .filter(|path| {
                 let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-                name.starts_with("segment-") || name == "archive"
+                name.starts_with("segment-") || name.starts_with("transcript-") || name == "archive"
             })
             .map(PathBuf::as_path)
             .collect();

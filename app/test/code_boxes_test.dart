@@ -18,6 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'account_test.dart' show awaiting, showAccount;
 import 'device_confirm_test.dart' show FakeAccountApi;
 import 'harness.dart';
+import 'pair_start.dart';
 
 final _mac = TargetPlatformVariant.only(TargetPlatform.macOS);
 
@@ -200,9 +201,8 @@ void main() {
     await harness.show(tester, size: const Size(320, 568));
     await pumpFrames(tester);
     expect(find.byType(PairScreen), findsOneWidget);
-    await tester.ensureVisible(find.text('Sign in with your email instead'));
-    await pumpFrames(tester);
-    await tester.tap(find.text('Sign in with your email instead'));
+    // The first screen's own way in (#363).
+    await pastPairStart(tester, email: true);
     await pumpFrames(tester);
     await tester.enterText(
       find.byKey(const ValueKey('device-email')),

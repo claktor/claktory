@@ -143,6 +143,9 @@ async fn agents_open_a_screen_in_the_app_the_person_is_using() {
     assert!(said.starts_with("tool show_screen: Opened Marketplace → Apps on "), "{said}");
     let both = ("marketplace".to_owned(), "apps".to_owned(), "lead".to_owned());
     assert_eq!(*asked.lock().expect("asked"), [both.clone(), both]);
+    let said = call(&mut client, &mut view, "lead", r#"call show_screen {"screen":"monitors"}"#).await;
+    assert!(said.starts_with("tool show_screen: Opened Monitors on "), "{said}");
+    asked.lock().expect("asked").clear();
     in_use.store(false, Ordering::SeqCst);
     let said = call(&mut client, &mut view, "lead", r#"call show_screen {"screen":"map"}"#).await;
     assert_eq!(

@@ -32,7 +32,6 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::home::Home;
 use crate::update::{VERSION, latest, plain};
@@ -342,22 +341,7 @@ pub(crate) async fn download_checked(expected: &Tarball, to: &Path) -> Result<Re
 
 async fn sha256(path: &Path) -> std::io::Result<String> {
     let path = path.to_owned();
-    tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        let mut file = std::fs::File::open(path)?;
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0; 1 << 16];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
-    })
-    .await
-    .map_err(std::io::Error::other)?
+    tokio::task::spawn_blocking(move || crate::encoding::sha256_file(&path, 1 << 16)).await.map_err(std::io::Error::other)?
 }
 
 async fn remove_all(path: &Path) {
@@ -536,10 +520,15 @@ impl Channel {
                     return Err(rejected(format!("its backend's signature doesn't verify: {}", why.trim())));
                 }
             }
-            // The helpers beside factoryd (the apps host, the speech host),
-            // which releases from before them don't have.
+            // The helpers beside factoryd (the apps host, the speech host,
+            // the video preview maker), which releases from before them
+            // don't have.
             for name in crate::update::HELPERS {
-                let label = if name == crate::update::APPS_HOST { "apps host" } else { "speech host" };
+                let label = match name {
+                    crate::update::APPS_HOST => "apps host",
+                    crate::update::SPEECH_HOST => "speech host",
+                    _ => "video preview maker",
+                };
                 let helper = partial.join(name);
                 if tokio::fs::metadata(&helper).await.is_ok_and(|metadata| metadata.is_file()) {
                     let verify = codesign(false).arg(&helper).output().await?;

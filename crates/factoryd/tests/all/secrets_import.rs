@@ -342,7 +342,9 @@ async fn a_whole_mib_imports_and_the_vault_answers_at_once_after_it() {
         let answer = decide(&mut client, &mut view, approve(&request.id)).await;
         assert!(!matches!(answer, server_message::Body::Error(_)), "{name}: {answer:?}");
         let took = started.elapsed();
-        assert!(took < std::time::Duration::from_secs(10), "{name}: approving took {took:?}");
+        // Seconds normally; 30 leaves room for a machine busy with other
+        // builds (12.7 s at load 30) and still fails the old minute and more.
+        assert!(took < std::time::Duration::from_secs(30), "{name}: approving took {took:?}");
         assert_eq!(decided(&view, &request.id).state(), v1::SecretRequestState::Generated, "{name}");
     }
     assert_eq!(secret(&view, "Exact").name, "Exact");

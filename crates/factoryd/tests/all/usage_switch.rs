@@ -4,7 +4,7 @@
 //! go back once Claude has room again. Against one mock server for both
 //! providers.
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::accounts::{account, registry_over, serve};
@@ -21,15 +21,41 @@ type Seen = Arc<Mutex<Vec<(String, String)>>>;
 
 /// Claude (account "a") at its limit until `reset` (unix seconds, 0 for
 /// never), OpenRouter answering every request.
-async fn providers(reset: Arc<AtomicI64>) -> (String, Seen) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+pub(crate) async fn providers(reset: Arc<AtomicI64>) -> (String, Seen) {
+    providers_on(TcpListener::bind("127.0.0.1:0").await.expect("bind"), reset)
+}
+
+/// `providers`, on `listener`.
+pub(crate) fn providers_on(listener: TcpListener, reset: Arc<AtomicI64>) -> (String, Seen) {
+    serve_providers(listener, reset, Arc::new(AtomicU64::new(0)))
+}
+
+/// `providers`, Claude's refusals answered `slow` ms late.
+fn serve_providers(listener: TcpListener, reset: Arc<AtomicI64>, slow: Arc<AtomicU64>) -> (String, Seen) {
+    serve_slowly(listener, Arc::new(move |path, _| answer(path, reset.load(Ordering::SeqCst))), slow)
+}
+
+/// An answer: status, more header lines ("name: value\r\n" each), content
+/// type and body.
+pub(crate) type Answer = (u16, String, &'static str, String);
+
+/// What a mock answers a request: its path and JSON body in, its answer out.
+pub(crate) type Route = Arc<dyn Fn(&str, &Value) -> Answer + Send + Sync>;
+
+/// A mock of the providers on `listener`, answering by `route`.
+pub(crate) fn serve_routes(listener: TcpListener, route: Route) -> (String, Seen) {
+    serve_slowly(listener, route, Arc::new(AtomicU64::new(0)))
+}
+
+/// `serve_routes`, its refusals (429) answered `slow` ms late.
+fn serve_slowly(listener: TcpListener, route: Route, slow: Arc<AtomicU64>) -> (String, Seen) {
     let base_url = format!("http://{}", listener.local_addr().expect("addr"));
     let seen: Seen = Arc::new(Mutex::new(Vec::new()));
     let recorded = seen.clone();
     tokio::spawn(async move {
         loop {
             let Ok((mut socket, _)) = listener.accept().await else { return };
-            let (recorded, reset) = (recorded.clone(), reset.clone());
+            let (recorded, route, slow) = (recorded.clone(), route.clone(), slow.clone());
             tokio::spawn(async move {
                 let mut raw = Vec::new();
                 let head_end = loop {
@@ -60,7 +86,10 @@ async fn providers(reset: Arc<AtomicI64>) -> (String, Seen) {
                 let path = head.split(' ').nth(1).unwrap_or_default().to_owned();
                 let body: Value = serde_json::from_slice(&raw[head_end + 4..]).unwrap_or_default();
                 recorded.lock().expect("lock").push((path.clone(), body["model"].as_str().unwrap_or_default().to_owned()));
-                let (status, extra, content_type, body) = answer(&path, reset.load(Ordering::SeqCst));
+                let (status, extra, content_type, body) = route(&path, &body);
+                if status == 429 {
+                    tokio::time::sleep(std::time::Duration::from_millis(slow.load(Ordering::SeqCst))).await;
+                }
                 let mut response = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n",
                     body.len()
@@ -76,7 +105,7 @@ async fn providers(reset: Arc<AtomicI64>) -> (String, Seen) {
     (base_url, seen)
 }
 
-fn answer(path: &str, reset: i64) -> (u16, String, &'static str, String) {
+fn answer(path: &str, reset: i64) -> Answer {
     let limited = reset == 0 || now_ms() / 1000 < u64::try_from(reset).unwrap_or(0);
     let resets_at = if reset == 0 { now_ms() / 1000 + 3 * 3600 } else { u64::try_from(reset).unwrap_or(0) };
     let json = |body: Value| (200, String::new(), "application/json", body.to_string());
@@ -88,19 +117,29 @@ fn answer(path: &str, reset: i64) -> (u16, String, &'static str, String) {
         return json(json!({"account": {"uuid": "uuid-a", "email": "a@x.com"}, "organization": {"uuid": "org-a"}}));
     }
     if path.ends_with("/chat/completions") {
-        let chunks = [
-            json!({"id": "c1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hi from openrouter"}}]}),
-            json!({"id": "c1", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 3, "completion_tokens": 2}}),
-        ];
-        let mut body: String = chunks.iter().map(|chunk| format!("data: {chunk}\n\n")).collect();
-        body.push_str("data: [DONE]\n\n");
-        return (200, String::new(), "text/event-stream", body);
+        return openrouter_reply();
     }
     if limited {
         let headers = format!("anthropic-ratelimit-unified-status: rejected\r\nanthropic-ratelimit-unified-reset: {resets_at}\r\n");
         let body = json!({"type": "error", "error": {"type": "rate_limit_error", "message": "Error"}});
         return (429, headers, "application/json", body.to_string());
     }
+    claude_reply()
+}
+
+/// OpenRouter's answer: "hi from openrouter".
+pub(crate) fn openrouter_reply() -> Answer {
+    let chunks = [
+        json!({"id": "c1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hi from openrouter"}}]}),
+        json!({"id": "c1", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 3, "completion_tokens": 2}}),
+    ];
+    let mut body: String = chunks.iter().map(|chunk| format!("data: {chunk}\n\n")).collect();
+    body.push_str("data: [DONE]\n\n");
+    (200, String::new(), "text/event-stream", body)
+}
+
+/// Claude's answer: "hi from claude".
+pub(crate) fn claude_reply() -> Answer {
     let events = [
         json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude", "usage": {"input_tokens": 3, "output_tokens": 1}}}),
         json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
@@ -113,17 +152,21 @@ fn answer(path: &str, reset: i64) -> (u16, String, &'static str, String) {
     (200, String::new(), "text/event-stream", body)
 }
 
-fn models_asked(seen: &Seen, path_ends: &str) -> Vec<String> {
+pub(crate) fn models_asked(seen: &Seen, path_ends: &str) -> Vec<String> {
     seen.lock().expect("lock").iter().filter(|(path, _)| path.ends_with(path_ends)).map(|(_, model)| model.clone()).collect()
 }
 
 /// A Claktory signed in to Claude (account a) and, with `openrouter`, to
 /// OpenRouter with a key.
-async fn claktory(openrouter: bool, reset: Arc<AtomicI64>) -> (std::path::PathBuf, Arc<Factory>, Client, View, Seen) {
+pub(crate) async fn claktory(openrouter: bool, reset: Arc<AtomicI64>) -> (std::path::PathBuf, Arc<Factory>, Client, View, Seen) {
     let dir = temp_dir();
     let (base_url, seen) = providers(reset).await;
     let file = dir.join("auth.json");
-    let mut auth = json!({"anthropic": account("a")});
+    // Named already, as after its first usage read, so that reading it
+    // again changes nothing in the providers' listing.
+    let mut claude = account("a");
+    claude["factoryLabel"] = json!("a@x.com");
+    let mut auth = json!({"anthropic": claude});
     if openrouter {
         auth["openrouter"] = json!({"type": "api_key", "key": "sk-or-test"});
     }
@@ -133,7 +176,7 @@ async fn claktory(openrouter: bool, reset: Arc<AtomicI64>) -> (std::path::PathBu
     (dir, factory, client, view, seen)
 }
 
-async fn create(client: &mut Client, view: &mut View, name: &str, model: &str, effort: &str) {
+pub(crate) async fn create(client: &mut Client, view: &mut View, name: &str, model: &str, effort: &str) {
     let create =
         Request::CreateAgent(v1::CreateAgent { name: name.into(), model: model.into(), effort: effort.into(), ..Default::default() });
     assert!(matches!(apply_request(client, view, create).await, Body::Ack(_)));
@@ -141,7 +184,7 @@ async fn create(client: &mut Client, view: &mut View, name: &str, model: &str, e
 
 /// Follows `view` until `done`, failing with what it waited for and where
 /// the agents and chats stood instead of a bare timeout.
-async fn until(client: &mut Client, view: &mut View, what: &str, done: impl FnMut(&View) -> bool) {
+pub(crate) async fn until(client: &mut Client, view: &mut View, what: &str, done: impl FnMut(&View) -> bool) {
     if tokio::time::timeout(std::time::Duration::from_secs(45), view.follow(client, done)).await.is_err() {
         let agents: Vec<String> = view
             .workspace
@@ -172,7 +215,9 @@ fn waiting(agent: &v1::Agent) -> bool {
 #[tokio::test]
 async fn waiting_agents_and_a_chat_continue_on_openrouter_and_go_back_once_claude_has_room() {
     let reset = Arc::new(AtomicI64::new(0));
-    let (dir, _factory, mut client, mut view, seen) = claktory(true, reset.clone()).await;
+    let (dir, factory, mut client, mut view, seen) = claktory(true, reset.clone()).await;
+    // Going back by itself is `goes_back_by_itself_once_claude_has_room…`.
+    factory.switch_back_only_by_tap();
     create(&mut client, &mut view, "Builder", "anthropic/claude-opus-4-8", "max").await;
     create(&mut client, &mut view, "Helper", "anthropic/claude-opus-4-8", "low").await;
     apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
@@ -316,6 +361,47 @@ async fn a_switch_is_kept_across_a_restart_and_the_persons_own_model_change_ends
 }
 
 #[tokio::test]
+async fn a_waiting_chat_put_on_another_model_carries_on_at_once_and_a_switch_ends_when_the_person_chooses() {
+    let (_dir, _factory, mut client, mut view, seen) = claktory(true, Arc::new(AtomicI64::new(0))).await;
+    let ask = Request::CreateChat(v1::CreateChat { text: "hello".into(), client_id: "c1".into() });
+    apply_request(&mut client, &mut view, ask).await;
+    until(&mut client, &mut view, "the chat waiting", |view| view.workspace.chats.first().is_some_and(|chat| !chat.usage_wait.is_empty()))
+        .await;
+    let id = chat(&view).id;
+
+    // The person picks a model of OpenRouter's: it asks again at once.
+    let chosen = Request::SetChatModel(v1::SetChatModel { chat_id: id.clone(), model: "openrouter/anthropic/claude-opus-4.8".into() });
+    assert!(matches!(apply_request(&mut client, &mut view, chosen).await, Body::Ack(_)));
+    until(&mut client, &mut view, "the chat answered on OpenRouter", |view| {
+        chat(view).status() == v1::AgentStatus::Idle && chat(view).usage_wait.is_empty()
+    })
+    .await;
+    let asked = models_asked(&seen, "/chat/completions");
+    assert!(!asked.is_empty() && asked.iter().all(|model| model == "anthropic/claude-opus-4.8"), "its reply and its title: {asked:?}");
+    assert!(chat(&view).usage_switch.is_none(), "chosen, not switched");
+
+    // Switched by Continue on OpenRouter, then chosen by the person: the
+    // switch is over.
+    let back = Request::SetChatModel(v1::SetChatModel { chat_id: id.clone(), model: "anthropic/claude-opus-4-8".into() });
+    assert!(matches!(apply_request(&mut client, &mut view, back).await, Body::Ack(_)));
+    apply_request(
+        &mut client,
+        &mut view,
+        Request::SendChatMessage(v1::SendChatMessage { chat_id: id.clone(), text: "again".into(), ..Default::default() }),
+    )
+    .await;
+    until(&mut client, &mut view, "the chat's alternative", |view| chat(view).usage_wait_alternative.is_some()).await;
+    let one = Request::ContinueOnAlternative(v1::ContinueOnAlternative { agent_id: id.clone(), all_waiting: false, expected_others: 0 });
+    assert!(matches!(apply_request(&mut client, &mut view, one).await, Body::Ack(_)));
+    until(&mut client, &mut view, "the switched chat answered", |view| chat(view).status() == v1::AgentStatus::Idle).await;
+    assert!(chat(&view).usage_switch.is_some());
+    let mine = Request::SetChatModel(v1::SetChatModel { chat_id: id, model: "openrouter/anthropic/claude-sonnet-4.6".into() });
+    assert!(matches!(apply_request(&mut client, &mut view, mine).await, Body::Ack(_)));
+    assert_eq!(chat(&view).model, "openrouter/anthropic/claude-sonnet-4.6");
+    assert!(chat(&view).usage_switch.is_none(), "the person chose its model");
+}
+
+#[tokio::test]
 async fn with_no_other_provider_signed_in_the_wait_says_another_would_carry_it() {
     let (_dir, _factory, mut client, mut view, _seen) = claktory(false, Arc::new(AtomicI64::new(0))).await;
     create(&mut client, &mut view, "Builder", "anthropic/claude-opus-4-8", "low").await;
@@ -335,4 +421,228 @@ async fn with_no_other_provider_signed_in_the_wait_says_another_would_carry_it()
         "{:?}",
         refused.body
     );
+}
+
+/// Row 227: once Claude answers again (Try now here; a usage read showing
+/// room does the same), its account's limit mark is gone from the
+/// workspace at once, so agents switched away are offered Back to Claude
+/// then, not at the old reset time.
+#[tokio::test]
+async fn back_to_claude_is_offered_as_soon_as_claude_answers_again() {
+    let reset = Arc::new(AtomicI64::new(0));
+    let (_dir, factory, mut client, mut view, _seen) = claktory(true, reset.clone()).await;
+    factory.switch_back_only_by_tap();
+    create(&mut client, &mut view, "Builder", "anthropic/claude-opus-4-8", "low").await;
+    create(&mut client, &mut view, "Helper", "anthropic/claude-opus-4-8", "low").await;
+    apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
+    apply_request(&mut client, &mut view, send_message("helper", "hello")).await;
+    until(&mut client, &mut view, "both waiting", |view| waiting(view.agent("builder")) && waiting(view.agent("helper"))).await;
+    let one =
+        Request::ContinueOnAlternative(v1::ContinueOnAlternative { agent_id: "builder".into(), all_waiting: false, expected_others: 0 });
+    assert!(matches!(apply_request(&mut client, &mut view, one).await, Body::Ack(_)));
+    until(&mut client, &mut view, "builder answered on OpenRouter", |view| view.agent("builder").status() == v1::AgentStatus::Idle).await;
+    assert!(!view.agent("builder").usage_switch.clone().expect("switched").ready);
+
+    // Claude has room again, unseen until Helper's Try now asks it.
+    reset.store(i64::try_from(now_ms() / 1000).expect("now") - 1, Ordering::SeqCst);
+    let try_now = Request::TryAgainNow(v1::TryAgainNow { agent_id: "helper".into() });
+    assert!(matches!(apply_request(&mut client, &mut view, try_now).await, Body::Ack(_)));
+    until(&mut client, &mut view, "builder's switch ready", |view| {
+        view.agent("helper").status() == v1::AgentStatus::Idle
+            && view.agent("builder").usage_switch.as_ref().is_some_and(|switch| switch.ready)
+    })
+    .await;
+    let claude = view.workspace.providers.iter().find(|provider| provider.id == "anthropic").expect("Claude").clone();
+    assert_eq!(claude.accounts[0].exhausted_until, 0, "{claude:?}");
+}
+
+fn notices(view: &View) -> Vec<String> {
+    crate::common::describe(&view.entries).into_iter().filter(|entry| entry.starts_with("notice: ")).collect()
+}
+
+/// Friend bug #8 A1: a switched agent goes back to Claude by itself once
+/// Claude has room, and says so; one that reaches the limit again within
+/// minutes of going back stays on OpenRouter until that limit resets.
+#[tokio::test]
+async fn goes_back_by_itself_once_claude_has_room_and_stays_when_it_bounces() {
+    let reset = Arc::new(AtomicI64::new(0));
+    let (_dir, _factory, mut client, mut view, seen) = claktory(true, reset.clone()).await;
+    create(&mut client, &mut view, "Builder", "anthropic/claude-opus-4-8", "low").await;
+    create(&mut client, &mut view, "Helper", "anthropic/claude-opus-4-8", "low").await;
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
+    apply_request(&mut client, &mut view, send_message("helper", "hello")).await;
+    until(&mut client, &mut view, "both waiting", |view| waiting(view.agent("builder")) && waiting(view.agent("helper"))).await;
+    let resets_at = view.agent("builder").usage_wait_until_ms;
+    let one =
+        Request::ContinueOnAlternative(v1::ContinueOnAlternative { agent_id: "builder".into(), all_waiting: false, expected_others: 0 });
+    assert!(matches!(apply_request(&mut client, &mut view, one).await, Body::Ack(_)));
+    until(&mut client, &mut view, "builder answered on OpenRouter", |view| view.agent("builder").status() == v1::AgentStatus::Idle).await;
+    let switched = view.agent("builder").usage_switch.clone().expect("switched");
+    assert!(switched.goes_back && !switched.ready, "{switched:?}");
+    assert_eq!(switched.goes_back_at_ms, resets_at, "when Claude's limit resets");
+
+    // Claude has room again, as Helper's Try now finds: Builder goes back.
+    reset.store(i64::try_from(now_ms() / 1000).expect("now") - 1, Ordering::SeqCst);
+    let try_now = Request::TryAgainNow(v1::TryAgainNow { agent_id: "helper".into() });
+    assert!(matches!(apply_request(&mut client, &mut view, try_now).await, Body::Ack(_)));
+    until(&mut client, &mut view, "builder back on Claude", |view| {
+        view.agent("builder").model == "anthropic/claude-opus-4-8" && view.agent("builder").usage_switch.is_none()
+    })
+    .await;
+    assert_eq!(view.agent("builder").effort, "low");
+    view.follow(&mut client, |view| notices(view).iter().any(|notice| notice.starts_with("notice: Back on "))).await;
+    assert!(
+        notices(&view).contains(&"notice: Back on Claude Opus 4.8: your Claude usage has room again.".to_owned()),
+        "{:?}",
+        notices(&view)
+    );
+
+    // At the limit again at once: continued again, it stays there until
+    // this limit resets.
+    reset.store(0, Ordering::SeqCst);
+    apply_request(&mut client, &mut view, send_message("builder", "again")).await;
+    until(&mut client, &mut view, "builder waiting again", |view| waiting(view.agent("builder"))).await;
+    let again =
+        Request::ContinueOnAlternative(v1::ContinueOnAlternative { agent_id: "builder".into(), all_waiting: false, expected_others: 0 });
+    assert!(matches!(apply_request(&mut client, &mut view, again).await, Body::Ack(_)));
+    until(&mut client, &mut view, "builder answered on OpenRouter again", |view| {
+        view.agent("builder").status() == v1::AgentStatus::Idle && view.agent("builder").usage_switch.is_some()
+    })
+    .await;
+    assert!(!view.agent("builder").usage_switch.clone().expect("switched").goes_back);
+    assert_eq!(models_asked(&seen, "/chat/completions").len(), 2);
+}
+
+/// Friend bug #8 A2: with Continue automatically on (kept in factory.db),
+/// an agent whose wait on Claude's limit starts continues on OpenRouter by
+/// itself, says so, and is a switch like any other; off, nothing moves.
+#[tokio::test]
+async fn with_continue_automatically_on_a_wait_on_the_limit_continues_by_itself() {
+    let reset = Arc::new(AtomicI64::new(0));
+    let (dir, factory, mut client, mut view, seen) = claktory(true, reset.clone()).await;
+    factory.switch_back_only_by_tap();
+    assert!(!view.workspace.usage_auto_continue, "off unless turned on");
+    let on = Request::SetUsageAutoContinue(v1::SetUsageAutoContinue { on: true });
+    assert!(matches!(apply_request(&mut client, &mut view, on).await, Body::Ack(_)));
+    assert!(view.workspace.usage_auto_continue);
+
+    create(&mut client, &mut view, "Builder", "anthropic/claude-opus-4-8", "low").await;
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
+    until(&mut client, &mut view, "builder answered on OpenRouter", |view| {
+        view.agent("builder").status() == v1::AgentStatus::Idle && view.agent("builder").usage_switch.is_some()
+    })
+    .await;
+    assert_eq!(view.agent("builder").model, "openrouter/anthropic/claude-opus-4.8");
+    assert_eq!(models_asked(&seen, "/chat/completions"), vec!["anthropic/claude-opus-4.8".to_owned()]);
+    view.follow(&mut client, |view| notices(view).iter().any(|notice| notice.starts_with("notice: Continued on "))).await;
+    assert!(
+        notices(&view).contains(&"notice: Continued on OpenRouter automatically: your Claude usage reached its limit.".to_owned()),
+        "{:?}",
+        notices(&view)
+    );
+    drop(client);
+    drop(factory);
+
+    // Kept across a restart; turned off, a new wait stays put.
+    let (base_url, seen) = providers(reset).await;
+    let factory = Factory::open(crate::common::home(&dir), Arc::new(registry_over(dir.join("auth.json"), &base_url))).await.expect("open");
+    let (mut client, mut view) = serve(&factory, &dir).await;
+    assert!(view.workspace.usage_auto_continue);
+    let off = Request::SetUsageAutoContinue(v1::SetUsageAutoContinue { on: false });
+    assert!(matches!(apply_request(&mut client, &mut view, off).await, Body::Ack(_)));
+    create(&mut client, &mut view, "Helper", "anthropic/claude-opus-4-8", "low").await;
+    apply_request(&mut client, &mut view, send_message("helper", "hello")).await;
+    until(&mut client, &mut view, "helper waiting", |view| waiting(view.agent("helper"))).await;
+    assert_eq!(view.agent("helper").model, "anthropic/claude-opus-4-8");
+    assert!(view.agent("helper").usage_switch.is_none());
+    assert_eq!(models_asked(&seen, "/chat/completions"), Vec::<String>::new());
+}
+
+/// U19 (#343): while agents are switched away from Claude and it still has
+/// no room, a new chat, and a new agent on the default model, start where
+/// they are, each as a switch that goes back with them; an agent given
+/// another model starts on it as asked.
+#[tokio::test]
+async fn new_chats_and_agents_start_where_the_switched_ones_are() {
+    let reset = Arc::new(AtomicI64::new(0));
+    let (_dir, factory, mut client, mut view, _seen) = claktory(true, reset.clone()).await;
+    factory.switch_back_only_by_tap();
+    create(&mut client, &mut view, "Builder", "anthropic/claude-opus-4-8", "low").await;
+    apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
+    until(&mut client, &mut view, "builder waiting", |view| waiting(view.agent("builder"))).await;
+    let one =
+        Request::ContinueOnAlternative(v1::ContinueOnAlternative { agent_id: "builder".into(), all_waiting: false, expected_others: 0 });
+    assert!(matches!(apply_request(&mut client, &mut view, one).await, Body::Ack(_)));
+
+    let ask = Request::CreateChat(v1::CreateChat { text: String::new(), client_id: "c1".into() });
+    apply_request(&mut client, &mut view, ask).await;
+    let new_chat = chat(&view);
+    assert_eq!(new_chat.model, "openrouter/anthropic/claude-opus-5.5");
+    assert_eq!(new_chat.usage_switch.expect("a switch").model, "anthropic/claude-opus-5-5");
+
+    let default = view.workspace.settings.as_ref().map(|settings| settings.default_model.clone()).unwrap_or_default();
+    assert_eq!(default, "anthropic/claude-opus-5-5");
+    create(&mut client, &mut view, "Newbie", &default, "high").await;
+    let newbie = view.agent("newbie").clone();
+    assert_eq!(newbie.model, "openrouter/anthropic/claude-opus-5.5");
+    assert_eq!(newbie.usage_switch.expect("a switch").model, default);
+    create(&mut client, &mut view, "Chosen", "anthropic/claude-sonnet-4-6", "low").await;
+    assert_eq!(view.agent("chosen").model, "anthropic/claude-sonnet-4-6", "a model chosen for it stays");
+    assert!(view.agent("chosen").usage_switch.is_none());
+}
+
+/// A chat put on another provider's model while its request to Claude is
+/// still out (row 736: Continue for all wakes it with the first one's
+/// change, before its own): refused by Claude once its model is
+/// OpenRouter's, it carries on there at once, rather than wait out
+/// Claude's limit under OpenRouter's name.
+#[tokio::test]
+async fn a_chat_moved_while_it_asks_carries_on_without_a_false_wait() {
+    let dir = temp_dir();
+    let slow = Arc::new(AtomicU64::new(0));
+    let (base_url, seen) =
+        serve_providers(TcpListener::bind("127.0.0.1:0").await.expect("bind"), Arc::new(AtomicI64::new(0)), slow.clone());
+    let file = dir.join("auth.json");
+    let mut claude = account("a");
+    claude["factoryLabel"] = json!("a@x.com");
+    std::fs::write(&file, json!({"anthropic": claude, "openrouter": {"type": "api_key", "key": "sk-or-test"}}).to_string())
+        .expect("credentials");
+    let factory = Factory::open(crate::common::home(&dir), Arc::new(registry_over(file, &base_url))).await.expect("open");
+    factory.switch_back_only_by_tap();
+    let (mut client, mut view) = serve(&factory, &dir).await;
+    let ask = Request::CreateChat(v1::CreateChat { text: "hello".into(), client_id: "c1".into() });
+    apply_request(&mut client, &mut view, ask).await;
+    until(&mut client, &mut view, "the chat waiting", |view| view.workspace.chats.first().is_some_and(|chat| !chat.usage_wait.is_empty()))
+        .await;
+
+    // Try now: it asks Claude again, whose refusal takes a while; meanwhile
+    // the person puts it on OpenRouter.
+    let id = chat(&view).id;
+    let claude_asked = |seen: &Seen| seen.lock().expect("lock").iter().filter(|(path, _)| path.ends_with("/v1/messages")).count();
+    let before = claude_asked(&seen);
+    slow.store(1500, Ordering::SeqCst);
+    assert!(matches!(
+        apply_request(&mut client, &mut view, Request::TryAgainNow(v1::TryAgainNow { agent_id: id.clone() })).await,
+        Body::Ack(_)
+    ));
+    let asked = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while claude_asked(&seen) == before {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(asked.is_ok(), "the chat asked Claude again");
+    let moved = Request::SetChatModel(v1::SetChatModel { chat_id: id.clone(), model: "openrouter/anthropic/claude-opus-5.5".into() });
+    assert!(matches!(apply_request(&mut client, &mut view, moved).await, Body::Ack(_)));
+    let mut elsewhere = Vec::new();
+    until(&mut client, &mut view, "the chat answered on OpenRouter", |view| {
+        elsewhere.extend(view.workspace.provider_waits.iter().filter(|wait| wait.provider_id != "anthropic").cloned());
+        chat(view).status() == v1::AgentStatus::Idle && chat(view).usage_wait.is_empty()
+    })
+    .await;
+    assert!(elsewhere.is_empty(), "{elsewhere:?}");
+    let asked = models_asked(&seen, "/chat/completions");
+    assert!(asked.iter().any(|model| model == "anthropic/claude-opus-5.5"), "{asked:?}");
 }

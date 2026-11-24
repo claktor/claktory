@@ -1,6 +1,7 @@
 package com.claktory.app
 
 import android.content.Intent
+import android.content.res.Configuration
 import android.view.View
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -28,9 +29,19 @@ class MainActivity : FlutterActivity() {
         adapters?.onResume()
     }
 
+    override fun onPostResume() {
+        super.onPostResume()
+        adapters?.onPostResume()
+    }
+
     override fun onPause() {
         adapters?.onPause()
         super.onPause()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        adapters?.onConfiguration(newConfig)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

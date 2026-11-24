@@ -40,6 +40,33 @@ fn focused(agent: &str, root: Option<v1::ViewNode>, focus: &str) -> client_messa
     client_message::Body::SetLayout(v1::SetLayout { agent_id: agent.into(), root, focus: Some(focus.into()) })
 }
 
+/// The layout without when each pane was opened.
+fn unstamped(node: Option<&v1::ViewNode>) -> Option<v1::ViewNode> {
+    fn clear(node: &mut v1::ViewNode) {
+        match &mut node.node {
+            Some(Node::Leaf(leaf)) => leaf.opened_ms = 0,
+            Some(Node::Split(split)) => split.children.iter_mut().for_each(clear),
+            None => {}
+        }
+    }
+    node.cloned().map(|mut node| {
+        clear(&mut node);
+        node
+    })
+}
+
+/// When the pane `id` of the layout was opened.
+fn opened(node: Option<&v1::ViewNode>, id: &str) -> i64 {
+    fn find(node: &v1::ViewNode, id: &str) -> Option<i64> {
+        match &node.node {
+            Some(Node::Leaf(leaf)) if node.id == id => Some(leaf.opened_ms),
+            Some(Node::Split(split)) => split.children.iter().find_map(|child| find(child, id)),
+            _ => None,
+        }
+    }
+    node.and_then(|node| find(node, id)).expect("the pane")
+}
+
 /// The layout's panes, depth first, as "kind path".
 fn panes(node: Option<&v1::ViewNode>) -> Vec<String> {
     fn walk(node: &v1::ViewNode, out: &mut Vec<String>) {
@@ -100,19 +127,47 @@ async fn layouts_are_checked_kept_for_every_device_and_survive_a_restart() {
     }
 
     let layout = row("s", vec![leaf("chat", "chat", ""), leaf("p1", "text", "/notes.md")]);
+    let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("now").as_millis() as i64;
     let reply = apply_request(&mut client, &mut view, set_layout("builder", Some(layout.clone()))).await;
     assert!(matches!(reply, Body::Ack(_)), "{reply:?}");
-    assert_eq!(view.agent("builder").layout.as_ref(), Some(&layout));
+    assert_eq!(unstamped(view.agent("builder").layout.as_ref()), Some(layout.clone()));
+    // Each pane says when it was opened: a new one, now.
+    let p1 = opened(view.agent("builder").layout.as_ref(), "p1");
+    assert!(p1 >= before, "{p1} >= {before}");
     let (_, other, _) = Client::connect(addr).await;
     let builder = other.agents.iter().find(|agent| agent.id == "builder").expect("builder");
-    assert_eq!(builder.layout.as_ref(), Some(&layout), "every device sees it");
+    assert_eq!(builder.layout.as_ref(), view.agent("builder").layout.as_ref(), "every device sees it");
+
+    // A device's layout sent back keeps when its panes were opened, whatever
+    // it says: the backend keeps that.
+    let mut sent = view.agent("builder").layout.clone().expect("a layout");
+    if let Some(Node::Split(split)) = &mut sent.node
+        && let Some(Node::Leaf(leaf)) = &mut split.children[1].node
+    {
+        leaf.opened_ms = 5;
+    }
+    assert!(matches!(apply_request(&mut client, &mut view, set_layout("builder", Some(sent))).await, Body::Ack(_)));
+    assert_eq!(opened(view.agent("builder").layout.as_ref(), "p1"), p1);
 
     drop(client);
     drop(factory);
+    let (addr, factory) = start(&dir).await;
+    let (client, workspace, _) = Client::connect(addr).await;
+    let view = View { workspace, ..View::default() };
+    assert_eq!(unstamped(view.agent("builder").layout.as_ref()), Some(layout.clone()), "kept across a restart");
+    assert_eq!(opened(view.agent("builder").layout.as_ref(), "p1"), p1, "and when it was opened");
+    drop(client);
+    drop(factory);
+
+    // A layout kept before Claktory kept when its panes were opened: 0.
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("db");
+    db.execute("UPDATE layouts SET opened = NULL", []).expect("from before");
+    drop(db);
     let (addr, _factory) = start(&dir).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
-    assert_eq!(view.agent("builder").layout.as_ref(), Some(&layout), "kept across a restart");
+    assert_eq!(unstamped(view.agent("builder").layout.as_ref()), Some(layout));
+    assert_eq!(opened(view.agent("builder").layout.as_ref(), "p1"), 0);
     // Back to just the conversation.
     apply_request(&mut client, &mut view, set_layout("builder", None)).await;
     assert!(view.agent("builder").layout.is_none());
@@ -151,14 +206,23 @@ async fn an_agent_shows_the_person_a_file_once() {
         _ => None,
     });
     let details: serde_json::Value = serde_json::from_str(&details.expect("the call")).expect("details are JSON");
-    let pane = lit.targets[0].id.strip_prefix("builder:").expect("the agent's pane");
+    let pane = lit.targets[0].id.strip_prefix("builder:").expect("the agent's pane").to_owned();
     assert_eq!(details, serde_json::json!({"path": report, "kind": "text", "pane": pane, "agent": "builder"}));
 
-    // Again: the same pane, glowing again, not a second one.
+    // Again: the same pane, glowing again, not a second one, and opened
+    // now, on every device.
+    let first = opened(view.agent("builder").layout.as_ref(), &pane);
+    assert!(first > 0);
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let glows = view.highlights.len();
     apply_request(&mut client, &mut view, show(&format!(r#"{{"path":"{report}"}}"#))).await;
     view.follow(&mut client, |view| idle(view, "builder") && view.highlights.len() > glows).await;
     assert_eq!(panes(view.agent("builder").layout.as_ref()).len(), 2);
+    let again = opened(view.agent("builder").layout.as_ref(), &pane);
+    assert!(again > first, "{again} > {first}");
+    let (_, other, _) = Client::connect(addr).await;
+    let builder = other.agents.iter().find(|agent| agent.id == "builder").expect("builder");
+    assert_eq!(opened(builder.layout.as_ref(), &pane), again);
 
     // What it can't show, it says why.
     apply_request(&mut client, &mut view, show(r#"{"path":"blob.bin"}"#)).await;
@@ -247,7 +311,8 @@ async fn a_full_layout_replaces_its_oldest_pane() {
     drop(client);
     drop(factory);
 
-    // Across a restart the order holds: f3 is the oldest left to replace.
+    // Across a restart the order holds: f3, shown again after f4 opened,
+    // counts as opened then, so f4 is the oldest left to replace.
     let (addr, _factory) = start(&dir).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
@@ -255,8 +320,8 @@ async fn a_full_layout_replaces_its_oldest_pane() {
     let before = calls(&view);
     apply_request(&mut client, &mut view, show(6)).await;
     view.follow(&mut client, |view| idle(view, "builder") && calls(view) > before).await;
-    assert!(said(&view).expect("said").ends_with(", in place of f3.md (the oldest pane)."), "{said:?}", said = said(&view));
-    assert_eq!(panes(view.agent("builder").layout.as_ref()), ["chat", &file(4), &file(1), &file(5), &file(6)]);
+    assert!(said(&view).expect("said").ends_with(", in place of f4.md (the oldest pane)."), "{said:?}", said = said(&view));
+    assert_eq!(panes(view.agent("builder").layout.as_ref()), ["chat", &file(6), &file(1), &file(5), &file(3)]);
 
     // The setting is from 1 to 11, or 0 for the default.
     let set = |panes: u32| client_message::Body::UpdateSettings(v1::UpdateSettings { max_open_panes: Some(panes), ..Default::default() });
@@ -445,4 +510,32 @@ async fn a_pdf_is_shown_and_read_whole_from_one_version() {
     file.set_len(80_000_000).expect("grow");
     let big = content(client.request(ranged(0, "")).await.body);
     assert_eq!((big.error.as_str(), big.data.len()), ("This PDF is too big to open here (80 MB).", 0));
+}
+
+/// #347: the person opening a pane (on the phone, from its list of open
+/// files) counts as opening it now, on every device, as an agent's re-show
+/// does.
+#[tokio::test]
+async fn the_person_opening_a_pane_makes_it_the_latest() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    let layout = row("s", vec![leaf("chat", "chat", ""), leaf("a", "text", "/a.md"), leaf("b", "text", "/b.md")]);
+    assert!(matches!(apply_request(&mut client, &mut view, set_layout("builder", Some(layout))).await, Body::Ack(_)));
+    let a = opened(view.agent("builder").layout.as_ref(), "a");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let opened_pane = |agent: &str, pane: &str| {
+        client_message::Body::PaneOpened(v1::PaneOpened { agent_id: agent.into(), pane_id: pane.into() })
+    };
+    assert!(matches!(apply_request(&mut client, &mut view, opened_pane("builder", "a")).await, Body::Ack(_)));
+    view.follow(&mut client, |view| opened(view.agent("builder").layout.as_ref(), "a") > a).await;
+    assert!(opened(view.agent("builder").layout.as_ref(), "a") > opened(view.agent("builder").layout.as_ref(), "b"));
+
+    let refused = apply_request(&mut client, &mut view, opened_pane("builder", "nope")).await;
+    assert!(matches!(&refused, Body::Error(error) if error.message == "The layout has no pane \"nope\"."), "{refused:?}");
+    let refused = apply_request(&mut client, &mut view, opened_pane("nobody", "a")).await;
+    assert!(matches!(&refused, Body::Error(error) if error.code() == v1::ErrorCode::NotFound), "{refused:?}");
 }

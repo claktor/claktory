@@ -158,6 +158,7 @@ async fn without_a_trusted_proxy_its_header_is_ignored() {
     let instance = start_with(Config::default()).await;
     let mut claktory = Claktory::new("203.0.113.9");
     instance.sign_in(&mut claktory, "matt@example.com", "Mac mini").await;
+    instance.advance(16 * 60);
     instance.share(&claktory, None).await.expect("a share");
     let notice = instance.mail.sent().pop().expect("a notice");
     assert!(notice.text.contains("From: 127.0.0.1\n"), "{}", notice.text);
@@ -181,6 +182,7 @@ async fn the_days_email_cap_stops_codes_but_not_notices() {
     let answer = instance.start_sign_in(&Claktory::new("198.51.105.10"), "p10@example.com", "Mac").await;
     assert_eq!((answer.status, answer.error().as_str()), (503, "email_unavailable"));
 
+    instance.advance(16 * 60);
     instance.share(&claktory, None).await.expect("a share");
     assert_eq!(instance.mail.sent().pop().expect("a notice").subject, "Mac mini unlocked its secrets");
 
@@ -216,5 +218,8 @@ async fn a_mail_outage_refuses_codes_but_still_unlocks() {
     instance.mail.fail.store(true, Ordering::SeqCst);
     let answer = instance.start_sign_in(&Claktory::new("198.51.106.2"), "p@example.com", "Mac").await;
     assert_eq!((answer.status, answer.error().as_str()), (503, "email_unavailable"));
+    // An unlock that's mailed (#412: later than just after signing in, from
+    // a new network) still gets its share while no mail goes.
+    instance.advance(16 * 60);
     assert!(instance.share(&claktory, None).await.is_ok());
 }

@@ -25,9 +25,14 @@ class PhoneExtensionList extends StatefulWidget {
     required this.chosen,
     required this.viewed,
     this.onSearch,
+    this.onVersions,
   });
 
   final Agent agent;
+
+  /// Opens the agent's other versions of its conversation (friend bug #9):
+  /// a row after Search while it has any.
+  final VoidCallback? onVersions;
 
   /// Opens the conversation's find: Search heads the list when it can.
   final VoidCallback? onSearch;
@@ -48,9 +53,23 @@ class _PhoneExtensionListState extends State<PhoneExtensionList> {
 
   @override
   Widget build(BuildContext context) {
+    // Live while it's open: a file an agent shows meanwhile comes in on top.
+    final store = AppScope.of(context).workspace;
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) => _list(
+        context,
+        store.workspace.agents.firstWhere(
+          (agent) => agent.id == widget.agent.id,
+          orElse: () => widget.agent,
+        ),
+      ),
+    );
+  }
+
+  Widget _list(BuildContext context, Agent agent) {
     final palette = Palette.of(context);
     final backend = AppScope.of(context);
-    final agent = widget.agent;
     final extensions = enabledExtensions(backend.workspace.workspace, agent);
     // Secrets shows what the agent was given, though the backend sends no
     // view for it.
@@ -64,7 +83,7 @@ class _PhoneExtensionListState extends State<PhoneExtensionList> {
       for (final extension in extensions)
         if (!shows(extension)) extension,
     ];
-    final viewers = [
+    final viewers = newestFirst([
       for (final pane in leaves(layoutOf(agent)))
         // Settings and other pages a Mac shows beside the conversation are
         // the phone's own screens here, and so are a project's Files.
@@ -72,7 +91,7 @@ class _PhoneExtensionListState extends State<PhoneExtensionList> {
             pane.leaf.kind != filesKind &&
             pageOfKind(pane.leaf.kind) == null)
           pane,
-    ];
+    ]);
     void open(Extension extension) {
       widget.chosen();
       fireAndLog(backend.openPanel(agent.id, extension.id));
@@ -104,6 +123,17 @@ class _PhoneExtensionListState extends State<PhoneExtensionList> {
                 name: 'Search',
                 onTap: search,
               ),
+            ),
+          if (widget.onVersions case final versions?)
+            _Row(
+              glyph: ExtensionGlyph(
+                icon: 'history',
+                name: 'Versions',
+                color: palette.textMuted,
+              ),
+              name: 'Versions (${agent.branches})…',
+              label: 'Other versions, ${agent.branches}',
+              onTap: versions,
             ),
           if (viewers.isNotEmpty) ...[
             const _Heading('Files'),
@@ -172,6 +202,19 @@ class _Heading extends StatelessWidget {
   );
 }
 
+/// [panes] newest first (#347, Matt): the file an agent most recently
+/// showed, or the person most recently opened, on top, the one most
+/// likely wanted. Equal times (all 0, from before the backend kept them)
+/// keep their layout order.
+List<ViewNode> newestFirst(List<ViewNode> panes) {
+  final ordered = panes.indexed.toList()
+    ..sort((a, b) {
+      final newer = b.$2.leaf.openedMs.compareTo(a.$2.leaf.openedMs);
+      return newer != 0 ? newer : a.$1.compareTo(b.$1);
+    });
+  return [for (final (_, pane) in ordered) pane];
+}
+
 /// A row as Settings' are on a phone: its glyph, its name, at least 52pt
 /// tall and growing with the text.
 class _Row extends StatelessWidget {
@@ -180,11 +223,15 @@ class _Row extends StatelessWidget {
     required this.name,
     required this.onTap,
     this.muted = false,
+    this.label,
   });
 
   final Widget glyph;
   final String name;
   final VoidCallback onTap;
+
+  /// What VoiceOver reads, when it isn't [name].
+  final String? label;
 
   /// A row that shows more rather than opening something.
   final bool muted;
@@ -195,6 +242,8 @@ class _Row extends StatelessWidget {
     return Semantics(
       container: true,
       button: true,
+      label: label,
+      excludeSemantics: label != null,
       child: Pressable(
         onTap: onTap,
         builder: (context, pressed) => Container(

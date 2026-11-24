@@ -604,9 +604,9 @@ async fn a_dictation_is_heard_by_the_asker_alone_first_and_nothing_is_kept() {
     let heard = transcribe(&mut asker, "r1", "d1").await;
     assert_eq!(of(&heard), answer("Ship it.", "", 41_200));
     assert!(kept_dictations(&dir).is_empty(), "the recording is deleted");
-    // Once only: the upload is gone.
-    assert_eq!(of(&transcribe(&mut asker, "r2", "d1").await), answer("", "failed", 0));
-    assert_eq!(of(&transcribe(&mut asker, "r3", "never-uploaded").await), answer("", "failed", 0));
+    // Once only: the upload is gone, to upload again.
+    assert_eq!(of(&transcribe(&mut asker, "r2", "d1").await), answer("", "no_recording", 0));
+    assert_eq!(of(&transcribe(&mut asker, "r3", "never-uploaded").await), answer("", "no_recording", 0));
     // Nothing heard, or too long (stopped once its length is known).
     dictation(&mut asker, "d2", "no speech").await;
     assert_eq!(of(&transcribe(&mut asker, "r4", "d2").await), answer("", "no_speech", 0));
@@ -756,4 +756,286 @@ async fn with_the_real_model_a_dictation_reads_as_said() {
     assert!(heard.text.to_lowercase().contains("check the logs first"), "{heard:?}");
     assert!((2_000..5_000).contains(&heard.duration_ms), "{heard:?}");
     assert!(kept_dictations(&dir).is_empty());
+}
+
+/// What a client sees of a chat: the Workspace and the shown chat's queue.
+#[derive(Default)]
+struct ChatSeen {
+    workspace: v1::Workspace,
+    queued: Vec<v1::QueuedMessage>,
+}
+
+impl ChatSeen {
+    fn apply(&mut self, body: &Body) {
+        match body {
+            Body::Workspace(workspace) => self.workspace = workspace.clone(),
+            Body::ChatQueuedMessages(queued) => self.queued = queued.messages.clone(),
+            _ => {}
+        }
+    }
+
+    async fn request(&mut self, client: &mut Client, body: Request) -> Body {
+        let reply = client.request(body).await;
+        for event in &reply.events {
+            if let Some(body) = &event.body {
+                self.apply(body);
+            }
+        }
+        reply.body
+    }
+
+    async fn follow(&mut self, client: &mut Client, done: impl Fn(&ChatSeen) -> bool) {
+        while !done(self) {
+            if let Some(body) = client.receive().await.body {
+                self.apply(&body);
+            }
+        }
+    }
+
+    fn chat(&self, id: &str) -> Option<&v1::Chat> {
+        self.workspace.chats.iter().find(|chat| chat.id == id)
+    }
+
+    fn settled(&self, id: &str) -> bool {
+        self.chat(id).is_some_and(|chat| chat.status() == v1::AgentStatus::Idle && chat.queued_messages == 0)
+    }
+}
+
+/// Uploads `said` as a chat's recording, as the app does.
+async fn upload_for_chat(client: &mut Client, chat: &str, name: &str, said: &str) -> v1::Attachment {
+    let upload_id = format!("up-{name}");
+    let start = v1::StartUpload {
+        upload_id: upload_id.clone(),
+        agent_id: chat.into(),
+        name: name.into(),
+        size: said.len() as u64,
+        mime: "audio/mp4".into(),
+        ..Default::default()
+    };
+    assert!(matches!(client.request(Request::StartUpload(start)).await.body, Body::UploadProgress(_)));
+    let chunk = v1::UploadChunk { upload_id: upload_id.clone(), offset: 0, data: said.as_bytes().to_vec() };
+    assert!(matches!(client.request(Request::UploadChunk(chunk)).await.body, Body::UploadProgress(_)));
+    let finish = v1::FinishUpload { upload_id, sha256: String::new() };
+    match client.request(Request::FinishUpload(finish)).await.body {
+        Body::UploadedFile(uploaded) => uploaded.attachment.expect("the recording"),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn chat_voice(chat: &str, recording: v1::Attachment) -> Request {
+    Request::SendChatMessage(v1::SendChatMessage { chat_id: chat.into(), voice: true, attachments: vec![recording], ..Default::default() })
+}
+
+/// #367: a chat takes a voice message as an agent's conversation does.
+#[tokio::test]
+async fn a_chat_takes_a_voice_message_as_an_agent_does() {
+    let dir = temp_dir();
+    let models = Scripted::signed_in();
+    let requests = models.requests.clone();
+    let (_factory, mut client, view, _server) = ready(&dir, models).await;
+    let mut seen = ChatSeen { workspace: view.workspace.clone(), ..ChatSeen::default() };
+    let settings =
+        v1::UpdateSettings { default_model: Some(crate::common::MODEL.into()), default_effort: Some("off".into()), ..Default::default() };
+    seen.request(&mut client, Request::UpdateSettings(settings)).await;
+    // A new chat for a first message that's spoken: made empty, then sent to.
+    seen.request(&mut client, Request::CreateChat(v1::CreateChat::default())).await;
+    let id = seen.workspace.chats.first().expect("the chat").id.clone();
+
+    // Only recordings are uploaded for a chat, and only voice messages sent.
+    let png = v1::StartUpload {
+        upload_id: "png".into(),
+        agent_id: id.clone(),
+        name: "a.png".into(),
+        size: 3,
+        mime: "image/png".into(),
+        ..Default::default()
+    };
+    assert!(refusal(&client.request(Request::StartUpload(png)).await.body).starts_with("A chat takes only voice messages"));
+    let recorded = upload_for_chat(&mut client, &id, "Voice.m4a", "wait Ship it.").await;
+    assert!(recorded.path.contains("/chats/"), "kept with the chat: {}", recorded.path);
+    let as_file =
+        v1::SendChatMessage { chat_id: id.clone(), text: "see".into(), attachments: vec![recorded.clone()], ..Default::default() };
+    assert_eq!(refusal(&client.request(Request::SendChatMessage(as_file)).await.body), "A chat takes only voice messages, not files.");
+
+    // Transcribed, it's read as the person's words, saying so; a chat left
+    // meanwhile is kept, since its first message is on its way.
+    seen.request(&mut client, chat_voice(&id, recorded.clone())).await;
+    seen.follow(&mut client, |seen| {
+        seen.queued.first().and_then(|queued| queued.transcription.as_ref()).is_some_and(|it| it.state() == v1::TranscriptionState::Pending)
+    })
+    .await;
+    seen.request(&mut client, Request::SelectAgent(v1::SelectAgent { agent_id: "ops".into() })).await;
+    assert!(seen.chat(&id).is_some(), "not deleted as empty");
+    std::fs::write(format!("{}.go", recorded.path), "").expect("go");
+    seen.follow(&mut client, |seen| seen.settled(&id) && seen.chat(&id).is_some_and(|chat| !chat.title.is_empty())).await;
+    let prompt = requests
+        .lock()
+        .expect("lock")
+        .iter()
+        .find(|request| request.system_prompt.starts_with("You're a chat") && request.prompt.contains("Ship it."))
+        .map(|request| request.prompt.clone())
+        .expect("the chat's request");
+    assert!(prompt.ends_with(" voice=\"42s\">\nShip it.\n</sent>"), "{prompt}");
+
+    // A short one with nothing said vanishes; a failed one can be discarded.
+    seen.request(&mut client, Request::SelectChat(v1::SelectChat { chat_id: id.clone() })).await;
+    let asked = requests.lock().expect("lock").len();
+    let short = upload_for_chat(&mut client, &id, "Voice 2.m4a", "silent 4999").await;
+    seen.request(&mut client, chat_voice(&id, short.clone())).await;
+    let silent = upload_for_chat(&mut client, &id, "Voice 3.m4a", "silent 5000").await;
+    seen.request(&mut client, chat_voice(&id, silent.clone())).await;
+    seen.follow(&mut client, |seen| {
+        seen.queued.len() == 1 && seen.queued[0].transcription.as_ref().is_some_and(|it| it.state() == v1::TranscriptionState::Failed)
+    })
+    .await;
+    let discard = Request::DiscardVoiceMessage(v1::DiscardVoiceMessage { agent_id: id.clone(), message_id: seen.queued[0].id });
+    assert!(matches!(seen.request(&mut client, discard).await, Body::Ack(_)));
+    seen.follow(&mut client, |seen| seen.queued.is_empty() && seen.settled(&id)).await;
+    assert_eq!(requests.lock().expect("lock").len(), asked, "the chat was given neither");
+    // Neither recording is kept: a chat has nowhere to show it (row 752).
+    assert!(!Path::new(&short.path).exists() && !Path::new(&silent.path).exists());
+    assert!(Path::new(&recorded.path).exists(), "the one heard stays, to play back");
+
+    // Without the model, a chat's voice message is refused as an agent's is.
+    let gone = seen.request(&mut client, Request::RemoveSpeechModel(v1::RemoveSpeechModel {})).await;
+    assert!(matches!(gone, Body::Ack(_)), "{gone:?}");
+    let later = upload_for_chat(&mut client, &id, "Voice 4.m4a", "Hello.").await;
+    assert_eq!(refusal(&client.request(chat_voice(&id, later)).await.body), "Voice messages need the speech model. Download it first.");
+}
+
+/// #401: on a weak connection the app asks again for what it never heard
+/// answered. A dictation's upload that finished answers as it did, and the
+/// same TranscribeAudio from the next connection waits with the first for
+/// its words, or gets them at once: never uploaded or transcribed twice.
+#[tokio::test]
+async fn a_dictation_asked_again_after_a_drop_gets_its_words_without_uploading_again() {
+    let dir = temp_dir();
+    let (addr, _factory, _client, _view, _server) = ready_at(&dir, Scripted::signed_in()).await;
+    let said = "wait Five minutes of words.";
+    let (mut first, _, _) = Client::connect(addr).await;
+    dictation(&mut first, "d1", said).await;
+
+    // FinishUpload's answer lost: started again, it's all there, and
+    // finishing again answers as before.
+    let start = v1::StartUpload {
+        upload_id: "d1".into(),
+        name: "dictation.m4a".into(),
+        size: said.len() as u64,
+        mime: "audio/mp4".into(),
+        purpose: v1::UploadPurpose::Dictation.into(),
+        ..Default::default()
+    };
+    match first.request(Request::StartUpload(start)).await.body {
+        Body::UploadProgress(progress) => assert_eq!(progress.received, said.len() as u64, "all there"),
+        other => panic!("{other:?}"),
+    }
+    let finish = v1::FinishUpload { upload_id: "d1".into(), sha256: String::new() };
+    assert!(matches!(first.request(Request::FinishUpload(finish)).await.body, Body::UploadedFile(_)));
+    assert_eq!(kept_dictations(&dir).len(), 1, "kept once");
+
+    // The connection drops while it's transcribed; the next asks again.
+    let request = v1::TranscribeAudio { request_id: "r1".into(), upload_id: "d1".into() };
+    first.ok(Request::TranscribeAudio(request.clone())).await;
+    drop(first);
+    let (mut second, _, _) = Client::connect(addr).await;
+    let events = second.ok(Request::TranscribeAudio(request.clone())).await;
+    assert!(!events.iter().any(|message| matches!(message.body, Some(Body::AudioTranscribed(_)))), "still being heard");
+    let recording = dir.join("home/speech/dictation").join(&kept_dictations(&dir)[0]);
+    std::fs::write(format!("{}.go", recording.display()), "").expect("go");
+    let heard = second
+        .wait_for(|body| match body {
+            Body::AudioTranscribed(heard) if heard.request_id == "r1" => Some(heard.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(of(&heard), answer("Five minutes of words.", "", 41_200));
+
+    // Asked again later, from yet another: the words at once, not heard again.
+    let (mut third, _, _) = Client::connect(addr).await;
+    assert_eq!(of(&transcribe(&mut third, "r1", "d1").await), answer("Five minutes of words.", "", 41_200));
+    let starts = std::fs::read_to_string(dir.join("starts")).expect("starts");
+    assert!(!recording.exists(), "the recording is deleted");
+    // Another request for the same recording: it's gone, to upload again.
+    assert_eq!(of(&transcribe(&mut third, "r2", "d1").await), answer("", "no_recording", 0));
+    assert_eq!(std::fs::read_to_string(dir.join("starts")).expect("starts"), starts);
+}
+
+/// #401: a message sent again with the same client_id (its answer lost on
+/// a weak connection) is answered as sent and delivered once: typed or
+/// spoken, to an agent or a chat, and a new chat isn't made twice.
+#[tokio::test]
+async fn a_message_sent_again_is_delivered_once() {
+    let dir = temp_dir();
+    let models = Scripted::signed_in();
+    let requests = models.requests.clone();
+    let (_factory, mut client, mut view, _server) = ready(&dir, models).await;
+    let delivered = |text: &str| -> usize {
+        // What reached the agent or the chat; not a chat's title, which
+        // quotes its first exchange.
+        let requests = requests.lock().expect("lock");
+        let read = requests.iter().filter(|request| !request.system_prompt.starts_with("Write a title"));
+        read.map(|request| request.prompt.matches(text).count()).sum()
+    };
+    let user = |view: &View, text: &str| {
+        view.entries.iter().filter(|entry| matches!(&entry.kind, Some(Kind::User(user)) if user.text == text)).count()
+    };
+
+    // Typed.
+    let typed = Request::SendMessage(v1::SendMessage {
+        agent_id: "ops".into(),
+        text: "Deploy at five.".into(),
+        client_id: "c1".into(),
+        ..Default::default()
+    });
+    apply_request(&mut client, &mut view, typed.clone()).await;
+    apply_request(&mut client, &mut view, typed).await;
+    view.follow(&mut client, |view| user(view, "Deploy at five.") == 1 && idle(view)).await;
+
+    // Spoken: its recording is the agent's already, and isn't needed again.
+    let recorded = recording(&dir, "ops", "Voice.m4a", "Call me back.");
+    let spoken = Request::SendMessage(v1::SendMessage {
+        agent_id: "ops".into(),
+        voice: true,
+        attachments: vec![recorded.clone()],
+        client_id: "c2".into(),
+        ..Default::default()
+    });
+    apply_request(&mut client, &mut view, spoken.clone()).await;
+    view.follow(&mut client, |view| voice_entry(view, "Call me back.").is_some() && idle(view)).await;
+    std::fs::remove_file(&recorded.path).expect("moved away by the agent, say");
+    match client.request(spoken).await.body {
+        Body::Ack(_) => {}
+        other => panic!("a repeat is answered as sent: {other:?}"),
+    }
+    // Another message after them settles what reached the agent.
+    apply_request(&mut client, &mut view, send_message("ops", "Thanks.")).await;
+    view.follow(&mut client, |view| user(view, "Thanks.") == 1 && idle(view)).await;
+    assert_eq!((user(&view, "Deploy at five."), user(&view, "Call me back.")), (1, 1));
+    assert_eq!((delivered("Deploy at five."), delivered("Call me back.")), (1, 1));
+    assert_eq!(view.queued.as_ref().map_or(0, |queued| queued.messages.len()), 0);
+
+    // A chat: made once, and its message sent once.
+    let mut seen = ChatSeen { workspace: view.workspace.clone(), ..ChatSeen::default() };
+    let settings =
+        v1::UpdateSettings { default_model: Some(crate::common::MODEL.into()), default_effort: Some("off".into()), ..Default::default() };
+    seen.request(&mut client, Request::UpdateSettings(settings)).await;
+    let create = Request::CreateChat(v1::CreateChat { text: "Plan the week.".into(), client_id: "c3".into() });
+    seen.request(&mut client, create.clone()).await;
+    let id = seen.workspace.chats.first().expect("the chat").id.clone();
+    seen.follow(&mut client, |seen| seen.settled(&id)).await;
+    seen.request(&mut client, create).await;
+    assert_eq!(seen.workspace.chats.len(), 1, "no second chat");
+    let more = Request::SendChatMessage(v1::SendChatMessage {
+        chat_id: id.clone(),
+        text: "And Friday.".into(),
+        client_id: "c4".into(),
+        ..Default::default()
+    });
+    seen.request(&mut client, more.clone()).await;
+    seen.request(&mut client, more).await;
+    seen.follow(&mut client, |seen| seen.settled(&id)).await;
+    seen.request(&mut client, Request::SendChatMessage(v1::SendChatMessage { chat_id: id.clone(), text: "Done.".into(), ..Default::default() }))
+        .await;
+    seen.follow(&mut client, |seen| seen.settled(&id)).await;
+    assert_eq!((delivered("Plan the week."), delivered("And Friday."), delivered("Done.")), (1, 1, 1));
 }

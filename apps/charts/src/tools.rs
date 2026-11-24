@@ -111,7 +111,11 @@ fn get(host: &mut impl Host, args: &Value) -> ToolOutput {
             format!("There's no dashboard \"{id}\"; charts_list lists them.")
         });
     };
-    let data = serde_json::to_value(&dashboard).unwrap_or_default();
+    let mut data = serde_json::to_value(&dashboard).unwrap_or_default();
+    // How it's kept is Charts' own business.
+    if let Some(fields) = data.as_object_mut() {
+        fields.remove("_v");
+    }
     answer(serde_json::to_string_pretty(&data).unwrap_or_default(), data)
 }
 
@@ -129,10 +133,26 @@ fn put(host: &mut impl Host, args: &Value, caller: &str) -> ToolOutput {
     if let Some(fields) = fields.as_object_mut() {
         fields.remove("_by");
     }
-    let dashboard: Dashboard = match serde_json::from_value(fields) {
+    let mut dashboard: Dashboard = match serde_json::from_value(fields) {
         Ok(dashboard) => dashboard,
         Err(error) => return refuse(format!("The dashboard can't be read: {error}. charts_get shows one as it should be.")),
     };
+    // A stat that doesn't say shows what it showed when kept (current
+    // version first, then the one before, as when it's brought back): a
+    // stat kept before reduce existed its total; a new one its last number.
+    let kept: Vec<(String, Option<String>)> = [model::load(host, &dashboard.id), model::previous(host, &dashboard.id)]
+        .into_iter()
+        .flatten()
+        .flat_map(|kept| kept.panels.into_iter().filter(|panel| panel.viz.kind == "stat").map(|panel| (panel.id, panel.viz.reduce)))
+        .collect();
+    for panel in &mut dashboard.panels {
+        if panel.viz.kind == "stat" && panel.viz.reduce.is_none() {
+            panel.viz.reduce = match kept.iter().find(|(id, _)| *id == panel.id) {
+                Some((_, reduce)) => reduce.clone(),
+                None => Some(model::NEW_REDUCE.into()),
+            };
+        }
+    }
     let sources = host.data_sources();
     let problems = dashboard.problems(&sources);
     if !problems.is_empty() {
@@ -197,7 +217,7 @@ fn query(host: &mut impl Host, args: &Value) -> ToolOutput {
     let from_text = args["from"].as_str().unwrap_or("now-7d");
     let to_text = args["to"].as_str().unwrap_or("now");
     let (Some(from), Some(to)) = (sql::time(from_text, now), sql::time(to_text, now)) else {
-        return refuse("from and to are \"now\", \"now-<n><m|h|d|w>\" (such as \"now-7d\") or milliseconds.");
+        return refuse("from and to are \"now\", \"now-<n><m|h|d|w|y>\" (such as \"now-7d\") or milliseconds.");
     };
     if from >= to {
         return refuse("from is before to.");

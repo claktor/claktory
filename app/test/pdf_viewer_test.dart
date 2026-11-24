@@ -219,6 +219,118 @@ void main() {
     variant: mac,
   );
 
+  testWidgets(
+    "ink saved on an iPad shows over its pages, only read: each page's "
+    'latest layer of the version shown, again as it is saved or deleted '
+    'anywhere, and all of it when the view is made again (#368)',
+    (tester) async {
+      _Cache();
+      final native = _Native();
+      final file = _pdf('a paper');
+      final harness = await _show(tester, file);
+      List<Map<Object?, Object?>> loads() => [
+        for (final call in native.calls)
+          if (call.method == 'loadDrawing')
+            for (final layer in (call.arguments as Map)['layers'] as List)
+              layer as Map<Object?, Object?>,
+      ];
+      Future<void> ready() async {
+        await native.send('ready', {
+          'surface': 'pdf',
+          'source_sha256': file.sha256,
+          'sha256_verified': true,
+          'page_count': 4,
+          'pages': [],
+          'drawing_space': 'none',
+        });
+        await pumpFrames(tester);
+      }
+
+      // No ink anywhere: the pages show as they always did.
+      await ready();
+      expect(loads(), isEmpty);
+      expect(
+        harness.backend.sent.where((m) => m.hasListInkLayers()).single,
+        isNotNull,
+      );
+
+      InkLayer layer(
+        String id,
+        int page,
+        int revision, {
+        String? sha,
+        String conflictOf = '',
+        String kind = 'pdf_page',
+      }) {
+        final bytes = utf8.encode('ink $id $revision');
+        final drawing = sha256.convert(bytes).toString();
+        harness.backend.inkBlobs[drawing] = bytes;
+        return InkLayer(
+          id: id,
+          path: _path,
+          sourceSha256: sha ?? file.sha256,
+          space: InkSpace(kind: kind, page1based: page),
+          revision: revision,
+          conflictOf: conflictOf,
+          drawing: InkBlobRef(sha256: drawing, contentVersion: 2),
+          preview: InkBlobRef(sha256: 'preview-$id-$revision'),
+        );
+      }
+
+      void saved(List<InkLayer> layers) => harness.backend.inkLayerLists.value =
+          InkLayerList(path: _path, layers: layers);
+
+      final first = [
+        layer('a', 1, 1),
+        layer('a', 1, 2),
+        layer('b', 3, 1),
+        // A copy kept beside page 2's after a conflict, another version's
+        // page 4 and an image's: none of them shows.
+        layer('c', 2, 1, conflictOf: 'x'),
+        layer('d', 4, 1, sha: 'another'),
+        layer('e', 1, 9, kind: 'image'),
+      ];
+      saved(first);
+      await pumpFrames(tester);
+      var loaded = loads();
+      expect([for (final l in loaded) l['page_1based']], [1, 3]);
+      final one = loaded.first;
+      expect(one['ink_layer_id'], 'a');
+      expect(one['revision'], 2);
+      expect(
+        utf8.decode(
+          base64Decode((one['drawing'] as Map)['bytes_base64'] as String),
+        ),
+        'ink a 2',
+      );
+      expect((one['drawing'] as Map)['content_version'], 2);
+
+      // Saved again on the iPad: only that page loads again.
+      native.calls.clear();
+      saved([...first, layer('b', 3, 2)]);
+      await pumpFrames(tester);
+      loaded = loads();
+      expect([for (final l in loaded) l['page_1based']], [3]);
+      expect(loaded.single['revision'], 2);
+
+      // Its layer deleted: the page shows none.
+      native.calls.clear();
+      saved([layer('b', 3, 2)]);
+      await pumpFrames(tester);
+      loaded = loads();
+      expect(loaded.single['page_1based'], 1);
+      expect(loaded.single['clear'], isTrue);
+
+      // The view made again: what's saved, all of it.
+      native.calls.clear();
+      await ready();
+      loaded = loads();
+      expect([for (final l in loaded) l['page_1based']], [3]);
+      expect(loaded.single['clear'], isNull);
+    },
+    variant: mac,
+  );
+
   testWidgets("Search and ⌘F open the app's find bar over the page; Return and "
       '⇧Return go from match to match, Escape closes it', (tester) async {
     _Cache();

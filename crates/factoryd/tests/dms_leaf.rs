@@ -436,7 +436,7 @@ impl People {
         select(&mut self.client, &mut self.view, "rivet").await;
         call(&mut self.client, &mut self.view, "rivet", "app_grants_propose", &proposal).await;
         let seq = self.view.entries.iter().rev().find_map(|entry| matches!(entry.kind, Some(Kind::AppGrant(_))).then_some(entry.seq));
-        let decision = v1::DecideAppGrant { agent_id: "rivet".into(), seq: seq.expect("a card"), approve: true, comment: String::new() };
+        let decision = v1::DecideAppGrant { agent_id: "rivet".into(), seq: seq.expect("a card"), approve: true, comment: String::new(), ..Default::default() };
         apply_request(&mut self.client, &mut self.view, Request::DecideAppGrant(decision)).await;
         self.view
             .follow(&mut self.client, |view| view.agent("mike").extensions.iter().any(|extension| extension.id == "dm" && extension.enabled))

@@ -229,18 +229,33 @@ fn show(factory: &Factory, proposal: &v1::ConnectProposal) {
     }
 }
 
-/// The person dismissed a proposal: its card shows it, and its agent is told.
+/// The person dismissed a proposal, or replied to it with a comment (#370
+/// Submit), which connects nothing either: its card shows it, and its agent
+/// is told.
 pub(crate) fn dismiss(factory: &Arc<Factory>, request: &v1::DismissConnectProposal) -> Result<(), RequestError> {
     let comment = crate::decisions::comment(&request.comment)?;
-    let proposal = factory.vault.decide_proposal(&request.proposal_id, None, comment)?;
+    if request.reply && comment.is_empty() {
+        return Err(crate::vault::VaultError::Invalid("Write a reply, or connect or dismiss it.".to_owned()).into());
+    }
+    let proposal = factory.vault.decide_proposal(&request.proposal_id, None, comment, request.reply)?;
     factory.vault_changed();
     show(factory, &proposal);
     let (person, service) = {
         let inner = factory.lock();
         (inner.config.person_capitalized().to_owned(), service_name(factory, &proposal.connector_id))
     };
-    let summary = format!("{person} dismissed your proposal to connect {service}.");
-    let text = format!("{summary}{}\n\nYou proposed it for: {}", crate::decisions::note(&person, comment), proposal.purpose);
+    let (summary, text) = if request.reply {
+        let summary = format!("{person} replied to your proposal to connect {service}.");
+        let text = format!(
+            "{person} replied to your proposal to connect {service}; nothing was connected. They say:\n\n{comment}\n\nIf it still fits, propose it again with that in mind.\n\nYou proposed it for: {}",
+            proposal.purpose
+        );
+        (summary, text)
+    } else {
+        let summary = format!("{person} dismissed your proposal to connect {service}.");
+        let text = format!("{summary}{}\n\nYou proposed it for: {}", crate::decisions::note(&person, comment), proposal.purpose);
+        (summary, text)
+    };
     factory.deliver_event(&proposal.agent_id, text, host_event(summary));
     Ok(())
 }
@@ -260,7 +275,7 @@ pub(crate) fn connected(
     meta: &ConnectionMeta,
     comment: &str,
 ) {
-    let proposal = match factory.vault.decide_proposal(proposal_id, Some((secret_id, secret_name)), comment) {
+    let proposal = match factory.vault.decide_proposal(proposal_id, Some((secret_id, secret_name)), comment, false) {
         Ok(proposal) => proposal,
         Err(error) => {
             tracing::warn!(proposal = proposal_id, %error, "could not mark a proposal connected");

@@ -16,7 +16,7 @@ import 'package:factory_app/tunnel_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'reconnect_from_scratch_test.dart' show until;
-import 'tunnel_test.dart' show FakeTunnel;
+import 'tunnel_test.dart' show FakeTunnel, tunnelStatus;
 
 final _endpoint = 'a' * 64;
 final _code = 'factory://?t=${'c' * 64}&e=$_endpoint&name=mac-mini';
@@ -34,6 +34,7 @@ const _allowedKeys = {
   'up',
   'attempt',
   'welcomed',
+  'err',
 };
 final _token = RegExp(r'^([a-z_]+)=([0-9]+|[a-z]+)$');
 
@@ -105,13 +106,19 @@ class _Tunnels implements Tunnels {
 
   final int port;
 
+  /// The last one opened.
+  FakeTunnel? last;
+
+  /// What the next one opened says first.
+  TunnelStatus? first;
+
   @override
   Future<Tunnel> open({
     required String deviceKey,
     required String endpointId,
     required List<String> relays,
     List<String> addresses = const [],
-  }) async => FakeTunnel(port);
+  }) async => last = FakeTunnel(port)..status = first ?? tunnelStatus();
 
   @override
   Future<({String device, String backend})> pairingIds({
@@ -133,13 +140,14 @@ void main() {
     folder.deleteSync(recursive: true);
   });
 
+  late _Tunnels tunnels;
   Backend backend(DiagnosticsRecorder recorder) =>
       Backend(
           workspace: WorkspaceStore(),
           transcript: TranscriptStore(),
           explorer: ExplorerStore(),
           extensionView: ExtensionViewStore(),
-          tunnels: _Tunnels(far.server.port),
+          tunnels: tunnels = _Tunnels(far.server.port),
           diagnostics: recorder,
           localPairing: () async => null,
         )
@@ -203,6 +211,67 @@ void main() {
     final seqs = far.received.map((event) => event.seq.toInt()).toList();
     expect(seqs, [...seqs]..sort());
     expect(seqs.toSet().length, seqs.length);
+    await app.close();
+  });
+
+  test("the relay's trouble while it's down, and how long it took to come "
+      'up, are recorded in words and numbers only (#388)', () async {
+    DiagnosticsRecorder(folder)
+      ..select(_endpoint)
+      ..share(true);
+    final recorder = DiagnosticsRecorder(folder);
+    final app = backend(recorder);
+    app.connectTo(parsePairingCode(_code));
+    unawaited(app.run());
+    await until(() => far.received.any((event) => event.kind == 'connected'));
+    final tunnel = tunnels.last!;
+    tunnel.status = tunnelStatus(relay: false, trouble: TunnelRelayTrouble.dns);
+    await until(
+      () => far.received.any((event) => event.detail == 'up=0 err=dns'),
+    );
+    // Still down, now timing out: said again.
+    tunnel.status = tunnelStatus(
+      relay: false,
+      trouble: TunnelRelayTrouble.timeout,
+    );
+    await until(
+      () => far.received.any((event) => event.detail == 'up=0 err=timeout'),
+    );
+    tunnel.status = tunnelStatus(relayUpMs: 2300);
+    // Up again, with how long it took.
+    await until(
+      () => far.received.any(
+        (event) =>
+            event.kind == 'relay' &&
+            event.detail == 'up=1' &&
+            event.durationMs.toInt() == 2300,
+      ),
+    );
+    expectAllowed(far.received);
+    await app.close();
+  });
+
+  test('a launch whose relay comes up a little after says only how long '
+      'it took: no bare up=0 before it (Zucchero, #388)', () async {
+    DiagnosticsRecorder(folder)
+      ..select(_endpoint)
+      ..share(true);
+    final recorder = DiagnosticsRecorder(folder);
+    final app = backend(recorder);
+    tunnels.first = tunnelStatus(relay: false);
+    app.connectTo(parsePairingCode(_code));
+    unawaited(app.run());
+    await until(() => far.received.any((event) => event.kind == 'connected'));
+    tunnels.last!.status = tunnelStatus(relayUpMs: 640);
+    await until(() => far.received.any((event) => event.kind == 'relay'));
+    // A tick more, for anything noted after.
+    await Future<void>.delayed(const Duration(milliseconds: 1500));
+    final relay = [
+      for (final event in far.received)
+        if (event.kind == 'relay') event,
+    ];
+    expect(relay.map((event) => event.detail), ['up=1']);
+    expect(relay.single.durationMs.toInt(), 640);
     await app.close();
   });
 

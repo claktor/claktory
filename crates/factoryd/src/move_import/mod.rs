@@ -1487,7 +1487,7 @@ pub fn ask_passphrase() -> Result<String, String> {
 
 /// The SHA-256 of `text`, in hex.
 pub(crate) fn sha256_hex(text: &str) -> String {
-    Sha256::digest(text.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::encoding::hex(&Sha256::digest(text.as_bytes()))
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 use super::{Report, Target, schema, types};
 use crate::factory::Factory;
 use crate::pipes::Record;
-use crate::pipes::agents::escape;
+use crate::pipes::agents::{boundary, escape};
 
 /// handoff_submit's own parameters, beside a type's fields in a tool made
 /// before report types (its fields were beside them, not in `fields`).
@@ -193,14 +193,6 @@ fn submit(factory: &Arc<Factory>, agent: &str, args: Map<String, Value>) -> Resu
     Ok(said(&answer))
 }
 
-/// A random fence, so the words can close neither it nor the tool's answer.
-fn boundary() -> String {
-    const LETTERS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
-    let mut random = [0u8; 8];
-    getrandom::fill(&mut random).expect("the system's random source");
-    random.iter().map(|byte| LETTERS[usize::from(*byte) % LETTERS.len()] as char).collect()
-}
-
 fn said(text: &str) -> ToolResult {
     ToolResult::text(text.to_owned(), json!({}))
 }
@@ -256,6 +248,7 @@ fn open_file(factory: &Arc<Factory>, agent: &str, report: i64, index: usize) -> 
         result.content.push(factory_agent::ToolResultPart::Image {
             data: base64::engine::general_purpose::STANDARD.encode(&bytes),
             mime_type: mime.to_owned(),
+            digest: None,
         });
         return Ok(result);
     }

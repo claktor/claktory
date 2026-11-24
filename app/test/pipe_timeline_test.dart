@@ -508,8 +508,10 @@ void main() {
     await tester.tap(find.bySemanticsLabel('Menu'));
     await settle(tester);
     expect(menus, 1);
-    await tester.tap(find.bySemanticsLabel('Kai: more'));
+    // The pipe's "…": Move to group… (#359), then the liaison's own.
+    await tester.tap(find.bySemanticsLabel('Acme launch: more'));
     await settle(tester);
+    expect(find.text('Move to group…'), findsOneWidget);
     expect(find.text('Clear conversation…'), findsOneWidget);
   });
 

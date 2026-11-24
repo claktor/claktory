@@ -12,18 +12,18 @@ import 'browser/browser_view.dart' show BrowserSessionStrip;
 import 'characters/character.dart';
 import 'connection.dart';
 import 'controls.dart';
+import 'conversation_versions.dart' show showVersions, versionsLabel;
 import 'conversation_find.dart' show ConversationFind;
 import 'find.dart' show ClearOfFindBar, FindSessions, findShortcut;
 import 'forms.dart';
 import 'identity.dart';
-import 'inbox.dart' show NeedsYouChip, NeedsYouList;
+import 'inbox.dart' show NeedsYouChip;
 import 'message_box.dart';
 import 'mobile/agent_marks.dart';
 import 'mobile/header.dart';
 import 'mobile/lines.dart' show ActionLine, ControlsLine;
 import 'mobile/metrics.dart';
 import 'mobile/needs_you_button.dart';
-import 'mobile/presentation.dart' show showPanel;
 import 'model_step.dart' show showConnectModel;
 import 'panes.dart';
 import 'pipe_reports.dart' show ReadsReportsMark;
@@ -365,6 +365,25 @@ class _Header extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: Space.l),
+                // Its other versions of its conversation, while it has any
+                // (friend bug #9): what going back set aside.
+                if (agent.branches > 0) ...[
+                  HoverCard(
+                    end: true,
+                    card: (context) => Text(versionsLabel(agent)),
+                    child: GlyphButton(
+                      label: 'Other versions, ${agent.branches}',
+                      active: false,
+                      onTap: () => showVersions(context, agent),
+                      glyph: (color) => ExtensionGlyph(
+                        icon: 'history',
+                        name: 'Versions',
+                        color: color,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: Space.s),
+                ],
                 // Find in the conversation: what ⌘F does, for those who
                 // don't know it.
                 HoverCard(
@@ -498,7 +517,11 @@ class _PhoneHeader extends StatelessWidget {
       // How many things need the person, and "…". The quiet copies and
       // waiting messages show under the name, with the pipe marks.
       trailing: [
-        PhoneNeedsYouButton(onOpen: () => _showNeedsYou(context)),
+        // Needs you as the page it is on the phone, so a document a card
+        // opens (Review) comes over it, and Back returns to it.
+        PhoneNeedsYouButton(
+          onOpen: () => AppScope.openPage(context, AppPage.inbox),
+        ),
         if (onMore != null)
           HeaderButton.more(label: 'Extensions', onTap: onMore!),
       ],
@@ -1045,73 +1068,6 @@ class EmptyConversation extends StatelessWidget {
 String emptyConversationHint(String name) =>
     "Tell $name what you'd like done. It remembers this conversation, "
     'so you can pick up anytime.';
-
-/// On a phone, everything that waits for the person in a sheet, from the
-/// conversation's Needs you chip: answered there, each stays, showing how
-/// it ended, until the sheet closes. Opening a conversation or a pipe from
-/// it (or another device opening one) takes the sheet down with it.
-Future<void> _showNeedsYou(BuildContext context) {
-  final backend = AppScope.of(context);
-  final workspace = backend.workspace;
-  return showPanel(
-    context,
-    title: 'Needs you',
-    builder: (context, close) => _ClosesOnOpen(
-      opened: Listenable.merge([workspace, backend.reveal]),
-      where: () => (
-        workspace.workspace.selectedAgentId,
-        workspace.workspace.selectedPipeId,
-        backend.reveal.value,
-      ),
-      onOpened: close,
-      child: const NeedsYouList(shrinkWrap: true, padding: EdgeInsets.zero),
-    ),
-  );
-}
-
-/// Calls [onOpened] once [where] (what's open) changes.
-class _ClosesOnOpen extends StatefulWidget {
-  const _ClosesOnOpen({
-    required this.opened,
-    required this.where,
-    required this.onOpened,
-    required this.child,
-  });
-
-  final Listenable opened;
-  final Object? Function() where;
-  final VoidCallback onOpened;
-  final Widget child;
-
-  @override
-  State<_ClosesOnOpen> createState() => _ClosesOnOpenState();
-}
-
-class _ClosesOnOpenState extends State<_ClosesOnOpen> {
-  late final Object? _at = widget.where();
-  var _closed = false;
-
-  @override
-  void initState() {
-    super.initState();
-    widget.opened.addListener(_check);
-  }
-
-  @override
-  void dispose() {
-    widget.opened.removeListener(_check);
-    super.dispose();
-  }
-
-  void _check() {
-    if (_closed || widget.where() == _at) return;
-    _closed = true;
-    widget.onOpened();
-  }
-
-  @override
-  Widget build(BuildContext context) => widget.child;
-}
 
 /// On a phone, a tap on the conversation (not a drag, not a hold) tucks
 /// the keyboard away, as Messages does; what's tapped still gets the tap.

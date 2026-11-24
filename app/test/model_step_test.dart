@@ -164,6 +164,53 @@ void main() {
     expect(find.text('Sign in with Claude'), findsOneWidget);
   });
 
+  testWidgets("a key that can't run paid models says so instead of that "
+      'Rivet is ready', (tester) async {
+    final harness = Harness(_fresh());
+    await harness.show(tester);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Use an API key'));
+    await pumpFrames(tester);
+    await tester.enterText(find.byType(EditableText).last, 'openrouter');
+    await tester.pump();
+    await tester.tap(find.textContaining('OpenRouter API key'));
+    await pumpFrames(tester);
+    expect(harness.last.startLogin.providerId, 'openrouter');
+
+    Workspace signedIn(String warning) {
+      final workspace = _fresh(step: OnboardingStep.ONBOARDING_STEP_DONE)
+        ..models.add(opus);
+      final at = workspace.providers.indexWhere((p) => p.id == 'openrouter');
+      workspace.providers[at] = workspace.providers[at].deepCopy()
+        ..accounts.add(
+          Account(
+            id: 'k1',
+            label: 'sk-…a1b2',
+            plan: 'API key',
+            methodId: 'api_key',
+            credit: AccountCredit(
+              neverPaid: warning.isNotEmpty,
+              warning: warning,
+            ),
+          ),
+        );
+      return workspace;
+    }
+
+    const warning = 'This key has no credit yet. Add credit at OpenRouter.';
+    await harness.apply(tester, signedIn(warning));
+    await pumpFrames(tester);
+    expect(find.text('Connected'), findsOneWidget);
+    expect(find.text(warning), findsOneWidget);
+    expect(find.text('Rivet is ready.'), findsNothing);
+
+    // Credit added: the next read clears the sentence.
+    await harness.apply(tester, signedIn(''));
+    await pumpFrames(tester);
+    expect(find.text(warning), findsNothing);
+    expect(find.text('Rivet is ready.'), findsOneWidget);
+  });
+
   testWidgets('a refused sign-in says why in the step', (tester) async {
     final harness = Harness(_fresh());
     await harness.show(tester);

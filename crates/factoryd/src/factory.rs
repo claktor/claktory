@@ -99,6 +99,12 @@ pub enum RequestError {
     /// A slash command that can't run now, and why.
     #[error("{0}")]
     Command(String),
+    /// A conversation can't go back there (`crate::fork`).
+    #[error("{0}")]
+    Fork(String),
+    /// No such other version of the conversation (`crate::fork`).
+    #[error("This version of the conversation is gone.")]
+    NoBranch(String),
     #[error("extension \"{extension}\" has no option \"{option}\"")]
     UnknownOption { extension: String, option: String },
     /// A background task that can't be stopped, and why.
@@ -107,6 +113,9 @@ pub enum RequestError {
     /// A monitor that can't be changed so, and why.
     #[error("{0}")]
     Monitor(String),
+    /// A monitor the agent doesn't have.
+    #[error("{0}")]
+    NoMonitor(String),
     #[error("no paired device \"{0}\"")]
     UnknownDevice(String),
     /// The code of an agent's pairing (ShowPairingCode) that no longer
@@ -174,6 +183,10 @@ pub enum RequestError {
     Reset(String),
     #[error("no pipe \"{0}\"")]
     NoPipe(String),
+    /// A pipe group that isn't there (any more): deleted, maybe from
+    /// another device (`crate::pipes::groups`).
+    #[error("That group was deleted.")]
+    NoPipeGroup,
     /// A pipe that can't be made or changed so, and why (`crate::pipes`).
     #[error("{0}")]
     Pipe(String),
@@ -212,7 +225,10 @@ impl RequestError {
             | RequestError::UnknownThread(_)
             | RequestError::UnknownComment(_)
             | RequestError::NoReset(_)
-            | RequestError::NoPipe(_) => v1::ErrorCode::NotFound,
+            | RequestError::NoPipe(_)
+            | RequestError::NoPipeGroup
+            | RequestError::NoMonitor(_)
+            | RequestError::NoBranch(_) => v1::ErrorCode::NotFound,
             RequestError::Empty(_)
             | RequestError::RelativePath(_)
             | RequestError::ConfigBroken
@@ -227,6 +243,7 @@ impl RequestError {
             | RequestError::Lead(_)
             | RequestError::NotItsFolder(_)
             | RequestError::Command(_)
+            | RequestError::Fork(_)
             | RequestError::Monitor(_)
             | RequestError::Remote(_)
             | RequestError::Proposal(_)
@@ -324,6 +341,10 @@ pub struct Factory {
     /// The projects connections show the files of (`crate::explorer`).
     pub(crate) file_watches: crate::explorer::Watches,
     pub(crate) health: crate::update::Health,
+    /// While this backend is an update on trial, conversations' new
+    /// segments, and ones still JSON, are saved as JSON: the version it
+    /// would roll back to may not read JSON Lines (`transcript::log`).
+    pub(crate) old_segments: Arc<std::sync::atomic::AtomicBool>,
     /// The release channel and Check for updates (`crate::update`).
     pub(crate) updates: crate::update::Updates,
     /// The selected agent's queue as last sent to clients.
@@ -340,9 +361,17 @@ pub struct Factory {
     /// monitor's next look, whenever they were last read: signed in to
     /// again, or Try now (`crate::usage`).
     pub(crate) usage_reread: Mutex<std::collections::HashSet<String>>,
+    /// When each key's credit was last tried (`crate::credit`).
+    pub(crate) credit_tried: Mutex<HashMap<crate::usage::AccountKey, i64>>,
     /// Wakes agents waiting out their accounts' usage limits (`crate::waits`)
     /// when the accounts or the settings change.
     pub(crate) capacity: Arc<tokio::sync::Notify>,
+    /// Tests: whether the network is up for waits on it (`crate::waits`),
+    /// in place of looking: 0 looks, 1 up, 2 down.
+    pub(crate) network_says: std::sync::atomic::AtomicU8,
+    /// How long a provider can't be reached while the network works before
+    /// a run waiting on it gives up, in ms (`crate::waits`).
+    pub(crate) network_give_up_ms: std::sync::atomic::AtomicI64,
     /// The accounts a usage reset is being used on now (`crate::usage`).
     pub(crate) resetting: Mutex<std::collections::HashSet<crate::usage::AccountKey>>,
     /// The Monitors extension's scheduler.
@@ -360,6 +389,8 @@ pub struct Factory {
     pub(crate) build_caches: crate::extensions::tree::caches::State,
     /// When idle agents compact (`crate::idle`).
     pub(crate) idle: crate::idle::State,
+    /// When idle agents' conversations leave memory (`crate::unload`).
+    pub(crate) unload: crate::unload::State,
     /// Files the person is uploading for agents (`crate::uploads`).
     pub(crate) uploads: crate::uploads::Uploads,
     /// Connecting services (`crate::connectors`).
@@ -403,6 +434,12 @@ pub struct Factory {
     /// Agents and chats that continued on another provider while theirs
     /// was at its usage limit (`crate::usage_switch`).
     pub(crate) usage_switches: crate::usage_switch::Switches,
+    /// What each device's app was last sent, to resume from (#378).
+    pub(crate) resumes: Arc<crate::patch::Resumes>,
+    /// Keeping the Mac awake while agents work (P1).
+    pub(crate) keep_awake: crate::keep_awake::KeepAwake,
+    /// How each provider's model list was last read (friend bug #14).
+    pub(crate) catalog: crate::catalog::Catalog,
     /// Notifications: who's using Claktory where, and what was seen
     /// (`crate::notify`).
     pub(crate) notify: crate::notify::State,
@@ -428,6 +465,8 @@ pub(crate) struct Inner {
     pub(crate) providers: Vec<v1::Provider>,
     /// The usage of accounts signed in with a subscription, by provider and account id.
     pub(crate) usage: HashMap<crate::usage::AccountKey, v1::ProviderUsage>,
+    /// What API keys have to spend, as their providers say (`crate::credit`).
+    pub(crate) credit: HashMap<crate::usage::AccountKey, v1::AccountCredit>,
     /// The plan of accounts signed in with a subscription, by provider and account id.
     pub(crate) plans: HashMap<crate::usage::AccountKey, String>,
     pub(crate) login: Option<Flow>,
@@ -547,6 +586,9 @@ pub(crate) struct Runtime {
     pub(crate) running: bool,
     /// The person stopped it; it's only winding down.
     pub(crate) stopped: bool,
+    /// Its conversation is being taken back or switched (`crate::fork`):
+    /// no run takes what's queued until that's done.
+    pub(crate) forking: bool,
     /// Cancels the run in progress; taken when the person stops it.
     pub(crate) abort: Option<AbortHandle>,
     /// The run in progress in the store.
@@ -587,9 +629,24 @@ pub(crate) struct Runtime {
     /// The reset time its conversation last said it waits for, so a wait
     /// that starts again for the same one isn't said twice.
     pub(crate) wait_said: Option<Option<u64>>,
+    /// The provider whose answer its run waits after (its Waiting event):
+    /// its model may move to another before the wait starts.
+    pub(crate) asked_on: String,
     /// Since when it has waited for the vault to open, to use sign-ins kept
     /// in it (`crate::waits`), in ms since 1970; 0 when it doesn't.
     pub(crate) locked_since: i64,
+    /// Since when its model calls can't connect while the network is up
+    /// (`crate::waits`, #364 O2), in ms since 1970 (0 while it's down), and
+    /// how many times it has waited for the network since its last answer;
+    /// 0 once a call gets an answer.
+    pub(crate) network_since: i64,
+    pub(crate) network_waits: u32,
+    /// When its conversation was last needed: read, or a run of it ended,
+    /// in ms since 1970. An idle one is unloaded a while after (`crate::unload`).
+    pub(crate) used_ms: i64,
+    /// Its context size when its conversation was unloaded, shown until
+    /// it's read again.
+    pub(crate) held_tokens: u64,
 }
 
 impl Runtime {
@@ -707,6 +764,7 @@ impl Factory {
         crate::runs::import_files(&home, &store).await?;
         let chats = crate::chats::Chats::load(&store);
         let usage_switches = crate::usage_switch::Switches::load(&store);
+        let keep_awake = crate::keep_awake::KeepAwake::load(&store, crate::keep_awake::Machine::this());
         let mut state: State = store.state()?;
         if state.selected_agent.as_deref().is_some_and(|id| config.agent(id).is_none()) {
             state.selected_agent = None;
@@ -721,6 +779,9 @@ impl Factory {
         if created && state.selected_agent.is_none() {
             state.selected_agent = Some(config::RIVET.to_owned());
         }
+        // The providers' models as last fetched, and those added by their
+        // id, before they're first listed.
+        let catalog = crate::catalog::load(&home, &store, models.as_ref());
         let inner = Inner {
             config,
             config_error,
@@ -728,6 +789,7 @@ impl Factory {
             models: models.list().await,
             providers: models.providers().await,
             usage: HashMap::new(),
+            credit: HashMap::new(),
             plans: HashMap::new(),
             login: None,
             login_generation: 0,
@@ -750,7 +812,9 @@ impl Factory {
         let account = crate::account::State::new(&home, inner.config.account.enabled);
         let home_for_speech = home.clone();
         let onboarding = crate::onboarding::State::load(&store, created, &inner.models)?;
+        let old_segments = Arc::new(std::sync::atomic::AtomicBool::new(crate::update::on_trial(&home)));
         let factory = Arc::new(Factory {
+            old_segments,
             home,
             models,
             inner: Mutex::new(inner),
@@ -767,7 +831,10 @@ impl Factory {
             task_check_every: std::sync::atomic::AtomicU64::new(60_000),
             usage_wake: Arc::default(),
             usage_reread: Mutex::default(),
+            credit_tried: Mutex::default(),
             capacity: Arc::default(),
+            network_says: std::sync::atomic::AtomicU8::new(0),
+            network_give_up_ms: std::sync::atomic::AtomicI64::new(crate::waits::NETWORK_GIVE_UP_MS),
             resetting: Mutex::default(),
             monitors: crate::extensions::monitors::State::default(),
             web,
@@ -776,6 +843,7 @@ impl Factory {
             resources: crate::extensions::resources::State::default(),
             build_caches: crate::extensions::tree::caches::State::default(),
             idle: crate::idle::State::default(),
+            unload: crate::unload::State::default(),
             uploads: crate::uploads::Uploads::default(),
             broker: crate::connectors::Broker::default(),
             viewer,
@@ -794,6 +862,9 @@ impl Factory {
             voices: crate::speech::voice::Voices::new(),
             chats,
             usage_switches,
+            resumes: Arc::default(),
+            keep_awake,
+            catalog,
             notify: crate::notify::State::default(),
             browser: crate::browser::Browser::default(),
             presentations: crate::presentation::Hub::default(),
@@ -827,6 +898,9 @@ impl Factory {
         }
         tokio::spawn(watch(Arc::downgrade(&factory)));
         tokio::spawn(crate::usage::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::catalog::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::credit::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::keep_awake::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::nudge::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::swarm::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::extensions::tasks::monitor(Arc::downgrade(&factory)));
@@ -999,8 +1073,22 @@ impl Factory {
     }
 
     /// Renames a project, or archives it or brings it back (`archived`).
-    pub async fn update_project(&self, id: &str, name: Option<&str>, archived: Option<bool>) -> Result<(), RequestError> {
+    /// UpdateProject: `before` moves it in the sidebar's order (friend bug
+    /// #12), before that project, or last with "".
+    pub async fn update_project(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        archived: Option<bool>,
+        before: Option<&str>,
+    ) -> Result<(), RequestError> {
         self.edit_config(|config| {
+            if config.project(id).is_none() {
+                return Err(RequestError::UnknownProject(id.to_owned()));
+            }
+            if let Some(before) = before {
+                crate::arrange::move_project(&mut config.projects, id, before)?;
+            }
             let Some(project) = config.projects.iter_mut().find(|project| project.id == id) else {
                 return Err(RequestError::UnknownProject(id.to_owned()));
             };
@@ -1016,7 +1104,7 @@ impl Factory {
     }
 
     /// Removes a project and deletes its agents. Its folder stays.
-    pub async fn delete_project(&self, id: &str) -> Result<(), RequestError> {
+    pub async fn delete_project(self: &Arc<Self>, id: &str) -> Result<(), RequestError> {
         let removed = self
             .edit_config(|config| {
                 if config.project(id).is_none() {
@@ -1060,6 +1148,20 @@ impl Factory {
             return Err(RequestError::Empty("name"));
         }
         let home = &self.home;
+        // On the default model while others are switched away from its
+        // provider, it starts where they are (U19, #343).
+        let started = {
+            let inner = self.lock();
+            let config = &inner.config;
+            let chosen = if model.is_empty() { config.default_model.as_str() } else { model };
+            let chosen_effort = if effort.is_empty() { config.default_effort.as_str() } else { effort };
+            (chosen == config.default_model)
+                .then(|| {
+                    crate::usage_switch::start_on(self, &inner, chosen, chosen_effort)
+                        .map(|to| (chosen.to_owned(), chosen_effort.to_owned(), to))
+                })
+                .flatten()
+        };
         let id = self
             .edit_config(|config| {
                 let project = match project {
@@ -1072,6 +1174,10 @@ impl Factory {
                 }
                 let model = if model.is_empty() { config.default_model.clone() } else { model.to_owned() };
                 let effort = if effort.is_empty() { config.default_effort.clone() } else { effort.to_owned() };
+                let (model, effort) = match &started {
+                    Some((from, _, (to, to_effort))) if *from == model => (to.clone(), to_effort.clone()),
+                    _ => (model, effort),
+                };
                 // Leftover data under an id would show up as this agent's history.
                 let taken = |id: &str| config.agent(id).is_some() || home.agent_dir(id).exists();
                 let same_project = |id: &str| config.agent(id).is_some_and(|other| other.project == project);
@@ -1107,11 +1213,15 @@ impl Factory {
                 Ok(id)
             })
             .await?;
+        if let Some((from, from_effort, _)) = &started {
+            crate::usage_switch::started_switched(self, &id, from, from_effort);
+            self.broadcast_workspace(&self.lock());
+        }
         self.select_agent(&id).await
     }
 
     /// Deletes an agent and its conversation, stopping it if it's running.
-    pub async fn delete_agent(&self, id: &str) -> Result<(), RequestError> {
+    pub async fn delete_agent(self: &Arc<Self>, id: &str) -> Result<(), RequestError> {
         self.edit_config(|config| {
             if config.agent(id).is_none() {
                 return Err(RequestError::UnknownAgent(id.to_owned()));
@@ -1128,8 +1238,10 @@ impl Factory {
         self.delete_agent_data(id).await
     }
 
-    async fn delete_agent_data(&self, id: &str) -> Result<(), RequestError> {
+    async fn delete_agent_data(self: &Arc<Self>, id: &str) -> Result<(), RequestError> {
         self.browser_forget(id, "agent_changed");
+        // Cards asking to clear its conversation have nothing left to clear.
+        crate::extensions::ask::target_deleted(self, id);
         crate::vault::requests::forget_admin(self, id);
         crate::extensions::checklist::forget(&self.store, id)?;
         crate::extensions::memory::forget(&self.store, id)?;
@@ -1542,9 +1654,7 @@ impl Factory {
         let id = request.agent_id.as_str();
         self.known_agent(id)?;
         self.ensure_loaded(id).await?;
-        let inner = self.lock();
-        let transcript = inner.agents.get(id).and_then(|runtime| runtime.transcript.as_ref());
-        let page = transcript.and_then(|transcript| transcript.page(request.before_seq, request.limit, request.from_seq));
+        let page = crate::transcript::page_of(self, id, request.before_seq, request.limit, request.from_seq).await;
         let Some((entries, has_earlier)) = page else {
             return Err(RequestError::NoEntries(request.before_seq));
         };
@@ -1569,6 +1679,19 @@ impl Factory {
     /// (whose checklist, "" for the agent's own, and its id): the agent
     /// reads which, and the item's history keeps the reply.
     pub(crate) fn send_message_about(
+        self: &Arc<Self>,
+        id: &str,
+        text: &str,
+        sent_from: Option<factory_agent::SentFrom>,
+        client_id: &str,
+        attached: &[v1::Attachment],
+        item: Option<(&str, u32)>,
+    ) -> Result<(), RequestError> {
+        // Sent again after a lost answer: delivered once (`crate::repeats`).
+        crate::repeats::once(self, id, client_id, || self.send_message_once(id, text, sent_from, client_id, attached, item))
+    }
+
+    fn send_message_once(
         self: &Arc<Self>,
         id: &str,
         text: &str,
@@ -1716,11 +1839,15 @@ impl Factory {
     }
 
     pub(crate) async fn ensure_loaded(&self, id: &str) -> Result<(), TranscriptError> {
-        if self.lock().agents.get(id).is_some_and(|runtime| runtime.transcript.is_some()) {
+        if let Some(runtime) = self.lock().agents.get_mut(id)
+            && runtime.transcript.is_some()
+        {
+            runtime.used_ms = crate::transcript::now_ms();
             return Ok(());
         }
         let folder = if crate::chats::is_chat(id) { crate::chats::dir(&self.home, id) } else { self.home.agent_dir(id) };
         let mut transcript = Transcript::load(folder, id.to_owned()).await?;
+        transcript.save_old_form(self.old_segments.clone());
         if let Err(error) = crate::proposals::restore(&self.store, id, &mut transcript) {
             tracing::error!(agent = %id, %error, "could not read proposals; decided ones show as pending");
         }
@@ -1744,8 +1871,14 @@ impl Factory {
         }
         match self.vault.requests_of(id) {
             Ok(requests) => {
-                for request in requests.into_iter().filter(|request| request.state() != v1::SecretRequestState::Pending) {
-                    transcript.set_secret_request(request);
+                for request in requests {
+                    // A waiting one with what fits it now (#360); the rest
+                    // as decided.
+                    if request.state() == v1::SecretRequestState::Pending {
+                        transcript.set_secret_request(crate::vault::requests::fitted(self, request));
+                    } else {
+                        transcript.set_secret_request(request);
+                    }
                 }
             }
             Err(error) => tracing::error!(agent = %id, %error, "could not read secret requests; decided ones show as pending"),
@@ -1774,6 +1907,7 @@ impl Factory {
         }
         let mut inner = self.lock();
         let runtime = inner.agents.entry(id.to_owned()).or_default();
+        runtime.used_ms = crate::transcript::now_ms();
         if runtime.transcript.is_none() {
             let waiting = !transcript.waiting_seqs().is_empty();
             runtime.transcript = Some(transcript);
@@ -1787,7 +1921,7 @@ impl Factory {
 
     /// Whether something of the agent's waits for the person: a request for
     /// a secret, a proposal to connect a service or to Rivet, a question.
-    fn has_waiting(&self, id: &str) -> bool {
+    pub(crate) fn has_waiting(&self, id: &str) -> bool {
         let requests = self.vault.requests_of(id).unwrap_or_default();
         let connects = self.vault.proposals_of(id).unwrap_or_default();
         let collecting = self.vault.requests_with_admin(id).unwrap_or_default();
@@ -2335,7 +2469,7 @@ impl Factory {
         if self.events.receiver_count() == 0 {
             return;
         }
-        let message = v1::ServerMessage { reply_to: 0, body: Some(body) };
+        let message = v1::ServerMessage { reply_to: 0, body: Some(body), ..Default::default() };
         // An error only means the last client left just now.
         let _ = self.events.send(Bytes::from(message.encode_to_vec()));
     }
@@ -2375,6 +2509,7 @@ impl Factory {
             Default::default()
         });
         let switching = crate::usage_switch::view(self, inner);
+        let pools_in_use = crate::usage_switch::pools_in_use(self, inner);
         for agent in &inner.config.agents {
             let runtime = inner.agents.get(&agent.id);
             let character = self.character(inner, agent, now);
@@ -2387,7 +2522,8 @@ impl Factory {
                 model: agent.model.clone(),
                 effort: agent.effort.clone(),
                 status: status.into(),
-                context_tokens: runtime.and_then(|runtime| runtime.transcript.as_ref()).map_or(0, Transcript::context_tokens),
+                context_tokens: runtime
+                    .map_or(0, |runtime| runtime.transcript.as_ref().map_or(runtime.held_tokens, Transcript::context_tokens)),
                 compact_at_tokens: inner.config.compact_at_tokens,
                 queued_messages: runtime.map_or(0, |runtime| (runtime.queue.len() - runtime.quiet_waiting()) as u32),
                 quiet_waiting: runtime.map_or(0, |runtime| runtime.quiet_waiting() as u32),
@@ -2431,10 +2567,23 @@ impl Factory {
                 usage_wait_alternative: switching.alternative(&agent.id),
                 usage_wait_no_other_provider: switching.no_other_provider(&agent.id),
                 usage_switch: switching.switch(&agent.id),
+                branches: crate::fork::count(&self.home.agent_dir(&agent.id)),
             });
         }
         let config = &inner.config;
-        let mut vault = self.vault.state(|agent, task| self.store.task_running(agent, task));
+        // Which tasks run, read once for the whole vault (#402), and only
+        // when a grant has tasks that got its secret lately.
+        let running = std::cell::OnceCell::new();
+        let mut vault = self.vault.state(|agent, task| {
+            running
+                .get_or_init(|| {
+                    self.store.running_set().unwrap_or_else(|error| {
+                        tracing::error!(%error, "could not read which background tasks run");
+                        Default::default()
+                    })
+                })
+                .contains(&(agent.to_owned(), task.to_owned()))
+        });
         if vault.exists && !vault.unlocked {
             vault.agents_waiting = self.agents_waiting_for_vault(inner);
             let problem = self.account.view(&inner.config.account).map(|account| account.problem).unwrap_or_default();
@@ -2456,13 +2605,16 @@ impl Factory {
         let apps = crate::apps::infos(self, config, &vault);
         let (pipes, selected_pipe_id) = crate::pipes::view(self, inner);
         let (chats, selected_chat_id) = crate::chats::view(self, inner, &switching);
+        let provider_waits = crate::provider_waits::view(inner, &agents, &chats);
         v1::Workspace {
+            provider_waits,
             os: std::env::consts::OS.to_owned(),
             map: Some(crate::map::build(config, &self.home, &vault, &apps)),
             apps,
             apps_available: self.apps.available(),
             pinned_apps: crate::apps::pins::view(self, config),
             bundled_apps: crate::apps::bundled::view(self, config),
+            pipe_groups: crate::pipes::groups::view(self, inner),
             browser_sessions: self.browser.view(),
             dm_sends: crate::user_apps::dms::sends::waiting(self),
             pipes,
@@ -2487,9 +2639,11 @@ impl Factory {
             account: self.account.view(&config.account),
             update_error: inner.update_error.clone(),
             update_check: Some(inner.update_check.clone()),
+            keep_awake: Some(self.keep_awake.view()),
             diagnostics: Some(crate::diagnostics::view(self)),
             report_schemas: crate::pipes::handoff::schemas(self),
             report_type_rules: Some(crate::pipes::handoff::type_rules()),
+            usage_auto_continue: self.usage_switches.auto_continue(),
             next_agent_color: inner.config.next_color().to_owned(),
             extensions: crate::extensions::catalog(),
             open_panel: inner.state.selected_agent.as_deref().and_then(|agent| open_panel(inner, agent)).unwrap_or_default().to_owned(),
@@ -2507,8 +2661,11 @@ impl Factory {
                         .accounts
                         .iter()
                         .map(|account| v1::Account {
+                            in_use: account.in_use && pools_in_use.contains_key(&(provider.id.clone(), false)),
+                            fable_in_use: account.fable_in_use && pools_in_use.contains_key(&(provider.id.clone(), true)),
                             usage: inner.usage.get(&key(&account.id)).cloned().or_else(|| account.usage.clone()),
                             plan: inner.plans.get(&key(&account.id)).cloned().unwrap_or_else(|| account.plan.clone()),
+                            credit: inner.credit.get(&key(&account.id)).cloned(),
                             ..account.clone()
                         })
                         .collect();
@@ -2527,8 +2684,14 @@ impl Factory {
                             .iter()
                             .map(|ttl| ttl.as_str().to_owned())
                             .collect(),
+                        agents: pools_in_use.iter().filter(|((on, _), _)| *on == provider.id).map(|(_, count)| count).sum(),
                         ..provider.clone()
                     }
+                })
+                .map(|mut provider| {
+                    let fetchable = !provider.signed_in_with.is_empty() && self.models.fetches_models(&provider.id);
+                    self.catalog.view(&mut provider, fetchable);
+                    provider
                 })
                 .collect(),
             login: inner.login.as_ref().map(|flow| flow.view.clone()),
@@ -2716,6 +2879,7 @@ async fn watch(factory: Weak<Factory>) {
     match factory.upgrade() {
         Some(factory) => {
             factory.reload_config().await;
+            crate::extensions::ask::close_for_gone(&factory);
             factory.refresh_models().await;
             factory.refresh_release().await;
         }
@@ -2728,6 +2892,8 @@ async fn watch(factory: Weak<Factory>) {
         if config_now != config_stamp {
             config_stamp = config_now;
             factory.reload_config().await;
+            // An agent taken out of the settings, however (Rivet edits them).
+            crate::extensions::ask::close_for_gone(&factory);
         }
         let auth_now = stamp(&auth_path).await;
         if auth_now != auth_stamp {
@@ -2796,6 +2962,8 @@ impl Factory {
         hidden.extend(self.broker.hidden(&self.vault));
         self.redaction.set(factory_agent::Redactor::new(&hidden));
         self.vault_moved.notify_one();
+        // A secret added or gone may fit a waiting request now, or no more.
+        crate::vault::requests::refresh_fitting(self);
         self.broadcast_workspace(&self.lock());
         // An app's secret given or taken back may start or stop it.
         self.apps.poke();
@@ -2805,6 +2973,13 @@ impl Factory {
     /// tests.
     pub fn expire_secret_requests_after(self: &Arc<Self>, later_ms: i64) {
         crate::vault::requests::expire_requests(self, crate::transcript::now_ms() + later_ms);
+    }
+
+    /// A stand-in for the lid-closed helper, on a laptop as far as
+    /// Claktory knows; for tests.
+    pub fn set_lid_closed_helper(&self, helper: Arc<dyn crate::lid_closed::Helper>) {
+        self.keep_awake.lid.set_helper(helper);
+        self.keep_awake.runs_changed();
     }
 
     /// Makes new vault passphrases cheap to check; for tests.

@@ -37,12 +37,72 @@ fn build(target: &str, features: &[&str]) -> PathBuf {
     target.join("wasm32-wasip2/release/claktory_apps_test_guest.wasm")
 }
 
-/// A fresh folder for one test.
+/// A fresh folder for one test, removed when the test's thread ends;
+/// the first one a process makes sweeps those of test processes no longer
+/// running (#369). CLAKTORY_TEST_KEEP=1 keeps them.
 pub fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("claktory-apps-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
+    if std::env::var_os("CLAKTORY_TEST_KEEP").is_none() {
+        static SWEPT: std::sync::Once = std::sync::Once::new();
+        SWEPT.call_once(sweep);
+        let _ = MADE.try_with(|made| made.borrow_mut().0.push(dir.clone()));
+    }
     dir
+}
+
+/// The folders a thread made, removed when it ends.
+struct Made(Vec<PathBuf>);
+
+impl Drop for Made {
+    fn drop(&mut self) {
+        for dir in &self.0 {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+thread_local! {
+    static MADE: std::cell::RefCell<Made> = const { std::cell::RefCell::new(Made(Vec::new())) };
+}
+
+/// Removes claktory-apps-NAME-PID folders whose PID isn't a test binary
+/// running now (cargo runs them from target/…/deps/); nothing when `ps`
+/// can't say.
+fn sweep() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    let me = std::process::id();
+    let found: Vec<(u32, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let pid: u32 = name.strip_prefix("claktory-apps-")?.rsplit_once('-')?.1.parse().ok()?;
+            (pid != me).then(|| (pid, entry.path()))
+        })
+        .collect();
+    if found.is_empty() {
+        return;
+    }
+    let mut pids: Vec<String> = found.iter().map(|(pid, _)| pid.to_string()).collect();
+    pids.sort();
+    pids.dedup();
+    let Ok(output) = std::process::Command::new("ps").args(["-o", "pid=,command=", "-p", &pids.join(",")]).output() else { return };
+    if !output.status.success() && !output.stdout.is_empty() {
+        return;
+    }
+    let listed = String::from_utf8_lossy(&output.stdout);
+    let tests: Vec<u32> = listed
+        .lines()
+        .filter_map(|line| line.trim_start().split_once(char::is_whitespace))
+        .filter(|(_, command)| command.contains("/deps/"))
+        .filter_map(|(pid, _)| pid.parse().ok())
+        .collect();
+    for (pid, dir) in found {
+        if !tests.contains(&pid) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }
 
 /// Deadlines short enough for tests.

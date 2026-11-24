@@ -17,9 +17,9 @@
 //! listed.
 
 use factory_protocol::v1::{self, NeedsYouOutcome as Outcome, NeedsYouRecordKind as Kind, entry::Kind as Entry};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 use serde_json::Value;
 
 use crate::factory::{Factory, RequestError};
@@ -73,6 +73,31 @@ INSERT INTO decision_notes (kind, ref, comment, created)
     SELECT 'pipe_message', pipe || ':' || seq, comment, decided FROM pipe_decisions WHERE comment != '' AND seq > 0;
 ALTER TABLE pipe_decisions DROP COLUMN comment;
 ";
+
+/// The person's comment kept in decision_notes for `kind` and `reference`;
+/// '' for none.
+pub(crate) fn note_of(factory: &Factory, kind: &str, reference: &str) -> String {
+    factory
+        .store
+        .db()
+        .query_row("SELECT comment FROM decision_notes WHERE kind = ?1 AND ref = ?2", params![kind, reference], |row| row.get(0))
+        .optional()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// Keeps the person's comment on a decision for `kind` and `reference`,
+/// apart from the pipe tables.
+pub(crate) fn keep_note(factory: &Factory, kind: &str, reference: &str, comment: &str) {
+    let kept = factory.store.db().execute(
+        "INSERT OR REPLACE INTO decision_notes (kind, ref, comment, created) VALUES (?1, ?2, ?3, ?4)",
+        params![kind, reference, comment.trim(), now_ms()],
+    );
+    if let Err(error) = kept {
+        tracing::warn!(%error, kind, "couldn't keep the person's comment on a decision");
+    }
+}
 
 /// What the person decided on a pipe (`pipe_decided`).
 #[derive(Clone, Copy)]
@@ -146,6 +171,8 @@ struct Row {
     app: AppAccess,
     /// MODEL: what History shows of it.
     model: ModelChange,
+    /// CONVERSATION: what History shows of it.
+    conversation: ConversationChange,
     /// All the text a search looks in, lowercase.
     search: String,
 }
@@ -169,6 +196,21 @@ struct ModelChange {
     change: String,
     undone: bool,
     /// Whose model it was.
+    subject: String,
+    /// The changing agent's words, cut.
+    reason: String,
+    /// The model and effort it set: while the subject still has them, it
+    /// can be undone (`superseded`).
+    after: (String, String),
+}
+
+/// A change an agent made to another's conversation (CONVERSATION), as
+/// History shows it.
+#[derive(Default)]
+struct ConversationChange {
+    /// Its id in conversation_changes, to find its tool call.
+    change: String,
+    /// Whose conversation it was.
     subject: String,
     /// The changing agent's words, cut.
     reason: String,
@@ -202,6 +244,7 @@ impl Row {
             types: Types::default(),
             app: AppAccess::default(),
             model: ModelChange::default(),
+            conversation: ConversationChange::default(),
             search: String::new(),
         }
     }
@@ -233,6 +276,19 @@ fn cut(text: &str, max: usize) -> String {
     }
 }
 
+/// A replied card wins over its stored state. Read the state first even
+/// then, so its conversion error still precedes the reply flag's.
+fn outcome(
+    row: &rusqlite::Row<'_>,
+    state: usize,
+    replied: usize,
+    when: (&str, Outcome),
+    otherwise: Outcome,
+) -> rusqlite::Result<Outcome> {
+    let state: String = row.get(state)?;
+    Ok(if row.get::<_, bool>(replied)? { Outcome::Replied } else if state == when.0 { when.1 } else { otherwise })
+}
+
 /// The rows of one table: `sql` is bound to ?1 (since), ?2 (before) and ?3
 /// (the most); whether it had more than that.
 fn rows(
@@ -256,6 +312,13 @@ struct Found {
 }
 
 impl Found {
+    /// Map a table's changes up to the scan cap, keeping whether it had more.
+    fn changes<T>(&mut self, changes: Vec<T>, make: impl FnMut(T) -> Row) {
+        let capped = changes.len() > MAX_SCAN as usize;
+        let rows = changes.into_iter().take(MAX_SCAN as usize).map(make).collect();
+        self.add((rows, capped));
+    }
+
     fn add(&mut self, (rows, capped): (Vec<Row>, bool)) {
         if capped && let Some(oldest) = rows.last() {
             self.cutoff = Some(self.cutoff.map_or(oldest.decided, |cutoff| cutoff.max(oldest.decided)));
@@ -302,13 +365,13 @@ fn from_factory(
 ) -> rusqlite::Result<()> {
     found.add(rows(
         db,
-        "SELECT id, agent, title, answer, state, created, decided, taint, review, body FROM asks
+        "SELECT id, agent, title, answer, state, created, decided, taint, review, body, replied FROM asks
          WHERE state IN ('answered', 'dismissed') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
         window,
         |row| {
             let review: String = row.get(8)?;
             let kind = if review.is_empty() { Kind::Question } else { Kind::Review };
-            let outcome = if row.get::<_, String>(4)? == "answered" { Outcome::Answered } else { Outcome::Dismissed };
+            let outcome = outcome(row, 4, 10, ("answered", Outcome::Answered), Outcome::Dismissed)?;
             let mut found = Row::new(kind, row.get::<_, i64>(0)?.to_string(), row.get(1)?, outcome, row.get(5)?, row.get(6)?);
             found.title = cut(&row.get::<_, String>(2)?, MAX_TITLE);
             found.reply = cut(&row.get::<_, String>(3)?, MAX_REPLY);
@@ -318,12 +381,12 @@ fn from_factory(
     )?);
     found.add(rows(
         db,
-        "SELECT id, agent, text, comment, state, created, decided FROM proposals
+        "SELECT id, agent, text, comment, state, created, decided, replied FROM proposals
          WHERE state IN ('approved', 'dismissed') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
         window,
         |row| {
             let text: String = row.get(2)?;
-            let outcome = if row.get::<_, String>(4)? == "approved" { Outcome::Approved } else { Outcome::Dismissed };
+            let outcome = outcome(row, 4, 7, ("approved", Outcome::Approved), Outcome::Dismissed)?;
             let mut found = Row::new(Kind::Proposal, row.get::<_, i64>(0)?.to_string(), row.get(1)?, outcome, row.get(5)?, row.get(6)?);
             found.title = cut(text.lines().find(|line| !line.trim().is_empty()).unwrap_or_default(), MAX_TITLE);
             found.reply = cut(&row.get::<_, String>(3)?, MAX_REPLY);
@@ -332,14 +395,17 @@ fn from_factory(
     )?);
     found.add(rows(
         db,
-        "SELECT id, agent, secrets, state, created, decided, command FROM pipe_secret_approvals
-         WHERE state IN ('allowed', 'denied') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
+        "SELECT a.id, a.agent, a.secrets, a.state, a.created, a.decided, a.command, a.replied, COALESCE(n.comment, '')
+         FROM pipe_secret_approvals a
+         LEFT JOIN decision_notes n ON a.replied = 1 AND n.kind = 'secret_use' AND n.ref = CAST(a.id AS TEXT)
+         WHERE a.state IN ('allowed', 'denied') AND a.decided >= ?1 AND a.decided < ?2 ORDER BY a.decided DESC LIMIT ?3",
         window,
         |row| {
             let names: Vec<String> = serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or_default();
-            let outcome = if row.get::<_, String>(3)? == "allowed" { Outcome::Approved } else { Outcome::Denied };
+            let outcome = outcome(row, 3, 7, ("allowed", Outcome::Approved), Outcome::Denied)?;
             let mut found = Row::new(Kind::SecretUse, row.get::<_, i64>(0)?.to_string(), row.get(1)?, outcome, row.get(4)?, row.get(5)?);
             found.title = cut(&names.join(", "), MAX_TITLE);
+            found.reply = cut(&row.get::<_, String>(8)?, MAX_REPLY);
             Ok(found.searched(&[&row.get::<_, String>(6)?]))
         },
     )?);
@@ -361,7 +427,8 @@ fn from_factory(
     )?);
     found.add(rows(
         db,
-        "SELECT d.agent, d.kind, d.allowed, d.asked, d.decided, d.pipe, d.seq, COALESCE(m.text, ''), d.id, COALESCE(n.comment, '')
+        "SELECT d.agent, d.kind, d.allowed, d.asked, d.decided, d.pipe, d.seq, COALESCE(m.text, ''), d.id, COALESCE(n.comment, ''),
+                COALESCE(m.replied, 0)
          FROM pipe_decisions d LEFT JOIN pipe_messages m ON d.seq > 0 AND m.pipe = d.pipe AND m.seq = d.seq
          LEFT JOIN decision_notes n ON d.seq > 0 AND n.kind = 'pipe_message' AND n.ref = d.pipe || ':' || d.seq
          WHERE d.decided >= ?1 AND d.decided < ?2 ORDER BY d.decided DESC LIMIT ?3",
@@ -373,7 +440,13 @@ fn from_factory(
                 "held_incoming" => (Kind::PipeHeld, "A message from the other side"),
                 _ => (Kind::PipeLoop, "Your agents and theirs kept replying to each other"),
             };
-            let outcome = if row.get::<_, bool>(2)? { Outcome::Approved } else { Outcome::Denied };
+            // A held message sent back with a reply (#370 Submit) was
+            // neither sent nor simply discarded.
+            let outcome = match row.get::<_, bool>(2)? {
+                _ if row.get::<_, bool>(10)? => Outcome::Replied,
+                true => Outcome::Approved,
+                false => Outcome::Denied,
+            };
             let mut found = Row::new(kind, row.get::<_, i64>(8)?.to_string(), row.get(0)?, outcome, row.get(3)?, row.get(4)?);
             found.title = title.to_owned();
             found.reply = cut(&row.get::<_, String>(9)?, MAX_REPLY);
@@ -386,11 +459,12 @@ fn from_factory(
     )?);
     found.add(rows(
         db,
-        "SELECT id, agent, grantee, app, state, created, decided, comment, reason FROM app_grant_proposals
+        "SELECT id, agent, grantee, app, state, created, decided, comment, reason, replied FROM app_grant_proposals
          WHERE state IN ('granted', 'declined', 'failed') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
         window,
         |row| {
             let outcome = match row.get::<_, String>(4)?.as_str() {
+                _ if row.get::<_, bool>(9)? => Outcome::Replied,
                 "granted" => Outcome::Approved,
                 "declined" => Outcome::Denied,
                 _ => Outcome::Failed,
@@ -460,6 +534,22 @@ fn from_factory(
     )?);
     from_app_access(db, window, names, found)?;
     from_model_changes(db, window, names, found)?;
+    from_conversation_changes(db, window, names, found)?;
+    Ok(())
+}
+
+/// What agents did to other agents' conversations with the Conversations
+/// extension (`fork::history`): Claktory's sentence, the agent's reason apart.
+fn from_conversation_changes(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
+    let changes = crate::fork::history::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
+    found.changes(changes, |change| {
+        let mut row = Row::new(Kind::Conversation, change.id.to_string(), change.by.clone(), Outcome::Changed, change.at, change.at);
+        row.title = cut(&change.title(names), MAX_TITLE);
+        row.conversation =
+            ConversationChange { change: change.id.to_string(), subject: change.agent.clone(), reason: cut(&change.reason, MAX_REPLY) };
+        let subject = names.get(&change.agent).cloned().unwrap_or_default();
+        row.searched(&[&change.reason, &subject])
+    });
     Ok(())
 }
 
@@ -467,23 +557,18 @@ fn from_factory(
 /// (`extensions::models`): Claktory's sentence, the agent's reason apart.
 fn from_model_changes(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
     let changes = crate::extensions::models::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
-    let capped = changes.len() > MAX_SCAN as usize;
-    let rows = changes
-        .into_iter()
-        .take(MAX_SCAN as usize)
-        .map(|change| {
-            let mut row = Row::new(Kind::Model, change.id.to_string(), change.by.clone(), Outcome::Changed, change.at, change.at);
-            row.title = cut(&change.title(names), MAX_TITLE);
-            row.model = ModelChange {
-                change: change.id.to_string(),
-                undone: change.undone.is_some(),
-                subject: change.agent.clone(),
-                reason: cut(&change.reason, MAX_REPLY),
-            };
-            row.searched(&[&change.reason, &change.model_after, &change.name_after])
-        })
-        .collect();
-    found.add((rows, capped));
+    found.changes(changes, |change| {
+        let mut row = Row::new(Kind::Model, change.id.to_string(), change.by.clone(), Outcome::Changed, change.at, change.at);
+        row.title = cut(&change.title(names), MAX_TITLE);
+        row.model = ModelChange {
+            change: change.id.to_string(),
+            undone: change.undone.is_some(),
+            subject: change.agent.clone(),
+            reason: cut(&change.reason, MAX_REPLY),
+            after: (change.model_after.clone(), change.effort_after.clone()),
+        };
+        row.searched(&[&change.reason, &change.model_after, &change.name_after])
+    });
     Ok(())
 }
 
@@ -493,9 +578,7 @@ fn from_model_changes(db: &Connection, window: &Window, names: &HashMap<String, 
 fn from_app_access(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
     let names: std::collections::BTreeMap<String, String> = names.iter().map(|(id, name)| (id.clone(), name.clone())).collect();
     let changes = crate::apps::changes::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
-    let capped = changes.len() > MAX_SCAN as usize;
-    let mut rows = Vec::new();
-    for change in changes.into_iter().take(MAX_SCAN as usize) {
+    found.changes(changes, |change| {
         let card = change.via == crate::apps::changes::Via::Card;
         // A card's change shows in Rivet's conversation, at its card.
         let (agent, asked) = if card {
@@ -516,16 +599,15 @@ fn from_app_access(db: &Connection, window: &Window, names: &HashMap<String, Str
             reason: cut(&change.reason, MAX_REPLY),
             card: if card { change.reference.clone() } else { String::new() },
         };
-        rows.push(row.searched(&[&change.labels.app, &change.reason]));
-    }
-    found.add((rows, capped));
+        row.searched(&[&change.labels.app, &change.reason])
+    });
     found.add(self::rows(
         db,
-        "SELECT id, agent, app, card, state, created, decided, comment FROM app_access_proposals
+        "SELECT id, agent, app, card, state, created, decided, comment, replied FROM app_access_proposals
          WHERE state IN ('declined', 'failed') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
         window,
         |row| {
-            let outcome = if row.get::<_, String>(4)? == "declined" { Outcome::Denied } else { Outcome::Failed };
+            let outcome = outcome(row, 4, 8, ("declined", Outcome::Denied), Outcome::Failed)?;
             let id: String = row.get(0)?;
             let mut found = Row::new(Kind::AppAccess, id.clone(), row.get(1)?, outcome, row.get(5)?, row.get(6)?);
             let card: Vec<u8> = row.get(3)?;
@@ -640,11 +722,22 @@ fn types_title(
     }
 }
 
+/// Whether `table` has `column`: vault.db is read here as it is, and a
+/// vault not opened since an update doesn't have the newer columns yet.
+fn has_column(db: &Connection, table: &str, column: &str) -> bool {
+    db.prepare(&format!("SELECT {column} FROM {table} LIMIT 0")).is_ok()
+}
+
 fn from_vault(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::Result<()> {
+    // Answered with a reply (#370): 0 in a vault from before it.
+    let replied = |table: &str| if has_column(db, table, "replied") { "replied" } else { "0 AS replied" };
     found.add(rows(
         db,
-        "SELECT id, agent, secret_name, new_secret, comment, state, created, MAX(decided, approved) AS at, reason FROM requests
-         WHERE state IN ('granted', 'generated', 'approved', 'dismissed') AND at >= ?1 AND at < ?2 ORDER BY at DESC LIMIT ?3",
+        &format!(
+            "SELECT id, agent, secret_name, new_secret, comment, state, created, MAX(decided, approved) AS at, reason, {} FROM requests
+             WHERE state IN ('granted', 'generated', 'approved', 'dismissed') AND at >= ?1 AND at < ?2 ORDER BY at DESC LIMIT ?3",
+            replied("requests")
+        ),
         window,
         |row| {
             let mut name: String = row.get(2)?;
@@ -652,7 +745,7 @@ fn from_vault(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::
                 let new: Value = serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default();
                 name = new.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
             }
-            let outcome = if row.get::<_, String>(5)? == "dismissed" { Outcome::Dismissed } else { Outcome::Approved };
+            let outcome = outcome(row, 5, 9, ("dismissed", Outcome::Dismissed), Outcome::Approved)?;
             let mut found = Row::new(Kind::SecretRequest, row.get(0)?, row.get(1)?, outcome, row.get(6)?, row.get(7)?);
             found.title = cut(&name, MAX_TITLE);
             found.reply = cut(&row.get::<_, String>(4)?, MAX_REPLY);
@@ -661,12 +754,15 @@ fn from_vault(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::
     )?);
     found.add(rows(
         db,
-        "SELECT id, agent, connector, purpose, comment, state, created, decided, reason FROM connect_proposals
-         WHERE state IN ('connected', 'dismissed') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
+        &format!(
+            "SELECT id, agent, connector, purpose, comment, state, created, decided, reason, {} FROM connect_proposals
+             WHERE state IN ('connected', 'dismissed') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
+            replied("connect_proposals")
+        ),
         window,
         |row| {
             let (connector, purpose): (String, String) = (row.get(2)?, row.get(3)?);
-            let outcome = if row.get::<_, String>(5)? == "connected" { Outcome::Approved } else { Outcome::Dismissed };
+            let outcome = outcome(row, 5, 9, ("connected", Outcome::Approved), Outcome::Dismissed)?;
             let mut found = Row::new(Kind::Connect, row.get(0)?, row.get(1)?, outcome, row.get(6)?, row.get(7)?);
             found.title = cut(if purpose.trim().is_empty() { &connector } else { &purpose }, MAX_TITLE);
             found.reply = cut(&row.get::<_, String>(4)?, MAX_REPLY);
@@ -678,8 +774,8 @@ fn from_vault(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::
 
 /// The card's entry in its conversation as loaded now, if it's there: its
 /// seq, and its taint.
-fn card(entries: &[v1::Entry], row: &Row) -> Option<(u64, Vec<v1::PipeTaint>)> {
-    entries.iter().rev().find_map(|entry| {
+fn card<'a>(entries: impl DoubleEndedIterator<Item = &'a v1::Entry>, row: &Row) -> Option<(u64, Vec<v1::PipeTaint>)> {
+    entries.rev().find_map(|entry| {
         let taint = match (&entry.kind, row.kind) {
             (Some(Entry::AskPerson(ask)), Kind::Question | Kind::Review) if ask.id == row.id => ask.taint.clone(),
             (Some(Entry::Proposal(proposal)), Kind::Proposal) if proposal.id == row.id => proposal.taint.clone(),
@@ -701,10 +797,20 @@ fn card(entries: &[v1::Entry], row: &Row) -> Option<(u64, Vec<v1::PipeTaint>)> {
             {
                 Vec::new()
             }
+            (Some(Entry::ToolCall(call)), Kind::Conversation)
+                if crate::fork::history::change_of(call).as_deref() == Some(row.conversation.change.as_str()) =>
+            {
+                Vec::new()
+            }
             _ => return None,
         };
         Some((entry.seq, taint))
     })
+}
+
+/// A pipe's record, which says where it is itself: no card shows it.
+fn piped(kind: Kind) -> bool {
+    matches!(kind, Kind::PipeHeld | Kind::PipeLoop | Kind::PipeForward)
 }
 
 /// The end of a page of `limit` from `rows` (sorted, newest first): never
@@ -719,8 +825,30 @@ fn page_end(rows: &[Row], limit: usize) -> usize {
 }
 
 impl Factory {
+    /// Reads the conversations the rows' cards are in that aren't held (not
+    /// opened since a restart, or unloaded while idle: `crate::unload`), so
+    /// each record says where its card is.
+    async fn hold_cards_of(&self, rows: &[Row]) {
+        let unheld: BTreeSet<String> = {
+            let inner = self.lock();
+            let chats = self.chats.ids();
+            rows.iter()
+                .filter(|row| !piped(row.kind))
+                .filter(|row| inner.config.agent(&row.agent).is_some() || chats.contains(&row.agent))
+                .filter(|row| inner.agents.get(&row.agent).is_none_or(|runtime| runtime.transcript.is_none()))
+                .map(|row| row.agent.clone())
+                .collect()
+        };
+        let reads = futures_util::future::join_all(unheld.iter().map(|agent| self.ensure_loaded(agent))).await;
+        for (agent, read) in unheld.iter().zip(reads) {
+            if let Err(error) = read {
+                tracing::warn!(%agent, %error, "could not read a conversation to find where its cards are");
+            }
+        }
+    }
+
     /// ListNeedsYouHistory.
-    pub(crate) fn needs_you_history(&self, request: &v1::ListNeedsYouHistory) -> Result<v1::NeedsYouHistory, RequestError> {
+    pub(crate) async fn needs_you_history(&self, request: &v1::ListNeedsYouHistory) -> Result<v1::NeedsYouHistory, RequestError> {
         let query: String = request.query.trim().chars().take(MAX_QUERY).collect::<String>().to_lowercase();
         let limit = match request.limit {
             0 => DEFAULT_LIMIT,
@@ -762,6 +890,8 @@ impl Factory {
         let end = page_end(&rows, limit);
         let more = rows.len() > end || unscanned;
         rows.truncate(end);
+        drop(vault);
+        self.hold_cards_of(&rows).await;
 
         let inner = self.lock();
         let records = rows
@@ -774,8 +904,8 @@ impl Factory {
                     inner.config.agent(&row.agent).map_or_else(|| row.agent.clone(), |agent| agent.name.clone())
                 };
                 let entries =
-                    inner.agents.get(&row.agent).and_then(|runtime| runtime.transcript.as_ref()).map(|transcript| transcript.entries());
-                let piped = matches!(row.kind, Kind::PipeHeld | Kind::PipeLoop | Kind::PipeForward);
+                    inner.agents.get(&row.agent).and_then(|runtime| runtime.transcript.as_ref()).map(|transcript| transcript.in_memory());
+                let piped = piped(row.kind);
                 let (seq, mut taint) =
                     if piped { (row.seq, Vec::new()) } else { entries.and_then(|entries| card(entries, &row)).unwrap_or_default() };
                 if taint.is_empty()
@@ -804,9 +934,20 @@ impl Factory {
                     app_change_id: row.app.change,
                     undone: row.app.undone || row.model.undone,
                     app_id: row.app.app,
-                    agent_reason: if row.kind == Kind::Model { row.model.reason } else { row.app.reason },
+                    agent_reason: match row.kind {
+                        Kind::Model => row.model.reason,
+                        Kind::Conversation => row.conversation.reason,
+                        _ => row.app.reason,
+                    },
                     model_change_id: row.model.change,
-                    subject_agent_id: row.model.subject,
+                    // As UndoModelChange checks it.
+                    superseded: row.kind == Kind::Model
+                        && !row.model.undone
+                        && inner
+                            .config
+                            .agent(&row.model.subject)
+                            .is_none_or(|agent| (agent.model.clone(), agent.effort.clone()) != row.model.after),
+                    subject_agent_id: if row.kind == Kind::Conversation { row.conversation.subject } else { row.model.subject },
                 }
             })
             .collect();

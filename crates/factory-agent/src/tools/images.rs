@@ -94,12 +94,23 @@ pub async fn read_image(cwd: &Path, args: &Value, cancel: &CancellationToken) ->
     Ok(ToolResult {
         content: vec![
             ToolResultPart::Text { text: note },
-            ToolResultPart::Image { data: base64::engine::general_purpose::STANDARD.encode(&out), mime_type: out_mime.to_owned() },
+            ToolResultPart::Image {
+                data: base64::engine::general_purpose::STANDARD.encode(&out),
+                mime_type: out_mime.to_owned(),
+                digest: Some(digest(&out)),
+            },
         ],
         details,
         usage: None,
         terminate: None,
     })
+}
+
+/// The SHA-256 of an image's bytes, in hex: how a provider that keeps
+/// images as files (Anthropic's, #382) knows it has sent this one.
+pub fn digest(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// What `fit` made: the bytes to send, their type and the size they show.

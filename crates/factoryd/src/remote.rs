@@ -49,7 +49,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::{Config, RemoteConfig};
-use crate::encoding::{hex, unhex};
+pub(crate) use crate::encoding::percent_encode as encode;
+use crate::encoding::{hex, percent_decode as decode, unhex};
 use crate::factory::{Factory, Inner, RequestError};
 use crate::home::Home;
 use crate::locking::lock;
@@ -78,7 +79,7 @@ const ONLINE_WAIT: Duration = Duration::from_secs(5);
 /// This machine's own app, in devices.json.
 pub const LOCAL_DEVICE: &str = "local";
 /// What a turned-away connection is closed with.
-const REFUSED: u32 = 1;
+pub(crate) const REFUSED: u32 = 1;
 /// What an unpaired device's connection is closed with.
 const UNPAIRED: u32 = 2;
 
@@ -376,6 +377,54 @@ pub fn pairing_code(token: &str, endpoint_id: &str, relays: &[String], addresses
     code
 }
 
+/// Where a pairing code's QR code sends a phone's camera: Claktory's page,
+/// which Claktory claims as a Universal Link and App Link (only this path),
+/// so the camera opens the app, or the page offers it in the store.
+pub const PAIR_PAGE: &str = "https://claktory.com/pair";
+
+/// Whether QR codes hold the link (#352 P6, step 2). Off until the page,
+/// its headers and its Universal Link and App Link files are live and
+/// checked, and phone apps that read the link are out: until then the page
+/// could answer with anything, a redirect that takes the code along
+/// included, and an older app can't read the link. Off, `pairing_link` is
+/// empty and QR codes hold the `factory://` code.
+const PAIR_LINKS: bool = false;
+
+/// A pairing code as a link for its QR code (PairingCode.link), once
+/// PAIR_LINKS is on: `PAIR_PAGE#` and the code's query, unchanged, so only a
+/// device ever reads it (a browser never sends a fragment to the page's
+/// server). Empty for anything that isn't a `factory://?` code.
+pub fn pairing_link(code: &str) -> String {
+    if PAIR_LINKS { link_of(code) } else { String::new() }
+}
+
+fn link_of(code: &str) -> String {
+    code.strip_prefix("factory://?").map(|query| format!("{PAIR_PAGE}#{query}")).unwrap_or_default()
+}
+
+/// A numbered version's line, its first two numbers: v0.1.11 and
+/// v0.1.12-dev.3 are both on (0, 1). A release stamped `--incompatible`
+/// starts a new line (v0.1.7 → v0.2.0), and only an app and a backend on one
+/// line work together, as the app's own check reads it (compatibility.dart's
+/// versionLine). None for what isn't numbered ("dev", the date stamps from
+/// before v0.1.0).
+fn version_line(version: &str) -> Option<(u64, u64)> {
+    let numbered = version.strip_prefix('v')?;
+    let numbered = numbered.split_once('-').map_or(numbered, |(numbers, _)| numbers);
+    let parts: Vec<&str> = numbered.split('.').collect();
+    let [major, minor, patch] = parts[..] else { return None };
+    if [major, minor, patch].iter().any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit())) {
+        return None;
+    }
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Whether an app at `app` can't work with the backend `offered`: both
+/// numbered, on different lines.
+fn leaves_behind(app: &str, offered: &str) -> bool {
+    matches!((version_line(app), version_line(offered)), (Some(app), Some(offered)) if app != offered)
+}
+
 /// What a Claktory is called and its color, as devices show it.
 pub struct Identity {
     pub name: String,
@@ -456,6 +505,20 @@ pub fn approval_number(claktory: &str, device: &str, token_sha256: &str) -> Stri
     let digest = Sha256::digest(format!("claktory pairing\n{claktory}\n{device}\n{token_sha256}").as_bytes());
     let number = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 10_000;
     format!("{number:04}")
+}
+
+/// How many wrong numbers turn a waiting device away (#352 P4).
+const WRONG_NUMBERS: u32 = 3;
+
+/// A waiting device's name as the person's devices and terminal show it
+/// (#352 P4, Fugo): no control characters, nor the invisible ones that
+/// reorder or hide text (bidi controls, zero widths, the BOM), at most 40
+/// characters. A device found through the account chose it itself.
+pub fn shown_name(name: &str) -> String {
+    let invisible = |char: char| matches!(char, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}');
+    let name: String = name.chars().filter(|char| !char.is_control() && !invisible(*char)).collect();
+    let name = name.trim();
+    if name.chars().count() <= 40 { name.to_owned() } else { format!("{}…", name.chars().take(39).collect::<String>().trim_end()) }
 }
 
 /// How a code that let no device in ended.
@@ -651,37 +714,6 @@ fn chosen_machine_name(value: Option<std::ffi::OsString>) -> Option<String> {
     (!name.is_empty() && !name.chars().any(char::is_control)).then(|| name.chars().take(64).collect::<String>().trim_end().to_owned())
 }
 
-/// Percent-encodes all but letters, digits, '-', '.', '_' and '~'.
-pub(crate) fn encode(text: &str) -> String {
-    text.bytes()
-        .map(
-            |byte| {
-                if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) { (byte as char).to_string() } else { format!("%{byte:02X}") }
-            },
-        )
-        .collect()
-}
-
-/// Undoes `encode` (and any other percent-encoding).
-fn decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        match text.get(at + 1..at + 3).filter(|_| bytes[at] == b'%').and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
-            Some(byte) => {
-                out.push(byte);
-                at += 3;
-            }
-            None => {
-                out.push(bytes[at]);
-                at += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 /// How a connection travels now, and the address it comes from when it
 /// comes directly.
 fn path_of(connection: &Connection) -> (v1::DevicePath, Option<SocketAddr>) {
@@ -815,11 +847,16 @@ pub(crate) struct State {
     tunnel: tokio::sync::Mutex<Tunnel>,
     /// How long making a code waits for the relay; tests make it shorter.
     online_wait: Mutex<Option<Duration>>,
+    /// Local relays and address lookup in place of the internet's; tests'.
+    network: Mutex<Option<Network>>,
     /// Notified when a waiting device is allowed or its code ends.
     pairing: tokio::sync::Notify,
     /// How each code that let no device in ended, by its device's id, for
     /// the device waiting with it.
     ended: Mutex<HashMap<String, Ended>>,
+    /// How many wrong numbers each waiting device was allowed with, by its
+    /// id (#352 P4): the third turns it away.
+    wrong_numbers: Mutex<HashMap<String, u32>>,
     /// Connections of devices waiting to be allowed, or being told they
     /// weren't: remote access stays on for them until they've heard.
     waiting: AtomicU64,
@@ -1171,9 +1208,34 @@ struct Shown {
     paths: HashMap<String, v1::DevicePath>,
 }
 
-/// n0's relays, which the tunnel uses unless config.json names others.
-fn default_relays() -> Vec<String> {
-    RelayMode::Default.relay_map().urls::<Vec<RelayUrl>>().iter().map(ToString::to_string).collect()
+/// Claktory's own relay (iroh-relay), the first of the relays the tunnel
+/// uses unless config.json names others. They used to be n0's: devices
+/// paired then, whose codes name n0's relays, find this Claktory on these
+/// through the address lookup. Written exactly as iroh compares relays (as
+/// written, a trailing slash added): the apps home on the same string.
+pub const DEFAULT_RELAY: &str = "https://relay.claktory.com/";
+
+/// The relays the tunnel uses unless config.json names others: Claktory's
+/// own, and n0's US East one in case it's down (an endpoint homes on the
+/// fastest it reaches, so Europe stays on Claktory's). Not n0's Frankfurt
+/// one: about as close as Claktory's from Europe, it would bring back the
+/// rate limits. n0's as iroh writes it, so it's the relay devices that home
+/// there know.
+pub fn default_relays() -> Vec<String> {
+    vec![DEFAULT_RELAY.to_owned(), iroh::defaults::prod::default_na_east_relay().url.to_string()]
+}
+
+/// `default_relays`, as iroh takes them.
+pub(crate) fn default_relay_map() -> RelayMap {
+    default_relays().iter().filter_map(|relay| relay.parse::<RelayUrl>().ok()).collect()
+}
+
+/// What tests put in place of the internet (`set_tunnel_network`): the
+/// default relays, and what sets up the address lookup `presets::N0` would.
+#[derive(Clone)]
+struct Network {
+    relays: Vec<String>,
+    lookup: Arc<dyn Fn(Builder) -> Builder + Send + Sync>,
 }
 
 /// One of a device's sessions; it counts as connected while this lives.
@@ -1323,6 +1385,40 @@ impl Factory {
         Ok(())
     }
 
+    /// A sign-in made on a paired device (AccountVerify) confirms that
+    /// device as the owner's (#365 R5): typing the emailed code proved the
+    /// email as a device's own sign-in does. Only the device whose id is
+    /// `asker` and whose bound key is the one its connection showed,
+    /// `endpoint_id`, and only for `account_id`, the account this Claktory
+    /// was just signed in to. Nothing for this computer's app, a device
+    /// waiting to be allowed, or a key that doesn't match.
+    pub(crate) fn confirm_signed_in_device(&self, asker: &str, endpoint_id: &str, account_id: &str) {
+        if asker == LOCAL_DEVICE || endpoint_id.is_empty() || account_id.is_empty() {
+            return;
+        }
+        let confirm = || -> Result<bool, RemoteError> {
+            let _changing = devices_lock();
+            let mut devices = devices(&self.home)?;
+            let Some(device) = devices.iter_mut().find(|device| {
+                device.id == asker && !device.local && device.endpoint_id == endpoint_id && device.pending_endpoint_id.is_empty()
+            }) else {
+                return Ok(false);
+            };
+            device.confirmed_as = account_id.to_owned();
+            device.confirm_by = None;
+            save_devices(&self.home, &devices)?;
+            Ok(true)
+        };
+        match confirm() {
+            Ok(true) => {
+                tracing::info!(device = %asker, "a device signed in on itself and was confirmed as the owner's");
+                self.refresh_remote();
+            }
+            Ok(false) => {}
+            Err(error) => tracing::error!(%error, device = %asker, "could not confirm a device that signed in"),
+        }
+    }
+
     /// Waits until a second after `peer`'s last refusal.
     async fn pause_after_refusal(&self, peer: &Peer) {
         let wait = {
@@ -1385,8 +1481,44 @@ impl Factory {
         self.remote.pairing.notify_waiters();
     }
 
-    /// Allows the device waiting with this device's code, from the app.
-    pub async fn approve_device(&self, id: &str) -> Result<(), RequestError> {
+    /// Allows the device waiting with this device's code, from the app,
+    /// with the four digits the person read off it (#352 P4, Fugo): a wrong
+    /// number is refused, and the third wrong one turns the device away.
+    pub async fn approve_device(&self, id: &str, number: &str) -> Result<(), RequestError> {
+        // As the devices file has it now, not as last shown: a code that
+        // just ran out isn't waiting any more.
+        let now = now_ms();
+        let known = devices(&self.home).map_err(|error| RequestError::Remote(error.to_string()))?;
+        let Some(device) = known.into_iter().find(|device| device.id == id && device.is_pending(now)) else {
+            return Err(RequestError::UnknownDevice(id.to_owned()));
+        };
+        let endpoint = lock(&self.remote.shown).endpoint_id.clone();
+        let (name, shows) =
+            (shown_name(&device.name), approval_number(&endpoint, &device.pending_endpoint_id, &device.token_sha256));
+        let number = number.trim();
+        if number.is_empty() {
+            return Err(RequestError::Remote(format!("Type the 4 digits {name} shows to allow it.")));
+        }
+        if number != shows {
+            let wrong = {
+                let mut wrong = lock(&self.remote.wrong_numbers);
+                let count = wrong.entry(id.to_owned()).or_default();
+                *count += 1;
+                *count
+            };
+            tracing::warn!(device = %id, wrong, "a device was allowed with a wrong number");
+            if wrong >= WRONG_NUMBERS {
+                lock(&self.remote.wrong_numbers).remove(id);
+                self.deny_device(id).await?;
+                return Err(RequestError::Remote(format!(
+                    "That's not the number {name} shows, a third time, so it was turned away. To add it, make a new code."
+                )));
+            }
+            let left = WRONG_NUMBERS - wrong;
+            let tries = if left == 1 { "1 try left".to_owned() } else { format!("{left} tries left") };
+            return Err(RequestError::Remote(format!("That's not the number {name} shows. {tries}.")));
+        }
+        lock(&self.remote.wrong_numbers).remove(id);
         match approve(&self.home, id) {
             Ok(device) => tracing::info!(device = %device.id, "the person allowed a device"),
             Err(RemoteError::NotWaiting(id)) => return Err(RequestError::UnknownDevice(id)),
@@ -1492,7 +1624,7 @@ impl Factory {
                 on,
                 relays: match (on, relays.is_empty()) {
                     (false, _) => Vec::new(),
-                    (true, true) => default_relays(),
+                    (true, true) => self.default_relays(),
                     (true, false) => relays.clone(),
                 },
                 custom_relays: !relays.is_empty(),
@@ -1535,7 +1667,7 @@ impl Factory {
             .filter(|device| device.is_pending(now))
             .map(|device| v1::PendingDevice {
                 device_id: device.id.clone(),
-                name: device.name.clone(),
+                name: shown_name(&device.name),
                 kind: device.pending_kind,
                 number: approval_number(&shown.endpoint_id, &device.pending_endpoint_id, &device.token_sha256),
                 requested_ms: device.pending_since.unwrap_or_default(),
@@ -1545,6 +1677,10 @@ impl Factory {
             })
             .collect();
         pending.sort_by_key(|device| device.requested_ms);
+        // The backend an update would bring, if it would bring one.
+        let offered = Some(inner.latest_release.backend.as_str())
+            .filter(|offered| !offered.is_empty() && *offered != crate::update::VERSION)
+            .unwrap_or_default();
         v1::RemoteAccess {
             on: shown.on,
             port: 0,
@@ -1573,6 +1709,9 @@ impl Factory {
                         // (paired before the tunnel) shows as expired.
                         code_expires_ms: if device.endpoint_id.is_empty() { device.code_expires.unwrap_or(device.created) } else { 0 },
                         notifications: crate::notify::push::registered(self, &device.id),
+                        platform: device.app_platform,
+                        update_leaves_behind: leaves_behind(&device.app_version, offered),
+                        app_version: device.app_version,
                         id: device.id,
                         name: device.name,
                         paired_ms: device.created,
@@ -1599,6 +1738,19 @@ impl Factory {
         *lock(&self.remote.online_wait) = Some(wait);
     }
 
+    /// Puts relays and an address lookup on this machine in place of
+    /// Claktory's relay and n0's lookup, for tests to need no network:
+    /// `relays` become the default ones, and `lookup` sets up the remote
+    /// endpoint as `presets::N0` would. Applies from the tunnel's next start.
+    pub fn set_tunnel_network(&self, relays: Vec<String>, lookup: impl Fn(Builder) -> Builder + Send + Sync + 'static) {
+        *lock(&self.remote.network) = Some(Network { relays, lookup: Arc::new(lookup) });
+    }
+
+    /// The relays the tunnel uses when config.json names none.
+    fn default_relays(&self) -> Vec<String> {
+        lock(&self.remote.network).as_ref().map_or_else(default_relays, |network| network.relays.clone())
+    }
+
     /// Pairs a new device, from the app: remote access turns on, and the
     /// code names the relay the tunnel reaches and the addresses it can be
     /// dialled at.
@@ -1607,7 +1759,7 @@ impl Factory {
         let paired = tokio::task::spawn_blocking(move || pair(&home, &name)).await.map_err(std::io::Error::other)?;
         let (token, device) = paired.map_err(|error| RequestError::Remote(error.to_string()))?;
         let code = self.code_with(&token).await?;
-        Ok(v1::PairingCode { code, device_id: device.id })
+        Ok(v1::PairingCode { link: pairing_link(&code), code, device_id: device.id })
     }
 
     /// The pairing code with `token`: remote access turns on, and the code
@@ -1635,11 +1787,19 @@ impl Factory {
     }
 
     /// Where other machines reach `endpoint` now: its relays (config.json's
-    /// too) and its addresses but 127.0.0.1's.
+    /// too; the default ones while it has reached none, so a code made
+    /// before it's online still names one) and its addresses but
+    /// 127.0.0.1's.
     pub(crate) fn reached_at(&self, endpoint: &Endpoint) -> (Vec<String>, Vec<SocketAddr>) {
         let addr = endpoint.addr();
         let mut relays: Vec<String> = addr.relay_urls().map(ToString::to_string).collect();
-        for relay in self.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default() {
+        let configured = self.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default();
+        let using = match (configured.is_empty(), relays.is_empty()) {
+            (false, _) => configured,
+            (true, true) => self.default_relays(),
+            (true, false) => Vec::new(),
+        };
+        for relay in using {
             if !relays.iter().any(|known| known.trim_end_matches('/') == relay.trim_end_matches('/')) {
                 relays.push(relay);
             }
@@ -1871,7 +2031,10 @@ fn sync_tunnel(factory: &Arc<Factory>) -> std::pin::Pin<Box<dyn Future<Output = 
                 tracing::info!("remote access stopped");
             }
             if wanted.on {
-                match start_remote(&factory.home, &wanted, &factory.remote.pipes.admits, &factory.remote.account_open).await {
+                let network = lock(&factory.remote.network).clone();
+                let started =
+                    start_remote(&factory.home, &wanted, network.as_ref(), &factory.remote.pipes.admits, &factory.remote.account_open);
+                match started.await {
                     Ok(endpoint) => {
                         tracing::info!(endpoint = %endpoint.id(), "remote access started");
                         let accept = tokio::spawn(accept(endpoint.clone(), Arc::downgrade(factory)));
@@ -1907,7 +2070,7 @@ async fn start_local(factory: &Arc<Factory>) -> Result<Endpoint, RemoteError> {
     let pipes = factory.remote.pipes.admits.clone();
     // Local connections are this machine's whoever is signed in.
     let closed = Arc::new(AtomicBool::new(false));
-    let endpoint = bind(&home, key, &Wanted { on: false, relays: Vec::new() }, local_port(&home), &pipes, &closed).await?;
+    let endpoint = bind(&home, key, &Wanted { on: false, relays: Vec::new() }, None, local_port(&home), &pipes, &closed).await?;
     let (id, port) = (endpoint.id().to_string(), loopback_port(&endpoint).unwrap_or_default());
     let written = tokio::task::spawn_blocking(move || write_local_pairing(&home, &id, port)).await.map_err(std::io::Error::other)?;
     if let Err(error) = written {
@@ -1922,6 +2085,7 @@ async fn start_local(factory: &Arc<Factory>) -> Result<Endpoint, RemoteError> {
 async fn start_remote(
     home: &Home,
     wanted: &Wanted,
+    network: Option<&Network>,
     pipes: &Arc<crate::pipe_link::Admits>,
     open: &Arc<AtomicBool>,
 ) -> Result<Endpoint, RemoteError> {
@@ -1931,7 +2095,7 @@ async fn start_remote(
     };
     let path = dir(home).join("remote-port");
     let port = std::fs::read_to_string(&path).ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0);
-    let endpoint = bind(home, key, wanted, port, pipes, open).await?;
+    let endpoint = bind(home, key, wanted, network, port, pipes, open).await?;
     if let Some(bound) = loopback_port(&endpoint)
         && bound != port
         && let Err(error) = write_private(&path, format!("{bound}\n").as_bytes())
@@ -1949,29 +2113,38 @@ fn loopback_port(endpoint: &Endpoint) -> Option<u16> {
 
 /// An endpoint as `wanted` says, on `port` (the local pairing code's) if it's
 /// free. Without remote access: 127.0.0.1 only, no relays, nothing published.
-/// With it: every address, the relays (n0's, or config.json's own), and
-/// n0's address lookup either way: where this Claktory can be reached (its
-/// key, home relay and addresses, never data) stays published, so every
-/// already-paired device follows a relay change without re-pairing.
-/// Never a port mapping (no portmapper).
+/// With it: every address, the relays (Claktory's own, or config.json's),
+/// and n0's address lookup either way: where this Claktory can be reached
+/// (its key, home relay and addresses, never data) stays published, so
+/// every already-paired device follows a relay change without re-pairing,
+/// those whose codes name n0's relays, the default before, too. `network`
+/// puts tests' relays and lookup in place of those. Never a port mapping
+/// (no portmapper).
 async fn bind(
     home: &Home,
     key: SecretKey,
     wanted: &Wanted,
+    network: Option<&Network>,
     port: u16,
     pipes: &Arc<crate::pipe_link::Admits>,
     open: &Arc<AtomicBool>,
 ) -> Result<Endpoint, RemoteError> {
     let failed = |error: &dyn std::fmt::Display| RemoteError::Tunnel(error.to_string());
     let builder = |port: u16| -> Result<Builder, RemoteError> {
-        let builder = if wanted.on { Endpoint::builder(presets::N0) } else { Endpoint::builder(presets::Minimal) };
+        let builder = match (wanted.on, network) {
+            (false, _) => Endpoint::builder(presets::Minimal),
+            (true, None) => Endpoint::builder(presets::N0),
+            (true, Some(network)) => (network.lookup)(Endpoint::builder(presets::Minimal)),
+        };
         let relay_mode = if !wanted.on {
             RelayMode::Disabled
-        } else if wanted.relays.is_empty() {
-            RelayMode::Default
         } else {
-            let urls = wanted
-                .relays
+            let relays = match (wanted.relays.is_empty(), network) {
+                (false, _) => wanted.relays.clone(),
+                (true, None) => default_relays(),
+                (true, Some(network)) => network.relays.clone(),
+            };
+            let urls = relays
                 .iter()
                 .map(|relay| relay.parse::<RelayUrl>())
                 .collect::<Result<Vec<_>, _>>()
@@ -2136,6 +2309,35 @@ mod tests {
         assert_eq!(code_values(&code, "r").collect::<Vec<_>>(), ["https://relay.example/"]);
         assert_eq!(code_values(&code, "a").collect::<Vec<_>>(), ["127.0.0.1:7"]);
         assert_eq!(code_values(&code, "t").collect::<Vec<_>>(), ["ab"]);
+    }
+
+    #[test]
+    fn an_update_leaves_behind_only_an_app_on_another_line() {
+        assert_eq!(version_line("v0.1.19"), Some((0, 1)));
+        assert_eq!(version_line("v0.1.12-dev.3"), Some((0, 1)));
+        assert_eq!(version_line("v12.30.0"), Some((12, 30)));
+        for unnumbered in ["dev", "2026.11.19-1958", "v0.1", "v0.1.x", "v0.1.+2", "0.1.2", "v0.1.2.3", ""] {
+            assert_eq!(version_line(unnumbered), None, "{unnumbered}");
+        }
+        assert!(leaves_behind("v0.1.19", "v0.2.0"));
+        assert!(leaves_behind("v0.2.0", "v0.1.20"), "an app newer than the backend can't either");
+        assert!(!leaves_behind("v0.1.19", "v0.1.25"));
+        assert!(!leaves_behind("", "v0.2.0"), "an app that never said");
+        assert!(!leaves_behind("v0.1.19", ""), "nothing on offer");
+        assert!(!leaves_behind("dev", "v0.2.0"));
+    }
+
+    #[test]
+    fn a_pairing_link_carries_the_code_after_the_hash() {
+        let claktory = Identity { name: "Lee's Mac #2".into(), color: "teal".into() };
+        let code = pairing_code("ab", "id", &["https://relay.example/".into()], &["127.0.0.1:7".parse().unwrap()], &claktory);
+        let link = link_of(&code);
+        assert_eq!(link, format!("https://claktory.com/pair#{}", code.strip_prefix("factory://?").unwrap()));
+        assert_eq!(link.matches('#').count(), 1, "a # in a value stays encoded: {link}");
+        assert!(!link.contains('?'), "nothing before the fragment for the server: {link}");
+        assert_eq!(link_of("claktory://add?code=x"), "");
+        assert_eq!(link_of(""), "");
+        assert_eq!(pairing_link(&code), if PAIR_LINKS { link } else { String::new() }, "only once it's on");
     }
 
     #[test]
@@ -2320,6 +2522,15 @@ mod tests {
     }
 
     /// The example the app checks its side against.
+    #[test]
+    fn a_waiting_devices_name_shows_without_control_characters_and_cut_to_40() {
+        assert_eq!(shown_name("Laptop\u{7}\u{1b}[31m"), "Laptop[31m");
+        assert_eq!(shown_name("\u{202E}enohP\u{2066}x\u{2069}\u{200B}\u{FEFF}\u{2060}"), "enohPx");
+        let long = "x".repeat(60);
+        assert_eq!(shown_name(&long), format!("{}…", "x".repeat(39)));
+        assert_eq!(shown_name(&"y".repeat(40)), "y".repeat(40));
+    }
+
     #[test]
     fn the_approval_number_is_four_digits_both_sides_work_out() {
         let token = "0123456789abcdef";

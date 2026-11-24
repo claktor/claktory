@@ -30,6 +30,9 @@ use crate::transcript::{Transcript, now_ms};
 
 pub(crate) const ID: &str = "ask";
 pub(crate) const TOOL: &str = "ask_person";
+/// The Messaging extension's tool for admin agents that asks the person to
+/// clear another agent's conversation, with a card of this extension's.
+pub(crate) const CLEAR_TOOL: &str = "agents_clear";
 
 /// Questions an agent may have waiting at once.
 pub(crate) const MAX_PENDING: i64 = 3;
@@ -83,6 +86,27 @@ ALTER TABLE asks ADD COLUMN answer_attachments TEXT;
 /// order, as JSON (`Step`); null for an ordinary ask.
 pub(crate) const STEPS: &str = "
 ALTER TABLE asks ADD COLUMN steps TEXT;
+";
+
+/// The migration that added replies (#370 Submit): 1 when the person
+/// answered with a comment, neither a yes nor a no (state 'answered').
+pub(crate) const REPLIED: &str = "
+ALTER TABLE asks ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
+";
+
+/// The migration that added asking to clear another agent's conversation
+/// (agents_clear, an admin agent's tool): the id of the agent the person's
+/// approval clears; '' for an ordinary ask.
+pub(crate) const CLEARS: &str = "
+ALTER TABLE asks ADD COLUMN clears TEXT NOT NULL DEFAULT '';
+";
+
+/// The migration that tied a card asking to clear an agent's conversation
+/// to that agent (Fugo's follow-up to agents_clear): its incarnation
+/// (`user_apps::incarnation`) when it was asked. Approving clears only that
+/// agent, never one deleted and made again with its id since.
+pub(crate) const CLEARS_INCARNATION: &str = "
+ALTER TABLE asks ADD COLUMN clears_incarnation TEXT NOT NULL DEFAULT '';
 ";
 
 /// A procedure's steps: at least, at most, and the longest one, in characters.
@@ -383,7 +407,7 @@ fn review_file(factory: &Arc<Factory>, agent: &str, asked: &str) -> Result<Strin
 /// extension_call), pending; None for any other result, or one that asked
 /// nothing.
 pub(crate) fn asked(tool: &str, is_error: bool, details: &serde_json::Value) -> Option<v1::AskPerson> {
-    if !matches!(tool, TOOL | "extension_call") || is_error {
+    if !matches!(tool, TOOL | CLEAR_TOOL | "extension_call") || is_error {
         return None;
     }
     let text = crate::transcript::text_fields(details);
@@ -410,6 +434,7 @@ pub(crate) fn asked(tool: &str, is_error: bool, details: &serde_json::Value) -> 
                     .collect()
             })
             .unwrap_or_default(),
+        replied: false,
     })
 }
 
@@ -434,9 +459,17 @@ struct Row {
     item: String,
     /// A procedure's steps; empty for an ordinary ask.
     steps: Vec<Step>,
+    /// Answered with a reply (#370), not an approval.
+    replied: bool,
+    /// The agent whose conversation approving it clears (agents_clear); ''
+    /// for an ordinary ask.
+    clears: String,
+    /// That agent's incarnation when it was asked.
+    clears_incarnation: String,
 }
 
-const COLUMNS: &str = "id, title, body, wants_text, state, answer, decided, taint, review, created, answer_attachments, item, steps";
+const COLUMNS: &str =
+    "id, title, body, wants_text, state, answer, decided, taint, review, created, answer_attachments, item, steps, replied, clears, clears_incarnation";
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
     Ok(Row {
@@ -453,6 +486,9 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         answer_attachments: row.get::<_, Option<String>>(10)?.and_then(|list| serde_json::from_str(&list).ok()).unwrap_or_default(),
         item: row.get(11)?,
         steps: row.get::<_, Option<String>>(12)?.and_then(|steps| serde_json::from_str(&steps).ok()).unwrap_or_default(),
+        replied: row.get(13)?,
+        clears: row.get(14)?,
+        clears_incarnation: row.get(15)?,
     })
 }
 
@@ -480,6 +516,7 @@ impl Row {
             review_path: self.review.clone(),
             answer_attachments: self.answer_attachments.iter().map(crate::transcript::attachment).collect(),
             steps: self.steps.iter().map(Step::to_proto).collect(),
+            replied: self.replied,
         }
     }
 }
@@ -533,6 +570,15 @@ pub(crate) fn cleared(store: &Store, agent: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// `agent`'s conversation went back to before `since` (`crate::fork`): its
+/// questions asked since then close as /clear's do. How many.
+pub(crate) fn cleared_since(store: &Store, agent: &str, since: i64) -> rusqlite::Result<usize> {
+    store.db().execute(
+        "UPDATE asks SET state = 'cleared', decided = ?3 WHERE agent = ?1 AND state = 'pending' AND created >= ?2",
+        params![agent, since, now_ms()],
+    )
+}
+
 /// The person answers the ask shown at `seq` in `agent`'s conversation, or
 /// dismisses it. Its entry shows the decision, and the agent is told.
 pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk) -> Result<(), RequestError> {
@@ -545,7 +591,7 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk) -> R
             .agents
             .get(agent)
             .and_then(|runtime| runtime.transcript.as_ref())
-            .and_then(|transcript| transcript.entries().iter().find(|entry| entry.seq == request.seq).cloned());
+            .and_then(|transcript| transcript.entry(request.seq).cloned());
         match entry.and_then(|entry| entry.kind) {
             Some(v1::entry::Kind::AskPerson(ask)) => ask.id,
             _ => return Err(RequestError::Ask("There's no such question in this agent's conversation.".to_owned())),
@@ -558,32 +604,67 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk) -> R
         .query_row(&format!("SELECT {COLUMNS} FROM asks WHERE id = ?1 AND agent = ?2"), params![number, agent], row)
         .optional()?;
     let Some(mut ask) = found else { return Err(RequestError::Ask("There's no such question.".to_owned())) };
+    if ask.state == "cleared" {
+        return Err(RequestError::Ask("This question was closed without an answer.".to_owned()));
+    }
     if ask.state != "pending" {
         return Err(RequestError::Ask(format!("This question was already {}.", ask.state)));
     }
     if !ask.steps.is_empty() || request.step.is_some() {
+        if request.reply {
+            return Err(RequestError::Ask("Answer the step with Done or Can't do this, and a comment if you like.".to_owned()));
+        }
         return step(factory, agent, request, ask);
     }
     let text = request.text.trim();
-    if !request.dismiss && ask.wants_text && text.is_empty() {
+    // A reply (#370 Submit): the person's words, neither a yes nor a no.
+    if request.reply {
+        if ask.wants_text {
+            return Err(RequestError::Ask("This question wants a written answer: send it as the answer.".to_owned()));
+        }
+        if text.is_empty() {
+            return Err(RequestError::Ask("Write a reply, or approve or dismiss the question.".to_owned()));
+        }
+    }
+    let dismiss = request.dismiss && !request.reply;
+    if !dismiss && ask.wants_text && text.is_empty() {
         return Err(RequestError::Ask("Write an answer, or dismiss the question.".to_owned()));
+    }
+    // Asked to clear another agent's conversation (agents_clear): approved,
+    // it's cleared, so that agent must still be here.
+    let clearing = !ask.clears.is_empty() && !dismiss && !request.reply;
+    if clearing {
+        let Some(name) = factory.lock().config.agent(&ask.clears).filter(|_| ask.clears != agent).map(|target| target.name.clone())
+        else {
+            return Err(RequestError::Ask(
+                "That agent is no longer in this Claktory, so there's nothing to clear: dismiss this card.".to_owned(),
+            ));
+        };
+        // The agent it was asked for, not another made since with its id.
+        let now = crate::user_apps::current_incarnation(&factory.home, &ask.clears);
+        if ask.clears_incarnation.is_empty() || now.as_deref() != Some(ask.clears_incarnation.as_str()) {
+            return Err(RequestError::Ask(format!(
+                "The agent this card asked to clear was deleted, and {name} is another agent made since, so nothing was cleared: dismiss this card."
+            )));
+        }
     }
     // Drawings on a PDF's pages, answering or dismissing alike: uploads of
     // this agent's, as a message's attachments are.
     let attachments = factory.attachments(agent, &request.attachments)?;
     let stored = Some(&attachments).filter(|list| !list.is_empty()).and_then(|list| serde_json::to_string(list).ok());
     // Dismissing, the text is the person's optional comment.
-    let state = if request.dismiss { "dismissed" } else { "answered" };
+    let state = if dismiss { "dismissed" } else { "answered" };
     let answer = text;
     let decided = now_ms();
     let claimed = factory.store.db().execute(
-        "UPDATE asks SET state = ?2, answer = ?3, decided = ?4, answer_attachments = ?5 WHERE id = ?1 AND state = 'pending'",
-        params![number, state, answer, decided, stored],
+        "UPDATE asks SET state = ?2, answer = ?3, decided = ?4, answer_attachments = ?5, replied = ?6 WHERE id = ?1 AND state = 'pending'",
+        params![number, state, answer, decided, stored, request.reply],
     )?;
     if claimed == 0 {
         return Err(RequestError::Ask("This question was already answered.".to_owned()));
     }
-    (ask.state, ask.answer, ask.decided, ask.answer_attachments) = (state.to_owned(), answer.to_owned(), Some(decided), attachments);
+    (ask.state, ask.answer, ask.decided, ask.answer_attachments, ask.replied) =
+        (state.to_owned(), answer.to_owned(), Some(decided), attachments, request.reply);
     // Its entry shows the decision, and no longer waits for the person.
     let person = {
         let mut inner = factory.lock();
@@ -598,6 +679,21 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk) -> R
         }
         inner.config.person_capitalized().to_owned()
     };
+    if !ask.clears.is_empty() {
+        let name = factory.lock().config.agent(&ask.clears).map_or_else(|| ask.clears.clone(), |target| target.name.clone());
+        let cleared = if clearing {
+            let cleared = factory.clear_conversation(&ask.clears).await;
+            if let Err(error) = &cleared {
+                tracing::error!(%agent, clears = %ask.clears, %error, "could not clear the conversation the person approved clearing");
+            }
+            Some(cleared.map_err(|error| error.to_string()))
+        } else {
+            None
+        };
+        let (summary, text) = told_clear(&person, &ask, &name, cleared);
+        factory.deliver_event(agent, text, host_event(summary));
+        return Ok(());
+    }
     let comments = (!ask.review.is_empty()).then(|| reviewed(factory, agent, &ask));
     let (summary, mut text) = told(&person, &ask, comments);
     // Decided, a question about an item that still waits on the person
@@ -617,6 +713,161 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk) -> R
     let event = host_event(summary);
     factory.deliver_event(agent, text, event);
     Ok(())
+}
+
+/// What the agent that asked to clear `name`'s conversation is told: a
+/// summary, and the event's text. `cleared`: how clearing it went, approved;
+/// None when it wasn't.
+fn told_clear(person: &str, ask: &Row, name: &str, cleared: Option<Result<(), String>>) -> (String, String) {
+    let comment = if ask.answer.is_empty() { String::new() } else { format!("\n\nTheir comment:\n\n{}", ask.answer) };
+    match cleared {
+        Some(Ok(())) => (
+            format!("{person} approved clearing {name}'s conversation."),
+            format!(
+                "{person} approved, so {name}'s conversation is cleared: the old one is archived, and {name} starts on a new, empty one, with its checklist and memory.{comment}"
+            ),
+        ),
+        Some(Err(error)) => (
+            format!("{name}'s conversation couldn't be cleared."),
+            format!("{person} approved clearing {name}'s conversation, but it couldn't be cleared: {error}{comment}"),
+        ),
+        None if ask.replied => (
+            format!("{person} replied to your request to clear {name}'s conversation."),
+            format!(
+                "{person} replied to your request to clear {name}'s conversation instead of approving it, so nothing was cleared:\n\n{}",
+                ask.answer
+            ),
+        ),
+        None => (
+            format!("{person} dismissed clearing {name}'s conversation."),
+            format!("{person} dismissed your request to clear {name}'s conversation, so it stays as it is.{comment}"),
+        ),
+    }
+}
+
+/// `target` was deleted: the cards asking to clear its conversation close
+/// unseen, as /clear closes questions (shown as dismissed, but not by the
+/// person), and each agent that asked is told.
+pub(crate) fn target_deleted(factory: &Arc<Factory>, target: &str) {
+    let closed = (|| -> rusqlite::Result<Vec<(String, Row)>> {
+        let db = factory.store.db();
+        let asked = crate::store::query(
+            &db,
+            &format!("SELECT {COLUMNS}, agent FROM asks WHERE clears = ?1 AND state = 'pending' ORDER BY id"),
+            [target],
+            // `agent` comes after COLUMNS, which `row` reads from the start.
+            |found| Ok((found.get::<_, String>(16)?, row(found)?)),
+        )?;
+        // Each one closed here, not by another caller at the same time, so
+        // its agent is told once.
+        let mut closed = Vec::new();
+        for (asker, ask) in asked {
+            let claimed =
+                db.execute("UPDATE asks SET state = 'cleared', decided = ?2 WHERE id = ?1 AND state = 'pending'", params![ask.id, now_ms()])?;
+            if claimed == 1 {
+                closed.push((asker, ask));
+            }
+        }
+        Ok(closed)
+    })();
+    let closed = closed.unwrap_or_else(|error| {
+        tracing::error!(%target, %error, "could not close the cards asking to clear a deleted agent's conversation");
+        Vec::new()
+    });
+    for (asker, mut ask) in closed {
+        (ask.state, ask.decided) = ("cleared".to_owned(), Some(now_ms()));
+        {
+            let mut inner = factory.lock();
+            let entry =
+                inner.agents.get_mut(&asker).and_then(|runtime| runtime.transcript.as_mut()).and_then(|transcript| transcript.set_ask(ask.to_proto()));
+            if let Some(entry) = entry {
+                factory.send_change(&inner, &asker, crate::transcript::Change::Entry(entry));
+            }
+            factory.broadcast_workspace(&inner);
+        }
+        let summary = format!("Your card \"{}\" closed: that agent was deleted.", ask.title);
+        let text = format!("The agent your card \"{}\" was for was deleted, so the card is closed and nothing was cleared.", ask.title);
+        factory.deliver_event(&asker, text, host_event(summary));
+    }
+}
+
+/// Closes the cards asking to clear the conversations of agents the
+/// settings no longer list, as `target_deleted` does: deleted in the app
+/// (which closed them already), or taken out of config.json.
+pub(crate) fn close_for_gone(factory: &Arc<Factory>) {
+    let targets: Vec<String> = crate::store::query(
+        &factory.store.db(),
+        "SELECT DISTINCT clears FROM asks WHERE clears != '' AND state = 'pending'",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap_or_else(|error| {
+        tracing::error!(%error, "could not read the cards asking to clear conversations");
+        Vec::new()
+    });
+    let gone: Vec<String> = {
+        let inner = factory.lock();
+        targets.into_iter().filter(|target| inner.config.agent(target).is_none()).collect()
+    };
+    for target in gone {
+        target_deleted(factory, &target);
+    }
+}
+
+/// Opens the card asking the person to clear `target`'s conversation
+/// (agents_clear, an admin agent's tool; `name` is the target's): their
+/// approval runs /clear for it, and nothing else does. It's one of `asker`'s
+/// questions waiting, and asks once per agent at a time.
+pub(crate) fn ask_to_clear(factory: &Factory, asker: &str, target: &str, name: &str) -> Result<ToolResult, String> {
+    let (person, me) = {
+        let inner = factory.lock();
+        let me = super::caller(&inner.config, asker)?;
+        (inner.config.person().to_owned(), me.name.clone())
+    };
+    let title = format!("Clear {name}'s conversation");
+    let body = format!(
+        "{me} asks to clear {name}'s conversation. It's archived, and {name} starts on a new, empty one, stopping first if it's working; its checklist and memory stay."
+    );
+    // Approving clears this agent, never one made again with its id.
+    let incarnation = crate::user_apps::incarnation(&factory.home, target).map_err(|error| format!("Couldn't ask: {error}"))?;
+    // Read a pipe or a web page: the card says so, and where from.
+    let routes = crate::pipes::agents::routes(factory, asker);
+    let taint = (!routes.is_empty()).then(|| crate::pipes::agents::routes_json(&routes));
+    let id = {
+        let db = factory.store.db();
+        let couldnt = |error: rusqlite::Error| format!("Couldn't ask: {error}");
+        let waiting: i64 =
+            db.query_row("SELECT COUNT(*) FROM asks WHERE agent = ?1 AND state = 'pending'", [asker], |row| row.get(0)).map_err(couldnt)?;
+        if waiting >= MAX_PENDING {
+            return Err(format!(
+                "You already have {waiting} questions waiting for {person}, the most you can: wait for an answer before asking more. Nothing was asked."
+            ));
+        }
+        let asked: bool = db
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM asks WHERE agent = ?1 AND state = 'pending' AND clears = ?2)",
+                params![asker, target],
+                |row| row.get(0),
+            )
+            .map_err(couldnt)?;
+        if asked {
+            return Err(format!("You already asked {person} to clear {name}'s conversation; it's waiting for them. Nothing new was asked."));
+        }
+        db.execute(
+            "INSERT INTO asks (agent, title, body, wants_text, created, state, answer, taint, clears, clears_incarnation) VALUES (?1, ?2, ?3, 0, ?4, 'pending', '', ?5, ?6, ?7)",
+            params![asker, title, body, now_ms(), taint.as_ref().map(serde_json::Value::to_string), target, incarnation],
+        )
+        .map_err(couldnt)?;
+        db.last_insert_rowid().to_string()
+    };
+    let said = format!(
+        "Asked {person}: they see a card to approve or dismiss clearing {name}'s conversation, and only their approval clears it. You'll be told which in an event."
+    );
+    let mut details = json!({"ask": id, "title": title, "body": body, "wants_text": false, "clears": target});
+    if let Some(taint) = taint {
+        details["taint"] = taint;
+    }
+    Ok(ToolResult::text(said, details))
 }
 
 /// The person answers a procedure's current step: Done, or Can't do this
@@ -793,6 +1044,13 @@ fn told(person: &str, ask: &Row, comments: Option<i64>) -> (String, String) {
     };
     let drew = drawings(person, &ask.answer_attachments);
     let asked = format!("{left}{drew}\n\nYou asked: {}\n{}", ask.title, ask.body);
+    // A reply (#370): their words for what they want, never a yes or a no.
+    if ask.replied {
+        return (
+            format!("{person} replied to \"{}\".", ask.title),
+            format!("{person} replied to your question \"{}\":\n\n{}{asked}", ask.title, ask.answer),
+        );
+    }
     match (ask.state.as_str(), ask.answer.as_str()) {
         ("dismissed", comment) => {
             let judge = "Use your best judgment and carry on; say what you chose in your report.";
@@ -848,7 +1106,22 @@ mod tests {
             answer_attachments: Vec::new(),
             item: String::new(),
             steps: Vec::new(),
+            replied: false,
+            clears: String::new(),
+            clears_incarnation: String::new(),
         }
+    }
+
+    #[test]
+    fn a_reply_is_told_as_the_persons_words_with_no_yes_or_no() {
+        let replied = Row { replied: true, ..ask("answered", false, "No, staging first.") };
+        let (summary, text) = told("Matt", &replied, None);
+        assert_eq!(summary, "Matt replied to \"Deploy to production?\".");
+        assert_eq!(
+            text,
+            "Matt replied to your question \"Deploy to production?\":\n\nNo, staging first.\n\nYou asked: Deploy to production?\nThe release is ready."
+        );
+        assert!(!text.contains("yes") && !text.contains("dismissed"), "{text}");
     }
 
     #[test]

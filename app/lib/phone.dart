@@ -14,6 +14,7 @@ import 'claktory_identity.dart' show claktoryName;
 import 'connections.dart';
 import 'links.dart' show confirmPairing;
 import 'controls.dart';
+import 'conversation_versions.dart' show showVersions;
 import 'devices.dart' show thisDeviceKind;
 import 'explorer.dart';
 import 'extensions.dart';
@@ -23,8 +24,10 @@ import 'ipad/document_host.dart' show ipadDocumentPane, ipadProjectDocument;
 import 'ipad/workbench.dart' show WorkbenchFocus, WorkbenchScope;
 import 'layout.dart';
 import 'map.dart';
+import 'monitors_overview.dart' show MonitorsOverview;
 import 'marketplace.dart';
-import 'mobile/back.dart' show PageTarget;
+import 'mobile/back.dart'
+    show BackHandle, CallbackBackToken, PageTarget, PhoneBack;
 import 'mobile/drawer.dart';
 import 'mobile/extension_list.dart';
 import 'mobile/header.dart';
@@ -33,6 +36,7 @@ import 'mobile/navigation.dart';
 import 'mobile/page_find.dart';
 import 'mobile/platform_policy.dart';
 import 'mobile/review_bar.dart';
+import 'mobile/share.dart' show globalRectOf, shareText;
 import 'mobile/presentation.dart'
     show PhoneSheetHost, SheetOverlay, presentSheet;
 import 'pairing.dart';
@@ -44,7 +48,7 @@ import 'scanner.dart';
 import 'screens.dart' show ScreenOpener;
 import 'scope.dart';
 import 'settings_view.dart';
-import 'shell.dart' show NoAgentView;
+import 'shell.dart' show NoAgentView, turnedAway;
 import 'pane_chrome.dart';
 import 'viewers/registry.dart';
 import 'inbox.dart' show InboxView;
@@ -232,6 +236,7 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
           AppPage.changelog => const ChangelogView(),
           AppPage.map => const MapView(),
           AppPage.usage => const UsageView(),
+          AppPage.monitors => const MonitorsOverview(),
           AppPage.inbox => const InboxView(),
           AppPage.agent => const SizedBox.shrink(),
         },
@@ -566,9 +571,20 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
           },
           null => null,
         },
+        // Its other versions, while it has any (friend bug #9).
+        onVersions: agent.branches > 0
+            ? () {
+                close();
+                unawaited(showVersions(this.context, agent));
+              }
+            : null,
         viewed: (id) {
           close();
           _showViewer(agent.id, id);
+          // Opened: it's the newest, on top of this list next time.
+          fireAndLog(
+            AppScope.scope(this.context).backend.paneOpened(agent.id, id),
+          );
         },
       ),
     ),
@@ -762,9 +778,35 @@ class _Root extends StatelessWidget {
     final backend = scope.backend;
     final palette = Palette.of(context);
     return ListenableBuilder(
-      listenable: Listenable.merge([backend.workspace, scope.history]),
+      listenable: Listenable.merge([
+        backend.workspace,
+        scope.history,
+        backend.refused,
+        backend.connected,
+      ]),
       builder: (context, _) {
         final workspace = backend.workspace.workspace;
+        // The Claktory with no agent open: what to do, or why it can't be
+        // used. Turned away, also in place of whatever was open, since
+        // nothing there can be used (Zucchero's row 232).
+        Widget noAgent() => _Screen(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              PhoneHeader(
+                leading: HeaderButton.menu(onTap: onMenu),
+                title: Text(
+                  claktoryName(backend),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: PhoneType.emphasis.copyWith(color: palette.text),
+                ),
+              ),
+              const Expanded(child: NoAgentView()),
+            ],
+          ),
+        );
+        if (turnedAway(backend)) return noAgent();
         // One of the person's chats, as the conversation.
         final chat = selectedChat(workspace);
         if (chat != null) {
@@ -791,25 +833,7 @@ class _Root extends StatelessWidget {
           );
         }
         final agent = backend.workspace.selectedAgent;
-        if (agent == null) {
-          return _Screen(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                PhoneHeader(
-                  leading: HeaderButton.menu(onTap: onMenu),
-                  title: Text(
-                    claktoryName(backend),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: PhoneType.emphasis.copyWith(color: palette.text),
-                  ),
-                ),
-                const Expanded(child: NoAgentView()),
-              ],
-            ),
-          );
-        }
+        if (agent == null) return noAgent();
         final back = scope.history.back;
         return _Screen(
           overKeyboard: true,
@@ -1012,24 +1036,32 @@ class _ViewerScreen extends StatelessWidget {
       child: Builder(
         builder: (context) {
           final node = this.node, agentId = this.agentId;
+          Widget viewer(BuildContext context) {
+            // An app's view (C1F) is its own pane; any other leaf a viewer.
+            final body = leaf.kind == appKind
+                ? AppPane(leaf: leaf)
+                : viewerBody(context, leaf);
+            if (agentId == null || leaf.path.isEmpty) return body;
+            return PhoneReviewBar(
+              agentId: agentId,
+              path: leaf.path,
+              kind: leaf.kind,
+              child: body,
+            );
+          }
+
           final document = node != null && agentId != null
-              ? ipadDocumentPane(context, node, agentId: agentId)
+              ? ipadDocumentPane(
+                  context,
+                  node,
+                  agentId: agentId,
+                  viewer: viewer,
+                )
               // A project's file on an iPad: the host, only to read.
               : node == null && agentId == null
               ? ipadProjectDocument(context, leaf)
               : null;
-          if (document != null) return document;
-          // An app's view (C1F) is its own pane; any other leaf a viewer.
-          final body = leaf.kind == appKind
-              ? AppPane(leaf: leaf)
-              : viewerBody(context, leaf);
-          if (agentId == null || leaf.path.isEmpty) return body;
-          return PhoneReviewBar(
-            agentId: agentId,
-            path: leaf.path,
-            kind: leaf.kind,
-            child: body,
-          );
+          return document ?? viewer(context);
         },
       ),
     );
@@ -1083,6 +1115,44 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
   /// Why the last code scanned can't be used.
   String? _scanError;
 
+  /// A way to connect was chosen on the first screen ([_start]), shown
+  /// while this device has no Claktory yet (#363 F1, F2).
+  var _chose = false;
+
+  /// A way chosen from the first screen: Back (the chevron, or Android's
+  /// Back) returns to it, its choices and Send me the link.
+  bool get _backToStart =>
+      _chose && AppScope.scope(context).connections.saved.isEmpty;
+
+  void _toStart() {
+    if (!mounted) return;
+    setState(() {
+      _chose = false;
+      _pasting = false;
+      _withAccount = null;
+      _scanError = null;
+    });
+  }
+
+  /// Android's Back, while there's a first screen to go back to.
+  BackHandle? _backHandle;
+
+  void _syncBack() {
+    if (!mounted) return;
+    final policy = PhonePlatformPolicy.of(context);
+    final back = policy.touch && !policy.drawerEdgeSwipe
+        ? PhoneBack.maybeOf(context)
+        : null;
+    if (back != null && _backToStart) {
+      _backHandle ??= back.registerNavigation(
+        CallbackBackToken(onBack: _toStart),
+      );
+    } else {
+      _backHandle?.release();
+      _backHandle = null;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1093,6 +1163,7 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _backHandle?.release();
     _code.dispose();
     super.dispose();
   }
@@ -1174,8 +1245,22 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
         .connections
         .account
         .signedIn;
+    // Nothing here yet, from the store: what's needed first, and the ways
+    // in, email first (#363).
+    final start =
+        !_chose &&
+        !withAccount &&
+        AppScope.scope(context).connections.saved.isEmpty;
     final Widget body;
-    if (withAccount) {
+    if (start) {
+      body = _start(
+        context,
+        // One this phone can't use (none, or restricted): pasting only.
+        camera:
+            access != CameraAccess.unavailable &&
+            access != CameraAccess.restricted,
+      );
+    } else if (withAccount) {
       body = Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1208,6 +1293,7 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
       // Finding out whether there's a camera.
       body = const SizedBox(height: 120);
     }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _syncBack());
     return Center(
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(Space.xl),
@@ -1217,23 +1303,41 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // Back to the first screen's choices, where a finger and
+              // the eye expect it (#363, Sale's row 21).
+              if (_backToStart)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: _BackButton(onBack: _toStart),
+                ),
               Text(
                 'Connect to your Claktory',
                 style: TypeScale.of(context).title
                     .copyWith(color: palette.text),
               ),
-              if (!withAccount) ...[
+              if (start) ...[
                 const SizedBox(height: Space.s),
                 Text(
-                  _pasteOnly
-                      ? 'Paste the code for this phone. Find it in Settings → '
+                  defaultTargetPlatform == TargetPlatform.android
+                      ? 'Claktory runs on a Mac or a Linux server. Set it up '
+                            'there, then connect this $thisDeviceKind to it.'
+                      : 'Claktory runs on a Mac. Set it up there, then '
+                            'connect this $thisDeviceKind to it.',
+                  style: TypeScale.of(context).body
+                      .copyWith(color: palette.textMuted),
+                ),
+              ] else if (!withAccount) ...[
+                const SizedBox(height: Space.s),
+                Text(
+                  _pasteOnly || _pasting
+                      ? 'Paste the code for this $thisDeviceKind. Find it in Settings → '
                             "Devices → Add a device on a device that's "
                             'already connected, or where you set up your '
                             'Claktory.'
                       // Android is often paired to a Claktory on a
                       // server, with no Mac in sight.
                       : defaultTargetPlatform == TargetPlatform.android
-                      ? 'Scan the code for this phone. Find it in Settings → '
+                      ? 'Scan the code for this $thisDeviceKind. Find it in Settings → '
                             "Devices → Add a device on a device that's "
                             'already connected, or where you set up your '
                             'Claktory.'
@@ -1245,11 +1349,22 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
               ],
               const SizedBox(height: Space.xl),
               body,
-              if (!withAccount)
+              if (!withAccount && !start)
                 _Link(
                   'Sign in with your email instead',
                   onTap: () => setState(() => _withAccount = true),
                 ),
+              // Until Android gets notifications (Pesci's P2 takes this
+              // line away): what its people need to know first.
+              if (defaultTargetPlatform == TargetPlatform.android) ...[
+                const SizedBox(height: Space.l),
+                Text(
+                  "This $thisDeviceKind doesn't get notifications yet. Keep "
+                  'Claktory open to see what your agents need.',
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.textMuted),
+                ),
+              ],
             ],
           ),
         ),
@@ -1308,7 +1423,7 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
       children: [
         Text(
           restricted
-              ? "The camera isn't available on this ${_phoneWord()}. Paste "
+              ? "The camera isn't available on this $thisDeviceKind. Paste "
                     'the code instead.'
               : defaultTargetPlatform == TargetPlatform.android
               ? 'To scan, allow Claktory to use the camera in Settings.'
@@ -1331,6 +1446,61 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
           'Paste code instead',
           onTap: () => setState(() => _pasting = true),
         ),
+      ],
+    );
+  }
+
+  /// The first screen while this device has no Claktory (#363): Send me
+  /// the link, to set Claktory up on a Mac; then, for one already set up,
+  /// Sign in with your email first, and scanning or pasting a code.
+  Widget _start(BuildContext context, {required bool camera}) {
+    final palette = Palette.of(context);
+    void choose({bool account = false, bool paste = false}) {
+      setState(() {
+        _chose = true;
+        _withAccount = account;
+        _pasting = paste;
+      });
+      // Straight to the camera, asked for now that the person chose it.
+      if (!account && !paste) unawaited(_check(ask: true));
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Builder(
+          builder: (button) => Button(
+            label: 'Send me the link',
+            onPressed: () => unawaited(
+              shareText(
+                button,
+                defaultTargetPlatform == TargetPlatform.android
+                    ? 'Set up Claktory on your Mac or Linux server: '
+                          '$downloadLink'
+                    : 'Set up Claktory on your Mac: $downloadLink',
+                from: globalRectOf(button),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: Space.xl),
+        Semantics(
+          header: true,
+          child: Text(
+            'Already set up?',
+            style: TypeScale.of(context).label
+                .copyWith(color: palette.text, fontWeight: FontWeight.w600),
+          ),
+        ),
+        const SizedBox(height: Space.s),
+        Button(
+          label: 'Sign in with your email',
+          primary: true,
+          onPressed: () => choose(account: true),
+        ),
+        const SizedBox(height: Space.m),
+        if (camera) _Link('Scan code instead', onTap: choose),
+        _Link('Paste code instead', onTap: () => choose(paste: true)),
       ],
     );
   }
@@ -1432,9 +1602,9 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
   }
 }
 
-/// What this phone is called on screen: "iPhone", or "phone" elsewhere.
-String _phoneWord() =>
-    defaultTargetPlatform == TargetPlatform.iOS ? 'iPhone' : 'phone';
+/// Where Claktory is downloaded for a Mac or a server, sent from a phone's
+/// first screen (Send me the link).
+const downloadLink = 'https://claktory.com/download';
 
 /// Why [code] can't connect this phone, or null when it can: it isn't a
 /// code, or it's from a Claktory before the private tunnel.
@@ -1456,14 +1626,14 @@ String? pairingProblem(String code, {bool scanned = false}) {
   final android = defaultTargetPlatform == TargetPlatform.android;
   if (target == null && android) {
     return scanned
-        ? "That isn't a Claktory code. Scan the one shown for this phone in "
+        ? "That isn't a Claktory code. Scan the one shown for this $thisDeviceKind in "
               'Settings → Devices → Add a device.'
         : "That isn't a Claktory code. Copy it again, all of it, and paste "
               'it here.';
   }
   if (target != null && !target.tunnelled && android) {
     return 'This code is from an older Claktory. Update it where it runs, '
-        'then add this phone again.';
+        'then add this $thisDeviceKind again.';
   }
   if (target == null) {
     // A scanned one is most likely another QR code, such as a Wi-Fi one.
@@ -1494,11 +1664,16 @@ class _Link extends StatelessWidget {
     return Semantics(
       button: true,
       label: label,
+      // Its own tap, which excludeSemantics would drop with Pressable's:
+      // TalkBack and VoiceOver can activate it (Sale, #363).
+      onTap: onTap,
       excludeSemantics: true,
       child: Pressable(
         onTap: onTap,
-        builder: (context, hovered) => SizedBox(
-          height: 44,
+        // At least a finger's 44, and taller for a caption that wraps at
+        // large text, so none of it is cut.
+        builder: (context, hovered) => ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 44),
           child: Align(
             alignment: Alignment.centerLeft,
             widthFactor: 1,

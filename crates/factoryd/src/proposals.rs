@@ -42,6 +42,13 @@ CREATE TABLE proposals (
 CREATE INDEX proposals_by_agent ON proposals (agent, id);
 ";
 
+/// The migration that added answers (#370 Submit): 1 when the person
+/// answered it with a comment rather than approving it (state 'approved':
+/// Rivet acts on what they said).
+pub(crate) const REPLIED: &str = "
+ALTER TABLE proposals ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
+";
+
 /// The tool, one of the Messaging extension's, for agents that aren't admins.
 pub(crate) const TOOL: &str = "propose_to_rivet";
 
@@ -152,7 +159,7 @@ pub(crate) fn proposed(tool: &str, is_error: bool, details: &serde_json::Value) 
     let id = details.get("proposal")?.as_str()?.to_owned();
     let text = details.get("text").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
     let taint = details.get("taint").map(crate::pipes::agents::routes_from_json).unwrap_or_default();
-    Some(v1::Proposal { id, text, state: ProposalState::Pending.into(), comment: String::new(), decided_at_ms: 0, taint })
+    Some(v1::Proposal { id, text, state: ProposalState::Pending.into(), taint, ..Default::default() })
 }
 
 /// A proposal as recorded.
@@ -164,12 +171,22 @@ struct Row {
     decided: Option<i64>,
     /// JSON (`pipes::agents::routes_json`); null for none.
     taint: Option<String>,
+    /// Answered with a comment (#370), not approved.
+    replied: bool,
 }
 
-const COLUMNS: &str = "id, text, state, comment, decided, taint";
+const COLUMNS: &str = "id, text, state, comment, decided, taint, replied";
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
-    Ok(Row { id: row.get(0)?, text: row.get(1)?, state: row.get(2)?, comment: row.get(3)?, decided: row.get(4)?, taint: row.get(5)? })
+    Ok(Row {
+        id: row.get(0)?,
+        text: row.get(1)?,
+        state: row.get(2)?,
+        comment: row.get(3)?,
+        decided: row.get(4)?,
+        taint: row.get(5)?,
+        replied: row.get(6)?,
+    })
 }
 
 impl Row {
@@ -191,6 +208,7 @@ impl Row {
                 .and_then(|taint| serde_json::from_str(taint).ok())
                 .map(|taint| crate::pipes::agents::routes_from_json(&taint))
                 .unwrap_or_default(),
+            replied: self.replied,
         }
     }
 }
@@ -220,11 +238,18 @@ pub(crate) fn forget(store: &Store, agent: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// The person approves (with `comment`) or dismisses `agent`'s proposal.
-/// Approved, Rivet gets it as the person's message; it stays pending when
-/// there's no Rivet, or Rivet has no model. Either way the agent is told.
-pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: bool, comment: &str) -> Result<(), RequestError> {
+/// The person approves (with `comment`) or dismisses `agent`'s proposal,
+/// or answers it (`reply`, #370 Submit): Rivet gets it with their comment
+/// as what to do. Approved or answered, Rivet gets it as the person's
+/// message; it stays pending when there's no Rivet, or Rivet has no model.
+/// Either way the agent is told.
+pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: bool, reply: bool, comment: &str) -> Result<(), RequestError> {
     let comment = crate::decisions::comment(comment)?;
+    if reply && comment.is_empty() {
+        return Err(RequestError::Proposal("Write an answer, or approve or dismiss the proposal.".to_owned()));
+    }
+    // An answer goes to Rivet as an approval does.
+    let approve = approve || reply;
     let unknown = || RequestError::UnknownProposal(id.to_owned());
     let number: i64 = id.trim().parse().map_err(|_| unknown())?;
     let found = factory
@@ -257,15 +282,23 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
                 )));
             }
             Some(rivet) => {
-                let mut message = String::new();
-                if !comment.is_empty() {
-                    message.push_str(comment);
-                    message.push_str("\n\n");
-                }
                 let signed = match from {
                     Some(from) => agents::signed(config, from, rivet),
                     None => crate::chats::signed(factory, agent),
                 };
+                let mut message = String::new();
+                if reply {
+                    // Their comment is what to do; the proposal only says
+                    // what it was about.
+                    let (person, named) = (config.person(), config.person_capitalized());
+                    let _ = write!(
+                        message,
+                        "{named} answered {signed}'s proposal:\n\n{comment}\n\nDo what {person} says; the proposal is for context.\n\n"
+                    );
+                } else if !comment.is_empty() {
+                    message.push_str(comment);
+                    message.push_str("\n\n");
+                }
                 let _ = write!(message, "{signed} proposes:\n\n{}", row.text);
                 Some((rivet.id.clone(), message))
             }
@@ -276,8 +309,8 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
     let state = if approve { "approved" } else { "dismissed" };
     let decided = now_ms();
     let claimed = factory.store.db().execute(
-        "UPDATE proposals SET state = ?2, comment = ?3, decided = ?4 WHERE id = ?1 AND state = 'pending'",
-        params![number, state, comment, decided],
+        "UPDATE proposals SET state = ?2, comment = ?3, decided = ?4, replied = ?5 WHERE id = ?1 AND state = 'pending'",
+        params![number, state, comment, decided, reply],
     )?;
     if claimed == 0 {
         return Err(RequestError::Proposal("This proposal was already decided.".to_owned()));
@@ -285,10 +318,13 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
     if let Some((rivet, message)) = &delivery
         && let Err(error) = factory.send_message(rivet, message, None, "", &[])
     {
-        factory.store.db().execute("UPDATE proposals SET state = 'pending', comment = '', decided = NULL WHERE id = ?1", [number])?;
+        factory
+            .store
+            .db()
+            .execute("UPDATE proposals SET state = 'pending', comment = '', decided = NULL, replied = 0 WHERE id = ?1", [number])?;
         return Err(error);
     }
-    (row.state, row.comment, row.decided) = (state.to_owned(), comment.to_owned(), Some(decided));
+    (row.state, row.comment, row.decided, row.replied) = (state.to_owned(), comment.to_owned(), Some(decided), reply);
     // Its entry shows the decision.
     {
         let mut inner = factory.lock();
@@ -303,9 +339,20 @@ pub(crate) fn decide(factory: &Arc<Factory>, agent: &str, id: &str, approve: boo
             factory.broadcast_workspace(&inner);
         }
     }
-    let summary = format!("{person} {state} your proposal to {rivet_name}.");
     let about = crate::extensions::checklist::card_decided(factory, &crate::extensions::checklist::Card::Proposal(number), !approve);
-    let text = format!("{summary}{}\n\nYour proposal:\n{}{about}", crate::decisions::note(&person, comment), row.text);
+    let (summary, text) = if reply {
+        (
+            format!("{person} answered your proposal to {rivet_name}."),
+            format!(
+                "{person} answered your proposal; {rivet_name} acts on what they said:\n\n{comment}\n\nYour proposal:\n{}{about}",
+                row.text
+            ),
+        )
+    } else {
+        let summary = format!("{person} {state} your proposal to {rivet_name}.");
+        let text = format!("{summary}{}\n\nYour proposal:\n{}{about}", crate::decisions::note(&person, comment), row.text);
+        (summary, text)
+    };
     let event = host_event(summary);
     factory.deliver_event(agent, text, event);
     Ok(())

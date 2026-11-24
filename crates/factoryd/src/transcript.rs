@@ -3,11 +3,18 @@
 //!
 //! Each context window is one JSON file, `segment-NNNN.json`. Compaction starts
 //! a new segment whose first message is the summary, so older segments stay as
-//! read-only history and only the current one is rewritten.
+//! read-only history and only the current one is rewritten. A restart reads
+//! only the newest; the older ones' entries are read back when asked for
+//! (`older`). A segment is written a message at a time, as JSON Lines
+//! (`log`).
+
+pub(crate) mod log;
+mod older;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use factory_agent::{
@@ -17,11 +24,14 @@ use factory_agent::{
 use factory_protocol::v1::{self, Entry, NoticeLevel, ToolCallState, entry::Kind};
 use serde::{Deserialize, Serialize};
 
+pub use older::Older;
+use older::{Index, Next, Section, Stamp};
+
 /// Live tool output reaches clients at most this often.
 const TOOL_OUTPUT_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct CompactionInfo {
+pub(crate) struct CompactionInfo {
     summary: String,
     tokens_before: u64,
     /// Compacted while the agent was idle (`crate::idle`).
@@ -33,32 +43,8 @@ struct CompactionInfo {
     usage: Option<factory_agent::Usage>,
 }
 
-#[derive(Deserialize)]
-struct Segment {
-    #[serde(default)]
-    compaction: Option<CompactionInfo>,
-    messages: Vec<Message>,
-    #[serde(default)]
-    pinned: BTreeMap<String, String>,
-    /// When the person cleared the conversation, starting this segment.
-    #[serde(default)]
-    cleared: Option<i64>,
-    #[serde(default)]
-    frame: Option<Frame>,
-}
-
-#[derive(Serialize)]
-struct SegmentRef<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    compaction: Option<&'a CompactionInfo>,
-    messages: &'a [Message],
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pinned: &'a BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cleared: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    frame: Option<&'a Frame>,
-}
+/// A segment as read.
+type Segment = log::SegmentFile<Message>;
 
 /// What a segment's model calls start with: the system prompt and tools,
 /// written when the segment starts and sent byte for byte until the next, so
@@ -125,10 +111,95 @@ pub enum Change {
     Delta { seq: u64, text: String },
 }
 
-/// A file write the caller must perform, outside any lock.
+/// A save of the conversation's current segment, to make outside any lock
+/// (`write`): what's new since the last save, appended, or the segment
+/// whole. One that isn't made has the next save write the segment whole.
 pub struct Persist {
-    pub path: PathBuf,
-    pub bytes: Vec<u8>,
+    path: PathBuf,
+    save: Save,
+    unsaved: Arc<AtomicBool>,
+    made: bool,
+}
+
+enum Save {
+    Append(Vec<log::Line<Message>>),
+    /// As JSON Lines, or as JSON (`Transcript::old_form`).
+    Whole {
+        lines: bool,
+        segment: Box<OwnedSegment>,
+    },
+}
+
+/// A segment's parts, taken to write it whole.
+struct OwnedSegment {
+    compaction: Option<CompactionInfo>,
+    cleared: Option<i64>,
+    messages: Vec<Message>,
+    pinned: BTreeMap<String, String>,
+    frame: Option<Frame>,
+}
+
+impl Persist {
+    /// Makes the save, off the async threads.
+    pub async fn write(self) -> std::io::Result<()> {
+        let mut persist = self;
+        tokio::task::spawn_blocking(move || persist.write_now()).await.map_err(std::io::Error::other)?
+    }
+
+    /// Makes the save here.
+    pub fn write_now(&mut self) -> std::io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match &self.save {
+            Save::Append(lines) if lines.is_empty() => {}
+            Save::Append(lines) => {
+                let mut bytes = Vec::new();
+                for line in lines {
+                    log::push_line(line, &mut bytes).map_err(std::io::Error::other)?;
+                }
+                log::append(&self.path, &bytes)?;
+            }
+            Save::Whole { lines, segment } => {
+                let whole = log::WholeSegment {
+                    compaction: segment.compaction.as_ref(),
+                    cleared: segment.cleared,
+                    messages: &segment.messages,
+                    pinned: &segment.pinned,
+                    frame: segment.frame.as_ref(),
+                };
+                log::replace(&self.path, &whole.bytes(*lines).map_err(std::io::Error::other)?)?;
+            }
+        }
+        self.made = true;
+        Ok(())
+    }
+
+    /// The file it writes.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Persist {
+    fn drop(&mut self) {
+        if !self.made {
+            self.unsaved.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// What the current segment's file holds, as of the last save.
+#[derive(Default)]
+struct Saved {
+    /// Its number; 0 for no file yet.
+    segment: u32,
+    /// JSON Lines, appended to.
+    lines: bool,
+    messages: usize,
+    pinned: BTreeMap<String, String>,
+    /// Its frame is the segment's.
+    frame: bool,
 }
 
 #[derive(Default)]
@@ -163,8 +234,17 @@ pub struct Transcript {
     /// entries show in both the asker's and the admin agent's conversations,
     /// and which one waits for the person depends on which this is.
     owner: String,
-    /// An entry's seq is its index.
+    /// The seq of `entries`' first: the ones before are on disk (`older`),
+    /// in `sections`.
+    base: u64,
+    /// The entries held, from `base` on: the newest segment's, and the ones
+    /// before it a first page needs. An entry's seq is `base` + its index.
     entries: Vec<Entry>,
+    /// The entries before `base` still held: those that can change or are
+    /// looked up by what they show (`keeps`). They win over what's on disk.
+    kept: BTreeMap<u64, Entry>,
+    /// The older segments' entries on disk, before `base`.
+    sections: std::sync::Arc<[Section]>,
     segment: u32,
     compaction: Option<CompactionInfo>,
     messages: Vec<Message>,
@@ -174,6 +254,15 @@ pub struct Transcript {
     /// When the person cleared the conversation, if that started this segment.
     cleared: Option<i64>,
     frame: Option<Frame>,
+    /// Each segment's file, by number, as read.
+    files: BTreeMap<u32, PathBuf>,
+    /// What the current segment's file holds.
+    saved: Saved,
+    /// A save wasn't made: the next writes the segment whole.
+    unsaved: Arc<AtomicBool>,
+    /// Save a new segment, or one still JSON, as JSON: an update is on
+    /// trial, and the version it rolls back to may not read JSON Lines.
+    old_form: Arc<AtomicBool>,
     context_tokens: u64,
     /// The entries waiting for the person's answer (see `waits`).
     waiting: BTreeSet<u64>,
@@ -186,6 +275,56 @@ pub struct Transcript {
     /// as runs: from the response whose first entry is this seq on, until
     /// the next. For reporting a reply (`report`).
     models: Vec<(u64, String)>,
+    /// Where each message the agent was given (the person's or an event,
+    /// never a tool's result) is kept, by its entry's seq. A conversation
+    /// goes back to right before one of these (`crate::fork`).
+    origins: BTreeMap<u64, Origin>,
+    /// It shows entries a reload wouldn't: notices, messages that never
+    /// reached the model, what a response streamed before it failed. It
+    /// stays in memory while it does (`reads_back_the_same`).
+    shown_only: bool,
+}
+
+/// Where a message the agent was given is kept: its segment, and its index
+/// in that segment's messages; and when it was given (its entry's time).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Origin {
+    segment: u32,
+    index: u32,
+    ms: i64,
+}
+
+/// A page of entries (`Transcript::page`): at hand, or to read from disk
+/// first, off the async threads (`OlderPage::read`).
+pub enum Page {
+    Here(Vec<Entry>, bool),
+    Older(OlderPage),
+}
+
+/// A page that starts before the entries held.
+pub struct OlderPage {
+    older: Older,
+    /// The page's entries held in memory.
+    held: Vec<Entry>,
+    before: u64,
+    limit: u32,
+    from: Option<u64>,
+}
+
+impl OlderPage {
+    /// The page's entries, and whether there are earlier ones.
+    pub fn read(self) -> std::io::Result<(Vec<Entry>, bool)> {
+        self.older.page(self.held, self.before, self.limit, self.from)
+    }
+}
+
+/// Where a conversation can go back to (`crate::fork`): right before the
+/// message at `index` of segment `segment`, given at `at_ms`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForkPoint {
+    pub segment: u32,
+    pub index: u32,
+    pub at_ms: i64,
 }
 
 /// What a snapshot of the conversation holds at most: the latest entries,
@@ -208,45 +347,114 @@ impl Transcript {
         }
     }
 
-    fn read(dir: PathBuf, owner: String) -> Result<Transcript, TranscriptError> {
-        let mut transcript = Transcript {
+    fn empty(dir: PathBuf, owner: String, cleared: Option<i64>) -> Transcript {
+        Transcript {
             dir,
             owner,
+            base: 0,
             entries: Vec::new(),
+            kept: BTreeMap::new(),
+            sections: std::sync::Arc::new([]),
             segment: 1,
             compaction: None,
             messages: Vec::new(),
             pinned: BTreeMap::new(),
-            cleared: None,
+            cleared,
             frame: None,
+            files: BTreeMap::new(),
+            saved: Saved::default(),
+            unsaved: Arc::new(AtomicBool::new(false)),
+            old_form: Arc::new(AtomicBool::new(false)),
             context_tokens: 0,
             waiting: BTreeSet::new(),
             awaiting_reply: None,
             live: Live::default(),
             models: Vec::new(),
-        };
-        let mut numbers = Vec::new();
-        match std::fs::read_dir(&transcript.dir) {
-            Ok(files) => {
-                for file in files {
-                    if let Some(number) = segment_number(&file?.file_name()) {
-                        numbers.push(number);
-                    }
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(transcript),
-            Err(error) => return Err(error.into()),
+            origins: BTreeMap::new(),
+            shown_only: false,
         }
-        numbers.sort_unstable();
-        for number in numbers {
-            let path = transcript.segment_path(number);
-            let bytes = std::fs::read(&path)?;
-            let segment = serde_json::from_slice(&bytes).map_err(|source| TranscriptError::Corrupt { path, source })?;
-            transcript.restore(number, segment);
+    }
+
+    /// Reads the conversation: its older segments' entries from the index
+    /// of them (`older`) as far as it still matches them, the rest from the
+    /// segments, which then go into the index; the newest segment, the
+    /// model's context, always whole. Holds the newest segment's entries
+    /// and the ones before it a first page needs.
+    fn read(dir: PathBuf, owner: String) -> Result<Transcript, TranscriptError> {
+        let mut transcript = Transcript::empty(dir, owner, None);
+        transcript.files = log::files(&transcript.dir)?;
+        let numbers: Vec<u32> = transcript.files.keys().copied().collect();
+        let Some((&newest, older)) = numbers.split_last() else {
+            older::forget(&transcript.dir, true);
+            return Ok(transcript);
+        };
+        if older.is_empty() {
+            older::forget(&transcript.dir, true);
+        }
+        let stamps =
+            older.iter().map(|number| Ok((*number, Stamp::of(&transcript.files[number])?))).collect::<std::io::Result<Vec<_>>>()?;
+        let index = if older.is_empty() { None } else { Index::read(&transcript.dir, &stamps) };
+        // What's kept in memory of the older segments once they're on disk.
+        let mut keep = BTreeSet::new();
+        let mut sections = Vec::new();
+        match &index {
+            Some(index) => {
+                transcript.resume(index, &mut keep);
+                sections.clone_from(&index.sections);
+            }
+            None if !older.is_empty() => older::forget(&transcript.dir, false),
+            None => {}
+        }
+        let cached = sections.len();
+        let next = index.as_ref().and_then(|index| index.next);
+        // The segment before the first one read, whose messages weren't.
+        let mut before = cached.checked_sub(1).map(|at| older[at]);
+        for (number, stamp) in &stamps[cached..] {
+            let first = transcript.len();
+            // An older segment is only shown, and images show as "[image]":
+            // their data, often most of its bytes, isn't kept (#377).
+            let segment = transcript.parse(*number, false)?;
+            transcript.restore_after(*number, segment, next, before.take())?;
+            sections.push(Section { number: *number, file: *stamp, first, count: transcript.len() - first, offset: 0, bytes: 0 });
+        }
+        // The index keeps the state after the older segments.
+        let added = (sections.len() > cached).then(|| transcript.snapshot(&mut sections, cached, &mut keep, index.as_ref()));
+        let newest_first = transcript.len();
+        let segment = transcript.parse(newest, true)?;
+        // Saves append to it, unless it must be written whole first: a crash
+        // cut its last save off, it's JSON, or another name links to it.
+        let path = &transcript.files[&newest];
+        transcript.saved = Saved {
+            segment: newest,
+            lines: log::is_lines(path),
+            messages: segment.messages.len(),
+            pinned: segment.pinned.clone(),
+            frame: true,
+        };
+        if segment.torn || (log::is_lines(path) && !log::appendable(path)) {
+            transcript.unsaved.store(true, Ordering::Relaxed);
+        }
+        let summary_ms = summary_ms(&segment);
+        let shown_from = transcript.restore_after(newest, segment, next, before.take())?;
+        let next_now = summary_ms.map(|summary_ms| Next { number: newest, summary_ms, shown_from: u32::try_from(shown_from).unwrap_or(0) });
+        let mut on_disk = cached;
+        let written = match (added, index) {
+            (Some((mut index, from, bytes)), _) => {
+                index.next = next_now;
+                index.write(&transcript.dir, from, &bytes).map(|()| on_disk = sections.len())
+            }
+            (None, Some(mut index)) if index.next != next_now => {
+                index.next = next_now;
+                index.write(&transcript.dir, index.end(), &[])
+            }
+            _ => Ok(()),
+        };
+        if let Err(error) = written {
+            tracing::warn!(dir = %transcript.dir.display(), %error, "could not write a conversation's index; its older entries stay in memory");
         }
         // Nothing is running yet, so a call still without a result was cut off
         // by a restart. The model is told the same ("No result provided").
-        for entry in &mut transcript.entries {
+        for entry in transcript.kept.values_mut().chain(&mut transcript.entries) {
             if let Some(Kind::ToolCall(call)) = &mut entry.kind
                 && matches!(call.state(), ToolCallState::Pending | ToolCallState::Running)
             {
@@ -254,83 +462,224 @@ impl Transcript {
                 call.output = "Interrupted: Claktory restarted before this finished.".to_owned();
             }
         }
+        transcript.hold(sections, on_disk, newest_first, &keep);
         Ok(transcript)
+    }
+
+    /// A segment of the conversation, read whole or without its images' data.
+    fn parse(&self, number: u32, whole: bool) -> Result<Segment, TranscriptError> {
+        let path = self.files.get(&number).cloned().unwrap_or_else(|| log::path(&self.dir, number, true));
+        let bytes = std::fs::read(&path)?;
+        let parse = || log::parse::<Message>(&path, &bytes);
+        let segment = if whole { parse() } else { factory_agent::types::without_image_data(parse) };
+        segment.map_err(|source| TranscriptError::Corrupt { path, source })
+    }
+
+    /// Picks up after the older segments the index has, from the state it
+    /// keeps; `keep` gets the seqs of the entries it keeps.
+    fn resume(&mut self, index: &Index, keep: &mut BTreeSet<u64>) {
+        self.base = index.sections.last().map_or(0, |last| last.first + last.count);
+        self.segment = index.sections.last().map_or(1, |last| last.number);
+        for entry in index.kept() {
+            keep.insert(entry.seq);
+            self.track(&entry);
+            self.kept.insert(entry.seq, entry);
+        }
+        self.awaiting_reply = index.awaiting_reply;
+        self.live.tools = index.tools.iter().cloned().collect();
+        self.models.clone_from(&index.models);
+        self.origins = index.origins.iter().copied().collect();
+    }
+
+    /// Restores a segment read after the index's (`resume`): where its shown
+    /// messages start is known from the index when it's the segment the
+    /// index last knew as the newest (`next`); else, when it carries
+    /// messages over from `before`, whose messages weren't read, from those.
+    fn restore_after(&mut self, number: u32, segment: Segment, next: Option<Next>, before: Option<u32>) -> Result<usize, TranscriptError> {
+        let summary_ms = summary_ms(&segment);
+        let shown_from =
+            next.filter(|next| next.number == number && Some(next.summary_ms) == summary_ms).map(|next| next.shown_from as usize);
+        if shown_from.is_none()
+            && summary_ms.is_some()
+            && let Some(before) = before
+        {
+            self.messages = self.parse(before, false)?.messages;
+        }
+        Ok(self.restore(number, segment, shown_from))
+    }
+
+    /// The index of the older segments just read, `sections[from..]`: their
+    /// entries, encoded, where they go in the entries file, and the state
+    /// after them. `keep` gains what of them is kept in memory.
+    fn snapshot(&self, sections: &mut [Section], from: usize, keep: &mut BTreeSet<u64>, index: Option<&Index>) -> (Index, u64, Vec<u8>) {
+        let end = index.map_or(0, Index::end);
+        let mut bytes = Vec::new();
+        for section in &mut sections[from..] {
+            let start = usize::try_from(section.first - self.base).unwrap_or(usize::MAX).min(self.entries.len());
+            let entries = &self.entries[start..(start + section.count as usize).min(self.entries.len())];
+            section.offset = end + bytes.len() as u64;
+            older::encode(entries, &mut bytes);
+            section.bytes = end + bytes.len() as u64 - section.offset;
+            keep.extend(entries.iter().filter(|entry| keeps(entry)).map(|entry| entry.seq));
+        }
+        let index = Index {
+            version: 0,
+            sections: sections.to_vec(),
+            awaiting_reply: self.awaiting_reply,
+            tools: self.live.tools.iter().filter(|(_, seq)| keep.contains(seq)).map(|(id, seq)| (id.clone(), *seq)).collect(),
+            models: self.models.clone(),
+            origins: self.origins.iter().map(|(seq, origin)| (*seq, *origin)).collect(),
+            kept: Index::encode_kept(keep.iter().filter_map(|seq| self.entry(*seq))),
+            next: None,
+        };
+        (index, end, bytes)
+    }
+
+    /// Holds the newest segment's entries and the older sections' a first
+    /// page needs; lets go of the rest, but for what's kept (`keep`).
+    /// `sections[..on_disk]` are on disk; the rest stay held.
+    fn hold(&mut self, sections: Vec<Section>, on_disk: usize, newest_first: u64, keep: &BTreeSet<u64>) {
+        // sections[at..] are held.
+        let mut at = sections.len();
+        let mut from = newest_first;
+        loop {
+            if from < self.base {
+                let older = Older::new(self.dir.clone(), sections[..=at].into(), self.kept.clone());
+                match older.section(at) {
+                    Ok(mut entries) => {
+                        for entry in &entries {
+                            self.kept.remove(&entry.seq);
+                        }
+                        entries.append(&mut self.entries);
+                        self.entries = entries;
+                        self.base = from;
+                    }
+                    Err(error) => {
+                        tracing::warn!(dir = %self.dir.display(), %error, "could not read a conversation's older entries");
+                        at += 1;
+                        from = sections.get(at).map_or(newest_first, |section| section.first);
+                        break;
+                    }
+                }
+            }
+            let held = &self.entries[usize::try_from(from - self.base).unwrap_or(usize::MAX).min(self.entries.len())..];
+            if at == 0 || page_start(held, from, self.len(), 0, None).is_some() {
+                break;
+            }
+            at -= 1;
+            from = sections[at].first;
+        }
+        if at > on_disk {
+            at = on_disk;
+            from = sections.get(at).map_or(newest_first, |section| section.first);
+        }
+        let from = from.max(self.base);
+        let gone = usize::try_from(from - self.base).unwrap_or(usize::MAX).min(self.entries.len());
+        for entry in self.entries.drain(..gone) {
+            if keep.contains(&entry.seq) {
+                self.kept.insert(entry.seq, entry);
+            }
+        }
+        self.base = from;
+        self.sections = sections[..at].into();
     }
 
     /// A new, empty conversation the person started with /clear, and its
     /// first file. The old conversation's files must be out of `dir`.
-    pub fn cleared(dir: PathBuf, owner: String) -> Result<(Transcript, Persist), serde_json::Error> {
+    /// `old_form` as `save_old_form` takes it.
+    pub fn cleared(dir: PathBuf, owner: String, old_form: Arc<AtomicBool>) -> (Transcript, Persist) {
         let now = now_ms();
-        let mut transcript = Transcript {
-            dir,
-            owner,
-            entries: Vec::new(),
-            segment: 1,
-            compaction: None,
-            messages: Vec::new(),
-            pinned: BTreeMap::new(),
-            cleared: Some(now),
-            frame: None,
-            context_tokens: 0,
-            waiting: BTreeSet::new(),
-            awaiting_reply: None,
-            live: Live::default(),
-            models: Vec::new(),
-        };
+        let mut transcript = Transcript::empty(dir, owner, Some(now));
+        transcript.old_form = old_form;
         transcript.push(now, notice(CLEARED.to_owned(), NoticeLevel::Info));
-        let persist = transcript.persist()?;
-        Ok((transcript, persist))
+        let persist = transcript.persist();
+        (transcript, persist)
     }
 
     /// The latest entries, as a snapshot sends them, and whether there are
-    /// earlier ones.
+    /// earlier ones. Always held (`hold`).
     pub fn recent(&self) -> (Vec<Entry>, bool) {
-        self.page(self.entries.len() as u64, 0, None).unwrap_or_default()
+        match self.page(self.len(), 0, None) {
+            Some(Page::Here(entries, more)) => (entries, more),
+            Some(Page::Older(page)) => (page.held, true),
+            None => Default::default(),
+        }
     }
 
     /// Entries before `before` (a seq, exclusive): from `from` on when set,
     /// else the latest, at most `limit` (0 for `PAGE_ENTRIES`) and about
     /// `PAGE_BYTES`, and never starting partway through a model response
     /// unless that response alone is bigger. Whether there are earlier ones.
-    /// None when `before` is beyond the end.
-    pub fn page(&self, before: u64, limit: u32, from: Option<u64>) -> Option<(Vec<Entry>, bool)> {
-        let end = usize::try_from(before).ok().filter(|end| *end <= self.entries.len())?;
-        let start = match from {
-            Some(from) => usize::try_from(from).unwrap_or(usize::MAX).min(end),
-            None => {
-                let limit = match limit {
-                    0 => PAGE_ENTRIES,
-                    limit => (limit as usize).min(MAX_PAGE_ENTRIES),
-                };
-                let mut start = end;
-                let mut bytes = 0usize;
-                while start > 0 && end - start < limit {
-                    let size = prost::Message::encoded_len(&self.entries[start - 1]);
-                    if start < end && bytes + size > PAGE_BYTES {
-                        break;
-                    }
-                    bytes += size;
-                    start -= 1;
-                }
-                // The whole model response the first entry is part of.
-                if let Some(first) = self.entries.get(start)
-                    && first.reply != 0
-                    && (first.reply as usize) < start
-                {
-                    let response = first.reply as usize;
-                    let extra: usize = self.entries[response..start].iter().map(prost::Message::encoded_len).sum();
-                    if bytes + extra <= PAGE_BYTES * 2 {
-                        start = response;
-                    }
-                }
-                start
-            }
-        };
-        Some((self.entries[start..end].to_vec(), start > 0))
+    /// None when `before` is beyond the end; to read from disk first when it
+    /// starts before the entries held.
+    pub fn page(&self, before: u64, limit: u32, from: Option<u64>) -> Option<Page> {
+        if before > self.len() {
+            return None;
+        }
+        let offset = self.base.min(before);
+        let held = if before > self.base { &self.entries[..usize::try_from(before - self.base).ok()?] } else { &[] };
+        Some(match page_start(held, offset, before, limit, from) {
+            Some(start) => Page::Here(held[usize::try_from(start - offset).ok()?..].to_vec(), start > 0),
+            None => Page::Older(OlderPage { older: self.older(), held: held.to_vec(), before, limit, from }),
+        })
     }
 
-    pub fn entries(&self) -> &[Entry] {
-        &self.entries
+    /// The older entries on disk, to read off the async threads.
+    pub fn older(&self) -> Older {
+        Older::new(self.dir.clone(), self.sections.clone(), self.kept.clone())
+    }
+
+    /// How many entries the conversation has: the next one's seq.
+    pub fn len(&self) -> u64 {
+        self.base + self.entries.len() as u64
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The entries held from `base` on (`window`'s first): the newest
+    /// segment's and the ones before it a first page needs.
+    pub fn window(&self) -> (u64, &[Entry]) {
+        (self.base, &self.entries)
+    }
+
+    /// The held entries from `seq` on.
+    pub fn since(&self, seq: u64) -> &[Entry] {
+        let from = usize::try_from(seq.saturating_sub(self.base)).unwrap_or(usize::MAX).min(self.entries.len());
+        &self.entries[from..]
+    }
+
+    /// The entry `seq`, if it's held: every card and call still waiting
+    /// is, older ones too; read others with `older`.
+    pub fn entry(&self, seq: u64) -> Option<&Entry> {
+        match seq.checked_sub(self.base) {
+            Some(index) => self.entries.get(usize::try_from(index).ok()?),
+            None => self.kept.get(&seq),
+        }
+    }
+
+    /// The entries held, oldest first: the older ones kept, then the window.
+    pub fn in_memory(&self) -> impl DoubleEndedIterator<Item = &Entry> + '_ {
+        self.kept.values().chain(&self.entries)
+    }
+
+    fn in_memory_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut Entry> + '_ {
+        self.kept.values_mut().chain(&mut self.entries)
+    }
+
+    /// The held entry `seq`, from the fields, so other fields stay free.
+    fn at<'a>(entries: &'a mut [Entry], kept: &'a mut BTreeMap<u64, Entry>, base: u64, seq: u64) -> Option<&'a mut Entry> {
+        match seq.checked_sub(base) {
+            Some(index) => entries.get_mut(usize::try_from(index).ok()?),
+            None => kept.get_mut(&seq),
+        }
+    }
+
+    /// The seqs of the messages the agent was given, oldest first: where the
+    /// conversation can go back to (`fork_point`).
+    pub fn origin_seqs(&self) -> impl DoubleEndedIterator<Item = u64> + '_ {
+        self.origins.keys().copied()
     }
 
     /// The model that wrote the response whose first entry is `reply`
@@ -363,6 +712,13 @@ impl Transcript {
     /// Sets the segment's frame; it's saved with the segment's next write.
     pub fn set_frame(&mut self, frame: Frame) {
         self.frame = Some(frame);
+        self.saved.frame = false;
+    }
+
+    /// Has saves keep a new segment, or one still JSON, as JSON while `old`
+    /// says so (an update on trial).
+    pub fn save_old_form(&mut self, old: Arc<AtomicBool>) {
+        self.old_form = old;
     }
 
     pub fn context_tokens(&self) -> u64 {
@@ -386,7 +742,7 @@ impl Transcript {
 
     /// Replaces the latest shown item of the same kind and id, keeping its entry metadata.
     fn replace_shown(&mut self, kind: Kind) -> Option<Entry> {
-        let entry = self.entries.iter_mut().rev().find(|entry| match (&entry.kind, &kind) {
+        let entry = self.in_memory_mut().rev().find(|entry| match (&entry.kind, &kind) {
             (Some(Kind::Proposal(shown)), Kind::Proposal(updated)) => shown.id == updated.id,
             (Some(Kind::SecretRequest(shown)), Kind::SecretRequest(updated)) => shown.id == updated.id,
             (Some(Kind::ConnectProposal(shown)), Kind::ConnectProposal(updated)) => shown.id == updated.id,
@@ -413,7 +769,7 @@ impl Transcript {
     /// entries that changed.
     fn close_collect_cards(&mut self, id: &str) -> Vec<Entry> {
         let mut closed = Vec::new();
-        for entry in &mut self.entries {
+        for entry in self.in_memory_mut() {
             if let Some(Kind::SecretRequest(request)) = &mut entry.kind
                 && request.id == id
                 && request.collecting
@@ -446,7 +802,7 @@ impl Transcript {
     /// comes from the devices_add call, and factory.db doesn't record it.
     pub fn set_device_pairing(&mut self, mut pairing: v1::DevicePairing) -> Option<Entry> {
         if pairing.kind() == v1::DeviceKind::Unspecified {
-            let shown = self.entries.iter().rev().find_map(|entry| match &entry.kind {
+            let shown = self.in_memory().rev().find_map(|entry| match &entry.kind {
                 Some(Kind::DevicePairing(shown)) if shown.id == pairing.id => Some(shown.kind),
                 _ => None,
             });
@@ -478,11 +834,15 @@ impl Transcript {
     }
 
     /// Shows a pipe secret approval as decided; None if it isn't shown.
-    pub fn set_secret_approval(&mut self, id: &str, state: v1::SecretApprovalState, decided_ms: i64) -> Option<Entry> {
-        let entry = self.entries.iter_mut().find(|entry| matches!(&entry.kind, Some(Kind::SecretApproval(shown)) if shown.id == id))?;
+    /// `reply`: the person's reply when they answered it with a comment
+    /// (#370), else None.
+    pub fn set_secret_approval(&mut self, id: &str, state: v1::SecretApprovalState, decided_ms: i64, reply: Option<&str>) -> Option<Entry> {
+        let entry = self.in_memory_mut().find(|entry| matches!(&entry.kind, Some(Kind::SecretApproval(shown)) if shown.id == id))?;
         if let Some(Kind::SecretApproval(approval)) = &mut entry.kind {
             approval.state = state.into();
             approval.decided_ms = decided_ms;
+            approval.replied = reply.is_some();
+            approval.comment = reply.unwrap_or_default().to_owned();
         }
         let entry = entry.clone();
         self.track(&entry);
@@ -497,26 +857,50 @@ impl Transcript {
 
     /// Adds a harness notice. Notices are for display only and aren't saved.
     pub fn notice(&mut self, text: impl Into<String>, level: NoticeLevel) -> Entry {
+        self.shown_only = true;
         self.push(now_ms(), notice(text.into(), level))
     }
 
     /// Shows a message that never reached the model (e.g. the run couldn't
     /// start). Display only.
     pub fn unsent(&mut self, message: &UserMessage) -> Entry {
+        self.shown_only = true;
         self.push(now_ms(), user_kind(message))
+    }
+
+    /// Whether reading its files again gives what it holds: everything it
+    /// shows is saved, and nothing it shows is for display only. Then it
+    /// can be unloaded (`crate::unload`).
+    pub fn reads_back_the_same(&self) -> bool {
+        !self.shown_only
+            && self.live.reply.is_none()
+            && self.live.parts.iter().all(Option::is_none)
+            && !self.unsaved.load(Ordering::Relaxed)
+            // No save of it is still to be written: each holds `unsaved`.
+            && Arc::strong_count(&self.unsaved) == 1
+            && self.saved.segment == self.segment
+            && self.saved.messages == self.messages.len()
+            && self.saved.pinned == self.pinned
+            && (self.saved.frame || self.frame.is_none())
+    }
+
+    /// Drops what the response being shown streamed into, which stays
+    /// shown, for display only, when no complete message took it over.
+    fn end_live(&mut self) {
+        self.shown_only |= self.live.reply.is_some() || self.live.parts.iter().any(Option::is_some);
+        self.live.parts.clear();
+        self.live.reply = None;
     }
 
     pub fn apply(&mut self, event: AgentEvent) -> Result<Applied, serde_json::Error> {
         let mut applied = Applied::default();
         match event {
-            AgentEvent::MessageStart { message: Message::Assistant(_) } => {
-                self.live.parts.clear();
-                self.live.reply = None;
-            }
+            AgentEvent::MessageStart { message: Message::Assistant(_) } => self.end_live(),
             AgentEvent::MessageUpdate { assistant_message_event, .. } => self.stream(*assistant_message_event, &mut applied.changes),
             AgentEvent::MessageEnd { message } => {
                 let waiting = self.waiting.len();
-                for entry in self.show(&message) {
+                let at = (self.segment, u32::try_from(self.messages.len()).unwrap_or(u32::MAX));
+                for entry in self.show(&message, at) {
                     applied.changes.push(Change::Entry(entry));
                 }
                 // A request or proposal now waits for the person.
@@ -530,7 +914,7 @@ impl Transcript {
                 }
                 applied.user_message = matches!(message, Message::User(_));
                 self.messages.push(message);
-                applied.persist = Some(self.persist()?);
+                applied.persist = Some(self.persist());
             }
             AgentEvent::ToolExecutionStart { tool_call_id, .. } => {
                 let times = Times { started: Some(now_ms()), ended: None };
@@ -561,18 +945,14 @@ impl Transcript {
             // The response failed partway and will be requested again. What it
             // streamed stays visible; the retry streams into new entries.
             AgentEvent::Retrying { attempt, delay_ms, .. } => {
-                self.live.parts.clear();
-                self.live.reply = None;
+                self.end_live();
                 let seconds = delay_ms.div_ceil(1000);
                 let text = format!("The model request failed. Retrying in {seconds}s (attempt {attempt}).");
-                applied.changes.push(Change::Entry(self.push(now_ms(), notice(text, NoticeLevel::Info))));
+                applied.changes.push(Change::Entry(self.notice(text, NoticeLevel::Info)));
             }
             // The response failed for want of an account with capacity: the
             // run waits (`crate::waits` says so) and asks again.
-            AgentEvent::Waiting { .. } => {
-                self.live.parts.clear();
-                self.live.reply = None;
-            }
+            AgentEvent::Waiting { .. } => self.end_live(),
             AgentEvent::Compacted { summary, tokens_before, messages, usage, reason } => {
                 let idle = reason == factory_agent::compaction::Reason::Idle;
                 self.segment += 1;
@@ -587,14 +967,18 @@ impl Transcript {
                 self.frame = None;
                 self.context_tokens = 0;
                 applied.context_changed = true;
-                applied.persist = Some(self.persist()?);
+                applied.persist = Some(self.persist());
             }
             _ => {}
         }
         Ok(applied)
     }
 
-    fn restore(&mut self, number: u32, segment: Segment) {
+    /// Shows a segment read back after the ones before it. Messages
+    /// compaction carried over are shown where they appeared live, at the end
+    /// of the segment before: those before `shown_from` when it's given, else
+    /// as many as end that segment. Where the messages shown start.
+    fn restore(&mut self, number: u32, segment: Segment, shown_from: Option<usize>) -> usize {
         self.segment = number;
         if let Some(time) = segment.cleared {
             self.push(time, notice(CLEARED.to_owned(), NoticeLevel::Info));
@@ -609,15 +993,28 @@ impl Transcript {
             let kind =
                 Kind::Compaction(v1::Compaction { summary: info.summary.clone(), tokens_before: info.tokens_before, idle: info.idle });
             self.push(summary.timestamp() as i64, kind);
-            let mut carried = kept.len().min(self.messages.len());
-            while carried > 0 && !self.messages.ends_with(&kept[..carried]) {
-                carried -= 1;
-            }
+            let carried = match shown_from {
+                Some(from) => from.saturating_sub(1).min(kept.len()),
+                None => {
+                    let mut carried = kept.len().min(self.messages.len());
+                    // The previous segment's were read without their images' data.
+                    let ends_with = |carried: usize| {
+                        let tail = &self.messages[self.messages.len() - carried..];
+                        tail.iter().zip(&kept[..carried]).all(|(before, kept)| same_but_images(before, kept))
+                    };
+                    while carried > 0 && !ends_with(carried) {
+                        carried -= 1;
+                    }
+                    carried
+                }
+            };
             messages = &kept[carried..];
         }
         self.context_tokens = 0;
-        for message in messages {
-            self.show(message);
+        // Where the messages shown start in the segment's own.
+        let offset = segment.messages.len() - messages.len();
+        for (index, message) in messages.iter().enumerate() {
+            self.show(message, (number, u32::try_from(offset + index).unwrap_or(u32::MAX)));
             if let Message::Assistant(assistant) = message {
                 let tokens = context_tokens(assistant);
                 if tokens > 0 {
@@ -630,13 +1027,16 @@ impl Transcript {
         self.pinned = segment.pinned;
         self.cleared = segment.cleared;
         self.frame = segment.frame;
+        offset
     }
 
-    /// Shows a complete message, reusing the entries its stream already created.
-    fn show(&mut self, message: &Message) -> Vec<Entry> {
+    /// Shows a complete message, reusing the entries its stream already
+    /// created; `at` is where it's kept (its segment and index there).
+    fn show(&mut self, message: &Message, at: (u32, u32)) -> Vec<Entry> {
         match message {
             Message::User(user) => {
                 let entry = self.push(user.timestamp as i64, user_kind(user));
+                self.origins.insert(entry.seq, Origin { segment: at.0, index: at.1, ms: entry.timestamp_ms });
                 // The next assistant text answers the latest prompt: the
                 // person's message is quoted by it; an event's reply isn't.
                 self.awaiting_reply = user.event.is_none().then_some(entry.seq);
@@ -728,7 +1128,7 @@ impl Transcript {
             };
             let seq = match streamed {
                 Some(seq) => {
-                    let entry = &mut self.entries[seq as usize];
+                    let Some(entry) = Self::at(&mut self.entries, &mut self.kept, self.base, seq) else { continue };
                     if entry.kind.as_ref() != Some(&kind) {
                         entry.kind = Some(kind);
                         changed.push(entry.clone());
@@ -743,7 +1143,9 @@ impl Transcript {
                         && let Some(from) = self.awaiting_reply.take()
                     {
                         entry.replied_to = Some(from);
-                        self.entries[entry.seq as usize].replied_to = Some(from);
+                        if let Some(held) = Self::at(&mut self.entries, &mut self.kept, self.base, entry.seq) {
+                            held.replied_to = Some(from);
+                        }
                     }
                     let seq = entry.seq;
                     changed.push(entry);
@@ -811,7 +1213,9 @@ impl Transcript {
                 // its first streamed word on.
                 if let Some(from) = self.awaiting_reply.take() {
                     entry.replied_to = Some(from);
-                    self.entries[entry.seq as usize].replied_to = Some(from);
+                    if let Some(held) = Self::at(&mut self.entries, &mut self.kept, self.base, entry.seq) {
+                        held.replied_to = Some(from);
+                    }
                 }
                 changes.push(Change::Entry(entry));
             }
@@ -829,7 +1233,8 @@ impl Transcript {
             }
             StreamEvent::TextDelta { content_index, delta, .. } | StreamEvent::ThinkingDelta { content_index, delta, .. } => {
                 let Some(seq) = self.live.parts.get(content_index).copied().flatten() else { return };
-                match &mut self.entries[seq as usize].kind {
+                let Some(entry) = Self::at(&mut self.entries, &mut self.kept, self.base, seq) else { return };
+                match &mut entry.kind {
                     Some(Kind::Assistant(v1::AssistantText { text })) | Some(Kind::Thinking(v1::Thinking { text })) => {
                         text.push_str(&delta);
                         changes.push(Change::Delta { seq, text: delta });
@@ -843,7 +1248,7 @@ impl Transcript {
                 let Some(seq) = self.live.parts.get(content_index).copied().flatten() else { return };
                 let now = Instant::now();
                 let due = self.live.tool_pushed.get(&seq).is_none_or(|last| now.duration_since(*last) >= TOOL_OUTPUT_INTERVAL);
-                let entry = &mut self.entries[seq as usize];
+                let Some(entry) = Self::at(&mut self.entries, &mut self.kept, self.base, seq) else { return };
                 if let Some(Kind::ToolCall(call)) = &mut entry.kind {
                     call.input.push_str(&delta);
                     if due {
@@ -854,7 +1259,7 @@ impl Transcript {
             }
             StreamEvent::ToolcallEnd { content_index, tool_call: AssistantPart::ToolCall { id, name, arguments, .. }, .. } => {
                 let Some(seq) = self.live.parts.get(content_index).copied().flatten() else { return };
-                let entry = &mut self.entries[seq as usize];
+                let Some(entry) = Self::at(&mut self.entries, &mut self.kept, self.base, seq) else { return };
                 if let Some(Kind::ToolCall(call)) = &mut entry.kind {
                     call.call_id = id.clone();
                     call.input = pretty(&arguments);
@@ -880,7 +1285,7 @@ impl Transcript {
     /// and its result with details once it's done.
     fn update_tool(&mut self, call_id: &str, output: Option<ToolOutput>, state: ToolCallState, times: Times) -> Option<Entry> {
         let seq = *self.live.tools.get(call_id)?;
-        let entry = &mut self.entries[seq as usize];
+        let entry = Self::at(&mut self.entries, &mut self.kept, self.base, seq)?;
         let Some(Kind::ToolCall(call)) = &mut entry.kind else { return None };
         if matches!(state, ToolCallState::Done | ToolCallState::Failed) {
             self.live.tool_pushed.remove(&seq);
@@ -907,7 +1312,7 @@ impl Transcript {
     }
 
     fn push(&mut self, timestamp_ms: i64, kind: Kind) -> Entry {
-        let entry = Entry { seq: self.entries.len() as u64, timestamp_ms, kind: Some(kind), reply: 0, replied_to: None };
+        let entry = Entry { seq: self.len(), timestamp_ms, kind: Some(kind), reply: 0, replied_to: None };
         self.entries.push(entry.clone());
         self.track(&entry);
         entry
@@ -915,31 +1320,280 @@ impl Transcript {
 
     /// Adds an entry of the model response being shown.
     fn push_part(&mut self, timestamp_ms: i64, kind: Kind) -> Entry {
-        let seq = self.entries.len() as u64;
+        let seq = self.len();
         let reply = *self.live.reply.get_or_insert(seq);
         let entry = Entry { seq, timestamp_ms, kind: Some(kind), reply, replied_to: None };
         self.entries.push(entry.clone());
         entry
     }
 
-    fn persist(&self) -> Result<Persist, serde_json::Error> {
-        let segment = SegmentRef {
-            compaction: self.compaction.as_ref(),
-            messages: &self.messages,
-            pinned: &self.pinned,
-            cleared: self.cleared,
-            frame: self.frame.as_ref(),
+    /// Where the conversation goes back to when the person (or an agent)
+    /// takes it back to the entry `seq` (`entry`, read back if it isn't
+    /// held), which must still have `timestamp_ms`: right before it, for a
+    /// message the agent was given (the person's or an event); right before
+    /// the next one, for the agent's reply, so the whole run it's part of
+    /// stays. Else why not, in the person's words.
+    pub fn fork_point(&self, seq: u64, entry: Option<&Entry>, timestamp_ms: i64) -> Result<ForkPoint, &'static str> {
+        let Some(entry) = entry.filter(|entry| entry.seq == seq && entry.timestamp_ms == timestamp_ms && seq < self.len()) else {
+            return Err("The conversation changed. Try again.");
         };
-        Ok(Persist { path: self.segment_path(self.segment), bytes: serde_json::to_vec(&segment)? })
+        let origin = match entry.kind {
+            Some(Kind::User(_) | Kind::Event(_)) => match self.origins.get(&seq) {
+                Some(origin) => *origin,
+                None => return Err("This message never reached the agent, so it can't go back to it."),
+            },
+            Some(Kind::Assistant(_) | Kind::Thinking(_)) => match self.origins.range(seq + 1..).next() {
+                Some((_, origin)) => *origin,
+                None => return Err("Nothing came after this yet, so there's nothing to go back from."),
+            },
+            _ => return Err("A conversation goes back only to a message or a reply."),
+        };
+        // Before the first message there's nothing to keep.
+        let first = self.origins.values().map(|origin| (origin.segment, origin.index)).min();
+        if origin.index == 0 && first == Some((origin.segment, origin.index)) {
+            return Err("This is where the conversation starts, so there's nothing before it to go back to.");
+        }
+        Ok(ForkPoint { segment: origin.segment, index: origin.index, at_ms: origin.ms })
     }
 
-    fn segment_path(&self, number: u32) -> PathBuf {
-        self.dir.join(format!("segment-{number:04}.json"))
+    /// The save of the current segment: the messages, frame and pinned
+    /// sections new since the last, as lines to append; or the segment whole,
+    /// for a new one, one still JSON, one a crash cut off or another name
+    /// links to, and after a save that wasn't made.
+    pub(crate) fn persist(&mut self) -> Persist {
+        let unsaved = self.unsaved.swap(false, Ordering::Relaxed);
+        let same = self.saved.segment == self.segment;
+        let append = !unsaved && same && self.saved.lines && self.saved.messages <= self.messages.len();
+        let (lines, save) = if append {
+            let mut lines: Vec<log::Line<Message>> = self.messages[self.saved.messages..].iter().cloned().map(log::Line::Message).collect();
+            if self.pinned != self.saved.pinned {
+                lines.push(log::Line::Pinned(self.pinned.clone()));
+            }
+            if !self.saved.frame
+                && let Some(frame) = &self.frame
+            {
+                lines.push(log::Line::Frame(frame.clone()));
+            }
+            (true, Save::Append(lines))
+        } else {
+            let lines = !(self.old_form.load(Ordering::Relaxed) && !(same && self.saved.lines));
+            let segment = OwnedSegment {
+                compaction: self.compaction.clone(),
+                cleared: self.cleared,
+                messages: self.messages.clone(),
+                pinned: self.pinned.clone(),
+                frame: self.frame.clone(),
+            };
+            (lines, Save::Whole { lines, segment: Box::new(segment) })
+        };
+        let path = log::path(&self.dir, self.segment, lines);
+        self.files.insert(self.segment, path.clone());
+        self.saved = Saved { segment: self.segment, lines, messages: self.messages.len(), pinned: self.pinned.clone(), frame: true };
+        Persist { path, save, unsaved: self.unsaved.clone(), made: false }
     }
 }
 
-fn segment_number(name: &OsStr) -> Option<u32> {
-    name.to_str()?.strip_prefix("segment-")?.strip_suffix(".json")?.parse().ok()
+/// A page of `id`'s conversation (`Transcript::page`), read from disk when
+/// it starts before the entries held. None when `before` is beyond its end
+/// or what's on disk can't be read.
+pub(crate) async fn page_of(
+    factory: &crate::factory::Factory,
+    id: &str,
+    before: u64,
+    limit: u32,
+    from: Option<u64>,
+) -> Option<(Vec<Entry>, bool)> {
+    let page = {
+        let inner = factory.lock();
+        inner.agents.get(id)?.transcript.as_ref()?.page(before, limit, from)?
+    };
+    match page {
+        Page::Here(entries, more) => Some((entries, more)),
+        Page::Older(page) => match tokio::task::spawn_blocking(move || page.read()).await {
+            Ok(Ok(page)) => Some(page),
+            Ok(Err(error)) => {
+                tracing::warn!(agent = %id, %error, "could not read a conversation's older entries");
+                None
+            }
+            Err(_) => None,
+        },
+    }
+}
+
+/// The entries `seqs` of `id`'s conversation there are: held, or read from
+/// disk.
+pub(crate) async fn entries_of(factory: &crate::factory::Factory, id: &str, seqs: &[u64]) -> HashMap<u64, Entry> {
+    let mut found = HashMap::new();
+    let older = {
+        let inner = factory.lock();
+        let Some(transcript) = inner.agents.get(id).and_then(|runtime| runtime.transcript.as_ref()) else { return found };
+        let mut missing = Vec::new();
+        for &seq in seqs {
+            match transcript.entry(seq) {
+                Some(entry) => {
+                    found.insert(seq, entry.clone());
+                }
+                None if seq < transcript.len() => missing.push(seq),
+                None => {}
+            }
+        }
+        if missing.is_empty() {
+            return found;
+        }
+        (transcript.older(), missing)
+    };
+    let (older, missing) = older;
+    match tokio::task::spawn_blocking(move || older.entries(&missing)).await {
+        Ok(Ok(read)) => found.extend(read),
+        Ok(Err(error)) => tracing::warn!(agent = %id, %error, "could not read a conversation's older entries"),
+        Err(_) => {}
+    }
+    found
+}
+
+/// Tests: the file of segment `number` of the conversation in `dir`, in
+/// whichever form it is.
+#[doc(hidden)]
+pub fn segment_file_for_test(dir: &Path, number: u32) -> Option<PathBuf> {
+    log::files(dir).ok()?.remove(&number)
+}
+
+/// Tests: segment `number` of the conversation in `dir`, whichever form it's
+/// in, as the one JSON object a segment was before JSON Lines (`messages`,
+/// `frame`, `pinned`…).
+#[doc(hidden)]
+pub fn segment_for_test(dir: &Path, number: u32) -> Option<serde_json::Value> {
+    let segment = log::read::<serde_json::Value>(&segment_file_for_test(dir, number)?).ok()?;
+    let whole = log::WholeSegment {
+        compaction: segment.compaction.as_ref(),
+        cleared: segment.cleared,
+        messages: &segment.messages,
+        pinned: &segment.pinned,
+        frame: segment.frame.as_ref(),
+    };
+    serde_json::from_slice(&whole.bytes(false).ok()?).ok()
+}
+
+/// Goes through `id`'s entries before `before` (all of them for None),
+/// newest first, until `visit` says to stop (true): those held a slice at a
+/// time under the lock, then the older ones read back from disk a section at
+/// a time, off it. A section that can't be read ends it, logged.
+pub(crate) async fn scan_back(factory: &crate::factory::Factory, id: &str, before: Option<u64>, mut visit: impl FnMut(&Entry) -> bool) {
+    /// Held entries looked at per hold of the lock.
+    const SLICE: u64 = 2000;
+    let mut end = before.unwrap_or(u64::MAX);
+    let older = loop {
+        let start = {
+            let inner = factory.lock();
+            let Some(transcript) = inner.agents.get(id).and_then(|runtime| runtime.transcript.as_ref()) else { return };
+            let (base, entries) = transcript.window();
+            end = end.min(transcript.len());
+            if end <= base {
+                break transcript.older();
+            }
+            let start = end.saturating_sub(SLICE).max(base);
+            for entry in entries[(start - base) as usize..(end - base) as usize].iter().rev() {
+                if visit(entry) {
+                    return;
+                }
+            }
+            start
+        };
+        end = start;
+        tokio::task::yield_now().await;
+    };
+    let sections: Vec<usize> = older.before(end).collect();
+    for at in sections {
+        let read = older.clone();
+        let entries = match tokio::task::spawn_blocking(move || read.section(at)).await {
+            Ok(Ok(entries)) => entries,
+            Ok(Err(error)) => {
+                tracing::warn!(agent = %id, %error, "could not read a conversation's older entries");
+                return;
+            }
+            Err(_) => return,
+        };
+        for entry in entries.iter().rev().filter(|entry| entry.seq < end) {
+            if visit(entry) {
+                return;
+            }
+        }
+    }
+}
+
+/// Where a page (`Transcript::page`) of the entries before `before` starts:
+/// `entries` are those from `offset` to `before`. None when it starts before
+/// them, or needs one of the earlier entries to know.
+fn page_start(entries: &[Entry], offset: u64, before: u64, limit: u32, from: Option<u64>) -> Option<u64> {
+    let end = before;
+    let at = |seq: u64| entries.get(usize::try_from(seq.checked_sub(offset)?).ok()?);
+    if let Some(from) = from {
+        let start = from.min(end);
+        return (start >= offset).then_some(start);
+    }
+    let limit = match limit {
+        0 => PAGE_ENTRIES,
+        limit => (limit as usize).min(MAX_PAGE_ENTRIES),
+    } as u64;
+    let mut start = end;
+    let mut bytes = 0usize;
+    while start > 0 && end - start < limit {
+        let size = prost::Message::encoded_len(at(start - 1)?);
+        if start < end && bytes + size > PAGE_BYTES {
+            break;
+        }
+        bytes += size;
+        start -= 1;
+    }
+    // The whole model response the first entry is part of.
+    if start < end
+        && let Some(first) = at(start)
+        && first.reply != 0
+        && first.reply < start
+    {
+        let response = first.reply;
+        let mut extra = 0;
+        for seq in response..start {
+            extra += prost::Message::encoded_len(at(seq)?);
+        }
+        if bytes + extra <= PAGE_BYTES * 2 {
+            start = response;
+        }
+    }
+    Some(start)
+}
+
+/// Whether an older segment's entry stays in memory once its entries are on
+/// disk (`older`): a card, which changes as it's decided and is looked up
+/// by what it shows; a call still without a result, which a later segment
+/// or a restart changes; and a call Needs you shows a change by.
+fn keeps(entry: &Entry) -> bool {
+    match &entry.kind {
+        Some(
+            Kind::Proposal(_)
+            | Kind::SecretRequest(_)
+            | Kind::ConnectProposal(_)
+            | Kind::DevicePairing(_)
+            | Kind::AskPerson(_)
+            | Kind::PipeStart(_)
+            | Kind::AppGrant(_)
+            | Kind::AppAccess(_)
+            | Kind::SecretApproval(_),
+        ) => true,
+        Some(Kind::ToolCall(call)) => {
+            matches!(call.state(), ToolCallState::Pending | ToolCallState::Running)
+                || crate::apps::access::change_of(call).is_some()
+                || crate::extensions::models::change_of(call).is_some()
+                || crate::fork::history::change_of(call).is_some()
+        }
+        _ => false,
+    }
+}
+
+/// When a segment's summary was written, if it starts with one.
+fn summary_ms(segment: &Segment) -> Option<u64> {
+    segment.compaction.as_ref()?;
+    segment.messages.first().map(Message::timestamp)
 }
 
 /// Tokens the model held after producing `message`.
@@ -980,6 +1634,33 @@ fn waits(kind: Option<&Kind>, owner: &str) -> bool {
         Some(Kind::AppAccess(proposal)) => proposal.state() == v1::AppGrantState::Pending,
         _ => false,
     }
+}
+
+/// Whether two messages are the same but for their images' data, which an
+/// older segment is read without.
+fn same_but_images(a: &Message, b: &Message) -> bool {
+    fn blank(message: &Message) -> Message {
+        let mut message = message.clone();
+        match &mut message {
+            Message::User(UserMessage { content: UserContent::Parts(parts), .. }) => {
+                for part in parts {
+                    if let UserPart::Image { data, .. } = part {
+                        data.clear();
+                    }
+                }
+            }
+            Message::ToolResult(result) => {
+                for part in &mut result.content {
+                    if let ToolResultPart::Image { data, .. } = part {
+                        data.clear();
+                    }
+                }
+            }
+            _ => {}
+        }
+        message
+    }
+    a == b || blank(a) == blank(b)
 }
 
 fn notice(text: String, level: NoticeLevel) -> Kind {

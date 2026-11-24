@@ -1,14 +1,15 @@
 // Where chats live (#213): "Chats" under the projects in the Mac's sidebar
 // and the phone's drawer, the newest 20 then Show all, each a session (a
 // bubble and its title, no character, no color); a tap opens it in place of
-// a conversation, a right click or a touch and hold offers Rename and
-// Delete, and "+" starts a new one.
+// a conversation, a right click or a touch and hold offers Rename…, Change
+// model… (U17) and Delete…, and "+" starts a new one.
 import 'package:factory_app/chats.dart' show ChatView;
 import 'package:factory_app/characters/character.dart' show AgentCharacter;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/sidebar.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show kSecondaryButton;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -46,9 +47,11 @@ Workspace _workspace({List<Chat> chats = const [], String selected = ''}) =>
     );
 
 /// The chat rows in the sidebar.
-Finder get _chatRows =>
-    find.byWidgetPredicate((widget) => widget.key is ValueKey<String> &&
-        (widget.key! as ValueKey<String>).value.startsWith('chat-row/'));
+Finder get _chatRows => find.byWidgetPredicate(
+  (widget) =>
+      widget.key is ValueKey<String> &&
+      (widget.key! as ValueKey<String>).value.startsWith('chat-row/'),
+);
 
 void _iPhone() {
   debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -67,10 +70,7 @@ Future<void> _reveal(WidgetTester tester, Finder target) async {
     target,
     200,
     scrollable: find
-        .descendant(
-          of: find.byType(Sidebar),
-          matching: find.byType(Scrollable),
-        )
+        .descendant(of: find.byType(Sidebar), matching: find.byType(Scrollable))
         .first,
   );
   await pumpFrames(tester);
@@ -155,7 +155,7 @@ void main() {
   });
 
   testWidgets('on a phone, Chats is in the drawer: a tap opens one as the '
-      'conversation, a touch and hold offers Rename and Delete', (
+      'conversation, a touch and hold offers what its "…" does', (
     tester,
   ) async {
     _iPhone();
@@ -169,8 +169,10 @@ void main() {
     await _reveal(tester, row);
     await tester.longPress(row);
     await pumpFrames(tester);
-    expect(find.text('Rename'), findsOneWidget);
-    expect(find.text('Delete'), findsOneWidget);
+    // As the chat's own "…" (Abbacchio's row 725): Change model… too.
+    expect(find.text('Rename…'), findsOneWidget);
+    expect(find.text('Change model…'), findsOneWidget);
+    expect(find.text('Delete…'), findsOneWidget);
     await tester.tap(find.text('Cancel').last);
     await pumpFrames(tester);
 
@@ -187,6 +189,26 @@ void main() {
     );
     await pumpFrames(tester);
     expect(find.byType(ChatView), findsOneWidget);
+  });
+
+  testWidgets('on a Mac, a right click on a chat row offers what its "…" '
+      'does, Change model… included', (tester) async {
+    final harness = Harness(
+      _workspace(chats: [_chat(1, title: 'History of fried chicken')]),
+    );
+    await harness.show(tester);
+    await pumpFrames(tester);
+    await tester.tap(
+      find.text('History of fried chicken'),
+      buttons: kSecondaryButton,
+    );
+    await pumpFrames(tester);
+    expect(find.text('Rename…'), findsOneWidget);
+    expect(find.text('Delete…'), findsOneWidget);
+    await tester.tap(find.text('Change model…'));
+    await pumpFrames(tester);
+    expect(find.text('Change model'), findsOneWidget);
+    expect(harness.backend.sent.where((m) => m.hasSelectChat()), isEmpty);
   });
 
   testWidgets('on a phone, a chat row is the drawer\'s size and fits the '

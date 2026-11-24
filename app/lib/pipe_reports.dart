@@ -590,7 +590,8 @@ String reportRoomText(Pipe pipe) {
 }
 
 /// The quiet counts about a pipe's reports and its agent, each a sentence:
-/// over the limit, its spending cap, its held questions.
+/// over the limit, its held questions. Its spending limit has a notice of
+/// its own under the pipe's header (PipeSpendNotice).
 List<String> pipeReportNotes(Workspace workspace, Pipe pipe) {
   final liaison = pipeLiaison(workspace, pipe);
   final name = liaison?.name ?? 'The pipe’s agent';
@@ -599,19 +600,12 @@ List<String> pipeReportNotes(Workspace workspace, Pipe pipe) {
     if (over > 0)
       '$over ${over == 1 ? 'report' : 'reports'} over today’s limit '
           '${over == 1 ? 'wasn’t' : 'weren’t'} forwarded.',
-    if (liaison != null && liaison.hasSpend() && liaison.spend.over)
-      '$name reached today’s ${_dollars(liaison.spend.capUsd)} limit. It '
-          'carries on tomorrow.',
     if (liaison != null && liaison.heldAsks > 0)
       '${liaison.heldAsks} more '
           '${liaison.heldAsks == 1 ? 'question' : 'questions'} from $name '
           '${liaison.heldAsks == 1 ? 'is' : 'are'} waiting.',
   ];
 }
-
-String _dollars(double usd) => usd == usd.roundToDouble()
-    ? '\$${usd.round()}'
-    : '\$${usd.toStringAsFixed(2)}';
 
 /// Under a pipe's header while its reports go somewhere, or any wait or
 /// were refused: "Forwarded", the newest reports with where they stand,

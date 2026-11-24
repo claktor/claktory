@@ -157,10 +157,11 @@ async fn a_device_paired_without_a_name_gives_its_own_and_is_allowed_by_its_digi
     let devices = cli(&dir, addr, "devices --json", "").await;
     let listed = &ok(&devices)["devices"][0];
     assert_eq!((listed["name"].as_str(), listed["state"].as_str()), (Some("Matt's MacBook"), Some("waiting")), "{listed}");
-    assert_eq!(listed["number"].as_str(), Some(shows.as_str()));
+    // Never its number (#352 P4): the person reads it off the device.
+    assert!(listed.get("number").is_none(), "{listed}");
     // The key it asks with, for a setup on the device to compare with its own (#245).
     assert_eq!(listed["endpoint_id"].as_str(), Some(device.id().to_string().as_str()));
-    assert_eq!(keys(listed), ["connected", "endpoint_id", "expires_in", "id", "last_seen_ms", "name", "number", "state"]);
+    assert_eq!(keys(listed), ["connected", "endpoint_id", "expires_in", "id", "last_seen_ms", "name", "state"]);
     let status = cli(&dir, addr, "status", "").await;
     assert!(status.text.ends_with(", 0 devices, 1 waiting to be allowed."), "{}", status.text);
 
@@ -169,8 +170,23 @@ async fn a_device_paired_without_a_name_gives_its_own_and_is_allowed_by_its_digi
     // Without --json too, the flag first or after the device (Arjun's finding).
     let wrong = cli(&dir, addr, &format!("allow --number {other} {id}"), "").await;
     assert_eq!((wrong.exit, wrong.json["error"].as_str()), (Exit::Refused, Some("wrong_number")), "{wrong:?}");
+    assert_eq!(wrong.text, "That's not the number Matt's MacBook shows. 2 tries left.");
+    // Without the number, nothing is allowed, and the digits aren't said.
+    let bare = cli(&dir, addr, &format!("allow {id}"), "").await;
+    assert_eq!((bare.exit, bare.json["error"].as_str()), (Exit::Refused, Some("needs_number")), "{bare:?}");
+    assert_eq!(
+        bare.text,
+        format!(
+            "A device calling itself \"Matt's MacBook\" is waiting. Allow it only if its screen shows the number you type: factoryd allow {id} --number <the 4 digits on its screen>."
+        )
+    );
+    assert!(!bare.text.contains(&shows) && !bare.json.to_string().contains(&format!("\"{shows}\"")));
+    // devices says the same, never the digits (Abbacchio's row 705, Fugo).
+    let listed = cli(&dir, addr, "devices --no-wait", "").await;
+    assert_eq!(listed.text, format!("{id}  {}", bare.text));
+    assert!(!listed.text.contains(&shows) && !listed.json.to_string().contains(&format!("\"{shows}\"")));
     let allowed = cli(&dir, addr, &format!(r#"allow "Matt's MacBook" --number {shows} --json"#), "").await;
-    assert_eq!((ok(&allowed)["allowed"].as_str(), allowed.json["number"].as_str()), (Some(id.as_str()), Some(shows.as_str())));
+    assert_eq!((ok(&allowed)["allowed"].as_str(), allowed.json.get("number")), (Some(id.as_str()), None));
     assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
     let status = cli(&dir, addr, "status", "").await;
     assert!(status.text.ends_with(", 1 device."), "{}", status.text);
@@ -233,51 +249,76 @@ async fn factoryd_pair_without_a_name_makes_a_code_the_device_names() {
     assert_eq!((made.name.as_str(), made.unnamed), ("New device", true));
 }
 
-/// Fugo's rule (#245) for `factoryd allow` without --json too: run by a
-/// program (stdin isn't a terminal), it lets in the first device only.
+/// `factoryd devices` in a terminal, from the devices file: a waiting
+/// device's number is never printed, and a name the device chose reaches
+/// the terminal without escape sequences, controls or bidi marks (Abbacchio's
+/// rows 705-706, Fugo: OSC 52 could write the clipboard).
 #[test]
-fn factoryd_allow_from_a_program_lets_in_only_the_first_device() {
+fn factoryd_devices_prints_no_number_and_no_escapes() {
     use factoryd::remote::Device;
     let dir = temp_dir();
     let home = home(&dir);
     let later = jiff::Timestamp::now().as_millisecond() + 600_000;
-    let waiting = |id: &str, key: &str| Device {
-        id: id.to_owned(),
-        name: id.to_owned(),
+    let name = "\x1b]52;c;aGk=\x07Evil\x1b[2K\u{202e}Mac\u{200b}\u{9b}\u{feff} Laptop of someone with a very long name 1234567890";
+    let waiting = Device {
+        id: "first".to_owned(),
+        name: name.to_owned(),
         token_sha256: "00".repeat(32),
         code_expires: Some(later),
-        pending_endpoint_id: key.to_owned(),
+        pending_endpoint_id: "e-first".to_owned(),
         pending_since: Some(later - 1000),
         ..Device::default()
     };
-    let write = |devices: &[Device]| {
-        std::fs::create_dir_all(home.root().join("remote")).expect("remote");
-        std::fs::write(home.root().join("remote/devices.json"), serde_json::to_vec(devices).expect("json")).expect("devices");
+    std::fs::create_dir_all(home.root().join("remote")).expect("remote");
+    std::fs::write(home.root().join("remote/devices.json"), serde_json::to_vec(&[waiting]).expect("json")).expect("devices");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_factoryd"))
+        .arg("devices")
+        .env("FACTORY_HOME", home.root())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("factoryd devices");
+    let printed = String::from_utf8(output.stdout).expect("utf-8");
+    assert!(output.status.success(), "{printed}");
+    assert!(!printed.chars().any(|char| char.is_control() && char != '\n' || matches!(char, '\u{200b}' | '\u{202e}' | '\u{feff}')), "{printed:?}");
+    let shown = factoryd::remote::shown_name(name);
+    assert_eq!(
+        printed,
+        format!("first  A device calling itself \"{shown}\" is waiting. Allow it only if its screen shows the number you type: factoryd allow first --number <the 4 digits on its screen>.\n")
+    );
+    let claktory = factoryd::remote::secret_key(&home).expect("key").public().to_string();
+    let number = factoryd::remote::approval_number(&claktory, "e-first", &"00".repeat(32));
+    assert!(!printed.contains(&number), "{printed}");
+}
+
+/// `factoryd allow` without a running Claktory allows nothing: only the
+/// running one checks the number typed (#352 P4), so nothing allows a
+/// device from its files alone.
+#[test]
+fn factoryd_allow_without_a_running_claktory_allows_nothing() {
+    use factoryd::remote::Device;
+    let dir = temp_dir();
+    let home = home(&dir);
+    let later = jiff::Timestamp::now().as_millisecond() + 600_000;
+    let waiting = Device {
+        id: "first".to_owned(),
+        name: "first".to_owned(),
+        token_sha256: "00".repeat(32),
+        code_expires: Some(later),
+        pending_endpoint_id: "e-first".to_owned(),
+        pending_since: Some(later - 1000),
+        ..Device::default()
     };
-    let allow = |id: &str| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_factoryd"))
-            .args(["allow", id])
+    std::fs::create_dir_all(home.root().join("remote")).expect("remote");
+    std::fs::write(home.root().join("remote/devices.json"), serde_json::to_vec(&[waiting]).expect("json")).expect("devices");
+    for args in [&["allow", "first"][..], &["allow", "first", "--number", "1234"][..]] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_factoryd"))
+            .args(args)
             .env("FACTORY_HOME", home.root())
             .stdin(std::process::Stdio::null())
             .output()
-            .expect("factoryd allow")
-    };
-    let local = Device { id: "local".to_owned(), local: true, endpoint_id: "e-local".to_owned(), ..Device::default() };
-
-    // The first: this machine's own app doesn't count.
-    write(&[local.clone(), waiting("first", "e-first")]);
-    let output = allow("first");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let first = factoryd::remote::devices(&home).expect("devices").into_iter().find(|device| device.id == "first").expect("first");
-    assert_eq!(first.endpoint_id, "e-first");
-
-    // The second: refused, and it's still waiting for a person to allow it.
-    let mut devices = factoryd::remote::devices(&home).expect("devices");
-    devices.push(waiting("second", "e-second"));
-    write(&devices);
-    let output = allow("second");
-    assert_eq!(output.status.code(), Some(3));
-    assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), factoryd::cli::HAS_DEVICES);
-    let second = factoryd::remote::devices(&home).expect("devices").into_iter().find(|device| device.id == "second").expect("second");
-    assert_eq!((second.endpoint_id.as_str(), second.pending_endpoint_id.as_str()), ("", "e-second"));
+            .expect("factoryd allow");
+        assert!(!output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stdout));
+        let first = factoryd::remote::devices(&home).expect("devices").into_iter().find(|device| device.id == "first").expect("first");
+        assert_eq!((first.endpoint_id.as_str(), first.pending_endpoint_id.as_str()), ("", "e-first"), "{args:?}");
+    }
 }

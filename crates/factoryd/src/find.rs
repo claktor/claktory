@@ -19,8 +19,6 @@ const MAX_LIMIT: usize = 500;
 const TOTAL_CAP: u32 = 1000;
 /// The longest query, in characters.
 const MAX_QUERY: usize = 500;
-/// Entries scanned per hold of the lock.
-const SLICE: usize = 2000;
 /// A snippet's length, and where its first occurrence starts, in characters.
 const SNIPPET: usize = 80;
 const LEAD: usize = 25;
@@ -100,29 +98,7 @@ impl Found {
 }
 
 async fn search_transcript(factory: &Factory, id: &str, before: Option<u64>, finder: &Finder, found: &mut Found) {
-    let mut end = before.map_or(usize::MAX, |before| usize::try_from(before).unwrap_or(usize::MAX));
-    loop {
-        let start = {
-            let inner = factory.lock();
-            let Some(transcript) = inner.agents.get(id).and_then(|runtime| runtime.transcript.as_ref()) else { return };
-            let entries = transcript.entries();
-            end = end.min(entries.len());
-            let start = end.saturating_sub(SLICE);
-            for entry in entries[start..end].iter().rev() {
-                if let Some(hit) = finder.entry(entry)
-                    && found.add(hit)
-                {
-                    return;
-                }
-            }
-            start
-        };
-        if start == 0 {
-            return;
-        }
-        end = start;
-        tokio::task::yield_now().await;
-    }
+    crate::transcript::scan_back(factory, id, before, |entry| finder.entry(entry).is_some_and(|hit| found.add(hit))).await;
 }
 
 fn search_pipe(factory: &Factory, pipe: &str, before: Option<u64>, finder: &Finder, found: &mut Found) -> Result<(), RequestError> {

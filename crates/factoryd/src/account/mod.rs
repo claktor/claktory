@@ -869,8 +869,9 @@ pub(crate) async fn resend(factory: &Arc<Factory>) -> Result<(), RequestError> {
 }
 
 /// AccountVerify: signs in with the emailed code, and protects the vault
-/// with the account.
-pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<(), RequestError> {
+/// with the account. Returns the account it signed in to, once it's this
+/// Claktory's and saved.
+pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String, RequestError> {
     enabled(factory)?;
     let account = &factory.account;
     let _busy = account.busy.lock().await;
@@ -971,7 +972,7 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<(), Req
     }
     factory.vault_changed();
     account.wake.notify_one();
-    Ok(())
+    Ok(signed_in.account_id)
 }
 
 /// AccountSignOut: no more calls to the service. An open vault opens by

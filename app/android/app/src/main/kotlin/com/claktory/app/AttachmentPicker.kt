@@ -292,15 +292,16 @@ class AttachmentCopies(
 
         /**
          * A name to keep the copy under: its provider's, made safe for a
-         * file (no folders, no leading dots, at most 120 characters, its
-         * extension kept), else "Attachment" with one for its type.
+         * file and to show (no control, bidi or format characters, no
+         * folders, no leading dots, at most 120 characters, its extension
+         * kept), else "Attachment" with one for its type.
          */
         fun fileName(
             source: AttachmentPicker.Source,
             index: Int,
             extensionOf: (String) -> String? = { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) },
         ): String {
-            val given = source.name?.substringAfterLast('/')?.substringAfterLast('\\')
+            val given = source.name?.filterNot(::invisible)?.substringAfterLast('/')?.substringAfterLast('\\')
                 ?.replace(Regex("[\\u0000-\\u001f\\u007f:*?\"<>|]"), "_")
                 ?.trim()?.trimStart('.')
             if (!given.isNullOrEmpty()) return shorten(given)
@@ -308,6 +309,15 @@ class AttachmentCopies(
             val base = if (index == 0) "Attachment" else "Attachment ${index + 1}"
             return if (extension.isNullOrEmpty()) base else "$base.$extension"
         }
+
+        /**
+         * Control, bidi and format characters, which could make a name read
+         * as another (factoryd's shown_name drops the same): dropped before
+         * anything else, since the message box shows the name.
+         */
+        fun invisible(char: Char): Boolean =
+            Character.isISOControl(char) || char in '\u200B'..'\u200F' || char in '\u202A'..'\u202E' ||
+                char in '\u2060'..'\u2064' || char in '\u2066'..'\u2069' || char == '\uFEFF'
 
         private fun shorten(name: String): String {
             if (name.length <= 120) return name

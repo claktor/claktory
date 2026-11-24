@@ -27,13 +27,28 @@ pub struct Failure {
     pub code: &'static str,
     /// What went wrong, for people.
     pub error: String,
+    /// What the decoder or engine said, for the log: never shown to people.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub detail: String,
 }
 
 impl Failure {
     pub fn new(code: &'static str, error: impl Into<String>) -> Failure {
-        Failure { code, error: error.into() }
+        Failure { code, error: error.into(), detail: String::new() }
+    }
+
+    /// With what the decoder or engine said, for the log.
+    #[must_use]
+    pub fn with_detail(self, detail: impl Into<String>) -> Failure {
+        Failure { detail: detail.into(), ..self }
     }
 }
+
+/// What a person reads when a recording can't be read: plain words, with
+/// the decoder's own kept for the log (`Failure::detail`).
+const DAMAGED: &str = "Couldn't read the recording. It may be damaged.";
+const SILENT: &str = "Couldn't read the recording. It has no sound.";
+const UNSUPPORTED: &str = "Couldn't read the recording. Its format isn't supported.";
 
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -59,8 +74,9 @@ pub fn decode(path: &Path) -> Result<Audio, Failure> {
     use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
     use symphonia::core::meta::MetadataOptions;
 
-    let failed = |why: String| Failure::new("decode_failed", format!("Couldn't read the recording: {why}"));
-    let file = std::fs::File::open(path).map_err(|error| failed(error.to_string()))?;
+    let failed = |said: &str, detail: String| Failure::new("decode_failed", said).with_detail(detail);
+    let damaged = |detail: String| failed(DAMAGED, detail);
+    let file = std::fs::File::open(path).map_err(|error| damaged(format!("open: {error}")))?;
     let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
     let mut hint = Hint::new();
     if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
@@ -68,13 +84,14 @@ pub fn decode(path: &Path) -> Result<Audio, Failure> {
     }
     let mut format = symphonia::default::get_probe()
         .probe(&hint, stream, FormatOptions::default(), MetadataOptions::default())
-        .map_err(|error| failed(format!("not a recording this can read ({error})")))?;
-    let track = format.default_track(TrackType::Audio).ok_or_else(|| failed("it has no sound".to_owned()))?;
+        .map_err(|error| damaged(format!("probe: {error}")))?;
+    let track = format.default_track(TrackType::Audio).ok_or_else(|| failed(SILENT, "no audio track".to_owned()))?;
     let track_id = track.id;
-    let params = track.codec_params.as_ref().and_then(|params| params.audio()).ok_or_else(|| failed("it has no sound".to_owned()))?;
+    let params =
+        track.codec_params.as_ref().and_then(|params| params.audio()).ok_or_else(|| failed(SILENT, "no audio parameters".to_owned()))?;
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(params, &AudioDecoderOptions::default())
-        .map_err(|error| failed(format!("its sound isn't in a format this can read ({error})")))?;
+        .map_err(|error| failed(UNSUPPORTED, format!("codec: {error}")))?;
 
     let mut rate = 0u32;
     let mut mono: Vec<f32> = Vec::new();
@@ -86,7 +103,7 @@ pub fn decode(path: &Path) -> Result<Audio, Failure> {
             // A stream cut short (a recording that was still being written)
             // keeps what came before.
             Err(Error::IoError(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(error) => return Err(failed(error.to_string())),
+            Err(error) => return Err(damaged(format!("read: {error}"))),
         };
         if packet.track_id != track_id {
             continue;
@@ -95,14 +112,14 @@ pub fn decode(path: &Path) -> Result<Audio, Failure> {
             Ok(decoded) => decoded,
             // One bad packet loses a moment of sound, not the recording.
             Err(Error::DecodeError(_)) => continue,
-            Err(error) => return Err(failed(error.to_string())),
+            Err(error) => return Err(damaged(format!("decode: {error}"))),
         };
         let spec = decoded.spec();
         let channels = spec.channels().count().max(1);
         if rate == 0 {
             rate = spec.rate();
         } else if rate != spec.rate() {
-            return Err(failed("its sample rate changes partway".to_owned()));
+            return Err(damaged("its sample rate changes partway".to_owned()));
         }
         decoded.copy_to_vec_interleaved(&mut interleaved);
         mono.extend(interleaved.chunks(channels).map(|frame| frame.iter().sum::<f32>() / channels as f32));
@@ -114,7 +131,7 @@ pub fn decode(path: &Path) -> Result<Audio, Failure> {
         return Err(Failure::new("no_speech", "Didn't hear any speech."));
     }
     let duration_ms = mono.len() as u64 * 1000 / u64::from(rate);
-    Ok(Audio { samples: resample(mono, rate).map_err(failed)?, duration_ms })
+    Ok(Audio { samples: resample(mono, rate).map_err(|error| failed("Couldn't read the recording.", format!("resample: {error}")))?, duration_ms })
 }
 
 /// Mono samples at `rate` to `SAMPLE_RATE`.
@@ -193,8 +210,8 @@ impl Engine {
             let backend = if cpu { transcribe_cpp::Backend::Cpu } else { transcribe_cpp::Backend::Auto };
             transcribe_cpp::Model::load_with(path, &transcribe_cpp::ModelOptions { backend, ..Default::default() })
         }
-        .map_err(|error| Failure::new("model", format!("Couldn't load the speech model: {error}")))?;
-        let session = model.session().map_err(|error| Failure::new("model", format!("Couldn't load the speech model: {error}")))?;
+        .map_err(|error| Failure::new("model", "Couldn't load the speech model.").with_detail(error.to_string()))?;
+        let session = model.session().map_err(|error| Failure::new("model", "Couldn't load the speech model.").with_detail(error.to_string()))?;
         Ok(Engine { model, session, load_ms: started.elapsed().as_millis() as u64 })
     }
 
@@ -218,7 +235,7 @@ impl Engine {
             let transcript = self
                 .session
                 .run(&audio.samples[window], &transcribe_cpp::RunOptions::default())
-                .map_err(|error| Failure::new("transcribe_failed", format!("Couldn't transcribe the recording: {error}")))?;
+                .map_err(|error| Failure::new("transcribe_failed", "Couldn't transcribe the recording.").with_detail(error.to_string()))?;
             let text = transcript.text.trim();
             if !text.is_empty() {
                 said.push(text.to_owned());
@@ -319,8 +336,23 @@ mod tests {
         let dir = tempfile::tempdir().expect("dir");
         let path = dir.path().join("notes.m4a");
         std::fs::write(&path, b"not audio at all").expect("write");
-        assert_eq!(decode(&path).expect_err("not audio").code, "decode_failed");
-        assert_eq!(decode(&dir.path().join("missing.wav")).expect_err("missing").code, "decode_failed");
+        // In plain words; the decoder's own go to the log (#367, Trish).
+        let damaged = decode(&path).expect_err("not audio");
+        assert_eq!((damaged.code, damaged.error.as_str()), ("decode_failed", "Couldn't read the recording. It may be damaged."));
+        assert!(damaged.detail.starts_with("probe: "), "{}", damaged.detail);
+        let said = serde_json::to_value(&damaged).expect("json");
+        assert_eq!(said["error"], "Couldn't read the recording. It may be damaged.");
+        assert!(said["detail"].as_str().is_some_and(|detail| !detail.is_empty()));
+        assert!(serde_json::to_value(Failure::new("too_long", "Too long.")).expect("json").get("detail").is_none());
+        // A recording cut off partway through its header.
+        let path = dir.path().join("cut.wav");
+        tone(&path, SAMPLE_RATE, 1, 1.0);
+        let bytes = std::fs::read(&path).expect("read");
+        std::fs::write(&path, &bytes[..30]).expect("cut");
+        let cut = decode(&path).expect_err("cut");
+        assert_eq!((cut.code, cut.error.as_str()), ("decode_failed", "Couldn't read the recording. It may be damaged."));
+        let missing = decode(&dir.path().join("missing.wav")).expect_err("missing");
+        assert_eq!((missing.code, missing.error.as_str()), ("decode_failed", "Couldn't read the recording. It may be damaged."));
         let path = dir.path().join("empty.wav");
         tone(&path, SAMPLE_RATE, 1, 0.0);
         assert_eq!(decode(&path).expect_err("nothing in it").code, "no_speech");

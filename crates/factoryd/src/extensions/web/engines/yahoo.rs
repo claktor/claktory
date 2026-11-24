@@ -4,6 +4,7 @@
 use scraper::Html;
 
 use super::{first_text, selector, text};
+use crate::encoding::percent_decode;
 use crate::extensions::web::search::{Hit, Options, Recency};
 
 pub(super) fn request(client: &primp::Client, query: String, options: &Options) -> primp::RequestBuilder {
@@ -31,24 +32,6 @@ fn address(href: &str) -> Option<String> {
     let encoded = href.split("/RU=").nth(1)?.split('/').next()?;
     let url = percent_decode(encoded);
     url.starts_with("http").then_some(url)
-}
-
-fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && let Some(byte) = text.get(index + 1..index + 3).and_then(|hex| u8::from_str_radix(hex, 16).ok())
-        {
-            out.push(byte);
-            index += 3;
-        } else {
-            out.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 pub(super) fn hits(page: &Html) -> Vec<Hit> {

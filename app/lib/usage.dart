@@ -26,6 +26,13 @@ class UsageMeter {
     return provider.hasUsage() ? provider.usage : null;
   }
 
+  /// What its API key has to spend, as its provider says (OpenRouter,
+  /// #343 U8); null when the provider doesn't say or it isn't read yet.
+  AccountCredit? get credit {
+    final account = this.account;
+    return account != null && account.hasCredit() ? account.credit : null;
+  }
+
   /// The plan as the provider names it, empty when unknown.
   String get plan => account?.plan ?? provider.plan;
 
@@ -37,7 +44,7 @@ class UsageMeter {
   bool get oneOfMany => account != null && provider.accounts.length > 1;
 
   /// Requests go to it now, rather than to the provider's other accounts.
-  bool get inUseOfMany => oneOfMany && account!.inUse;
+  bool get inUseOfMany => oneOfMany && accountInUse(account!);
 
   /// First in the order requests try the provider's accounts: used
   /// whenever it has room.
@@ -190,7 +197,9 @@ class UsageRing extends StatelessWidget {
     final palette = Palette.of(context);
     final provider = meter.provider;
     final usage = meter.usage;
-    final (mark, used) = usageMark(usage);
+    final (mark, used) = usage == null && meter.credit != null
+        ? creditMark(meter.credit!)
+        : usageMark(usage);
     final ring = SizedBox.square(
       dimension: cell,
       child: ResetCue(
@@ -250,6 +259,35 @@ const inUseDot = 4.0;
   final weekly = _window(usage, headlineWindow);
   if (weekly == null) return (UsageMark.unknown, 0);
   return (UsageMark.meter, weekly.usedPercent.clamp(0, 100) / 100);
+}
+
+/// How a circle for an API key's [credit] is drawn: a ring filling as its
+/// spending limit is used, when it has one; else the mark alone.
+(UsageMark, double) creditMark(AccountCredit credit) {
+  if (!credit.limited || credit.limit <= 0) return (UsageMark.noLimits, 0);
+  return (UsageMark.meter, (1 - credit.left / credit.limit).clamp(0.0, 1.0));
+}
+
+/// Dollars as the card says them: "\$10", "\$0.80".
+String formatDollars(double usd) => usd == usd.roundToDouble() && usd.abs() >= 1
+    ? '\$${usd.round()}'
+    : '\$${usd.toStringAsFixed(2)}';
+
+/// What an API key has to spend, in a line: "\$3.20 left of \$10 a day ·
+/// \$0.80 today", or with no limit on the key, "\$0.80 today · no spending
+/// limit on this key".
+String creditLine(AccountCredit credit) {
+  final today = '${formatDollars(credit.spentToday)} today';
+  if (!credit.limited) return '$today · no spending limit on this key';
+  final per = switch (credit.limitReset) {
+    'daily' => ' a day',
+    'weekly' => ' a week',
+    'monthly' => ' a month',
+    _ => '',
+  };
+  final left = credit.left < 0 ? 0.0 : credit.left;
+  return '${formatDollars(left)} left of ${formatDollars(credit.limit)}$per · '
+      '$today';
 }
 
 enum UsageMark {
@@ -417,7 +455,41 @@ class UsageCard extends StatelessWidget {
               color: state.problem ? palette.danger : palette.textMuted,
             ),
           ),
-        if (usage == null)
+        // An API key's credit, where its provider says it (#343 U8).
+        if (meter.credit case final credit? when usage == null) ...[
+          if (credit.readMs > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.s),
+              child: Text(
+                creditLine(credit),
+                style: caption.copyWith(
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+          if (credit.error.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.s),
+              child: Text(
+                "Couldn't check credit: ${credit.error}",
+                style: TextStyles.caption.copyWith(color: palette.danger),
+              ),
+            )
+          else if (credit.readMs == 0)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.s),
+              child: Text('Credit not checked yet.', style: caption),
+            ),
+          if (credit.readMs > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.s),
+              child: Text(
+                '${credit.error.isEmpty ? 'Checked' : 'Last checked'} '
+                '${formatAge(credit.readMs.toInt(), now)}',
+                style: TextStyles.caption.copyWith(color: palette.textFaint),
+              ),
+            ),
+        ] else if (usage == null)
           Padding(
             padding: const EdgeInsets.only(top: Space.s),
             child: Text('No usage limits to show.', style: caption),
@@ -498,8 +570,12 @@ class UsageCard extends StatelessWidget {
 ) {
   final until = account.exhaustedUntil.toInt();
   if (until > now.millisecondsSinceEpoch) {
+    // Fable has a pool of its own: its requests may still go to it.
     return (
-      text: 'Limit reached, back at ${formatUntil(until, now)}',
+      text: [
+        'Limit reached, back at ${formatUntil(until, now)}',
+        if (account.fableInUse) 'In use for Fable',
+      ].join(' · '),
       problem: false,
     );
   }
@@ -509,10 +585,42 @@ class UsageCard extends StatelessWidget {
       problem: true,
     );
   }
+  // Its key can't run paid models: no credit yet, or its spending limit is
+  // used up (Claktory's sentence, #343 U8).
+  if (account.hasCredit() && account.credit.warning.isNotEmpty) {
+    return (text: account.credit.warning, problem: true);
+  }
   // The provider refused to refresh it: skipped until signed in to again.
   if (account.signInAgain) return (text: 'Sign-in expired', problem: true);
-  if (account.inUse) return (text: 'In use', problem: false);
-  return (text: 'Signed in', problem: false);
+  return (text: accountUseLine(account, now), problem: false);
+}
+
+/// Under a provider signed in to whose models no agent or chat runs yet
+/// (Provider.agents 0, #343 U1): signing in doesn't move them.
+String noAgentsOnProvider(Provider provider) =>
+    'No agents or chats use ${provider.name} models yet.';
+
+/// Whether requests go to [account] now: an agent or chat runs on its
+/// provider's models and it's the first with room, in its normal pool
+/// (#343 U1: only while one does) or Fable's own (U10).
+bool accountInUse(Account account) => account.inUse || account.fableInUse;
+
+/// Where [account] stands when nothing's wrong with it: "In use" while
+/// requests go to it ("In use for Fable" for Fable's alone), else "Signed
+/// in"; with Fable's own weekly limit
+/// reached on it, that too ("In use · Fable: limit reached, back at Fri
+/// 18:00", #343 U10), since Fable's requests then go to another account.
+String accountUseLine(Account account, DateTime now) {
+  final fableUntil = account.fableExhaustedUntil.toInt();
+  return [
+    account.inUse
+        ? 'In use'
+        : account.fableInUse
+        ? 'In use for Fable'
+        : 'Signed in',
+    if (fableUntil > now.millisecondsSinceEpoch)
+      'Fable: limit reached, back at ${formatUntil(fableUntil, now)}',
+  ].join(' · ');
 }
 
 /// A time to come, from [ms] since 1970: "14:00" today, "Tue 14:00" within
@@ -565,7 +673,8 @@ String formatAge(int ms, DateTime now) {
 
 /// When a limit resets, from [ms] since 1970 (0 when unknown): "resets in
 /// 3 h 20 min", or with the day and time when it's a day or more away,
-/// "resets in 2 days, Tue 14:00".
+/// "resets in 2 days 20 h, Tue 14:00" (whole days alone would round
+/// 2 days 20 h down to "2 days").
 String formatReset(int ms, DateTime now) {
   if (ms <= 0) return 'reset time unknown';
   final at = DateTime.fromMillisecondsSinceEpoch(ms);
@@ -579,11 +688,15 @@ String formatReset(int ms, DateTime now) {
         '${minutes == 0 ? '' : ' $minutes min'}';
   }
   const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  final days = left.inDays == 1 ? '1 day' : '${left.inDays} days';
+  final hours = left.inHours % 24;
+  final days =
+      '${left.inDays == 1 ? '1 day' : '${left.inDays} days'}'
+      '${hours == 0 ? '' : ' $hours h'}';
   final time =
       '${at.hour.toString().padLeft(2, '0')}:'
       '${at.minute.toString().padLeft(2, '0')}';
-  return 'resets in $days, ${weekdays[at.weekday - 1]} $time';
+  // The weekday and time stay together on a narrow card (Abbacchio).
+  return 'resets in $days, ${weekdays[at.weekday - 1]}\u00A0$time';
 }
 
 // Provider marks as SVG path data, filled. Claude's spark and OpenRouter's

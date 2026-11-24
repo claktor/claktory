@@ -41,9 +41,11 @@ const MEMORY: u64 = 256 << 20;
 const STOP_WITHIN: Duration = Duration::from_secs(40);
 /// The home's entries a bundle never holds. `dm` is the direct-message
 /// leaf's store: two copies of a leaf would reuse its keys, so a moved or
-/// restored Claktory enrolls a new one (dms-e2ee.md §5.2).
-const LEFT_OUT: [&str; 13] = [
+/// restored Claktory enrolls a new one (dms-e2ee.md §5.2). `cache` holds
+/// what's made again when asked, such as phones' image previews (#379).
+const LEFT_OUT: [&str; 14] = [
     "bin",
+    "cache",
     "dm",
     "releases",
     "trees",

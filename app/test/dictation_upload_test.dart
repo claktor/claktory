@@ -10,6 +10,7 @@ import 'package:factory_app/dictation.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/recorder.dart';
 import 'package:factory_app/state.dart';
+import 'package:factory_app/voice_keep.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -26,6 +27,16 @@ class _Claktory {
 
   /// Refuses StartUpload as a Claktory from before dictation does.
   bool older = false;
+
+  /// Answers this many TranscribeAudio with no_recording first, as a
+  /// Claktory that restarted since does.
+  var forgotten = 0;
+
+  /// The TranscribeAudio request ids, in order.
+  final requests = <String>[];
+
+  /// StartUpload's upload ids, in order.
+  final starts = <String>[];
 }
 
 Future<HttpServer> _serve(_Claktory claktory) async {
@@ -47,10 +58,15 @@ Future<HttpServer> _serve(_Claktory claktory) async {
           );
         }
         claktory.purposes.add(start.purpose);
-        claktory.received[start.uploadId] = [];
+        claktory.starts.add(start.uploadId);
+        // Picks up what it has of the same upload.
+        final has = claktory.received[start.uploadId] ??= [];
         return reply(
           ServerMessage(
-            uploadProgress: UploadProgress(uploadId: start.uploadId),
+            uploadProgress: UploadProgress(
+              uploadId: start.uploadId,
+              received: Int64(has.length),
+            ),
           ),
         );
       }
@@ -81,12 +97,15 @@ Future<HttpServer> _serve(_Claktory claktory) async {
       if (message.hasTranscribeAudio()) {
         final asked = message.transcribeAudio;
         claktory.heard.add(asked.uploadId);
+        claktory.requests.add(asked.requestId);
+        final error = claktory.forgotten > 0 ? 'no_recording' : claktory.error;
+        if (claktory.forgotten > 0) claktory.forgotten--;
         socket.add(
           ServerMessage(
             audioTranscribed: AudioTranscribed(
               requestId: asked.requestId,
-              text: claktory.error.isEmpty ? 'Yes, the second one.' : '',
-              error: claktory.error,
+              text: error.isEmpty ? 'Yes, the second one.' : '',
+              error: error,
             ),
           ).writeToBuffer(),
         );
@@ -187,5 +206,71 @@ void main() {
       ),
     );
     expect(claktory.heard, isEmpty);
+  });
+
+  group('kept on the device (#401)', () {
+    Future<KeptVoice> kept(int size) async {
+      final said = await recording(size);
+      return KeptVoice(
+        path: said.path,
+        duration: said.duration,
+        claktory: 'claktory',
+        kind: KeptKind.dictation,
+        kept: false,
+      );
+    }
+
+    test('it goes with its own ids, and picks up the upload where it '
+        'stopped', () async {
+      final voice = await kept(1024 * 1024 + 300);
+      // Some of it got there before the connection dropped.
+      claktory.received[voice.uploadId] = List.of(
+        (await File(voice.path).readAsBytes()).sublist(0, 1000),
+      );
+      final words = await transcribeOnClaktory(backend, voice);
+      expect(words, 'Yes, the second one.');
+      expect(claktory.starts, [voice.uploadId]);
+      expect(
+        claktory.received[voice.uploadId],
+        await File(voice.path).readAsBytes(),
+      );
+      expect(claktory.requests, [voice.requestId]);
+      expect(voice.uploaded, isTrue);
+    });
+
+    test('once uploaded, asked again it only asks for the words, with the '
+        'same request', () async {
+      final voice = await kept(10);
+      await transcribeOnClaktory(backend, voice);
+      await transcribeOnClaktory(backend, voice);
+      expect(claktory.starts, [voice.uploadId], reason: 'uploaded once');
+      expect(claktory.requests, [voice.requestId, voice.requestId]);
+    });
+
+    test(
+      'a Claktory that no longer has it gets it again, as a new upload',
+      () async {
+        final voice = await kept(10);
+        final first = voice.uploadId;
+        voice.uploaded = true;
+        claktory.forgotten = 1;
+        final words = await transcribeOnClaktory(backend, voice);
+        expect(words, 'Yes, the second one.');
+        expect(voice.uploadId, isNot(first));
+        expect(claktory.starts, [voice.uploadId]);
+        expect(claktory.requests, hasLength(2));
+      },
+    );
+
+    test('a cut-off upload is left for its next try, not cancelled', () async {
+      final voice = await kept(10);
+      await backend.close();
+      await expectLater(
+        transcribeOnClaktory(backend, voice),
+        throwsA(isA<RequestFailure>()),
+      );
+      expect(claktory.cancelled, isEmpty);
+      expect(voice.uploaded, isFalse);
+    });
   });
 }

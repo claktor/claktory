@@ -16,11 +16,11 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::{ConnectError, ConnectingError, Connection, ConnectionError, RecvStream, SendStream};
 use iroh::{EndpointAddr, EndpointId, RelayUrl, SecretKey, Signature};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -137,6 +137,37 @@ pub struct LinkStatus {
     pub offline_since_ms: i64,
 }
 
+/// What one side tells the other of its liaison (#343 U18, Fugo's ruling):
+/// that it waits, and until when when that's known (rounded up to a quarter
+/// of an hour by the sender, checked by the receiver), or that it's awake.
+/// Only the time, never why it waits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Liaison {
+    /// `until_ms`: ms since 1970; 0 when there's no known end (or, heard,
+    /// none that holds: not in the future, or more than 8 days ahead).
+    Waiting { until_ms: i64 },
+    Awake,
+}
+
+/// How long a heard wait's end may be ahead, at most: further, it's shown
+/// without a time.
+const LIAISON_AHEAD_MS: i64 = 8 * 24 * 60 * 60 * 1000;
+/// At most one word on the liaison a minute per pipe, each way (a minute;
+/// tests make it shorter). The receiver takes one at most every five
+/// sixths of it, so the sender's own pace never loses one.
+static LIAISON_EVERY_MS: AtomicU64 = AtomicU64::new(60_000);
+
+/// How often a pipe may tell its peer of its liaison, at most: the store
+/// keeps to it, and the transport drops what comes faster.
+pub fn liaison_every() -> Duration {
+    Duration::from_millis(LIAISON_EVERY_MS.load(Ordering::Relaxed))
+}
+
+/// Shortens `liaison_every`, for every Factory in this process (tests).
+pub fn set_liaison_every(every: Duration) {
+    LIAISON_EVERY_MS.store(u64::try_from(every.as_millis()).unwrap_or(u64::MAX), Ordering::Relaxed);
+}
+
 /// Why the transport can't do what the store asked. Each says it so the app
 /// can show it.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -153,6 +184,11 @@ pub enum PipeError {
     NotFound,
     #[error("Can't reach the other Claktory: {0}")]
     Unreachable(String),
+    /// The other Claktory answered and turned this one away: the code no
+    /// longer works there (it expired, its expiry was forged or this
+    /// clock is behind, or it was used already).
+    #[error("This code has expired or was already used. Ask for a new one.")]
+    TurnedAway,
     #[error("{0}")]
     TooLarge(String),
     #[error("This pipe isn't open yet.")]
@@ -203,6 +239,12 @@ pub trait Store: Send + Sync {
     /// than the person accepted): queued ones stay, in order, with what's
     /// behind them, until it says otherwise and `wake`s the link.
     fn holds_agents(&self, factory: &Arc<Factory>, pipe: &str) -> bool;
+    /// The peer says its liaison waits, or is awake: only on an open pipe,
+    /// at most one every five sixths of `liaison_every`, its time checked.
+    fn peer_liaison(&self, _factory: &Arc<Factory>, _pipe: &str, _liaison: Liaison) {}
+    /// The peer heard what `tell_liaison` said (or can't take it: a
+    /// Claktory from before).
+    fn liaison_told(&self, _factory: &Arc<Factory>, _pipe: &str, _liaison: Liaison) {}
 }
 
 const SCHEMA_SQL: &str = "
@@ -283,8 +325,12 @@ pub fn set_dial(timeout: Duration) {
 const ANSWER: Duration = Duration::from_secs(30);
 /// How often an idle link checks that its peer is there.
 const PING: Duration = Duration::from_secs(20);
-/// The longest wait between tries to reach a peer.
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// The longest wait between tries to reach a peer. Long, since each try at
+/// a peer that's away sends ~46 KB for nothing (Polpo's pipe-redial.md): a
+/// frame from the peer, or something queued for it, wakes the worker anyway.
+const MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
+/// The first wait after a try fails, which then doubles.
+const FIRST_BACKOFF: Duration = Duration::from_secs(1);
 /// How long a closed pipe keeps trying to tell its peer.
 const CLOSE_TRIES: i64 = 7 * 24 * 60 * 60 * 1000;
 /// Files that came with messages and weren't moved are deleted after this.
@@ -327,7 +373,15 @@ pub(crate) struct State {
     workers: Mutex<HashMap<String, Arc<Worker>>>,
     /// One frame at a time per pipe from its peer.
     receiving: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// When each pipe's peer last said something of its liaison that was
+    /// taken, in ms since 1970.
+    liaison_heard: Mutex<HashMap<String, i64>>,
     key: OnceLock<SecretKey>,
+    /// `FIRST_BACKOFF` in ms for this Factory's workers, 0 unless a test
+    /// set it (`set_first_backoff`).
+    first_backoff_ms: AtomicU64,
+    /// A test's stand-in for a Claktory that's away (`set_away`).
+    away: AtomicBool,
 }
 
 impl State {
@@ -343,6 +397,9 @@ impl State {
 struct Worker {
     wake: tokio::sync::Notify,
     status: Mutex<LinkStatus>,
+    /// What to tell the peer of this side's liaison, once the pipe flows:
+    /// the latest only, never queued.
+    liaison: Mutex<Option<Liaison>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -523,6 +580,10 @@ struct Payload {
     /// (`Store::identity`); absent from a Claktory from before.
     #[serde(skip_serializing_if = "Option::is_none")]
     identity: Option<String>,
+    /// waiting: until when, in ms since 1970; absent when there's no known
+    /// end. Whatever the peer put here is checked (`heard_liaison`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    until_ms: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -564,6 +625,11 @@ const KIND_APPROVE: &str = "approve";
 const KIND_PAUSE: &str = "pause";
 const KIND_RESUME: &str = "resume";
 const KIND_CLOSE: &str = "close";
+/// This side's liaison waits (`until_ms` when known), or is awake again:
+/// told out of the queue, never in order with the messages, and dropped by
+/// a Claktory from before (which answers "bad").
+const KIND_WAITING: &str = "waiting";
+const KIND_AWAKE: &str = "awake";
 
 /// This Claktory's tunnel key, which signs its frames.
 fn key(factory: &Factory) -> Result<&SecretKey, PipeError> {
@@ -680,10 +746,34 @@ async fn exchange(connection: &Connection, frame: &[u8], patience: Duration) -> 
     tokio::time::timeout(time, talk).await.map_err(|_| "no answer in time".to_owned())?
 }
 
+/// Why a dial didn't connect.
+#[derive(Debug)]
+enum DialError {
+    /// The peer's gate turned this Claktory's key away (`turned_away`).
+    TurnedAway,
+    Failed(String),
+}
+
+impl std::fmt::Display for DialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DialError::TurnedAway => f.write_str("it turned the code away"),
+            DialError::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+/// Whether the peer's gate closed `error`'s connection, refusing this key
+/// (`remote::REFUSED`).
+fn turned_away(error: &ConnectionError) -> bool {
+    matches!(error, ConnectionError::ApplicationClosed(close) if close.error_code == crate::remote::REFUSED.into())
+}
+
 /// Dials `peer` at what it's known by.
-async fn dial(factory: &Arc<Factory>, peer: &str, relays: &[String], addresses: &[String]) -> Result<Connection, String> {
-    let endpoint = factory.remote_endpoint().ok_or("remote access isn't running")?;
-    let id: EndpointId = peer.parse().map_err(|_| "a bad key".to_owned())?;
+async fn dial(factory: &Arc<Factory>, peer: &str, relays: &[String], addresses: &[String]) -> Result<Connection, DialError> {
+    let failed = |why: &str| DialError::Failed(why.to_owned());
+    let endpoint = factory.remote_endpoint().ok_or_else(|| failed("remote access isn't running"))?;
+    let id: EndpointId = peer.parse().map_err(|_| failed("a bad key"))?;
     let mut addr = EndpointAddr::new(id);
     for relay in relays {
         if let Ok(url) = relay.parse::<RelayUrl>() {
@@ -698,8 +788,12 @@ async fn dial(factory: &Arc<Factory>, peer: &str, relays: &[String], addresses: 
     let connecting = endpoint.connect(addr, ALPN_PIPE);
     match tokio::time::timeout(Duration::from_millis(DIAL_MS.load(Ordering::Relaxed)), connecting).await {
         Ok(Ok(connection)) => Ok(connection),
-        Ok(Err(error)) => Err(format!("{error:#}")),
-        Err(_) => Err("no answer in time".to_owned()),
+        Ok(Err(
+            ConnectError::Connection { source, .. }
+            | ConnectError::Connecting { source: ConnectingError::ConnectionError { source, .. }, .. },
+        )) if turned_away(&source) => Err(DialError::TurnedAway),
+        Ok(Err(error)) => Err(DialError::Failed(format!("{error:#}"))),
+        Err(_) => Err(failed("no answer in time")),
     }
 }
 
@@ -835,11 +929,48 @@ pub(crate) fn reload(factory: &Arc<Factory>) {
     }
 }
 
+/// Starts this Factory's workers' backoff at `from` instead of a second,
+/// both at first and after each time the peer answers (tests: a worker in
+/// a long backoff).
+pub fn set_first_backoff(factory: &Factory, from: Duration) {
+    factory.remote.pipes.first_backoff_ms.store(u64::try_from(from.as_millis()).unwrap_or(u64::MAX), Ordering::Relaxed);
+}
+
+/// Has this Factory's pipes act as a Claktory that's away, as a stopped
+/// process would (tests): its peers' connections are closed unanswered, and
+/// its workers reach no one. Back, its workers carry on at once.
+pub fn set_away(factory: &Factory, away: bool) {
+    factory.remote.pipes.away.store(away, Ordering::Relaxed);
+    if !away {
+        for worker in lock(&factory.remote.pipes.workers).values() {
+            worker.wake.notify_one();
+        }
+    }
+}
+
+fn first_backoff(factory: &Factory) -> Duration {
+    match factory.remote.pipes.first_backoff_ms.load(Ordering::Relaxed) {
+        0 => FIRST_BACKOFF,
+        ms => Duration::from_millis(ms),
+    }
+}
+
 /// The link's worker looks at its queue again now.
 pub(crate) fn wake(factory: &Factory, pipe: &str) {
     if let Some(worker) = lock(&factory.remote.pipes.workers).get(pipe) {
         worker.wake.notify_one();
     }
+}
+
+/// Tells the peer of this side's liaison, once the pipe flows and the
+/// peer can be reached (`Store::liaison_told` once it's heard): only the
+/// latest, in place of one not told yet. False when the pipe has no link
+/// at work (not open).
+pub fn tell_liaison(factory: &Factory, pipe: &str, liaison: Liaison) -> bool {
+    let Some(worker) = lock(&factory.remote.pipes.workers).get(pipe).cloned() else { return false };
+    *lock(&worker.liaison) = Some(liaison);
+    worker.wake.notify_one();
+    true
 }
 
 /// A one-time code for `pipe`, working for `INVITE_LIFETIME`:
@@ -952,7 +1083,11 @@ pub async fn join(factory: &Arc<Factory>, pipe: &str, code: &str, mine: &Side) -
     if me == code.endpoint {
         return Err(PipeError::Other("This code was made on this Claktory. Use it on the other one.".to_owned()));
     }
-    let connection = dial(factory, &code.endpoint, &code.relays, &code.addresses).await.map_err(PipeError::Unreachable)?;
+    let connection = match dial(factory, &code.endpoint, &code.relays, &code.addresses).await {
+        Ok(connection) => connection,
+        Err(DialError::TurnedAway) => return Err(PipeError::TurnedAway),
+        Err(error) => return Err(PipeError::Unreachable(error.to_string())),
+    };
     let payload = Payload {
         v: 1,
         wire: code.wire.clone(),
@@ -964,7 +1099,13 @@ pub async fn join(factory: &Arc<Factory>, pipe: &str, code: &str, mine: &Side) -
         sent_at: now_ms(),
         ..Payload::default()
     };
-    let reply = exchange(&connection, &frame(key(factory)?, &payload, &[]), ANSWER).await.map_err(PipeError::Unreachable)?;
+    // The gate turns a key away just after the handshake, so a refusal
+    // usually shows here, as the connection's end.
+    let reply = match exchange(&connection, &frame(key(factory)?, &payload, &[]), ANSWER).await {
+        Ok(reply) => reply,
+        Err(_) if connection.close_reason().is_some_and(|reason| turned_away(&reason)) => return Err(PipeError::TurnedAway),
+        Err(error) => return Err(PipeError::Unreachable(error)),
+    };
     connection.close(0u32.into(), b"joined");
     match reply.code.as_str() {
         "ok" => {}
@@ -1168,6 +1309,7 @@ fn forget(factory: &Arc<Factory>, pipe: &str) {
         }
     }
     lock(&factory.remote.pipes.workers).remove(pipe);
+    lock(&factory.remote.pipes.liaison_heard).remove(pipe);
     reload(factory);
 }
 
@@ -1233,10 +1375,16 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
     // has, no message goes, so who it is now (its identity, which may hold
     // agents' messages) is heard before anything queued meanwhile.
     let mut pinged = false;
-    let mut backoff = Duration::from_secs(1);
+    let mut backoff = factory.upgrade().map_or(FIRST_BACKOFF, |factory| first_backoff(&factory));
     let mut contact = tokio::time::Instant::now() - PING;
     loop {
         let Some(strong) = factory.upgrade() else { return };
+        if strong.remote.pipes.away.load(Ordering::Relaxed) {
+            connection = None;
+            drop(strong);
+            let _ = tokio::time::timeout(PING, worker.wake.notified()).await;
+            continue;
+        }
         let Some(link) = load(&strong, &pipe) else {
             lock(&strong.remote.pipes.workers).remove(&pipe);
             return;
@@ -1253,8 +1401,10 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
             forget(&strong, &pipe);
             return;
         }
+        // Word on the liaison, only while the pipe flows.
+        let liaison = (*lock(&worker.liaison)).filter(|_| link.flowing());
         let ping_due = contact.elapsed() >= PING;
-        if next.is_none() && !ping_due {
+        if next.is_none() && liaison.is_none() && !ping_due {
             drop(strong);
             let _ = tokio::time::timeout_at(contact + PING, worker.wake.notified()).await;
             continue;
@@ -1270,6 +1420,7 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
                 }
                 Err(error) => {
                     tracing::debug!(pipe, %error, "can't reach a pipe's peer");
+                    let error = error.to_string();
                     set_status(&strong, &pipe, &worker, |status| offline(status, &error));
                     drop(strong);
                     let _ = tokio::time::timeout(backoff, worker.wake.notified()).await;
@@ -1280,9 +1431,26 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
         }
         let Some(open) = connection.clone() else { continue };
         let next = next.filter(|(_, msg_id, _)| pinged || msg_id.is_empty());
-        let bytes = match &next {
-            Some((_, _, frame)) => frame.clone(),
-            None => {
+        // After what's queued, and only once the peer answered a ping here.
+        let liaison = liaison.filter(|_| pinged && next.is_none());
+        let bytes = match (&next, liaison) {
+            (Some((_, _, frame)), _) => frame.clone(),
+            (None, Some(liaison)) => {
+                let (kind, until_ms) = match liaison {
+                    Liaison::Waiting { until_ms } => (KIND_WAITING, (until_ms > 0).then(|| serde_json::json!(until_ms))),
+                    Liaison::Awake => (KIND_AWAKE, None),
+                };
+                let payload =
+                    Payload { v: 1, wire: link.wire.clone(), kind: kind.to_owned(), sent_at: now_ms(), until_ms, ..Payload::default() };
+                match key(&strong) {
+                    Ok(key) => frame(key, &payload, &[]),
+                    Err(error) => {
+                        tracing::error!(%error, "can't sign for a pipe");
+                        return;
+                    }
+                }
+            }
+            (None, None) => {
                 let (relays, addresses) = here(&strong);
                 let payload = Payload {
                     v: 1,
@@ -1319,7 +1487,7 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
                 continue;
             }
         };
-        backoff = Duration::from_secs(1);
+        backoff = first_backoff(&strong);
         contact = tokio::time::Instant::now();
         let seen = now_ms();
         if let Err(error) = strong.store.db().execute("UPDATE pipe_links SET last_seen = ?2 WHERE pipe = ?1", params![pipe, seen]) {
@@ -1342,6 +1510,30 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
         }
         if let (Some(identity), Some(store)) = (reply.identity.as_deref(), store()) {
             store.identity(&strong, &pipe, &link.peer, identity);
+        }
+        if let Some(told) = liaison {
+            // Heard, or a Claktory from before that can't take it ("bad"):
+            // either way it's said, unless something newer came meanwhile.
+            if matches!(reply.code.as_str(), "ok" | "bad") {
+                let newer = {
+                    let mut pending = lock(&worker.liaison);
+                    if *pending == Some(told) {
+                        *pending = None;
+                    }
+                    pending.is_some()
+                };
+                if let Some(store) = store() {
+                    store.liaison_told(&strong, &pipe, told);
+                }
+                if newer {
+                    worker.wake.notify_one();
+                }
+            } else {
+                // Not now: after a while, or when the peer says something.
+                drop(strong);
+                let _ = tokio::time::timeout(Duration::from_secs(5), worker.wake.notified()).await;
+            }
+            continue;
         }
         if next.is_none() {
             pinged = true;
@@ -1387,6 +1579,10 @@ pub(crate) async fn serve(connection: Connection, factory: Weak<Factory>) {
     let mut unpinned_streams = 0;
     while let Ok((send, receive)) = connection.accept_bi().await {
         let Some(strong) = factory.upgrade() else { return };
+        if strong.remote.pipes.away.load(Ordering::Relaxed) {
+            connection.close(0u32.into(), b"away");
+            return;
+        }
         let pinned = strong.remote.pipes.admits.pinned(&peer.to_string());
         drop(strong);
         if !pinned {
@@ -1582,6 +1778,23 @@ async fn received(factory: &Arc<Factory>, peer: &str, payload: Payload, files: V
                 }
             }
         }
+        KIND_WAITING | KIND_AWAKE => {
+            // Only on an open pipe; past the pace, dropped. "ok" either
+            // way: there's nothing to send again.
+            if link.flowing() && let Some(liaison) = heard_liaison(factory, &pipe, &payload) {
+                let factory = factory.clone();
+                let pipe = pipe.clone();
+                // Never with a lock of the transport's held.
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move {
+                        if let Some(store) = store() {
+                            store.peer_liaison(&factory, &pipe, liaison);
+                        }
+                    });
+                }
+            }
+            Reply::code("ok")
+        }
         _ => Reply::code("bad"),
     };
     if let Err(error) = link.save_received(&factory.store.db()) {
@@ -1591,6 +1804,32 @@ async fn received(factory: &Arc<Factory>, peer: &str, payload: Payload, files: V
     // The peer is there: what waits for it can go now.
     wake(factory, &pipe);
     reply
+}
+
+/// What the peer said of its liaison, as this side takes it: None past the
+/// pace (one every five sixths of `liaison_every`); a wait's time only when
+/// it's a number in the future and at most 8 days ahead, else none.
+fn heard_liaison(factory: &Factory, pipe: &str, payload: &Payload) -> Option<Liaison> {
+    let now = now_ms();
+    let pace = i64::try_from(liaison_every().as_millis() * 5 / 6).unwrap_or(i64::MAX);
+    {
+        let mut heard = lock(&factory.remote.pipes.liaison_heard);
+        if heard.get(pipe).is_some_and(|last| now - last < pace) {
+            tracing::debug!(pipe, "a pipe's word on its peer's liaison came too soon: dropped");
+            return None;
+        }
+        heard.insert(pipe.to_owned(), now);
+    }
+    if payload.kind == KIND_AWAKE {
+        return Some(Liaison::Awake);
+    }
+    let until_ms = payload
+        .until_ms
+        .as_ref()
+        .and_then(serde_json::Value::as_i64)
+        .filter(|until| *until > now && *until - now <= LIAISON_AHEAD_MS)
+        .unwrap_or(0);
+    Some(Liaison::Waiting { until_ms })
 }
 
 /// Writes a message's files to `<home>/pipes/incoming/<pipe>/<seq>/`, for

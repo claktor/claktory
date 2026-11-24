@@ -17,11 +17,13 @@ import 'identity.dart';
 import 'mobile/header.dart' show HeaderButton, PhoneHeader;
 import 'mobile/metrics.dart' show TypeScale;
 import 'mobile/page_find.dart' show PhonePageFind, phonePageSearch;
+import 'mobile/input.dart' show InputKind;
 import 'mobile/lines.dart' show ActionLine;
 import 'mobile/popover.dart' show presentPopover;
 import 'account.dart' show askSignIn;
 import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'pairing.dart' show PairingDigits;
+import 'pipe_groups.dart' show groupOf, moveToGroup, removeFromGroup;
 import 'pipe_start.dart' show PipeInviteQr, copyInviteCode, pipeInviteCheck;
 import 'scan_code.dart';
 import 'pipe_reports.dart'
@@ -34,6 +36,7 @@ import 'selection.dart';
 import 'state.dart' show PipeChat;
 import 'taint_label.dart' show TaintLabel, taintPages, taintRead;
 import 'transcript.dart' show Bubble, userAvatarSize;
+import 'usage.dart' show formatUntil;
 import 'visible_codes.dart' show proseCodes, visibleCodes;
 import 'waiting.dart' show EntryReveal;
 
@@ -161,8 +164,29 @@ const pipeChooseLead =
     'settings to have it answer.';
 
 /// Where [pipe] stands, in a few words, for its sidebar row and header.
-String pipeStatus(Pipe pipe) {
+/// With its [lead] ([pipeLead]), open and online: the lead's usage wait in
+/// place of "Online" (#343 U18), since nothing is answered meanwhile. Only
+/// ever on this side: the wait's words never go to the other.
+String pipeStatus(Pipe pipe, {Agent? lead, DateTime? now}) {
   final who = pipePeerName(pipe);
+  // Past its daily spending limit, the lead answers nothing from the other
+  // side until midnight (#357 L1).
+  if (pipe.state == PipeState.PIPE_STATE_OPEN && pipeLeadOverLimit(lead)) {
+    return pipeOverLimitLine;
+  }
+  if (pipe.state == PipeState.PIPE_STATE_OPEN &&
+      pipe.online &&
+      lead != null &&
+      lead.usageWait.isNotEmpty) {
+    return liaisonWaitLine(lead, now: now ?? DateTime.now());
+  }
+  // The other side's liaison waits (#343 U18): in our words, with this
+  // side's own name for the pipe, never anything they wrote.
+  if (pipe.state == PipeState.PIPE_STATE_OPEN &&
+      pipe.online &&
+      pipe.peerWaiting) {
+    return peerWaitLine(pipe, now: now ?? DateTime.now());
+  }
   return switch (pipe.state) {
     PipeState.PIPE_STATE_INVITED => 'Waiting for your invite to be used',
     PipeState.PIPE_STATE_JOINING => 'Connecting…',
@@ -185,6 +209,46 @@ String pipeStatus(Pipe pipe) {
     PipeState.PIPE_STATE_CLOSED => 'Closed',
     _ => '',
   };
+}
+
+/// A pipe's row while its lead is past its daily spending limit.
+const pipeOverLimitLine = 'Paused until midnight: daily limit reached';
+
+/// Whether [lead] is past its daily spending limit (ContainedSpend.over):
+/// what the other side sends waits until midnight.
+bool pipeLeadOverLimit(Agent? lead) =>
+    lead != null && lead.hasSpend() && lead.spend.over;
+
+/// The agent [pipe] wakes when something arrives (Pipe.lead_id, its
+/// liaison when it has one); null when it has none.
+Agent? pipeLead(Workspace workspace, Pipe pipe) {
+  if (pipe.leadId.isEmpty) return null;
+  for (final agent in workspace.agents) {
+    if (agent.id == pipe.leadId) return agent;
+  }
+  return null;
+}
+
+/// A pipe's lead [liaison] held up by its provider's usage (#343 U18): "Kai
+/// is waiting until Fri 18:00", or "Kai is waiting" when it waits for the
+/// person (out of credit, a sign-in).
+String liaisonWaitLine(Agent liaison, {required DateTime now}) {
+  final name = proseCodes(liaison.name);
+  final ms = liaison.usageWaitUntilMs.toInt();
+  return ms > now.millisecondsSinceEpoch
+      ? '$name is waiting until ${formatUntil(ms, now)}'
+      : '$name is waiting';
+}
+
+/// [pipe]'s other side waiting to answer (Pipe.peer_waiting): "Acme is
+/// waiting until Fri 18:00", or "Acme is waiting" with no known end, named
+/// by this side's own name for the pipe.
+String peerWaitLine(Pipe pipe, {required DateTime now}) {
+  final name = pipe.name.isNotEmpty ? proseCodes(pipe.name) : 'The other side';
+  final ms = pipe.peerWaitingUntilMs.toInt();
+  return ms > now.millisecondsSinceEpoch
+      ? '$name is waiting until ${formatUntil(ms, now)}'
+      : '$name is waiting';
 }
 
 /// The name to prefill for [pipe]'s new liaison: Claktory's suggestion
@@ -326,6 +390,8 @@ class PipeView extends StatelessWidget {
             onMenu: onMenu,
           ),
           PipeIdentityNotice(pipe: pipe),
+          // Its lead past its spending limit, with the limit to raise.
+          PipeSpendNotice(pipe: pipe),
           // Its reports: where they go, and what was forwarded.
           PipeReportsStrip(pipe: pipe),
           Expanded(child: body),
@@ -423,7 +489,13 @@ class _PipeHeader extends StatelessWidget {
                 ],
                 Flexible(
                   child: Text(
-                    pipeStatus(pipe),
+                    pipeStatus(
+                      pipe,
+                      lead: pipeLead(
+                        AppScope.of(context).workspace.workspace,
+                        pipe,
+                      ),
+                    ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyles.body.copyWith(color: palette.textMuted),
@@ -435,18 +507,19 @@ class _PipeHeader extends StatelessWidget {
                     label: liaison.name,
                     child: AgentCharacter(agent: liaison, size: 24, live: true),
                   ),
-                  const SizedBox(width: Space.xs),
-                  GlyphButton(
-                    label: 'More',
-                    active: false,
-                    onTap: () => _liaisonActions(context, liaison),
-                    glyph: (color) => ExtensionGlyph(
-                      icon: 'ellipsis',
-                      name: 'More',
-                      color: color,
-                    ),
-                  ),
                 ],
+                // Always: Move to group… (#359), and the liaison's own.
+                SizedBox(width: liaison == null ? Space.m : Space.xs),
+                GlyphButton(
+                  label: 'More',
+                  active: false,
+                  onTap: () => _pipeActions(context, pipe, liaison),
+                  glyph: (color) => ExtensionGlyph(
+                    icon: 'ellipsis',
+                    name: 'More',
+                    color: color,
+                  ),
+                ),
               ],
             ),
           ),
@@ -478,7 +551,10 @@ extension on _PipeHeader {
     final type = TypeScale.of(context);
     final liaison = this.liaison;
     final status = [
-      pipeStatus(pipe),
+      pipeStatus(
+        pipe,
+        lead: pipeLead(AppScope.of(context).workspace.workspace, pipe),
+      ),
       if (pipe.state != PipeState.PIPE_STATE_INVITED) verifiedLabel(pipe),
       if (pipe.canRunCommandsIds.isNotEmpty)
         canRunCommandsText(pipe.canRunCommandsIds.length),
@@ -521,15 +597,14 @@ extension on _PipeHeader {
       titleHint: 'Opens pipe settings',
       onTitleTap: () => showPipeSettings(context, pipe),
       trailing: [
-        if (liaison != null) ...[
+        if (liaison != null)
           ExcludeSemantics(
             child: AgentCharacter(agent: liaison, size: 24, live: true),
           ),
-          HeaderButton.more(
-            label: '${liaison.name}: more',
-            onTap: () => _liaisonActions(context, liaison),
-          ),
-        ],
+        HeaderButton.more(
+          label: '${pipe.name}: more',
+          onTap: () => _pipeActions(context, pipe, liaison),
+        ),
       ],
       bottom: SizedBox(
         height: 2,
@@ -547,12 +622,19 @@ extension on _PipeHeader {
 }
 
 /// What can be done from the pipe's "…": on a phone, search the pipe;
-/// with its liaison, its settings, and clearing its conversation.
-Future<void> _liaisonActions(BuildContext context, Agent liaison) async {
+/// move it to a group (#359), or out of its own; with its liaison, its
+/// settings, and clearing its conversation.
+Future<void> _pipeActions(
+  BuildContext context,
+  Pipe pipe,
+  Agent? liaison,
+) async {
   final search = phonePageSearch(context);
+  final grouped =
+      groupOf(AppScope.of(context).workspace.workspace, pipe) != null;
   final action = await showActions<String>(
     context,
-    title: liaison.name,
+    title: pipe.name,
     actions: [
       if (search != null)
         SheetAction(
@@ -565,20 +647,28 @@ Future<void> _liaisonActions(BuildContext context, Agent liaison) async {
             size: 16,
           ),
         ),
-      const SheetAction('Liaison settings…', 'settings'),
-      const SheetAction('Clear conversation…', 'clear'),
+      const SheetAction('Move to group…', 'group'),
+      if (grouped) const SheetAction('Remove from group', 'ungroup'),
+      if (liaison != null) ...const [
+        SheetAction('Liaison settings…', 'settings'),
+        SheetAction('Clear conversation…', 'clear'),
+      ],
     ],
   );
   if (!context.mounted) return;
   switch (action) {
     case 'search':
       search?.call();
-    case 'settings':
+    case 'group':
+      await moveToGroup(context, pipe);
+    case 'ungroup':
+      removeFromGroup(context, pipe);
+    case 'settings' when liaison != null:
       await showModal(
         context,
         (context, close) => AgentSettingsForm(agent: liaison, close: close),
       );
-    case 'clear':
+    case 'clear' when liaison != null:
       await showModal(
         context,
         (context, close) => _ClearConversation(agent: liaison, close: close),
@@ -1012,6 +1102,140 @@ class _PipeIdentityNoticeState extends State<PipeIdentityNotice> {
   }
 }
 
+/// Under a pipe's header while its lead is past its daily spending limit
+/// (#357 L1): that the other side's messages wait until midnight, and the
+/// limit, to raise it now. Nothing otherwise.
+class PipeSpendNotice extends StatefulWidget {
+  const PipeSpendNotice({super.key, required this.pipe});
+
+  final Pipe pipe;
+
+  @override
+  State<PipeSpendNotice> createState() => _PipeSpendNoticeState();
+}
+
+class _PipeSpendNoticeState extends State<PipeSpendNotice> {
+  final _cap = TextEditingController();
+  var _busy = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _cap.addListener(() => setState(() {}));
+  }
+
+  @override
+  void dispose() {
+    _cap.dispose();
+    super.dispose();
+  }
+
+  /// The dollars typed, when they're an amount above [spend]'s limit.
+  double? _raised(ContainedSpend spend) {
+    final usd = double.tryParse(_cap.text.trim().replaceFirst(r'$', ''));
+    return usd != null && usd.isFinite && usd > spend.capUsd ? usd : null;
+  }
+
+  Future<void> _raise(Agent lead, double usd) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      // Its token cap as it is: 0 there would put the default back.
+      await AppScope.of(context).setSpendCap(
+        SetSpendCap(
+          agentId: lead.id,
+          capUsd: usd,
+          capTokens: lead.spend.capTokens,
+        ),
+      );
+      _cap.clear();
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final lead = pipeLead(
+      AppScope.of(context).workspace.workspace,
+      widget.pipe,
+    );
+    if (widget.pipe.state != PipeState.PIPE_STATE_OPEN ||
+        !pipeLeadOverLimit(lead)) {
+      return const SizedBox.shrink();
+    }
+    final spend = lead!.spend;
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final name = proseCodes(lead.name);
+    final raised = _raised(spend);
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: Space.xl,
+        vertical: Space.m,
+      ),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: palette.hairline)),
+      ),
+      child: ActionLine(
+        lead: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          spacing: 2,
+          children: [
+            Text(
+              spend.capUsd > 0
+                  ? '$name reached today’s \$${_capText(spend)} limit'
+                  : '$name reached today’s limit',
+              style: type.body.copyWith(
+                color: palette.text,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            Text(
+              'Messages from ${pipePeerName(widget.pipe)} wait until '
+              'midnight. Raise the limit to have $name answer now.',
+              style: type.body.copyWith(color: palette.textMuted),
+            ),
+            if (_error case final error?)
+              Text(error, style: type.caption.copyWith(color: palette.danger)),
+          ],
+        ),
+        action: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(r'$', style: type.body.copyWith(color: palette.textMuted)),
+            const SizedBox(width: Space.xs),
+            SizedBox(
+              width: 72,
+              child: TextField(
+                controller: _cap,
+                placeholder: _capText(spend).isEmpty ? '10' : _capText(spend),
+                kind: InputKind.number,
+                semanticsLabel: 'Daily spending limit in dollars',
+                onSubmitted: (_) {
+                  if (!_busy && raised != null) _raise(lead, raised);
+                },
+              ),
+            ),
+            const SizedBox(width: Space.s),
+            Button(
+              label: 'Raise limit',
+              onPressed: _busy || raised == null
+                  ? null
+                  : () => _raise(lead, raised),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// A quiet mark in a hairline capsule, such as "Not verified".
 class _Mark extends StatelessWidget {
   const _Mark({required this.text, required this.color});
@@ -1241,6 +1465,9 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
   var _busy = false;
   String? _error;
 
+  /// Who the last reply went to (#370), said until the next decision.
+  String? _sentTo;
+
   /// The person's comment, for this side's lead with either answer; never
   /// the other side's.
   final _comment = TextEditingController();
@@ -1294,6 +1521,34 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
     }
   }
 
+  /// The comment to [agent] (Pipe.reply_agent_id), as a reply: nothing
+  /// approved or declined, the pipe still waiting (#370).
+  Future<void> _reply(String agent) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+      _sentTo = null;
+    });
+    try {
+      await AppScope.of(context).approvePipe(
+        ApprovePipe(
+          pipeId: widget.pipe.id,
+          approve: false,
+          reply: true,
+          comment: _comment.text.trim(),
+        ),
+      );
+      if (mounted) {
+        _comment.clear();
+        setState(() => _sentTo = agent);
+      }
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   /// A liaison is limited to the pipe unless the person says otherwise;
   /// every other member can run commands, with the warning.
   static bool _canRunByDefault(Agent agent) =>
@@ -1310,6 +1565,10 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
     final project = store.project(pipe.projectId);
     final agents = store.agentsIn(pipe.projectId);
     final lead = _shownLead;
+    // Who a comment goes to as a reply; none, no Submit.
+    final replyTo = pipe.replyAgentId.isEmpty
+        ? null
+        : store.agent(pipe.replyAgentId)?.name ?? 'Your agent';
     // Their words, on a card to decide on: what reorders text shows by
     // its code (proseCodes, Fugo).
     final who = [
@@ -1463,30 +1722,51 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
                 style: TextStyles.body.copyWith(color: palette.textMuted),
               ),
             ),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  _error ??
-                      'You can change this later in the pipe\'s '
-                          'settings.',
-                  style: TextStyles.caption.copyWith(
-                    color: _error == null ? palette.textFaint : palette.danger,
+          // A comment typed, with someone to hear it: one Submit, the
+          // pipe still waiting (#370).
+          CommentTyped(
+            controller: _comment,
+            builder: (context, typed) {
+              final replying = typed && replyTo != null;
+              return Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _error ??
+                          (replying
+                              ? 'The pipe still waits for you. $replyTo '
+                                    'gets your comment.'
+                              : _sentTo != null
+                              ? 'Sent to $_sentTo.'
+                              : 'You can change this later in the pipe\'s '
+                                    'settings.'),
+                      style: TextStyles.caption.copyWith(
+                        color: _error == null
+                            ? palette.textFaint
+                            : palette.danger,
+                      ),
+                    ),
                   ),
-                ),
-              ),
-              const SizedBox(width: Space.s),
-              Button(
-                label: 'Decline',
-                onPressed: _busy ? null : () => _decide(false),
-              ),
-              const SizedBox(width: Space.s),
-              Button(
-                label: 'Approve',
-                primary: true,
-                onPressed: _busy ? null : () => _decide(true),
-              ),
-            ],
+                  const SizedBox(width: Space.s),
+                  if (replying)
+                    SubmitButton(
+                      onPressed: _busy ? null : () => _reply(replyTo),
+                    )
+                  else ...[
+                    Button(
+                      label: 'Decline',
+                      onPressed: _busy ? null : () => _decide(false),
+                    ),
+                    const SizedBox(width: Space.s),
+                    Button(
+                      label: 'Approve',
+                      primary: true,
+                      onPressed: _busy ? null : () => _decide(true),
+                    ),
+                  ],
+                ],
+              );
+            },
           ),
           // Approved, the lead chosen here hears it; declined, the agent
           // that set the pipe up (or Rivet): only this side's agents.
@@ -1495,6 +1775,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
             agent: 'your agents',
             note: 'Only your agents see it, not ${pipePeerClaktory(pipe)}.',
             enabled: !_busy,
+            onSubmit: replyTo == null ? null : () => _reply(replyTo),
           ),
         ],
       ),
@@ -1828,7 +2109,10 @@ class _PipeMessageViewState extends State<PipeMessageView> {
     super.dispose();
   }
 
-  Future<void> _decide(bool allow) async {
+  /// Sends it (lets it in), or discards it; [reply], on one of this
+  /// side's agents' (#370), sends it back unsent to its writer with the
+  /// comment, to write again.
+  Future<void> _decide(bool allow, {bool reply = false}) async {
     setState(() {
       _busy = true;
       _error = null;
@@ -1839,6 +2123,7 @@ class _PipeMessageViewState extends State<PipeMessageView> {
         widget.message.seq.toInt(),
         allow,
         comment: _comment.text.trim(),
+        reply: reply,
       );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
@@ -2098,6 +2383,13 @@ class _PipeMessageViewState extends State<PipeMessageView> {
     );
   }
 
+  /// The agent of this side that wrote it, by name.
+  String _writer() {
+    final author = widget.message.author;
+    final agent = AppScope.of(context).workspace.agent(author.agentId);
+    return proseCodes(agent?.name ?? author.name);
+  }
+
   /// What became of it, and the person's decision when one waits; [start]
   /// lines it up at the start whichever way it went.
   Widget _state(Palette palette, String time, {bool start = false}) {
@@ -2118,6 +2410,30 @@ class _PipeMessageViewState extends State<PipeMessageView> {
     };
     if (decide != null) {
       final held = message.state == PipeMessageState.PIPE_MESSAGE_STATE_HELD;
+      final hearer = pipeDecisionHearer(
+        AppScope.of(context).workspace.workspace,
+        widget.pipe,
+        message,
+      );
+      final choices = Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Button(
+            label: decide.$1,
+            onPressed: _busy ? null : () => _decide(false),
+          ),
+          const SizedBox(width: Space.s),
+          Button(
+            label: decide.$2,
+            primary: true,
+            onPressed: _busy ? null : () => _decide(true),
+          ),
+        ],
+      );
+      // An agent's held message with a comment typed: one Submit, which
+      // sends it back unsent (#370). The other side's keeps Discard and
+      // Let in: its lead reads it once it's in.
+      final replies = held && hearer != null;
       return Column(
         crossAxisAlignment: held && !start
             ? CrossAxisAlignment.end
@@ -2135,32 +2451,37 @@ class _PipeMessageViewState extends State<PipeMessageView> {
           ),
           if (_error case final error?) line(error, color: palette.danger),
           const SizedBox(height: Space.xs),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Button(
-                label: decide.$1,
-                onPressed: _busy ? null : () => _decide(false),
-              ),
-              const SizedBox(width: Space.s),
-              Button(
-                label: decide.$2,
-                primary: true,
-                onPressed: _busy ? null : () => _decide(true),
-              ),
-            ],
-          ),
-          if (pipeDecisionHearer(
-                AppScope.of(context).workspace.workspace,
-                widget.pipe,
-                message,
-              )
-              case final agent?)
+          if (replies)
+            CommentTyped(
+              controller: _comment,
+              builder: (context, typed) => typed
+                  ? Wrap(
+                      spacing: Space.s,
+                      runSpacing: Space.xs,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        line(
+                          'Not sent. $hearer gets your comment and writes '
+                          'it again.',
+                        ),
+                        SubmitButton(
+                          onPressed: _busy
+                              ? null
+                              : () => _decide(false, reply: true),
+                        ),
+                      ],
+                    )
+                  : choices,
+            )
+          else
+            choices,
+          if (hearer != null)
             DecisionComment(
               controller: _comment,
-              agent: agent,
+              agent: hearer,
               peer: pipePeerClaktory(widget.pipe),
               enabled: !_busy,
+              onSubmit: replies ? () => _decide(false, reply: true) : null,
             ),
         ],
       );
@@ -2176,6 +2497,14 @@ class _PipeMessageViewState extends State<PipeMessageView> {
         note.isEmpty ? 'Not sent · $time' : 'Not sent: $note · $time',
         color: palette.danger,
       ),
+      // Sent back to its writer with the person's comment (#370).
+      PipeMessageState.PIPE_MESSAGE_STATE_DISCARDED when message.replied =>
+        line(
+          note.isEmpty
+              ? 'Sent back to ${_writer()} · $time'
+              : 'Sent back to ${_writer()} · “$note” · $time',
+          color: palette.textMuted,
+        ),
       PipeMessageState.PIPE_MESSAGE_STATE_DISCARDED => line(
         'Discarded · $time',
       ),
@@ -3558,7 +3887,9 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
         : '${set[0].toUpperCase()}${set.substring(1)}. $expect';
   }
 
-  Future<void> _decide(bool allow) async {
+  /// Allows it once or doesn't; [reply] (#370) doesn't, sending the
+  /// comment as the answer.
+  Future<void> _decide(bool allow, {bool reply = false}) async {
     setState(() {
       _busy = true;
       _error = null;
@@ -3569,6 +3900,7 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
         widget.seq,
         allow,
         comment: _comment.text.trim(),
+        reply: reply,
       );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
@@ -3653,32 +3985,53 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
           ],
           const SizedBox(height: Space.m),
           if (pending) ...[
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _error ?? 'If you allow it, this command runs once.',
-                    style: TextStyles.caption.copyWith(
-                      color: _error == null
-                          ? palette.textFaint
-                          : palette.danger,
+            // A comment typed: one Submit, which doesn't allow it (#370).
+            CommentTyped(
+              controller: _comment,
+              builder: (context, typed) => Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _error ??
+                          (typed
+                              ? 'Not allowed this time. $name gets your '
+                                    'comment.'
+                              : 'If you allow it, this command runs once.'),
+                      style: TextStyles.caption.copyWith(
+                        color: _error == null
+                            ? palette.textFaint
+                            : palette.danger,
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: Space.s),
-                Button(
-                  label: "Don't allow",
-                  onPressed: _busy ? null : () => _decide(false),
-                ),
-                const SizedBox(width: Space.s),
-                Button(
-                  label: 'Allow once',
-                  primary: true,
-                  onPressed: _busy ? null : () => _decide(true),
-                ),
-              ],
+                  const SizedBox(width: Space.s),
+                  if (typed)
+                    SubmitButton(
+                      onPressed: _busy
+                          ? null
+                          : () => _decide(false, reply: true),
+                    )
+                  else ...[
+                    Button(
+                      label: "Don't allow",
+                      onPressed: _busy ? null : () => _decide(false),
+                    ),
+                    const SizedBox(width: Space.s),
+                    Button(
+                      label: 'Allow once',
+                      primary: true,
+                      onPressed: _busy ? null : () => _decide(true),
+                    ),
+                  ],
+                ],
+              ),
             ),
-            DecisionComment(controller: _comment, agent: name, enabled: !_busy),
+            DecisionComment(
+              controller: _comment,
+              agent: name,
+              enabled: !_busy,
+              onSubmit: () => _decide(false, reply: true),
+            ),
           ] else
             Row(
               children: [
@@ -3709,6 +4062,12 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
                             fontWeight: FontWeight.w500,
                           ),
                         ),
+                        // Not allowed with a comment (#370): the comment.
+                        if (approval.replied && approval.comment.isNotEmpty)
+                          TextSpan(
+                            text: ' · “${approval.comment}”',
+                            style: TextStyle(color: palette.text),
+                          ),
                         if (decided > 0)
                           TextSpan(
                             text:

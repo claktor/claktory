@@ -15,12 +15,11 @@ import 'chats.dart'
     show
         ChatGlyph,
         ChatHistory,
+        chatActions,
         chatTitle,
         chatWaiting,
         chatsNewestFirst,
-        deleteChat,
         openChat,
-        renameChat,
         selectedChat,
         startNewChat;
 import 'connection.dart';
@@ -41,6 +40,7 @@ import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'mobile/platform_policy.dart';
 import 'people/people_view.dart' show peopleAvailable, showPeople;
 import 'phone.dart' show PhoneProjects;
+import 'pipe_groups.dart';
 import 'pipe_timeline.dart' show pipeLiaison;
 import 'pipes.dart';
 import 'protocol/factory/v1/factory.pb.dart';
@@ -177,15 +177,23 @@ class Sidebar extends StatelessWidget {
               ] else ...[
                 for (final project in workspace.projects)
                   if (!project.archived)
-                    _Place(
-                      projectId: project.id,
-                      header: _ProjectRow(project: project),
-                      folders: project.folders,
-                      agents: backend.workspace.agentsIn(project.id),
-                      selectedAgentId: selected,
-                      // On a phone, a small step, so the left edge isn't
-                      // spent on depth.
-                      indent: phone ? Space.s : Space.l,
+                    _ProjectSlot(
+                      project: project,
+                      order: [for (final p in workspace.projects) p.id],
+                      shown: [
+                        for (final p in workspace.projects)
+                          if (!p.archived) p.id,
+                      ],
+                      place: (header) => _Place(
+                        projectId: project.id,
+                        header: header,
+                        folders: project.folders,
+                        agents: backend.workspace.agentsIn(project.id),
+                        selectedAgentId: selected,
+                        // On a phone, a small step, so the left edge isn't
+                        // spent on depth.
+                        indent: phone ? Space.s : Space.l,
+                      ),
                     ),
                 // Out of the way, and back with a click.
                 if (workspace.projects.any((p) => p.archived))
@@ -814,9 +822,11 @@ class _Place extends StatelessWidget {
     // another folder stands at its folder's top level.
     final folderIds = {for (final folder in folders) folder.id};
     final workspace = backend.workspace.workspace;
-    final pipes = projectId.isEmpty
-        ? const <Pipe>[]
-        : pipesIn(workspace, projectId);
+    // Its pipes to other Claktories: each group with its pipes, then the
+    // pipes in none.
+    final pipeRows = projectId.isEmpty
+        ? (groups: const <(PipeGroup, List<Pipe>)>[], loose: const <Pipe>[])
+        : pipeRowsIn(workspace, projectId);
     final selectedPipeId = AppScope.scope(context).page.value == AppPage.agent
         ? workspace.selectedPipeId
         : '';
@@ -928,9 +938,20 @@ class _Place extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   // Its pipes to other Claktories first, within reach
-                  // however many agents and folders follow.
-                  for (final pipe in pipes)
+                  // however many agents and folders follow: its groups,
+                  // each with its pipes, then the pipes in none.
+                  // Keyed, so a row stays itself when one above it goes
+                  // (a menu open on it keeps its place).
+                  for (final (group, inIt) in pipeRows.groups)
+                    _PipeGroupRow(
+                      key: ValueKey('pipe-group-slot/${group.id}'),
+                      group: group,
+                      pipes: inIt,
+                      selectedPipeId: selectedPipeId,
+                    ),
+                  for (final pipe in pipeRows.loose)
                     _PipeRow(
+                      key: ValueKey('pipe-slot/${pipe.id}'),
                       pipe: pipe,
                       selected: pipe.id == selectedPipeId,
                       onTap: () => _selectPipe(context, pipe),
@@ -1373,9 +1394,14 @@ class _Row extends StatefulWidget {
     this.onSecondaryTap,
     this.underlay,
     this.height = 28,
+    this.holdForMenu = true,
   });
 
   final VoidCallback onTap;
+
+  /// A finger's touch and hold is [onSecondaryTap], unless the row drags
+  /// on a hold instead (a project's).
+  final bool holdForMenu;
 
   /// Agents' rows are taller, for their characters.
   final double height;
@@ -1416,7 +1442,7 @@ class _RowState extends State<_Row> {
         onTap: widget.onTap,
         onSecondaryTap: widget.onSecondaryTap,
         // A phone's right click.
-        onLongPress: widget.onSecondaryTap,
+        onLongPress: widget.holdForMenu ? widget.onSecondaryTap : null,
         child: AnimatedContainer(
           duration: Motion.fast,
           curve: Curves.easeOut,
@@ -1584,7 +1610,9 @@ class _FilesButton extends StatelessWidget {
 
 /// A project: a folder glyph and its name, and on hover a Files button and
 /// a "+" that asks Rivet for a new agent in it. A click focuses it; a right
-/// click opens its settings (rename, delete).
+/// click opens its settings (rename, delete). A finger's touch and hold
+/// picks it up to move ([_ProjectSlot]); let go without moving, it's the
+/// project's menu as before.
 class _ProjectRow extends StatelessWidget {
   const _ProjectRow({required this.project});
 
@@ -1603,6 +1631,7 @@ class _ProjectRow extends StatelessWidget {
         fireAndLog(AppScope.of(context).focusProject(project.id));
       },
       onSecondaryTap: () => _projectMenu(context, project),
+      holdForMenu: false,
       builder: (context, hovered) => Row(
         children: [
           SizedBox(
@@ -1636,6 +1665,195 @@ class _ProjectRow extends StatelessWidget {
             ],
             if (hovered) _askForAgent(project),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A project being dragged to another place in the projects list.
+@immutable
+class _ProjectDrag {
+  const _ProjectDrag(this.projectId);
+
+  final String projectId;
+}
+
+/// A project in the list, its row and its agents, that moves as folder
+/// headings do (friend bug #12): its row drags (a finger holds it first),
+/// and another project dropped on this one's upper or lower half goes
+/// before or after it, a signal line showing where. VoiceOver has Move up
+/// and Move down. The order is the backend's projects list, archived
+/// projects keeping their place in it.
+class _ProjectSlot extends StatefulWidget {
+  const _ProjectSlot({
+    required this.project,
+    required this.order,
+    required this.shown,
+    required this.place,
+  });
+
+  final Project project;
+
+  /// Every project's id, in order, archived ones too.
+  final List<String> order;
+
+  /// The projects listed here, in order: those not archived.
+  final List<String> shown;
+
+  /// The project's place, with [header] as its row.
+  final Widget Function(Widget header) place;
+
+  @override
+  State<_ProjectSlot> createState() => _ProjectSlotState();
+}
+
+class _ProjectSlotState extends State<_ProjectSlot> {
+  /// Where the project being dragged over this one would go.
+  _Drop? _drop;
+
+  /// Where and with what the row was last pressed: a finger that holds and
+  /// lets go without moving opens the project's menu.
+  Offset? _downAt;
+  PointerDeviceKind? _downKind;
+
+  _Drop _zone(Offset global) {
+    final box = context.findRenderObject()! as RenderBox;
+    return box.globalToLocal(global).dy < box.size.height / 2
+        ? _Drop.before
+        : _Drop.after;
+  }
+
+  /// The project [dragged] goes before when dropped at [drop] on [target]
+  /// ("" for last); null when that's where it is already.
+  String? _beforeId(String dragged, String target, _Drop drop) {
+    final order = widget.order;
+    final others = [
+      for (final id in order)
+        if (id != dragged) id,
+    ];
+    final at = others.indexOf(target) + (drop == _Drop.after ? 1 : 0);
+    final before = at < others.length ? others[at] : '';
+    final now = order.indexOf(dragged);
+    final current = now + 1 < order.length ? order[now + 1] : '';
+    return before == current ? null : before;
+  }
+
+  /// Puts the project [projectId] before [beforeId] ("" for last), saying
+  /// why if the backend won't.
+  void _move(String projectId, String beforeId) {
+    final backend = AppScope.of(context);
+    final name = [
+      for (final project in backend.workspace.workspace.projects)
+        if (project.id == projectId) project.name,
+    ].firstOrNull;
+    backend
+        .updateProject(UpdateProject(projectId: projectId, beforeId: beforeId))
+        .catchError((Object error) {
+          if (!mounted || error is! RequestFailure) return;
+          unawaited(
+            showModal(
+              context,
+              (context, close) => _Refused(
+                title: "Couldn't move ${name ?? 'the project'}",
+                why: error.message,
+                close: close,
+              ),
+            ),
+          );
+        }, test: (error) => error is RequestFailure);
+  }
+
+  /// Moving this project one place up or down among those listed, for
+  /// VoiceOver (a drag otherwise); null at that end of the list.
+  VoidCallback? _step(int by) {
+    final id = widget.project.id;
+    final shown = widget.shown;
+    final at = shown.indexOf(id);
+    final to = at + by;
+    if (at < 0 || to < 0 || to >= shown.length) return null;
+    final before = _beforeId(
+      id,
+      shown[to],
+      by < 0 ? _Drop.before : _Drop.after,
+    );
+    if (before == null) return null;
+    return () => _move(id, before);
+  }
+
+  /// A finger held the row and let go where it was: the project's menu,
+  /// as a touch and hold was before it could move.
+  void _ended(DraggableDetails details) {
+    final at = _downAt;
+    final touch =
+        _downKind == PointerDeviceKind.touch ||
+        _downKind == PointerDeviceKind.stylus;
+    if (details.wasAccepted || !touch || at == null) return;
+    if ((details.offset - at).distance > kTouchSlop) return;
+    _projectMenu(context, widget.project);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final project = widget.project;
+    final row = _ProjectRow(project: project);
+    final header = Semantics(
+      customSemanticsActions: {
+        const CustomSemanticsAction(label: 'Move up'): ?_step(-1),
+        const CustomSemanticsAction(label: 'Move down'): ?_step(1),
+      },
+      child: Listener(
+        onPointerDown: (event) {
+          _downAt = event.position;
+          _downKind = event.kind;
+        },
+        child: _SidebarDraggable<_ProjectDrag>(
+          data: _ProjectDrag(project.id),
+          dragAnchorStrategy: pointerDragAnchorStrategy,
+          onDragEnd: _ended,
+          feedback: _DragFeedback(name: project.name, palette: palette),
+          childWhenDragging: Opacity(opacity: 0.4, child: row),
+          child: row,
+        ),
+      ),
+    );
+    return DragTarget<_ProjectDrag>(
+      onWillAcceptWithDetails: (details) =>
+          details.data.projectId != project.id &&
+          widget.shown.contains(details.data.projectId),
+      onMove: (details) {
+        final drop = _zone(details.offset);
+        if (drop != _drop) setState(() => _drop = drop);
+      },
+      onLeave: (_) => setState(() => _drop = null),
+      onAcceptWithDetails: (details) {
+        final dragged = details.data.projectId;
+        final drop = _drop ?? _zone(details.offset);
+        setState(() => _drop = null);
+        if (_beforeId(dragged, project.id, drop) case final before?) {
+          _move(dragged, before);
+        }
+      },
+      builder: (context, _, _) => Stack(
+        clipBehavior: Clip.none,
+        children: [
+          widget.place(header),
+          // Between projects: a signal line where it would go.
+          if (_drop != null)
+            Positioned(
+              left: 0,
+              right: 0,
+              top: _drop == _Drop.before ? -1 : null,
+              bottom: _drop == _Drop.after ? -1 : null,
+              child: Container(
+                height: 2,
+                decoration: BoxDecoration(
+                  color: palette.signal,
+                  borderRadius: BorderRadius.circular(1),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -2361,9 +2579,12 @@ class _Refused extends StatelessWidget {
 /// pipe's color where an agent's character would be, its name over where it
 /// stands, and like an agent's row, a needs-you count for what waits for
 /// the person (held messages, its approval, a loop's Continue) or a dot for
-/// something new. A click opens it.
+/// something new. A click opens it; a right click, or a touch and hold,
+/// offers to move it to a group. With a pointer it drags onto a group's
+/// row.
 class _PipeRow extends StatelessWidget {
   const _PipeRow({
+    super.key,
     required this.pipe,
     required this.selected,
     required this.onTap,
@@ -2385,13 +2606,14 @@ class _PipeRow extends StatelessWidget {
     final stands = unseen || waiting > 0;
     final closed = pipe.state == PipeState.PIPE_STATE_CLOSED;
     final phone = touchFirst(context);
-    return Semantics(
+    final row = Semantics(
       label: liaison == null ? 'Pipe' : 'Pipe, liaison ${liaison.name}',
       child: _Row(
         key: ValueKey('pipe-row/${pipe.id}'),
         height: 40,
         selected: selected,
         onTap: onTap,
+        onSecondaryTap: () => unawaited(pipeGroupActions(context, pipe)),
         underlay: liaison != null && atWork(liaison)
             ? WorkingWave(
                 color: agentColor(liaison.color),
@@ -2414,7 +2636,7 @@ class _PipeRow extends StatelessWidget {
             Expanded(
               child: _NameOverRole(
                 name: pipe.name,
-                role: pipeStatus(pipe),
+                role: pipeStatus(pipe, lead: pipeLead(workspace, pipe)),
                 style: TypeScale.of(context).body.copyWith(
                   color: selected || hovered || stands
                       ? palette.text
@@ -2454,6 +2676,209 @@ class _PipeRow extends StatelessWidget {
         ),
       ),
     );
+    // A finger's touch and hold is the menu (Move to group…), so only a
+    // pointer drags it.
+    return _PointerDraggable<_PipeDrag>(
+      data: _PipeDrag(pipe.id),
+      dragAnchorStrategy: pointerDragAnchorStrategy,
+      feedback: _DragFeedback(name: pipe.name, palette: palette),
+      childWhenDragging: Opacity(opacity: 0.4, child: row),
+      child: row,
+    );
+  }
+}
+
+/// A pipe being dragged onto a group's row.
+@immutable
+class _PipeDrag {
+  const _PipeDrag(this.pipeId);
+
+  final String pipeId;
+}
+
+/// A project's pipe group (#359): a row with the group's glyph, its name,
+/// how many pipes it holds and a disclosure, its pipes under it. A tap
+/// folds it away or opens it (the same on every device); a right click or
+/// a touch and hold offers Rename… and Delete group…; a pipe dropped on it
+/// moves in. Folded, it speaks for its pipes: the wave while a liaison
+/// works, and what's new or waits.
+class _PipeGroupRow extends StatelessWidget {
+  const _PipeGroupRow({
+    super.key,
+    required this.group,
+    required this.pipes,
+    required this.selectedPipeId,
+  });
+
+  final PipeGroup group;
+  final List<Pipe> pipes;
+  final String selectedPipeId;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final backend = AppScope.of(context);
+    final workspace = backend.workspace.workspace;
+    final folded = group.collapsed;
+    final hidden = folded ? pipes : const <Pipe>[];
+    final working = hidden.any((pipe) {
+      final liaison = pipeLiaison(workspace, pipe);
+      return liaison != null && atWork(liaison);
+    });
+    final waiting = hidden.fold(
+      0,
+      (sum, pipe) => sum + pipeWaitingAll(workspace, pipe),
+    );
+    final unseen = hidden.any(
+      (pipe) => pipe.unseen || (pipeLiaison(workspace, pipe)?.unseen ?? false),
+    );
+    final stands = unseen || waiting > 0;
+    final phone = touchFirst(context);
+    final heading = Semantics(
+      button: true,
+      label: pipeGroupLabel(group, pipes.length, unseen: unseen),
+      child: _Row(
+        key: ValueKey('pipe-group/${group.id}'),
+        underlay: working
+            ? WorkingWave(color: pipeColor, radius: Radii.control - 1)
+            : null,
+        onTap: () => fireAndLog(
+          backend.setPipeGroupCollapsed(group.id, !group.collapsed),
+        ),
+        onSecondaryTap: () => unawaited(pipeGroupMenu(context, group)),
+        builder: (context, hovered) {
+          final quiet = hovered ? palette.textMuted : palette.textFaint;
+          return Row(
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(right: Space.s - 2),
+                child: SizedBox(
+                  width: phone ? _phoneAvatar(context) : 24,
+                  child: const Center(child: PipeGroupGlyph()),
+                ),
+              ),
+              Expanded(
+                child: ExcludeSemantics(
+                  child: Text(
+                    group.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TypeScale.of(context).body.copyWith(
+                      color: hovered || stands
+                          ? palette.text
+                          : palette.textMuted,
+                      fontWeight: stands ? FontWeight.w600 : FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(left: Space.s),
+                child: ExcludeSemantics(
+                  child: Text(
+                    '${pipes.length}',
+                    style: TypeScale.of(context).caption.copyWith(color: quiet),
+                  ),
+                ),
+              ),
+              if (waiting > 0)
+                _needsYou(waitingLabel(group.name, waiting), waiting)
+              else if (unseen)
+                const Padding(
+                  padding: EdgeInsets.only(left: Space.s),
+                  child: Dot(color: pipeColor, size: 7),
+                ),
+              SizedBox(
+                width: phone ? Touch.target - Space.s : Space.l,
+                child: Align(
+                  alignment: phone ? Alignment.center : Alignment.centerRight,
+                  child: AnimatedRotation(
+                    turns: folded ? 0 : 0.25,
+                    duration: Motion.fast,
+                    curve: Curves.easeOut,
+                    child: Chevron(color: quiet, down: false),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    final target = DragTarget<_PipeDrag>(
+      onWillAcceptWithDetails: (details) {
+        final pipe = _pipe(workspace, details.data.pipeId);
+        return pipe != null &&
+            pipe.projectId == group.projectId &&
+            pipe.groupId != group.id;
+      },
+      onAcceptWithDetails: (details) {
+        final pipe = _pipe(workspace, details.data.pipeId);
+        if (pipe != null) dropPipeOnGroup(context, pipe, group);
+      },
+      builder: (context, candidates, _) => AnimatedContainer(
+        duration: Motion.fast,
+        curve: Curves.easeOut,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(Radii.control),
+          border: Border.all(
+            color: candidates.isEmpty
+                ? const Color(0x00000000)
+                : palette.signal,
+          ),
+        ),
+        child: heading,
+      ),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        target,
+        AnimatedSize(
+          duration: Motion.base,
+          curve: Curves.easeOut,
+          alignment: Alignment.topCenter,
+          child: folded
+              ? const SizedBox(width: double.infinity)
+              : Padding(
+                  padding: EdgeInsets.only(
+                    left: isPhoneLayout(context) ? Space.s : Space.m + 2,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final pipe in pipes)
+                        _PipeRow(
+                          key: ValueKey('pipe-slot/${pipe.id}'),
+                          pipe: pipe,
+                          selected: pipe.id == selectedPipeId,
+                          onTap: () => _selectPipe(context, pipe),
+                        ),
+                      if (pipes.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: Space.s,
+                            vertical: Space.xs,
+                          ),
+                          child: Text(
+                            'No pipes',
+                            style: TypeScale.of(context).caption
+                                .copyWith(color: palette.textFaint),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+        ),
+      ],
+    );
+  }
+
+  static Pipe? _pipe(Workspace workspace, String id) {
+    for (final pipe in workspace.pipes) {
+      if (pipe.id == id) return pipe;
+    }
+    return null;
   }
 }
 
@@ -2730,17 +3155,24 @@ class _ChatRow extends StatelessWidget {
     final title = chatTitle(chat);
     final waiting = chatWaiting(chat);
     final stands = chat.unseen || waiting > 0;
+    // Held up by usage limits: under its title, what it waits for, as an
+    // agent's row says it in its role's place.
+    final wait = chatUsageWaitLine(chat);
     return Semantics(
       label: 'Chat',
       child: _Row(
+        // Taller with the wait, for its line under the title.
+        height: wait.isEmpty ? 28 : 40,
         selected: selected,
         onTap: () {
           openChat(context, chat);
           _toConversation(context);
         },
-        onSecondaryTap: () => _chatMenu(context, chat),
-        // While it replies; in no one's color, as a chat is no one.
-        underlay: chat.status == AgentStatus.AGENT_STATUS_WORKING
+        // As its own "…": Rename…, Change model… and Delete….
+        onSecondaryTap: () => chatActions(context, chat, search: false),
+        // While it replies (not while it waits); in no one's color, as a
+        // chat is no one.
+        underlay: chatAtWork(chat)
             ? WorkingWave(color: palette.textFaint, radius: Radii.control - 1)
             : null,
         builder: (context, hovered) => Row(
@@ -2751,10 +3183,9 @@ class _ChatRow extends StatelessWidget {
                   : palette.textFaint,
             ),
             Expanded(
-              child: Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+              child: _NameOverRole(
+                name: title,
+                role: wait,
                 style: TypeScale.of(context).body.copyWith(
                   color: selected || hovered || stands
                       ? palette.text
@@ -2765,8 +3196,17 @@ class _ChatRow extends StatelessWidget {
                       ? FontWeight.w500
                       : FontWeight.w400,
                 ),
+                roleColor: selected || hovered
+                    ? palette.textMuted
+                    : palette.textFaint,
               ),
             ),
+            // As an agent's row: Try now (or Sign in…) under the pointer.
+            if (wait.isNotEmpty && hovered && !touchFirst(context))
+              Padding(
+                padding: const EdgeInsets.only(left: Space.xs),
+                child: TryNow(wait: wait, waiting: chat.id),
+              ),
             if (waiting > 0)
               _needsYou(waitingLabel(title, waiting), waiting)
             else if (chat.unseen)
@@ -2781,25 +3221,6 @@ class _ChatRow extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-/// A chat's right click or touch and hold: Rename or Delete.
-Future<void> _chatMenu(BuildContext context, Chat chat) async {
-  final chosen = await showActions<String>(
-    context,
-    title: chatTitle(chat),
-    actions: [
-      const SheetAction('Rename', 'rename'),
-      const SheetAction('Delete', 'delete', destructive: true),
-    ],
-  );
-  if (!context.mounted) return;
-  switch (chosen) {
-    case 'rename':
-      renameChat(context, chat);
-    case 'delete':
-      deleteChat(context, chat);
   }
 }
 
@@ -3138,6 +3559,12 @@ class _PhoneFooter extends StatelessWidget {
             (color) =>
                 ExtensionGlyph(icon: 'chart-column', name: '', color: color),
           ),
+          place(
+            AppPage.monitors,
+            'Monitors',
+            (color) =>
+                ExtensionGlyph(icon: 'alarm-clock', name: '', color: color),
+          ),
           // People, only where the backend offers direct messages (its
           // preview, FACTORY_DMS_PREVIEW) until it ships.
           if (peopleAvailable(workspace))
@@ -3387,6 +3814,16 @@ class _Footer extends StatelessWidget {
                   color: color,
                 ),
               ),
+              GlyphButton(
+                label: 'Monitors',
+                active: AppScope.pageShown(context, AppPage.monitors),
+                onTap: () => AppScope.togglePage(context, AppPage.monitors),
+                glyph: (color) => ExtensionGlyph(
+                  icon: 'alarm-clock',
+                  name: 'Monitors',
+                  color: color,
+                ),
+              ),
               // People, only where the backend offers direct messages (its
               // preview) until it ships.
               if (peopleAvailable(workspace))
@@ -3436,7 +3873,7 @@ class _Footer extends StatelessWidget {
 }
 
 /// The footer's buttons: the pages, then the person at the end. On a Mac a
-/// line of 28px buttons; with a finger's targets (an iPad's sidebar,
+/// line of 28px buttons (two in a narrow sidebar); with a finger's targets (an iPad's sidebar,
 /// [touchFirst]) the pages wrap onto more lines in the room beside the
 /// person rather than run past the sidebar's edge.
 class _FooterButtons extends StatelessWidget {
@@ -3456,13 +3893,15 @@ class _FooterButtons extends StatelessWidget {
         ],
       );
     }
+    // In a sidebar too narrow for all of them in a line, the last pages
+    // go on a second line beside the person, rather than past the edge.
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (final (i, page) in pages.indexed) ...[
-          if (i > 0) const SizedBox(width: Space.xs),
-          page,
-        ],
-        const Spacer(),
+        Expanded(
+          child: Wrap(spacing: Space.xs, runSpacing: Space.xs, children: pages),
+        ),
+        const SizedBox(width: Space.xs),
         profile,
       ],
     );
@@ -3532,17 +3971,20 @@ class _ConfigErrorState extends State<_ConfigError> {
             ),
           ],
           const SizedBox(height: Space.xl),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
+          // A line of its own for what doesn't fit beside the rest (Rivet's
+          // wait, while it waits).
+          Wrap(
+            alignment: WrapAlignment.end,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: Space.s,
+            runSpacing: Space.s,
             children: [
               Button(label: 'Close', onPressed: widget.close),
-              const SizedBox(width: Space.s),
               TellRivet(
                 error: widget.message,
                 about: 'The settings file has an error.',
                 onTold: widget.close,
               ),
-              const SizedBox(width: Space.s),
               Button(
                 label: 'Restore last working settings',
                 onPressed: restoring ? null : restore,
@@ -3586,11 +4028,35 @@ class _SidebarDraggable<T extends Object> extends Draggable<T> {
         ..onStart = onStart;
 }
 
+/// A [_SidebarDraggable] a pointer drags (a mouse, a trackpad) and a
+/// finger doesn't: its touch and hold is the row's menu.
+class _PointerDraggable<T extends Object> extends Draggable<T> {
+  const _PointerDraggable({
+    required super.child,
+    required super.feedback,
+    super.data,
+    super.childWhenDragging,
+    super.dragAnchorStrategy,
+  });
+
+  @override
+  MultiDragGestureRecognizer createRecognizer(
+    GestureMultiDragStartCallback onStart,
+  ) => _SlopDragRecognizer(
+    allowedButtonsFilter: allowedButtonsFilter,
+    supportedDevices: const {
+      PointerDeviceKind.mouse,
+      PointerDeviceKind.trackpad,
+    },
+  )..onStart = onStart;
+}
+
 /// How far the pointer moves before a press becomes a drag.
 const _dragSlop = 4.0;
 
 class _SlopDragRecognizer extends MultiDragGestureRecognizer {
-  _SlopDragRecognizer({super.allowedButtonsFilter}) : super(debugOwner: null);
+  _SlopDragRecognizer({super.allowedButtonsFilter, super.supportedDevices})
+    : super(debugOwner: null);
 
   @override
   MultiDragPointerState createNewPointerState(PointerDownEvent event) =>

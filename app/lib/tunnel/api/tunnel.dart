@@ -162,6 +162,27 @@ enum TunnelPath { none, direct, relayed }
 
 enum TunnelPhase { idle, dialing, connected, failed }
 
+/// Why this device's relay can't be reached, in a word.
+enum TunnelRelayTrouble {
+  none,
+
+  /// No relay chosen yet: none answered iroh's last measurement.
+  unchosen,
+
+  /// Its name couldn't be looked up.
+  dns,
+
+  /// Nothing answered in time.
+  timeout,
+
+  /// The secure connection to it failed.
+  tls,
+
+  /// The network turned it away: refused, reset or unreachable.
+  network,
+  other,
+}
+
 /// What the tunnel is doing, for the app to show.
 class TunnelStatus {
   final TunnelPhase phase;
@@ -174,12 +195,21 @@ class TunnelStatus {
   /// Whether this device reaches its relay now.
   final bool relayConnected;
 
+  /// How long its relay took to come up, in ms, from when it was last
+  /// lost (or the tunnel's endpoint made); 0 while it's down.
+  final int relayUpMs;
+
+  /// Why its relay can't be reached, roughly, while it can't.
+  final TunnelRelayTrouble relayTrouble;
+
   const TunnelStatus({
     required this.phase,
     required this.path,
     required this.error,
     required this.failure,
     required this.relayConnected,
+    required this.relayUpMs,
+    required this.relayTrouble,
   });
 
   @override
@@ -188,7 +218,9 @@ class TunnelStatus {
       path.hashCode ^
       error.hashCode ^
       failure.hashCode ^
-      relayConnected.hashCode;
+      relayConnected.hashCode ^
+      relayUpMs.hashCode ^
+      relayTrouble.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -199,5 +231,7 @@ class TunnelStatus {
           path == other.path &&
           error == other.error &&
           failure == other.failure &&
-          relayConnected == other.relayConnected;
+          relayConnected == other.relayConnected &&
+          relayUpMs == other.relayUpMs &&
+          relayTrouble == other.relayTrouble;
 }

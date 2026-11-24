@@ -36,6 +36,11 @@ ignore = "0.4.34"
 # The private tunnel (remote.rs): pinned, the same as the app's (app/rust); ring, as the
 # process default, and no portmapper, so Factory never asks the router to open a port.
 iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
+# Phone-sized previews of images (previews.rs, #379): decoded and resized
+# here (already linked through factory-agent), encoded as WebP by libwebp,
+# built from its source.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+libwebp-sys = "0.14"
 jiff = "1"
 libc = "0.2"
 pdf-extract = "0.12"
@@ -79,6 +84,10 @@ zeroize = "1.9"
 zstd = "0.14"
 toml = "1.2.1"
 
+[build-dependencies]
+# The lid-closed helper's XPC client (native/lid_xpc.c, #371), on macOS.
+cc = "1"
+
 [features]
 # QA only: the Anthropic subscription at qa-model on this computer, for
 # claktory-qa's sandboxes (factory-agent's qa-provider; scripts/qa.sh builds
@@ -94,3 +103,6 @@ claktory-user-apps = { path = "../claktory-user-apps" }
 # crypto provider beside ring.
 rcgen = "0.14"
 tokio-rustls = "0.26"
+# tests/all/remote.rs: relays and an address lookup on this machine, for the
+# tunnel's default relay and devices paired while n0's were the default.
+iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "fast-apple-datapath", "test-utils"] }

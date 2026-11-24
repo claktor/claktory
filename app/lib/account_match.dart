@@ -39,8 +39,10 @@ class AccountMatch extends ChangeNotifier {
     required Listenable account,
     required this.theirs,
     this.whose = _nobody,
+    DateTime Function()? now,
   }) : _changes = changes,
-       _account = account {
+       _account = account,
+       _now = now ?? DateTime.now {
     changes.addListener(_changed);
     account.addListener(_accountChanged);
     unawaited(relist());
@@ -48,6 +50,16 @@ class AccountMatch extends ChangeNotifier {
 
   /// How long after a list that couldn't be read it's tried again.
   static const retryAfter = Duration(minutes: 1);
+
+  /// How long reads of a list never read may fail before the Claktories
+  /// are marked as unchecked: just launched, the network may still be
+  /// coming up, which isn't an account that can't be read (#388). Until
+  /// then nothing is marked, as while the first read is under way.
+  static const unsureFor = Duration(seconds: 30);
+
+  /// How soon a read that failed is tried again meanwhile, doubling each
+  /// time: 2, 4, 8 and 16 seconds, the last at [unsureFor].
+  static const firstRetry = Duration(seconds: 2);
 
   /// The endpoints the app dials its other Claktories by.
   final Iterable<String> Function() remotes;
@@ -62,6 +74,12 @@ class AccountMatch extends ChangeNotifier {
   final String Function() whose;
 
   static String _nobody() => '';
+
+  final DateTime Function() _now;
+
+  /// When reads of a list never read began to fail; null while they don't.
+  DateTime? _failingSince;
+  var _nextRetry = firstRetry;
 
   /// Whose account [_listed] was read from.
   var _listedWhose = '';
@@ -127,6 +145,8 @@ class AccountMatch extends ChangeNotifier {
     final listed = theirs();
     var next = const <String>{};
     var unreadable = false;
+    // Failing, but not for long enough to say so: nothing known yet.
+    var unsure = false;
     if (listed != null) {
       try {
         next = {
@@ -134,17 +154,44 @@ class AccountMatch extends ChangeNotifier {
             if (claktory.endpointId.isNotEmpty)
               claktory.endpointId.toLowerCase(),
         };
+        _failingSince = null;
+        _nextRetry = firstRetry;
       } catch (_) {
         // The last list read stands, for the same account; with none,
-        // nothing can be checked.
+        // nothing can be checked, once that's lasted [unsureFor].
         final last = _listed;
-        unreadable =
+        final none =
             last == null || _signedOut || _unreadable || _listedWhose != who;
-        if (!unreadable) next = last;
-        if (!_disposed) _retry = Timer(retryAfter, () => unawaited(relist()));
+        var wait = retryAfter;
+        if (!none) {
+          next = last;
+        } else {
+          final since = _failingSince ??= _now();
+          final left = unsureFor - _now().difference(since);
+          if (left > Duration.zero) {
+            unsure = true;
+            wait = _nextRetry < left ? _nextRetry : left;
+            _nextRetry *= 2;
+          } else {
+            unreadable = true;
+          }
+        }
+        if (!_disposed) _retry = Timer(wait, () => unawaited(relist()));
       }
+    } else {
+      _failingSince = null;
+      _nextRetry = firstRetry;
     }
     if (_disposed) return;
+    if (unsure) {
+      // As before the first answer: nothing marked.
+      final changed = _listed != null;
+      _listed = null;
+      _signedOut = false;
+      _unreadable = false;
+      if (changed) notifyListeners();
+      return;
+    }
     final before = _listed;
     final changed =
         before == null ||

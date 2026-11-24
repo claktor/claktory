@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import '../backend.dart';
 import '../characters/character.dart';
 import '../controls.dart';
+import '../decision.dart' show SubmitButton, commentTyped;
 import '../dictation.dart';
 import '../identity.dart';
 import '../protocol/factory/v1/factory.pb.dart';
@@ -20,9 +21,10 @@ import 'metrics.dart' show TypeScale;
 
 /// A file's viewer on a phone, and at its foot, while [agentId] waits for
 /// the person's review of it, the answer: who asks and what, then a field
-/// that's always open. Return or Send answers with what's typed (Approve
-/// when nothing is, unless the question wants words); Dismiss, quieter,
-/// takes the same words. Answered, the viewer closes ([finishReview]),
+/// that's always open. With nothing typed, Approve (or Send, for a
+/// question that wants words) and Dismiss, quieter. Once a comment is
+/// typed, one Submit (Return too) sends it as a reply, never a yes or a
+/// no (#370); a question that wants words keeps Send and Dismiss. Answered, the viewer closes ([finishReview]),
 /// back where the person was. While the question waits, nothing else is added
 /// to the file: on text, comments on lines go with the answer.
 class PhoneReviewBar extends StatefulWidget {
@@ -101,11 +103,14 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
     super.dispose();
   }
 
-  /// Answers [ask] with what's typed: Approve (or the words it asked for),
-  /// or Dismiss. A failure keeps the words and says so under the field.
+  /// Answers [ask]: Approve with nothing typed, the words a question that
+  /// wants them asked for, Dismiss, or a typed comment as a reply (#370),
+  /// which carries out nothing. A failure keeps the words and says so
+  /// under the field.
   Future<void> _send(PendingReview ask, {bool dismiss = false}) async {
     final text = _answer.text.trim();
     if (_busy || !dismiss && ask.ask.wantsText && text.isEmpty) return;
+    final reply = !dismiss && !ask.ask.wantsText && text.isNotEmpty;
     setState(() {
       _busy = true;
       _error = null;
@@ -116,6 +121,7 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
         ask.seq,
         text: text,
         dismiss: dismiss,
+        reply: reply,
       );
     } on RequestFailure {
       unawaited(Haptics.warning());
@@ -166,17 +172,20 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     final name = agent.name;
-    final typed = _answer.text.trim().isNotEmpty;
+    final typed = commentTyped(_answer);
     // Approve with nothing typed, unless the question wants words: then
-    // Send, faint until there are some.
-    final approves = !typed && !ask.ask.wantsText;
-    final send = Button(
-      label: approves ? 'Approve' : 'Send',
-      primary: true,
-      onPressed: _busy || ask.ask.wantsText && !typed
-          ? null
-          : () => unawaited(_send(ask)),
-    );
+    // Send, faint until there are some. A comment typed on one that
+    // doesn't is a reply: Submit alone, Dismiss gone with Approve.
+    final replying = typed && !ask.ask.wantsText;
+    final send = replying
+        ? SubmitButton(onPressed: _busy ? null : () => unawaited(_send(ask)))
+        : Button(
+            label: ask.ask.wantsText ? 'Send' : 'Approve',
+            primary: true,
+            onPressed: _busy || ask.ask.wantsText && !typed
+                ? null
+                : () => unawaited(_send(ask)),
+          );
     final dismiss = Button(
       label: 'Dismiss',
       onPressed: _busy ? null : () => unawaited(_send(ask, dismiss: true)),
@@ -250,7 +259,7 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
                           ),
                         ),
                       ),
-                      if (!stacked) ...[
+                      if (!stacked && !replying) ...[
                         const SizedBox(width: Space.s),
                         dismiss,
                       ],
@@ -289,8 +298,10 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
                   const SizedBox(height: Space.s),
                   Row(
                     children: [
-                      Expanded(child: dismiss),
-                      const SizedBox(width: Space.s),
+                      if (!replying) ...[
+                        Expanded(child: dismiss),
+                        const SizedBox(width: Space.s),
+                      ],
                       Expanded(child: send),
                     ],
                   ),

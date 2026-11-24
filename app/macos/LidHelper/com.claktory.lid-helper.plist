@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The lid-closed helper's launchd daemon (#371; coordination/security/lid-closed.md
+  I1), registered by Claktory's Mac app with SMAppService. It goes in
+  Factory.app/Contents/Library/LaunchDaemons/, the helper in
+  Contents/Helpers/claktory-lid-helper. Only these keys: no ProgramArguments,
+  EnvironmentVariables or UserName. The release adds a SpawnConstraint
+  pinning the team and com.claktory.lid-helper where macOS supports it.
+  Dev and ad hoc builds carry neither file.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.claktory.lid-helper</string>
+  <key>BundleProgram</key>
+  <string>Contents/Helpers/claktory-lid-helper</string>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>dev.factory.app</string>
+  </array>
+  <key>MachServices</key>
+  <dict>
+    <key>com.claktory.lid-helper</key>
+    <true/>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+</dict>
+</plist>

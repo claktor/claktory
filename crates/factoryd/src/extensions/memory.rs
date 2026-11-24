@@ -903,7 +903,7 @@ fn read_manual(factory: &Factory, note: Option<&str>, q: Option<&str>) -> Result
         let body = crate::manual::render(&note.body, &factory.home, user.as_deref());
         for (number, line) in body.lines().enumerate() {
             if mentions(line) {
-                hits.push(format!("{}:{}: {}", note.slug, number + 1, clip(line.trim(), 200)));
+                hits.push(format!("{}:{}: {}", note.slug, number + 1, around(line.trim(), &lower, 200)));
             }
         }
     }
@@ -935,6 +935,34 @@ fn search(contents: &Contents, q: &str) -> Vec<String> {
     hits
 }
 
+/// Up to `chars` of `text` around its first mention of `lower` (lowercase),
+/// so a match late in a long line shows its words: a third of the room
+/// before it, the rest after, starting at a word where one is near, with "…"
+/// where text is left out. The start when it doesn't mention it.
+fn around(text: &str, lower: &str, chars: usize) -> String {
+    let all: Vec<(usize, char)> = text.char_indices().collect();
+    if all.len() <= chars {
+        return text.to_owned();
+    }
+    let wanted = lower.chars().count();
+    let found = all.iter().position(|&(byte, _)| {
+        let next: String = text[byte..].chars().take(wanted).collect();
+        next.to_lowercase().starts_with(lower)
+    });
+    let Some(found) = found else { return clip(text, chars) };
+    let mut begin = found.saturating_sub(chars / 3).min(all.len() - chars);
+    // From the start of a word, if one starts before the match, not too far on.
+    if begin > 0
+        && !all[begin - 1].1.is_whitespace()
+        && let Some(space) = all[begin..found].iter().take(20).position(|&(_, c)| c.is_whitespace())
+    {
+        begin += space + 1;
+    }
+    let end = (begin + chars).min(all.len());
+    let slice = &text[all[begin].0..all.get(end).map_or(text.len(), |&(byte, _)| byte)];
+    format!("{}{slice}{}", if begin > 0 { "…" } else { "" }, if end < all.len() { "…" } else { "" })
+}
+
 fn clip(text: &str, chars: usize) -> String {
     match text.char_indices().nth(chars) {
         Some((end, _)) => format!("{}…", &text[..end]),
@@ -945,6 +973,19 @@ fn clip(text: &str, chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_search_shows_the_words_around_a_late_match() {
+        let line = format!("{} the scheduled jobs are monitors {}", "word ".repeat(100), "more ".repeat(100));
+        let shown = around(&line, "scheduled jobs", 200);
+        assert!(shown.contains("the scheduled jobs are monitors"), "{shown}");
+        assert!(shown.starts_with("…word ") && shown.ends_with('…'), "a word's start, and what's left out marked: {shown}");
+        assert_eq!(shown.chars().count(), 200 + 2, "{shown}");
+        assert_eq!(around("Short. Every 6 Hours.", "every 6 hours", 200), "Short. Every 6 Hours.");
+        let end = format!("{}Scheduled", "x".repeat(300));
+        assert!(around(&end, "scheduled", 200).ends_with("Scheduled"), "a match at the very end");
+        assert_eq!(around(&"é".repeat(300), "zz", 10), format!("{}…", "é".repeat(10)), "none: the start");
+    }
 
     fn store() -> Store {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

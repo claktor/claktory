@@ -138,6 +138,41 @@ class MonitorAction extends $pb.ProtobufEnum {
   const MonitorAction._(super.value, super.name);
 }
 
+/// Whether a FileContent is a preview (#379).
+class FilePreview extends $pb.ProtobufEnum {
+  /// The original: no preview was asked, or none was needed (small enough,
+  /// it fits the screen already, a preview wouldn't be smaller, a GIF, or a
+  /// PDF of 5 MB or less, which comes as its first range as before).
+  static const FilePreview FILE_PREVIEW_NONE =
+      FilePreview._(0, _omitEnumNames ? '' : 'FILE_PREVIEW_NONE');
+
+  /// A preview, smaller than the original: the app says so and offers the
+  /// original. Saving and sharing read the original.
+  static const FilePreview FILE_PREVIEW_MADE =
+      FilePreview._(1, _omitEnumNames ? '' : 'FILE_PREVIEW_MADE');
+
+  /// A preview was asked and would have been made, but this Claktory can't
+  /// make one (a video on Linux without ffmpeg, a PDF's page off a Mac): the
+  /// original came, and the app says "No preview on this Claktory". For a
+  /// PDF's page (ReadFile.preview_page), none of the PDF's bytes come, only
+  /// its size and version: the app loads the PDF by its own requests.
+  static const FilePreview FILE_PREVIEW_UNAVAILABLE =
+      FilePreview._(2, _omitEnumNames ? '' : 'FILE_PREVIEW_UNAVAILABLE');
+
+  static const $core.List<FilePreview> values = <FilePreview>[
+    FILE_PREVIEW_NONE,
+    FILE_PREVIEW_MADE,
+    FILE_PREVIEW_UNAVAILABLE,
+  ];
+
+  static final $core.List<FilePreview?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static FilePreview? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const FilePreview._(super.value, super.name);
+}
+
 /// ROW: children side by side, left to right; COLUMN: top to bottom.
 class ViewAxis extends $pb.ProtobufEnum {
   static const ViewAxis VIEW_AXIS_UNSPECIFIED =
@@ -399,6 +434,121 @@ class UpdateCheckState extends $pb.ProtobufEnum {
   const UpdateCheckState._(super.value, super.name);
 }
 
+/// Keeping a laptop's agents working with its lid closed: a helper the Mac
+/// app installs (SMAppService, approved with an administrator password in
+/// System Settings → Login Items) stops the Mac from sleeping while agents
+/// work and it's plugged in, and lets go by itself on low battery, heat or
+/// the lid closed on battery.
+class LidClosedState extends $pb.ProtobufEnum {
+  /// The person hasn't turned it on, or turned it off.
+  static const LidClosedState LID_CLOSED_OFF =
+      LidClosedState._(0, _omitEnumNames ? '' : 'LID_CLOSED_OFF');
+
+  /// Turned on, and the helper waits for the person's approval in System
+  /// Settings → Login Items (the app opens it).
+  static const LidClosedState LID_CLOSED_NEEDS_APPROVAL =
+      LidClosedState._(1, _omitEnumNames ? '' : 'LID_CLOSED_NEEDS_APPROVAL');
+
+  /// Turned on and the helper answers: it holds the Mac awake while agents
+  /// work on power (lid_closed_holding).
+  static const LidClosedState LID_CLOSED_ON =
+      LidClosedState._(2, _omitEnumNames ? '' : 'LID_CLOSED_ON');
+
+  /// On, and the helper let go: the battery is at 20% or less (it holds again
+  /// at 30% or on power).
+  static const LidClosedState LID_CLOSED_PAUSED_BATTERY =
+      LidClosedState._(3, _omitEnumNames ? '' : 'LID_CLOSED_PAUSED_BATTERY');
+
+  /// On, and the helper let go: the Mac is too hot (it holds again 10 minutes
+  /// after it cools down).
+  static const LidClosedState LID_CLOSED_PAUSED_HEAT =
+      LidClosedState._(4, _omitEnumNames ? '' : 'LID_CLOSED_PAUSED_HEAT');
+
+  /// On, and the helper let go: the lid is closed on battery, as in a bag.
+  /// It holds again once plugged in.
+  static const LidClosedState LID_CLOSED_PAUSED_LID_ON_BATTERY =
+      LidClosedState._(
+          5, _omitEnumNames ? '' : 'LID_CLOSED_PAUSED_LID_ON_BATTERY');
+
+  /// On, but no helper answers: it isn't installed, it was turned off in
+  /// System Settings, or macOS refused to start it (then Login Items shows it
+  /// switched off until the person switches it on again, even after it's
+  /// installed again). The Mac app registers it again and offers Login Items;
+  /// it never assumes an earlier approval still holds.
+  static const LidClosedState LID_CLOSED_MISSING =
+      LidClosedState._(6, _omitEnumNames ? '' : 'LID_CLOSED_MISSING');
+
+  /// On, but the helper is from another version of Claktory: the Mac app
+  /// installs it again. factoryd asks it to hold nothing meanwhile.
+  static const LidClosedState LID_CLOSED_OUTDATED =
+      LidClosedState._(7, _omitEnumNames ? '' : 'LID_CLOSED_OUTDATED');
+
+  /// On, but installing or removing the helper failed: lid_closed_error says
+  /// why.
+  static const LidClosedState LID_CLOSED_FAILED =
+      LidClosedState._(8, _omitEnumNames ? '' : 'LID_CLOSED_FAILED');
+
+  static const $core.List<LidClosedState> values = <LidClosedState>[
+    LID_CLOSED_OFF,
+    LID_CLOSED_NEEDS_APPROVAL,
+    LID_CLOSED_ON,
+    LID_CLOSED_PAUSED_BATTERY,
+    LID_CLOSED_PAUSED_HEAT,
+    LID_CLOSED_PAUSED_LID_ON_BATTERY,
+    LID_CLOSED_MISSING,
+    LID_CLOSED_OUTDATED,
+    LID_CLOSED_FAILED,
+  ];
+
+  static final $core.List<LidClosedState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 8);
+  static LidClosedState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const LidClosedState._(super.value, super.name);
+}
+
+/// What macOS answered the Mac app about the helper (SMAppService's status,
+/// or the failure of register or unregister), for what the setting shows.
+/// Holding comes only from the helper's own answer, never from this.
+class LidClosedRegistration extends $pb.ProtobufEnum {
+  static const LidClosedRegistration LID_CLOSED_REGISTRATION_UNKNOWN =
+      LidClosedRegistration._(
+          0, _omitEnumNames ? '' : 'LID_CLOSED_REGISTRATION_UNKNOWN');
+  static const LidClosedRegistration LID_CLOSED_REGISTRATION_ENABLED =
+      LidClosedRegistration._(
+          1, _omitEnumNames ? '' : 'LID_CLOSED_REGISTRATION_ENABLED');
+  static const LidClosedRegistration LID_CLOSED_REGISTRATION_REQUIRES_APPROVAL =
+      LidClosedRegistration._(
+          2, _omitEnumNames ? '' : 'LID_CLOSED_REGISTRATION_REQUIRES_APPROVAL');
+  static const LidClosedRegistration LID_CLOSED_REGISTRATION_NOT_REGISTERED =
+      LidClosedRegistration._(
+          3, _omitEnumNames ? '' : 'LID_CLOSED_REGISTRATION_NOT_REGISTERED');
+  static const LidClosedRegistration LID_CLOSED_REGISTRATION_NOT_FOUND =
+      LidClosedRegistration._(
+          4, _omitEnumNames ? '' : 'LID_CLOSED_REGISTRATION_NOT_FOUND');
+  static const LidClosedRegistration LID_CLOSED_REGISTRATION_FAILED =
+      LidClosedRegistration._(
+          5, _omitEnumNames ? '' : 'LID_CLOSED_REGISTRATION_FAILED');
+
+  static const $core.List<LidClosedRegistration> values =
+      <LidClosedRegistration>[
+    LID_CLOSED_REGISTRATION_UNKNOWN,
+    LID_CLOSED_REGISTRATION_ENABLED,
+    LID_CLOSED_REGISTRATION_REQUIRES_APPROVAL,
+    LID_CLOSED_REGISTRATION_NOT_REGISTERED,
+    LID_CLOSED_REGISTRATION_NOT_FOUND,
+    LID_CLOSED_REGISTRATION_FAILED,
+  ];
+
+  static final $core.List<LidClosedRegistration?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
+  static LidClosedRegistration? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const LidClosedRegistration._(super.value, super.name);
+}
+
 class ChangelogKind extends $pb.ProtobufEnum {
   /// A line with none of the prefixes.
   static const ChangelogKind CHANGELOG_KIND_OTHER =
@@ -610,6 +760,71 @@ class MemoryChangeKind extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const MemoryChangeKind._(super.value, super.name);
+}
+
+class MonitorHeld extends $pb.ProtobufEnum {
+  static const MonitorHeld MONITOR_HELD_UNSPECIFIED =
+      MonitorHeld._(0, _omitEnumNames ? '' : 'MONITOR_HELD_UNSPECIFIED');
+
+  /// Its agent has the Monitors extension turned off.
+  static const MonitorHeld MONITOR_HELD_EXTENSION_OFF =
+      MonitorHeld._(1, _omitEnumNames ? '' : 'MONITOR_HELD_EXTENSION_OFF');
+
+  /// Its agent's project is archived.
+  static const MonitorHeld MONITOR_HELD_PROJECT_ARCHIVED =
+      MonitorHeld._(2, _omitEnumNames ? '' : 'MONITOR_HELD_PROJECT_ARCHIVED');
+
+  static const $core.List<MonitorHeld> values = <MonitorHeld>[
+    MONITOR_HELD_UNSPECIFIED,
+    MONITOR_HELD_EXTENSION_OFF,
+    MONITOR_HELD_PROJECT_ARCHIVED,
+  ];
+
+  static final $core.List<MonitorHeld?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static MonitorHeld? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const MonitorHeld._(super.value, super.name);
+}
+
+class MonitorEventKind extends $pb.ProtobufEnum {
+  static const MonitorEventKind MONITOR_EVENT_KIND_UNSPECIFIED =
+      MonitorEventKind._(
+          0, _omitEnumNames ? '' : 'MONITOR_EVENT_KIND_UNSPECIFIED');
+  static const MonitorEventKind MONITOR_EVENT_KIND_CREATED =
+      MonitorEventKind._(1, _omitEnumNames ? '' : 'MONITOR_EVENT_KIND_CREATED');
+  static const MonitorEventKind MONITOR_EVENT_KIND_FIRED =
+      MonitorEventKind._(2, _omitEnumNames ? '' : 'MONITOR_EVENT_KIND_FIRED');
+  static const MonitorEventKind MONITOR_EVENT_KIND_PAUSED =
+      MonitorEventKind._(3, _omitEnumNames ? '' : 'MONITOR_EVENT_KIND_PAUSED');
+  static const MonitorEventKind MONITOR_EVENT_KIND_RESUMED =
+      MonitorEventKind._(4, _omitEnumNames ? '' : 'MONITOR_EVENT_KIND_RESUMED');
+  static const MonitorEventKind MONITOR_EVENT_KIND_CANCELLED =
+      MonitorEventKind._(
+          5, _omitEnumNames ? '' : 'MONITOR_EVENT_KIND_CANCELLED');
+  static const MonitorEventKind MONITOR_EVENT_KIND_DONE =
+      MonitorEventKind._(6, _omitEnumNames ? '' : 'MONITOR_EVENT_KIND_DONE');
+  static const MonitorEventKind MONITOR_EVENT_KIND_ERROR =
+      MonitorEventKind._(7, _omitEnumNames ? '' : 'MONITOR_EVENT_KIND_ERROR');
+
+  static const $core.List<MonitorEventKind> values = <MonitorEventKind>[
+    MONITOR_EVENT_KIND_UNSPECIFIED,
+    MONITOR_EVENT_KIND_CREATED,
+    MONITOR_EVENT_KIND_FIRED,
+    MONITOR_EVENT_KIND_PAUSED,
+    MONITOR_EVENT_KIND_RESUMED,
+    MONITOR_EVENT_KIND_CANCELLED,
+    MONITOR_EVENT_KIND_DONE,
+    MONITOR_EVENT_KIND_ERROR,
+  ];
+
+  static final $core.List<MonitorEventKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 7);
+  static MonitorEventKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const MonitorEventKind._(super.value, super.name);
 }
 
 class MonitorState extends $pb.ProtobufEnum {
@@ -2332,7 +2547,7 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
   /// An agent (Rivet) put an agent on another model or effort with
   /// models_set, which changes what the person spends: outcome CHANGED,
   /// agent_id who did it, subject_agent_id whose model it was, title
-  /// Claktory's sentence ("Rivet put Ingrid on Claude Opus 5, high", "Rivet
+  /// Claktory's sentence ("Rivet put Ingrid on Claude Opus 5 at high effort", "Rivet
   /// changed Ingrid's effort to high"), agent_reason its why (models_set's
   /// reason; may be empty), model_change_id to undo it (UndoModelChange),
   /// undone once undone. seq is the models_set call's entry in its
@@ -2340,6 +2555,19 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
   static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_MODEL =
       NeedsYouRecordKind._(
           14, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_MODEL');
+
+  /// An agent (Rivet) took another agent's conversation back to an earlier
+  /// message, or switched it to another version, with the Conversations
+  /// extension (friend bug #9): outcome CHANGED, agent_id who did it,
+  /// subject_agent_id whose conversation it was, title Claktory's sentence
+  /// ("Rivet took Mike's conversation back to 14:02", "Rivet switched Mike
+  /// to another version"), agent_reason its why (may be empty). No Undo:
+  /// what was set aside is in the subject's other versions. seq is the tool
+  /// call's entry in the acting agent's conversation. The person's own
+  /// changes aren't listed.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_CONVERSATION =
+      NeedsYouRecordKind._(
+          15, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_CONVERSATION');
 
   static const $core.List<NeedsYouRecordKind> values = <NeedsYouRecordKind>[
     NEEDS_YOU_RECORD_KIND_UNSPECIFIED,
@@ -2357,10 +2585,11 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
     NEEDS_YOU_RECORD_KIND_REPORT_TYPE,
     NEEDS_YOU_RECORD_KIND_APP_ACCESS,
     NEEDS_YOU_RECORD_KIND_MODEL,
+    NEEDS_YOU_RECORD_KIND_CONVERSATION,
   ];
 
   static final $core.List<NeedsYouRecordKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 14);
+      $pb.ProtobufEnum.$_initByValueList(values, 15);
   static NeedsYouRecordKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -2389,6 +2618,11 @@ class NeedsYouOutcome extends $pb.ProtobufEnum {
   static const NeedsYouOutcome NEEDS_YOU_OUTCOME_CHANGED =
       NeedsYouOutcome._(6, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_CHANGED');
 
+  /// The person replied with a comment rather than approving or dismissing
+  /// (#370 Submit): `reply` holds it.
+  static const NeedsYouOutcome NEEDS_YOU_OUTCOME_REPLIED =
+      NeedsYouOutcome._(7, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_REPLIED');
+
   static const $core.List<NeedsYouOutcome> values = <NeedsYouOutcome>[
     NEEDS_YOU_OUTCOME_UNSPECIFIED,
     NEEDS_YOU_OUTCOME_ANSWERED,
@@ -2397,10 +2631,11 @@ class NeedsYouOutcome extends $pb.ProtobufEnum {
     NEEDS_YOU_OUTCOME_DENIED,
     NEEDS_YOU_OUTCOME_FAILED,
     NEEDS_YOU_OUTCOME_CHANGED,
+    NEEDS_YOU_OUTCOME_REPLIED,
   ];
 
   static final $core.List<NeedsYouOutcome?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 6);
+      $pb.ProtobufEnum.$_initByValueList(values, 7);
   static NeedsYouOutcome? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 

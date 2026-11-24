@@ -205,7 +205,18 @@ void main() {
     expect(formatReset(plus(const Duration(hours: 3)), at), 'resets in 3 h');
     expect(
       formatReset(plus(const Duration(days: 1, hours: 2)), at),
-      'resets in 1 day, Thu 14:00',
+      'resets in 1 day 2 h, Thu\u00A014:00',
+    );
+    // Friend bug #16: Monday 10:00 to Thursday 06:00 is 2 days 20 h, not
+    // "2 days".
+    final monday = DateTime(2026, 11, 16, 10);
+    expect(
+      formatReset(DateTime(2026, 11, 19, 6).millisecondsSinceEpoch, monday),
+      'resets in 2 days 20 h, Thu\u00A006:00',
+    );
+    expect(
+      formatReset(DateTime(2026, 11, 19, 10).millisecondsSinceEpoch, monday),
+      'resets in 3 days, Thu\u00A010:00',
     );
     expect(formatReset(plus(const Duration(hours: -1)), at), 'has reset since');
     expect(formatAge(plus(const Duration(seconds: -20)), at), 'just now');
@@ -374,6 +385,95 @@ void main() {
       await hover(tester, 'Anthropic', 'sk-ant-…a1b2');
       expect(find.text('sk-ant-…a1b2'), findsOneWidget);
       expect(find.text('No usage limits to show.'), findsOneWidget);
+    });
+  });
+
+  // #343 U8: an OpenRouter key says what it has to spend.
+  group('an API key with credit', () {
+    Provider openrouter(AccountCredit credit) => Provider(
+      id: 'openrouter',
+      name: 'OpenRouter',
+      signedInWith: 'API key',
+      accounts: [
+        Account(
+          id: 'k1',
+          label: 'sk-or-…9f2c',
+          canSignOut: true,
+          credit: credit,
+        ),
+      ],
+    );
+
+    test('its ring fills as its spending limit is used, only with one', () {
+      expect(creditMark(AccountCredit(limited: true, limit: 10, left: 2.5)), (
+        UsageMark.meter,
+        0.75,
+      ));
+      expect(creditMark(AccountCredit(limited: true, limit: 10, left: -1)), (
+        UsageMark.meter,
+        1.0,
+      ));
+      expect(creditMark(AccountCredit(spentToday: 3)), (
+        UsageMark.noLimits,
+        0.0,
+      ));
+      expect(
+        creditLine(
+          AccountCredit(
+            limited: true,
+            limit: 10,
+            left: 3.2,
+            limitReset: 'daily',
+            spentToday: 0.8,
+          ),
+        ),
+        '\$3.20 left of \$10 a day · \$0.80 today',
+      );
+      expect(
+        creditLine(AccountCredit(spentToday: 0.8)),
+        '\$0.80 today · no spending limit on this key',
+      );
+    });
+
+    testWidgets('hovering says what it has to spend, and why it can\'t', (
+      tester,
+    ) async {
+      await showProviders(tester, [
+        openrouter(
+          AccountCredit(
+            spentToday: 0.8,
+            readMs: ago(const Duration(minutes: 2)),
+          ),
+        ),
+      ]);
+      await hover(tester, 'OpenRouter', 'sk-or-…9f2c');
+      expect(
+        find.text('\$0.80 today · no spending limit on this key'),
+        findsOneWidget,
+      );
+      expect(find.text('No usage limits to show.'), findsNothing);
+      expect(find.textContaining('Checked '), findsOneWidget);
+    });
+
+    testWidgets('a key that can\'t run paid models says so', (tester) async {
+      const warning = 'This key has no credit yet. Add credit at OpenRouter.';
+      await showProviders(tester, [
+        openrouter(
+          AccountCredit(
+            neverPaid: true,
+            warning: warning,
+            readMs: ago(const Duration(minutes: 2)),
+            error: 'OpenRouter couldn\'t be reached.',
+          ),
+        ),
+      ]);
+      await hover(tester, 'OpenRouter', 'sk-or-…9f2c');
+      expect(find.text(warning), findsOneWidget);
+      expect(
+        find.text("Couldn't check credit: OpenRouter couldn't be reached."),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Last checked '), findsOneWidget);
     });
   });
 

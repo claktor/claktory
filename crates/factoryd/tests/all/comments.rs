@@ -416,7 +416,7 @@ async fn suggested_changes_are_accepted_or_rejected_and_the_agent_hears_which() 
     }
     let before = view.entries.len();
     // With the person's comment, as theirs (#289).
-    let reject = v1::DecideSuggestion { thread_id: "t-2".into(), accept: false, comment: "Keep the words.".into() };
+    let reject = v1::DecideSuggestion { thread_id: "t-2".into(), accept: false, comment: "Keep the words.".into(), ..Default::default() };
     assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::DecideSuggestion(reject)).await, Body::Ack(_)));
     assert_eq!(std::fs::read_to_string(&path).expect("read"), "one\n2\nfour\n");
     let prompt = last_prompt(&mut client, &mut view, &requests, before).await;
@@ -472,6 +472,38 @@ async fn suggested_changes_are_accepted_or_rejected_and_the_agent_hears_which() 
         Body::Error(error) => assert_eq!(error.message, "There are no comments to send."),
         other => panic!("expected an error, got {other:?}"),
     }
+
+    // Submit (#370): a comment instead of Accept or Reject is a reply on
+    // the thread, sent at once; the suggestion stays open, the file as it is.
+    call(&mut client, &mut view, "writer", r#"call comments_suggest {"path":"notes.txt","quote":{"exact":"uno"},"replacement":"one"}"#)
+        .await;
+    let listed = threads(&mut client, &path).await;
+    let open = listed.threads.iter().rev().find(|thread| thread.suggestion.is_some()).expect("the suggestion").id.clone();
+    let reply = |comment: &str| {
+        client_message::Body::DecideSuggestion(v1::DecideSuggestion {
+            thread_id: open.clone(),
+            accept: true,
+            comment: comment.into(),
+            reply: true,
+        })
+    };
+    match client.request(reply(" ")).await.body {
+        Body::Error(error) => assert_eq!(error.message, "Write a reply, or accept or reject the change."),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    let before = view.entries.len();
+    assert!(matches!(apply_request(&mut client, &mut view, reply("Say 'One', capitalized.")).await, Body::Ack(_)));
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), "uno\n2\n4\n", "nothing changed in the file");
+    let prompt = last_prompt(&mut client, &mut view, &requests, before).await;
+    assert!(prompt.contains("Say 'One', capitalized."), "{prompt}");
+    let replied = threads(&mut client, &path).await;
+    let thread = find(&replied, &open);
+    assert_eq!(
+        (thread.status(), thread.suggestion.as_ref().map(v1::Suggestion::decision)),
+        (ThreadStatus::Open, Some(v1::SuggestionDecision::Unspecified))
+    );
+    let last = thread.comments.last().expect("the reply");
+    assert!(last.body == "Say 'One', capitalized." && !last.draft, "{last:?}");
 }
 
 #[tokio::test]

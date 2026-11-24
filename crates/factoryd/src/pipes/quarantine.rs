@@ -157,10 +157,11 @@ fn link_in(folder: &Path, roots: &[PathBuf], input: &str) -> Option<PathBuf> {
 }
 
 /// The line its system prompt's pipe section gets.
-pub(crate) fn prompt_line(record: &Record) -> String {
+pub(crate) fn prompt_line(record: &Record, person: &str) -> String {
     format!(
-        "You're limited to the pipe \"{}\": you can only read and answer it, and draft files in its outbox. Your tools are the pipe's, the file tools in its folder (its inbox to read, its outbox to write) and ask_person: no commands, no other files, no secrets, web or messaging.",
-        super::agents::escape(&record.name)
+        "You're limited to the pipe \"{}\": you can only read and answer it, and draft files in its outbox. Besides the outbox's files, you can send only those {} attached to their own messages to you, by the path in their tag. Your tools are the pipe's, the file tools in its folder (its inbox to read, its outbox to write) and ask_person: no commands, no other files, no secrets, web or messaging.",
+        super::agents::escape(&record.name),
+        person
     )
 }
 

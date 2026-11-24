@@ -4,9 +4,9 @@
 
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/widgets.dart';
 
+import 'android/android_app_updates.dart' show openAndroidAppUpdatePage;
 import 'app_update.dart' show UpdateProgress, UpdateStage;
 import 'changelog.dart' show installedVersion;
 import 'claktory_identity.dart' show claktoryName;
@@ -18,24 +18,20 @@ import 'scope.dart';
 import 'settings_view.dart' show SettingRequests, SettingRow;
 import 'update.dart';
 
-/// Whether this app replaces itself when it updates: a desktop's does (as
-/// the banner's Update), a phone's or tablet's comes from its store, so
-/// there Update updates only the Claktory.
-bool get replacesItself => switch (defaultTargetPlatform) {
-  TargetPlatform.macOS ||
-  TargetPlatform.linux ||
-  TargetPlatform.windows => true,
-  _ => false,
-};
-
 /// What a check found, in the person's words, and whether Update goes with
-/// it; null when there's nothing to say (no check yet).
-({String text, bool ready, bool failed})? updateCheckAnswer({
+/// it; null when there's nothing to say (no check yet). Ready, [behind]
+/// names the paired devices the update would leave behind; and on a device
+/// that can't follow it ([cantFollowUpdate]: [thisDevice], a phone or
+/// tablet), it says to update the app first ([appFirst]), and there's no
+/// Update: in the Android app, with Download for the app's new version.
+({String text, bool ready, bool failed, String? behind, bool appFirst})?
+updateCheckAnswer({
   required UpdateCheck check,
   required Workspace workspace,
   required String appVersion,
   required bool replacesApp,
   required String claktory,
+  String thisDevice = '',
 }) {
   // Newer than what runs here: the backend's, and with [replacesApp] this
   // app's too (after an app-only release the backend still says ready, and
@@ -49,26 +45,59 @@ bool get replacesItself => switch (defaultTargetPlatform) {
   String ready() => replacesApp
       ? 'Claktory $latest is ready.'
       : '$claktory can update to Claktory $latest.';
+  final cantFollow = cantFollowUpdate(
+    workspace,
+    thisDevice: thisDevice,
+    appVersion: appVersion,
+    replacesApp: replacesApp,
+  );
+  final behind = leftBehindText(leftBehind(workspace, thisDevice));
   return switch (check.state) {
     UpdateCheckState.UPDATE_CHECK_STATE_CHECKING => (
       text: 'Checking for updates…',
       ready: false,
       failed: false,
+      behind: null,
+      appFirst: false,
     ),
     UpdateCheckState.UPDATE_CHECK_STATE_DOWNLOADING => (
       text: 'Downloading Claktory ${check.version}…',
       ready: false,
       failed: false,
+      behind: null,
+      appFirst: false,
     ),
     UpdateCheckState.UPDATE_CHECK_STATE_UP_TO_DATE ||
     UpdateCheckState.UPDATE_CHECK_STATE_READY =>
-      offered
-          ? (text: ready(), ready: true, failed: false)
-          : (text: 'Claktory is up to date.', ready: false, failed: false),
+      !offered
+          ? (
+              text: 'Claktory is up to date.',
+              ready: false,
+              failed: false,
+              behind: null,
+              appFirst: false,
+            )
+          : cantFollow
+          ? (
+              text: updateAppFirstText(claktory, latest),
+              ready: false,
+              failed: false,
+              behind: null,
+              appFirst: true,
+            )
+          : (
+              text: ready(),
+              ready: true,
+              failed: false,
+              behind: behind,
+              appFirst: false,
+            ),
     UpdateCheckState.UPDATE_CHECK_STATE_FAILED => (
       text: check.error.isEmpty ? "Couldn't check for updates." : check.error,
       ready: false,
       failed: true,
+      behind: null,
+      appFirst: false,
     ),
     _ => null,
   };
@@ -82,6 +111,10 @@ class UpdateCheckRow extends StatefulWidget {
 
   final Workspace workspace;
 
+  /// Opens a page in tests in place of the browser.
+  @visibleForTesting
+  static Future<bool> Function(Uri)? debugOpen;
+
   @override
   State<UpdateCheckRow> createState() => _UpdateCheckRowState();
 }
@@ -93,6 +126,26 @@ class _UpdateCheckRowState extends State<UpdateCheckRow> with SettingRequests {
 
   /// Lets Update be pressed again if a backend that should restart doesn't.
   Timer? _restartTimeout;
+
+  /// Android, its app first: asking the browser for the download page, and
+  /// whether it didn't open, since the last tap.
+  var _opening = false;
+  var _openFailed = false;
+
+  Future<void> _download() async {
+    setState(() {
+      _opening = true;
+      _openFailed = false;
+    });
+    final opened = await openAndroidAppUpdatePage(
+      open: UpdateCheckRow.debugOpen,
+    );
+    if (!mounted) return;
+    setState(() {
+      _opening = false;
+      _openFailed = !opened;
+    });
+  }
 
   @override
   void dispose() {
@@ -159,6 +212,7 @@ class _UpdateCheckRowState extends State<UpdateCheckRow> with SettingRequests {
       appVersion: scope.appBuild.version,
       replacesApp: replacesApp,
       claktory: claktoryName(scope.backend),
+      thisDevice: scope.backend.deviceId,
     );
     final busy =
         check.state == UpdateCheckState.UPDATE_CHECK_STATE_CHECKING ||
@@ -194,29 +248,61 @@ class _UpdateCheckRowState extends State<UpdateCheckRow> with SettingRequests {
               ),
               if (answer != null) ...[
                 const SizedBox(height: Space.s),
-                Wrap(
-                  spacing: Space.m,
-                  runSpacing: Space.s,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Text(
-                      answer.text,
-                      style: type.caption.copyWith(
-                        color: answer.failed
-                            ? palette.danger
-                            : answer.ready
-                            ? palette.text
-                            : palette.textMuted,
+                if (answer.behind case final behind?) ...[
+                  Text(
+                    answer.text,
+                    style: type.caption.copyWith(color: palette.text),
+                  ),
+                  const SizedBox(height: Space.xs),
+                  Text(
+                    behind,
+                    style: type.caption.copyWith(color: palette.textMuted),
+                  ),
+                  const SizedBox(height: Space.s),
+                  Button(
+                    label: _updating ? 'Updating…' : 'Update',
+                    primary: true,
+                    onPressed: _updating ? null : _update,
+                  ),
+                ] else
+                  Wrap(
+                    spacing: Space.m,
+                    runSpacing: Space.s,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(
+                        answer.text,
+                        style: type.caption.copyWith(
+                          color: answer.failed
+                              ? palette.danger
+                              : answer.ready
+                              ? palette.text
+                              : palette.textMuted,
+                        ),
                       ),
-                    ),
-                    if (answer.ready)
-                      Button(
-                        label: _updating ? 'Updating…' : 'Update',
-                        primary: true,
-                        onPressed: _updating ? null : _update,
-                      ),
-                  ],
-                ),
+                      if (answer.ready)
+                        Button(
+                          label: _updating ? 'Updating…' : 'Update',
+                          primary: true,
+                          onPressed: _updating ? null : _update,
+                        ),
+                      // Android's app comes from its download page, not a
+                      // store (Sale's row 60).
+                      if (answer.appFirst && !updatesHere)
+                        Button(
+                          label: _opening ? 'Opening…' : 'Download',
+                          primary: true,
+                          onPressed: _opening ? null : _download,
+                        ),
+                    ],
+                  ),
+                if (_openFailed && answer.appFirst) ...[
+                  const SizedBox(height: Space.xs),
+                  Text(
+                    "Couldn't open the download page. Try again.",
+                    style: type.caption.copyWith(color: palette.danger),
+                  ),
+                ],
               ],
               if (_progress case final progress? when _updating) ...[
                 const SizedBox(height: Space.xs),
@@ -227,6 +313,12 @@ class _UpdateCheckRowState extends State<UpdateCheckRow> with SettingRequests {
                       'Downloading the app: '
                           '${(progress.received / 1e6).toStringAsFixed(1)} of '
                           '${(progress.size / 1e6).toStringAsFixed(1)} MB',
+                    UpdateStage.waiting when progress.size == 0 =>
+                      'Waiting for the connection…',
+                    UpdateStage.waiting =>
+                      'Waiting for the connection to carry on: '
+                          '${(progress.received / 1e6).toStringAsFixed(1)} of '
+                          '${(progress.size / 1e6).toStringAsFixed(1)} MB so far',
                     UpdateStage.checking => 'Checking the new app…',
                   },
                   style: type.caption.copyWith(
@@ -242,6 +334,8 @@ class _UpdateCheckRowState extends State<UpdateCheckRow> with SettingRequests {
                   style: type.caption.copyWith(color: palette.danger),
                 ),
               ],
+              // On Android, a new version of this app (#355 D2).
+              const AndroidUpdateNotice(padding: EdgeInsets.only(top: Space.s)),
             ],
           ),
         ),

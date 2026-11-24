@@ -15,6 +15,7 @@ import 'find.dart' show FindHighlight;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
 import 'mobile/metrics.dart';
+import 'mobile/navigation.dart' show PhoneRoutesScope;
 import 'layout.dart';
 import 'loopback_forward.dart' show openLink;
 import 'markdown.dart';
@@ -1794,6 +1795,18 @@ class _ShowLine extends StatelessWidget {
     final shown = kept != null && kept.hasLeaf() && kept.leaf.path == path
         ? (root: root, paneId: pane)
         : open(root, path);
+    // A phone shows no panes beside the conversation: the file as a page
+    // over it, as Files in ⋯ opens it (Zucchero's #379 find), put in the
+    // layout first if it isn't there.
+    final phone = context
+        .getInheritedWidgetOfExactType<PhoneRoutesScope>()
+        ?.routes;
+    if (phone != null &&
+        (identical(shown.root, root)
+            ? phone.showPane(agent.id, shown.paneId)
+            : phone.showFile(agent.id, path))) {
+      return;
+    }
     if (identical(shown.root, root)) {
       final key = 'pane:${agent.id}:${shown.paneId}';
       // Brought forward even with highlights off (an iPad's hidden pane);

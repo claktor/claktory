@@ -292,7 +292,7 @@ fn tool_result_output(model: &Model, content: &[ToolResultPart]) -> Value {
         output.push(json!({"type": "input_text", "text": text}));
     }
     for image in images {
-        if let ToolResultPart::Image { data, mime_type } = image {
+        if let ToolResultPart::Image { data, mime_type, .. } = image {
             output.push(responses_image(data, mime_type));
         }
     }

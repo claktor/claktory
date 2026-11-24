@@ -129,6 +129,64 @@ async fn a_dismissed_ask_tells_the_agent_to_use_its_judgment_and_a_yes_needs_no_
     assert!(text.starts_with("The person answered your question \"Delete the old bucket?\": yes, go ahead."), "{text}");
 }
 
+/// Submit (#370): a comment instead of Approve or Dismiss is a reply,
+/// neither a yes nor a no. The agent gets the person's words to act on.
+#[tokio::test]
+async fn a_reply_is_told_as_the_persons_words_never_as_a_yes() {
+    let dir = temp_dir();
+    let (factory, mut client, mut view) = setup(&dir).await;
+    let reply = |seq: u64, text: &str| {
+        client_message::Body::AnswerAsk(v1::AnswerAsk {
+            agent_id: "builder".into(),
+            seq,
+            reply: true,
+            text: text.into(),
+            ..Default::default()
+        })
+    };
+    let (_, shown) = ask(&mut client, &mut view, "Deploy to production?", false).await;
+    let (seq, _) = shown.expect("a card");
+    let empty = apply_request(&mut client, &mut view, reply(seq, " ")).await;
+    let Body::Error(error) = empty else { panic!("{empty:?}") };
+    assert_eq!(error.message, "Write a reply, or approve or dismiss the question.");
+
+    // Sent with dismiss too, it's still a reply: the reply wins.
+    let mut both = v1::AnswerAsk { agent_id: "builder".into(), seq, reply: true, dismiss: true, ..Default::default() };
+    both.text = "No, staging first.".into();
+    let answered = apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(both)).await;
+    assert!(matches!(answered, Body::Ack(_)), "{answered:?}");
+    let decided = card(&view, seq);
+    assert_eq!((decided.state(), decided.replied, decided.answer.as_str()), (AskPersonState::Answered, true, "No, staging first."));
+    let text = told(&mut client, &mut view, 1).await;
+    assert!(
+        text.starts_with("The person replied to your question \"Deploy to production?\":\n\nNo, staging first.\n\nYou asked:"),
+        "{text}"
+    );
+    assert!(!text.contains("yes, go ahead") && !text.contains("dismissed"), "{text}");
+    assert!(view.agent("builder").waiting_seqs.is_empty());
+
+    // A question that wants a written answer takes the answer itself.
+    let (_, shown) = ask(&mut client, &mut view, "Which color?", true).await;
+    let (seq, _) = shown.expect("a card");
+    let refused = apply_request(&mut client, &mut view, reply(seq, "Blue.")).await;
+    let Body::Error(error) = refused else { panic!("{refused:?}") };
+    assert_eq!(error.message, "This question wants a written answer: send it as the answer.");
+
+    // It reads back replied after a restart.
+    drop(client);
+    drop(factory);
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, select("builder")).await;
+    let kept = view.entries.iter().find_map(|entry| match &entry.kind {
+        Some(Kind::AskPerson(ask)) if ask.title == "Deploy to production?" => Some(ask.clone()),
+        _ => None,
+    });
+    let kept = kept.expect("the card");
+    assert!(kept.replied && kept.answer == "No, staging first.", "{kept:?}");
+}
+
 #[tokio::test]
 async fn at_most_three_wait_and_they_survive_a_restart() {
     let dir = temp_dir();
@@ -295,7 +353,14 @@ async fn a_pdf_review_is_answered_with_drawings_of_its_pages_which_the_agent_is_
     std::fs::write(dir.join("stray.png"), b"\x89PNG\r\n\x1a\n").expect("stray");
     let stray = v1::Attachment { path: dir.join("stray.png").display().to_string(), name: "stray.png".into(), ..Default::default() };
     let drawn = |attachments: Vec<v1::Attachment>, dismiss: bool| {
-        client_message::Body::AnswerAsk(v1::AnswerAsk { agent_id: "builder".into(), seq, dismiss, text: String::new(), attachments, step: None })
+        client_message::Body::AnswerAsk(v1::AnswerAsk {
+            agent_id: "builder".into(),
+            seq,
+            dismiss,
+            text: String::new(),
+            attachments,
+            ..Default::default()
+        })
     };
     let refused = apply_request(&mut client, &mut view, drawn(vec![third.clone(), stray], false)).await;
     let Body::Error(error) = refused else { panic!("{refused:?}") };
@@ -327,7 +392,7 @@ async fn a_pdf_review_is_answered_with_drawings_of_its_pages_which_the_agent_is_
         dismiss: true,
         text: String::new(),
         attachments: vec![third.clone()],
-        step: None,
+        ..Default::default()
     });
     assert!(matches!(apply_request(&mut client, &mut view, one).await, Body::Ack(_)));
     let text = told(&mut client, &mut view, 2).await;

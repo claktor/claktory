@@ -20,6 +20,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart';
@@ -557,12 +558,22 @@ class InkLayerSync {
       // The earlier version's: it can't be saved onto this one.
       _journalRemove(ref.page1based);
       final page = _pages.putIfAbsent(ref.page1based, _Page.new);
+      // Erased there (its layer kept, empty): no ink of that version to
+      // name, and nothing of it to build on.
+      final erased = page.strokes == 0;
       page
-        ..outdated = true
+        ..outdated = !erased
         ..drawing = null
         ..pending = null
         ..reason = null
         ..conflict = null;
+      if (erased) {
+        page
+          ..id = null
+          ..revision = 0
+          ..source = null
+          ..savedSha = null;
+      }
     }
     _publish();
     // What the version now shown already has (a file changed back, say):
@@ -776,7 +787,8 @@ class InkLayerSync {
         ),
       );
     }
-    _markOutdated(list);
+    await _markOutdated(list);
+    if (_disposed) return;
     if (loads.isNotEmpty) await _load(loads);
     _publish();
     // Changes made meanwhile go now.
@@ -800,16 +812,60 @@ class InkLayerSync {
     return best.values;
   }
 
-  /// Pages whose only ink is of an earlier version of the file.
-  void _markOutdated(InkLayerList list) {
+  /// Pages whose only ink is of an earlier version of the file: each
+  /// version's latest drawing of the page, when it has strokes (a page
+  /// erased there keeps its layer, empty, and isn't named).
+  Future<void> _markOutdated(InkLayerList list) async {
+    final latest = <(int?, String), InkLayer>{};
     for (final layer in list.layers) {
       if (layer.sourceSha256 == _source || layer.conflictOf.isNotEmpty) {
         continue;
       }
-      final page = _pages.putIfAbsent(_pageOf(layer), _Page.new);
-      if (page.id == null && page.drawing == null && page.pending == null) {
-        page.outdated = true;
+      final key = (_pageOf(layer), layer.sourceSha256);
+      final had = latest[key];
+      if (had == null || layer.revision > had.revision) latest[key] = layer;
+    }
+    bool open(int? at) {
+      final page = _pages[at];
+      return page == null ||
+          (page.id == null && page.drawing == null && page.pending == null);
+    }
+
+    for (final layer in latest.values) {
+      final at = _pageOf(layer);
+      if (!open(at) || (_pages[at]?.outdated ?? false)) continue;
+      final inked = await _hasStrokes(layer);
+      if (_disposed) return;
+      if (inked && open(at)) _pages.putIfAbsent(at, _Page.new).outdated = true;
+    }
+  }
+
+  /// Whether a layer's drawing has strokes, told by its preview (the ink
+  /// alone, transparent elsewhere): one with nothing opaque is empty. A
+  /// preview that can't be read or decoded counts as ink.
+  Future<bool> _hasStrokes(InkLayer layer) async {
+    final sha = layer.preview.sha256;
+    if (sha.isEmpty) return true;
+    try {
+      final bytes = await blobs.read(sha);
+      final codec = await ui.instantiateImageCodec(Uint8List.fromList(bytes));
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      final image = frame.image;
+      final data = await image.toByteData();
+      image.dispose();
+      if (data == null) return true;
+      // RGBA, a byte each: alpha is every fourth.
+      final pixels = data.buffer.asUint8List(
+        data.offsetInBytes,
+        data.lengthInBytes,
+      );
+      for (var i = 3; i < pixels.length; i += 4) {
+        if (pixels[i] != 0) return true;
       }
+      return false;
+    } on Object {
+      return true;
     }
   }
 

@@ -153,6 +153,9 @@ impl Factory {
             Ok(()) => {
                 // The new credential changes which providers and models are available.
                 self.refresh_models().await;
+                // What a new key has to spend, before the sign-in shows as
+                // done, so the step can say when it has none (#343 U14).
+                self.read_provider_credit(provider_id).await;
                 self.accounts_changed(provider_id, true);
                 let mut inner = self.lock();
                 if inner.login.as_ref().is_some_and(|flow| flow.generation == generation) {

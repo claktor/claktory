@@ -8,7 +8,8 @@ import 'history.dart';
 import 'identity.dart';
 import 'layout.dart';
 import 'login.dart';
-import 'panes.dart' show pagePane, withPage;
+import 'panes.dart'
+    show fitsBesideChat, pagePane, pagePaneMinWidth, paneFitOf, withPage;
 import 'pipes.dart' show selectedPipe;
 import 'protocol/factory/v1/factory.pb.dart' show Agent;
 import 'scanner.dart';
@@ -30,7 +31,16 @@ class PhoneNavigation extends InheritedNotifier<ValueNotifier<bool>> {
 }
 
 /// What the content area shows.
-enum AppPage { agent, settings, marketplace, changelog, map, usage, inbox }
+enum AppPage {
+  agent,
+  settings,
+  marketplace,
+  changelog,
+  map,
+  usage,
+  inbox,
+  monitors,
+}
 
 /// What widgets below the app share: the backend with its stores, the
 /// browser side of sign-in, which page is showing, this app's own build and
@@ -104,12 +114,15 @@ class AppScope extends InheritedWidget {
 
   /// Shows [page] (Settings, the Marketplace, What's new). On a Mac it's a
   /// pane right of the selected agent's conversation, so the two are read
-  /// side by side; one already there glows instead. On a phone, or with no
-  /// agent to show it beside, it takes the agent view's place.
+  /// side by side; one already there glows instead. On a phone, with no
+  /// agent to show it beside, or in a window too narrow for it beside the
+  /// conversation ([fitsBesideChat]), it takes the agent view's place.
   static void openPage(BuildContext context, AppPage page) {
     final scope = AppScope.scope(context);
     final agent = _besideAgent(context);
-    if (agent == null) {
+    if (agent == null ||
+        (pagePane(layoutOf(agent), page) == null &&
+            !fitsBesideChat(paneFitOf(scope.backend), pagePaneMinWidth))) {
       scope.history.clear();
       scope.page.value = page;
       return;
@@ -123,7 +136,12 @@ class AppScope extends InheritedWidget {
       ]);
       return;
     }
-    fireAndLog(scope.backend.setLayout(agent.id, withPage(root, page)));
+    fireAndLog(
+      scope.backend.setLayout(
+        agent.id,
+        withPage(root, page, fit: paneFitOf(scope.backend)),
+      ),
+    );
   }
 
   /// Whether [page] shows: as the agent view's page, or as a pane in the

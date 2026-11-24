@@ -98,6 +98,9 @@ fn transcribe(args: &[&str]) -> ExitCode {
         }
         (Err(failure), false) => {
             eprintln!("{}", failure.error);
+            if !failure.detail.is_empty() {
+                eprintln!("({})", failure.detail);
+            }
             return ExitCode::FAILURE;
         }
     }
@@ -165,5 +168,10 @@ fn decoded(out: &mut impl std::io::Write, id: &Value, path: &Path) -> Result<(cl
 }
 
 fn failed(id: Value, failure: &Failure) -> Value {
-    json!({"id": id, "code": failure.code, "error": failure.error})
+    let mut answer = json!({"id": id, "code": failure.code, "error": failure.error});
+    // For factoryd's log, never the person.
+    if !failure.detail.is_empty() {
+        answer["detail"] = json!(failure.detail);
+    }
+    answer
 }

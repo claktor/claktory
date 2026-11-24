@@ -11,6 +11,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+import 'pair_start.dart';
 
 Future<Harness> _show(
   WidgetTester tester,
@@ -34,6 +35,7 @@ void main() {
   testWidgets('on Android with no camera: straight to pasting, in words '
       'for a server', (tester) async {
     await _show(tester, TargetPlatform.android);
+    await pastPairStart(tester, paste: true);
     expect(find.textContaining('Paste the code for this phone'), findsOne);
     expect(find.textContaining('iPhone'), findsNothing);
     expect(find.textContaining('Mac'), findsNothing);
@@ -54,6 +56,7 @@ void main() {
   testWidgets('on Android with the camera allowed: scanning, in words for '
       'a server, with pasting a tap away', (tester) async {
     await _show(tester, TargetPlatform.android, camera: CameraAccess.granted);
+    await pastPairStart(tester);
     expect(find.textContaining('Scan the code for this phone'), findsOne);
     expect(find.textContaining('iPhone'), findsNothing);
     expect(find.textContaining('Mac'), findsNothing);
@@ -63,11 +66,15 @@ void main() {
     expect(find.byType(EditableText), findsOneWidget);
   });
 
-  test(
+  testWidgets(
     "on Android, a scanned code that isn't Claktory's says which to scan",
-    () {
+    (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      // A phone's display, so it's "this phone" (a tablet's says tablet).
+      tester.view.display.size = const Size(1080, 2400);
+      tester.view.display.devicePixelRatio = 3;
+      addTearDown(tester.view.display.reset);
       expect(
         pairingProblem('WIFI:S:home;;', scanned: true),
         "That isn't a Claktory code. Scan the one shown for this phone in "
@@ -86,7 +93,8 @@ void main() {
     harness.camera
       ..granting = false
       ..afterRefusal = CameraAccess.undetermined;
-    await tester.tap(find.text('Scan code'));
+    // The first screen's way to scan asks at once.
+    await tester.tap(find.text('Scan code instead'));
     await pumpFrames(tester);
     expect(harness.camera.asked, 1);
     expect(find.text('Scan code'), findsOneWidget);
@@ -109,7 +117,7 @@ void main() {
       camera: CameraAccess.undetermined,
     );
     harness.camera.granting = false;
-    await tester.tap(find.text('Scan code'));
+    await tester.tap(find.text('Scan code instead'));
     await pumpFrames(tester);
     expect(harness.camera.asked, 1);
     expect(find.text('Open Settings'), findsOneWidget);
@@ -119,6 +127,7 @@ void main() {
     tester,
   ) async {
     await _show(tester, TargetPlatform.android, camera: CameraAccess.denied);
+    await pastPairStart(tester);
     expect(
       find.text('To scan, allow Claktory to use the camera in Settings.'),
       findsOneWidget,
@@ -129,6 +138,7 @@ void main() {
 
   testWidgets('on iPhone: its own words, scanning first', (tester) async {
     await _show(tester, TargetPlatform.iOS);
+    await pastPairStart(tester);
     expect(find.textContaining('On your Mac'), findsOne);
     expect(find.textContaining('Paste the code for this phone'), findsNothing);
   });

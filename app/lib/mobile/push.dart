@@ -16,8 +16,9 @@
 //
 // What notifies, and when, is the backend's: this only gets the iPhone
 // registered. The person is asked whether Claktory may notify them in
-// context, the first time they send something from the iPhone
-// ([PushRegistrar.askInContext]), never at launch.
+// context: as a Claktory they've just paired lets the iPhone in, or the
+// first time they send something from it ([PushRegistrar.askInContext]),
+// never at launch.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -206,9 +207,14 @@ class PushRegistrar {
       _state = state;
       _syncAll();
     });
+    _paired = {...claktories.all};
     _follow();
     unawaited(_start());
   }
+
+  /// The Claktories this device had when the app started: any other was
+  /// paired since, and its first connection asks ([askInContext]).
+  late final Set<Claktory> _paired;
 
   final Claktories claktories;
   final PushDevice device;
@@ -275,7 +281,12 @@ class PushRegistrar {
     for (final claktory in open) {
       if (_followed.containsKey(claktory)) continue;
       void connected() {
-        if (claktory.backend.connectedSince.value != null) _sync(claktory);
+        if (claktory.backend.connectedSince.value == null) return;
+        _sync(claktory);
+        // Just paired, and in: the person paired this iPhone to hear from
+        // their agents, so the system asks now whether Claktory may notify
+        // them, rather than only once they first send something (#352 P3).
+        if (_paired.add(claktory)) unawaited(askInContext());
       }
 
       _followed[claktory] = connected;
@@ -443,9 +454,10 @@ class PushRegistrar {
     return _state;
   }
 
-  /// The person just did something they'd want to hear back about (sent a
-  /// message from this iPhone): the first time, the system asks whether
-  /// Claktory may notify them. Once asked, never again.
+  /// The person just did something they'd want to hear back about (paired
+  /// this iPhone with a Claktory, or sent a message from it): the first
+  /// time, the system asks whether Claktory may notify them. Once asked,
+  /// never again.
   Future<void> askInContext() async {
     if (_asked) return;
     _asked = true;

@@ -78,17 +78,17 @@ async fn a_reply_to_several_queued_messages_quotes_the_latest() {
     apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
     apply_request(&mut client, &mut view, select("builder")).await;
 
-    // The agent hangs on the first message; two more queue behind it.
+    // The agent hangs on the first message; three more queue behind it.
     apply_request(&mut client, &mut view, send_message("builder", "hang")).await;
     view.follow(&mut client, |view| view.entries.len() == 1).await;
-    apply_request(&mut client, &mut view, send_message("builder", "one")).await;
-    apply_request(&mut client, &mut view, send_message("builder", "two")).await;
+    for text in ["one", "two", "three"] {
+        apply_request(&mut client, &mut view, send_message("builder", text)).await;
+    }
+
+    // Stopped, it takes all three in the next run; the answer quotes the
+    // latest.
     let stop = client_message::Body::StopAgent(v1::StopAgent { agent_id: "builder".into() });
     apply_request(&mut client, &mut view, stop).await;
-
-    // A third message starts a run that takes all three; the answer quotes
-    // the latest.
-    apply_request(&mut client, &mut view, send_message("builder", "three")).await;
     view.follow(&mut client, |view| {
         describe(&view.entries).iter().any(|entry| entry.starts_with("assistant: echo")) && idle(view, "builder")
     })

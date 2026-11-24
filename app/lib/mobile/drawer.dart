@@ -17,6 +17,7 @@ import '../rail.dart' show ClaktoriesScope, OffAccountMark, PhoneConnectionWord;
 import '../scope.dart';
 import '../selection.dart' show Unselectable;
 import '../sidebar.dart';
+import '../update.dart' show AndroidAppUpdateHost, AndroidUpdateNotice;
 import 'back.dart';
 import 'header.dart';
 import 'input.dart';
@@ -100,6 +101,14 @@ class PhoneDrawerHost extends StatefulWidget {
     }
   }
 
+  /// Something outside the tree chose what to show: bring its conversation
+  /// in front, through the same path as a choice in the sidebar.
+  static void showConversation() {
+    for (final host in PhoneDrawerHostState._live.toList()) {
+      host._front.value = true;
+    }
+  }
+
   @override
   State<PhoneDrawerHost> createState() => PhoneDrawerHostState();
 }
@@ -132,13 +141,20 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
 
   final _scope = FocusScopeNode(debugLabel: 'Drawer');
 
-  /// The phone's Back: the sheets, then this drawer, then the pages.
-  late final back = PhoneBack(
-    drawerOpen: () => _open,
-    closeDrawer: closeDrawer,
-    topPage: () => _pages?.topPage,
-    popPage: pop,
-  );
+  PhoneBack? _localBack;
+  PhoneBack? _windowBack;
+  BackHandle? _windowNavigation;
+
+  /// Android borrows the window's registry; iOS and standalone phone hosts
+  /// retain their original local registry and tree.
+  PhoneBack get back =>
+      _windowBack ??
+      (_localBack ??= PhoneBack(
+        drawerOpen: () => _open,
+        closeDrawer: closeDrawer,
+        topPage: () => _pages?.topPage,
+        popPage: pop,
+      ));
 
   /// Every drawer host showing now ([PhoneDrawerHost.closeAll]).
   static final _live = <PhoneDrawerHostState>{};
@@ -151,9 +167,34 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final policy = PhonePlatformPolicy.of(context);
+    // Depend on registry IDENTITY only, never its changing target. A Claktory
+    // or visible screen replacement then detaches this going provider safely.
+    final window = policy.touch && !policy.drawerEdgeSwipe
+        ? context.dependOnInheritedWidgetOfExactType<PhoneBackScope>()?.back
+        : null;
+    if (identical(window, _windowBack)) return;
+    _windowNavigation?.release();
+    _windowBack = window;
+    _windowNavigation = window?.attachNavigation(
+      drawerOpen: () => _open,
+      closeDrawer: closeDrawer,
+      topPage: () => _pages?.topPage,
+      popPage: pop,
+    );
+  }
+
+  Widget _backHost(BuildContext context, Widget child) => _windowBack != null
+      ? child
+      : PhonePlatformPolicy.of(context).backHost(back: back, child: child);
+
+  @override
   void dispose() {
     _live.remove(this);
-    back.dispose();
+    _windowNavigation?.release();
+    _localBack?.dispose();
     _front.dispose();
     _drawer.dispose();
     _scope.dispose();
@@ -391,109 +432,116 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
         ),
       ),
     );
-    return _HostScope(
-      host: this,
-      child: PhoneRoutesScope(
-        routes: this,
-        version: _version,
-        child: PhoneBackScope(
-          back: back,
-          child: PhoneNavigation(
-            conversation: _front,
-            child: PhoneProjects(
-              files: (project) => showFiles(project.id),
-              child: PhonePlatformPolicy.of(context).backHost(
-                back: back,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    // Under the open drawer, out of VoiceOver's and the
-                    // keyboard's reach.
-                    ExcludeSemantics(
-                      excluding: _open,
-                      child: ExcludeFocus(
+    // Android's check for a new version of its app, for the drawer and
+    // Settings to say (#355 D2); nothing elsewhere.
+    return AndroidAppUpdateHost(
+      child: _HostScope(
+        host: this,
+        child: PhoneRoutesScope(
+          routes: this,
+          version: _version,
+          child: PhoneBackScope(
+            back: back,
+            child: PhoneNavigation(
+              conversation: _front,
+              child: PhoneProjects(
+                files: (project) => showFiles(project.id),
+                child: _backHost(
+                  context,
+                  Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      // Under the open drawer, out of VoiceOver's and the
+                      // keyboard's reach.
+                      ExcludeSemantics(
                         excluding: _open,
-                        child: widget.child,
-                      ),
-                    ),
-                    if (_edgeShown)
-                      PositionedDirectional(
-                        start: 0,
-                        top: 0,
-                        bottom: 0,
-                        width: 20,
-                        child: RawGestureDetector(
-                          behavior: HitTestBehavior.translucent,
-                          gestures: {
-                            _EdgeDrag:
-                                GestureRecognizerFactoryWithHandlers<_EdgeDrag>(
-                                  () => _EdgeDrag(allowed: () => _swipeAllowed),
-                                  (drag) => drag
-                                    ..onStart = _dragStart
-                                    ..onUpdate = _dragUpdate
-                                    ..onEnd = _dragEnd
-                                    ..onCancel = _dragCancel,
-                                ),
-                          },
+                        child: ExcludeFocus(
+                          excluding: _open,
+                          child: widget.child,
                         ),
                       ),
-                    AnimatedBuilder(
-                      animation: _drawer,
-                      child: drawer,
-                      builder: (context, drawer) {
-                        final shown = _drawer.value;
-                        final out = shown > 0 || _dragging;
-                        return Offstage(
-                          offstage: !out,
-                          child: TickerMode(
-                            enabled: out,
-                            child: BlockSemantics(
-                              blocking: _open,
-                              child: GestureDetector(
-                                onHorizontalDragStart: _dragStart,
-                                onHorizontalDragUpdate: _dragUpdate,
-                                onHorizontalDragEnd: _dragEnd,
-                                onHorizontalDragCancel: _dragCancel,
-                                child: Stack(
-                                  fit: StackFit.expand,
-                                  children: [
-                                    Semantics(
-                                      container: true,
-                                      button: true,
-                                      label: 'Close menu',
-                                      onTap: closeDrawer,
-                                      excludeSemantics: true,
-                                      child: GestureDetector(
+                      if (_edgeShown)
+                        PositionedDirectional(
+                          start: 0,
+                          top: 0,
+                          bottom: 0,
+                          width: 20,
+                          child: RawGestureDetector(
+                            behavior: HitTestBehavior.translucent,
+                            gestures: {
+                              _EdgeDrag:
+                                  GestureRecognizerFactoryWithHandlers<
+                                    _EdgeDrag
+                                  >(
+                                    () =>
+                                        _EdgeDrag(allowed: () => _swipeAllowed),
+                                    (drag) => drag
+                                      ..onStart = _dragStart
+                                      ..onUpdate = _dragUpdate
+                                      ..onEnd = _dragEnd
+                                      ..onCancel = _dragCancel,
+                                  ),
+                            },
+                          ),
+                        ),
+                      AnimatedBuilder(
+                        animation: _drawer,
+                        child: drawer,
+                        builder: (context, drawer) {
+                          final shown = _drawer.value;
+                          final out = shown > 0 || _dragging;
+                          return Offstage(
+                            offstage: !out,
+                            child: TickerMode(
+                              enabled: out,
+                              child: BlockSemantics(
+                                blocking: _open,
+                                child: GestureDetector(
+                                  onHorizontalDragStart: _dragStart,
+                                  onHorizontalDragUpdate: _dragUpdate,
+                                  onHorizontalDragEnd: _dragEnd,
+                                  onHorizontalDragCancel: _dragCancel,
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: [
+                                      Semantics(
+                                        container: true,
+                                        button: true,
+                                        label: 'Close menu',
                                         onTap: closeDrawer,
-                                        child: ColoredBox(
-                                          color: const Color(0xFF000000)
-                                              .withValues(alpha: 0.3 * shown),
+                                        excludeSemantics: true,
+                                        child: GestureDetector(
+                                          onTap: closeDrawer,
+                                          child: ColoredBox(
+                                            color: const Color(0xFF000000)
+                                                .withValues(alpha: 0.3 * shown),
+                                          ),
                                         ),
                                       ),
-                                    ),
-                                    Align(
-                                      alignment:
-                                          AlignmentDirectional.centerStart,
-                                      child: FractionalTranslation(
-                                        translation: Offset(
-                                          (rtl ? 1 : -1) * (1 - shown),
-                                          0,
-                                        ),
-                                        child: SizedBox(
-                                          width: width,
-                                          child: drawer,
+                                      Align(
+                                        alignment:
+                                            AlignmentDirectional.centerStart,
+                                        child: FractionalTranslation(
+                                          translation: Offset(
+                                            (rtl ? 1 : -1) * (1 - shown),
+                                            0,
+                                          ),
+                                          child: SizedBox(
+                                            width: width,
+                                            child: drawer,
+                                          ),
                                         ),
                                       ),
-                                    ),
-                                  ],
+                                    ],
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
-                        );
-                      },
-                    ),
-                  ],
+                          );
+                        },
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -724,6 +772,15 @@ class _DrawerPanelState extends State<_DrawerPanel> {
                                   maxScaleFactor: _appStripTextScale,
                                   child: const AppStrip(),
                                 ),
+                                // A new version of the Android app.
+                                const AndroidUpdateNotice(
+                                  padding: EdgeInsetsDirectional.fromSTEB(
+                                    Space.l,
+                                    Space.xs,
+                                    Space.s,
+                                    Space.xs,
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -808,7 +865,7 @@ class _DrawerHeader extends StatelessWidget {
                     // list, the form and VoiceOver have it whole.
                     MediaQuery.withClampedTextScaling(
                       maxScaleFactor: 1.6,
-                      child: OffAccountMark(claktory: shown),
+                      child: OffAccountMark(claktory: shown, signIn: true),
                     ),
                   Transform.translate(
                     offset: const Offset(-Space.xs, 0),
