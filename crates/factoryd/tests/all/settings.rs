@@ -78,11 +78,11 @@ async fn an_admin_agent_reads_and_changes_the_settings_kept_in_the_database_as_t
     )
     .await;
     assert!(
-        changed.starts_with("Changed: keep this Mac awake off; notifications; lea's Notify me; the checklist's intervals; the pane limit; the voice model removed."),
+        changed.starts_with("Changed: keep this Mac awake off; notifications; Lea's Notify me; the checklist's intervals; the pane limit; the voice model removed."),
         "{changed}"
     );
     assert!(changed.contains("preview who; quiet_hours on (21:30 to 07:00"), "{changed}");
-    assert!(changed.contains("Agents' Notify me: lea never; the rest default"), "{changed}");
+    assert!(changed.contains("Agents' Notify me: Lea never; the rest default"), "{changed}");
     assert!(changed.contains("reask 60, overdue 1440"), "{changed}");
     assert!(changed.contains("Panes beside a conversation: 6\n"), "{changed}");
     assert!(changed.contains("Voice model: not installed") || changed.contains("Voice model: not available here"), "{changed}");

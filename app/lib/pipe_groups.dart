@@ -14,9 +14,18 @@ import 'backend.dart';
 import 'controls.dart';
 import 'forms.dart';
 import 'mobile/presentation.dart' show SheetAction, showActions;
+import 'pipe_shares.dart'
+    show
+        confirmGroupMove,
+        groupDeleteNote,
+        groupMoveNote,
+        groupShares,
+        shareWebsite,
+        stopShare;
 import 'pipes.dart' show pipeColor, pipesIn;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'visible_codes.dart' show visibleCodes;
 
 /// [projectId]'s pipe groups, in their order (PipeGroup.position).
 List<PipeGroup> pipeGroupsIn(Workspace workspace, String projectId) => [
@@ -136,7 +145,7 @@ Future<void> pipeGroupActions(BuildContext context, Pipe pipe) async {
     case 'move':
       await _moveToGroup(here, origin, pipe);
     case 'remove':
-      _setGroup(origin, pipe, '');
+      await _setGroup(origin, pipe, '');
   }
 }
 
@@ -174,13 +183,13 @@ Future<void> _moveToGroup(
     if (here == null || !here.mounted) return;
     await newPipeGroup(here, projectId: pipe.projectId, pipe: pipe);
   } else {
-    _setGroup(origin, pipe, chosen);
+    await _setGroup(origin, pipe, chosen);
   }
 }
 
 /// Takes [pipe] out of its group: it's among the pipes in none.
 void removeFromGroup(BuildContext context, Pipe pipe) =>
-    _setGroup(_Origin(context), pipe, '');
+    unawaited(_setGroup(_Origin(context), pipe, ''));
 
 /// Where what follows a choice shows: the row it came from while it's
 /// there, else the list around it (the sidebar's). A sheet left open can
@@ -201,8 +210,12 @@ class _Origin {
 }
 
 /// Puts [pipe] in [groupId] ("" for none), saying why if the Claktory
-/// won't.
-void _setGroup(_Origin origin, Pipe pipe, String groupId) {
+/// won't; asked first when that changes the websites it gets (a group's
+/// shares follow the group).
+Future<void> _setGroup(_Origin origin, Pipe pipe, String groupId) async {
+  final asking = origin.context;
+  if (asking == null || !asking.mounted) return;
+  if (!await confirmGroupMove(asking, pipe, groupId)) return;
   final here = origin.context;
   if (here == null || !here.mounted) return;
   final backend = AppScope.of(here);
@@ -226,24 +239,43 @@ void _setGroup(_Origin origin, Pipe pipe, String groupId) {
 /// Drops [pipe] on [group]'s row: it moves in, as Move to group… does.
 void dropPipeOnGroup(BuildContext context, Pipe pipe, PipeGroup group) {
   if (pipe.groupId == group.id || pipe.projectId != group.projectId) return;
-  _setGroup(_Origin(context), pipe, group.id);
+  unawaited(_setGroup(_Origin(context), pipe, group.id));
 }
 
 /// A group's actions, from its row's right click or touch and hold:
-/// Rename… and Delete group….
+/// Share a website… with its pipes, Stop sharing each website that follows
+/// it, Rename… and Delete group….
 Future<void> pipeGroupMenu(BuildContext context, PipeGroup group) async {
   final origin = _Origin(context);
+  final shares = groupShares(
+    AppScope.of(context).workspace.workspace,
+    group.id,
+  );
   final action = await showActions<String>(
     context,
     title: group.name,
-    actions: const [
-      SheetAction('Rename…', 'rename'),
-      SheetAction('Delete group…', 'delete', destructive: true),
+    actions: [
+      const SheetAction('Share a website…', 'share'),
+      for (final share in shares)
+        SheetAction(
+          'Stop sharing ${visibleCodes(share.name)}…',
+          'stop:${share.id}',
+        ),
+      const SheetAction('Rename…', 'rename'),
+      const SheetAction('Delete group…', 'delete', destructive: true),
     ],
   );
   final here = origin.context;
   if (here == null || !here.mounted) return;
+  if (action != null && action.startsWith('stop:')) {
+    for (final share in shares) {
+      if ('stop:${share.id}' == action) await stopShare(here, share);
+    }
+    return;
+  }
   switch (action) {
+    case 'share':
+      await shareWebsite(here, group: group);
     case 'rename':
       await showModal(
         here,
@@ -270,12 +302,14 @@ Future<void> newPipeGroup(
 /// group.
 Future<void> deletePipeGroup(BuildContext context, PipeGroup group) async {
   final backend = AppScope.of(context);
+  final shared = groupDeleteNote(backend.workspace.workspace, group);
   final sure = await showActions<bool>(
     context,
     title: 'Delete the group “${group.name}”?',
-    message:
-        'Its pipes stay, just outside any group. Nothing about them '
-        'changes.',
+    message: shared == null
+        ? 'Its pipes stay, just outside any group. Nothing about them '
+              'changes.'
+        : 'Its pipes stay, just outside any group. $shared',
     actions: const [SheetAction('Delete group', true, destructive: true)],
   );
   if (sure != true) return;
@@ -347,8 +381,13 @@ class _GroupNameFormState extends State<_GroupNameForm> {
   @override
   Widget build(BuildContext context) {
     final renaming = widget.group != null;
+    final pipe = widget.pipe;
     return FormFrame(
       title: renaming ? 'Rename group' : 'New group',
+      // Out of the group it's in: the websites that follow that one stop.
+      body: pipe == null
+          ? null
+          : groupMoveNote(AppScope.of(context).workspace.workspace, pipe, ''),
       error: _error,
       submitLabel: renaming ? 'Save' : 'Create',
       onSubmit: _saving ? null : _save,

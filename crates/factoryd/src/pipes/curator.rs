@@ -136,15 +136,11 @@ pub(crate) async fn release(factory: &Arc<Factory>, agent: &str, clear: bool) ->
     if !factory.pipes.curator(agent) {
         return Ok(());
     }
-    let name = factory.lock().config.agent(agent).map_or_else(|| agent.to_owned(), |found| found.name.clone());
+    let name = factory.agent_name(agent);
     match forwarding_to(factory, agent) {
         None => return Err(format!("Claktory couldn't check where reports go, so {name} still reads them. Try again.")),
         Some(places) if !places.is_empty() => {
-            let places = match places.split_last() {
-                Some((last, [])) => last.clone(),
-                Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-                None => String::new(),
-            };
+            let places = factory_agent::text::list_and(&places);
             return Err(format!("{name} still gets reports from {places}. Choose who reads them there first."));
         }
         Some(_) => {}

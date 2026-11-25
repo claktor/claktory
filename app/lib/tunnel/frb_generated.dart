@@ -4943,6 +4943,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  TunnelReach dco_decode_tunnel_reach(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return TunnelReach.values[raw as int];
+  }
+
+  @protected
   TunnelRelayTrouble dco_decode_tunnel_relay_trouble(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return TunnelRelayTrouble.values[raw as int];
@@ -4952,8 +4958,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TunnelStatus dco_decode_tunnel_status(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 10)
-      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
+    if (arr.length != 11)
+      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
     return TunnelStatus(
       phase: dco_decode_tunnel_phase(arr[0]),
       path: dco_decode_tunnel_path(arr[1]),
@@ -4965,6 +4971,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       received: dco_decode_u_32(arr[7]),
       linkReceived: dco_decode_u_32(arr[8]),
       dialTimeoutMs: dco_decode_u_32(arr[9]),
+      reach: dco_decode_tunnel_reach(arr[10]),
     );
   }
 
@@ -6069,6 +6076,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  TunnelReach sse_decode_tunnel_reach(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return TunnelReach.values[inner];
+  }
+
+  @protected
   TunnelRelayTrouble sse_decode_tunnel_relay_trouble(
     SseDeserializer deserializer,
   ) {
@@ -6090,6 +6104,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_received = sse_decode_u_32(deserializer);
     var var_linkReceived = sse_decode_u_32(deserializer);
     var var_dialTimeoutMs = sse_decode_u_32(deserializer);
+    var var_reach = sse_decode_tunnel_reach(deserializer);
     return TunnelStatus(
       phase: var_phase,
       path: var_path,
@@ -6101,6 +6116,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       received: var_received,
       linkReceived: var_linkReceived,
       dialTimeoutMs: var_dialTimeoutMs,
+      reach: var_reach,
     );
   }
 
@@ -7128,6 +7144,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_tunnel_reach(TunnelReach self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
   void sse_encode_tunnel_relay_trouble(
     TunnelRelayTrouble self,
     SseSerializer serializer,
@@ -7149,6 +7171,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.received, serializer);
     sse_encode_u_32(self.linkReceived, serializer);
     sse_encode_u_32(self.dialTimeoutMs, serializer);
+    sse_encode_tunnel_reach(self.reach, serializer);
   }
 
   @protected

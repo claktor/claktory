@@ -386,6 +386,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   TunnelPhase dco_decode_tunnel_phase(dynamic raw);
 
   @protected
+  TunnelReach dco_decode_tunnel_reach(dynamic raw);
+
+  @protected
   TunnelRelayTrouble dco_decode_tunnel_relay_trouble(dynamic raw);
 
   @protected
@@ -777,6 +780,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   TunnelPhase sse_decode_tunnel_phase(SseDeserializer deserializer);
+
+  @protected
+  TunnelReach sse_decode_tunnel_reach(SseDeserializer deserializer);
 
   @protected
   TunnelRelayTrouble sse_decode_tunnel_relay_trouble(
@@ -1258,6 +1264,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_tunnel_phase(TunnelPhase self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_tunnel_reach(TunnelReach self, SseSerializer serializer);
 
   @protected
   void sse_encode_tunnel_relay_trouble(

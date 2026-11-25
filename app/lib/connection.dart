@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
@@ -9,6 +11,8 @@ import 'forms.dart';
 import 'identity.dart';
 import 'mobile/metrics.dart' show Touch;
 import 'mobile/platform_policy.dart';
+import 'setup.dart'
+    show LocalEngine, SetupScope, backgroundItemNote, localEngine;
 import 'tunnel/api/tunnel.dart';
 import 'tunnel_client.dart' show idleTunnel, tunnelAdvice;
 
@@ -29,6 +33,12 @@ enum Link {
   /// It moved to another computer: what answers here is the copy it left,
   /// which runs nothing.
   moved,
+
+  /// This Mac's own, turned off by the person (friend bug #27).
+  off,
+
+  /// This Mac's own, kept from running by macOS (friend bug #28).
+  blocked,
 }
 
 /// A Claktory's connection as the app shows it: its state and the words
@@ -50,6 +60,16 @@ class Connection {
     if (backend.refused.value != null) return Link.refused;
     if (backend.movedAway.value != null) return Link.moved;
     if (backend.connected.value) return Link.live;
+    if (backend.target == null) {
+      switch (localEngine.value) {
+        case LocalEngine.off:
+          return Link.off;
+        case LocalEngine.blocked:
+          return Link.blocked;
+        case LocalEngine.running:
+          break;
+      }
+    }
     final tunnel = backend.tunnel.value;
     // Back from the background or a network change, it reconnects without
     // a word for a few seconds first.
@@ -70,6 +90,7 @@ class Connection {
     backend.refused,
     backend.movedAway,
     backend.tunnel,
+    localEngine,
   ]);
 
   String get _name => machine ?? 'this Claktory';
@@ -87,6 +108,8 @@ class Connection {
       '' => 'Moved to another computer',
       final to => 'Moved to $to',
     },
+    Link.off => 'Turned off on this Mac',
+    Link.blocked => 'Blocked by macOS',
   };
 
   /// A word or two, beside a name that's already shown (a phone's rows).
@@ -97,6 +120,8 @@ class Connection {
     Link.failing => "Can't connect",
     Link.refused => 'Not allowed',
     Link.moved => 'Moved',
+    Link.off => 'Turned off',
+    Link.blocked => 'Blocked by macOS',
   };
 
   /// How it connects, and since when.
@@ -124,6 +149,13 @@ class Connection {
         };
       case Link.connecting:
         return 'Trying to reach $_name…';
+      case Link.off:
+        return "Claktory is turned off on this Mac, so its agents aren't "
+            'running. Start it, and they carry on where they left off.';
+      case Link.blocked:
+        return 'macOS is blocking Claktory from running in the background. '
+            'Open System Settings and turn on Claktory under Allow in the '
+            'Background. $backgroundItemNote';
       case Link.moved:
         final to = backend.movedAway.value?.to ?? '';
         return 'This Claktory moved to '
@@ -139,7 +171,8 @@ class Connection {
   }
 
   /// Red when it can't connect.
-  bool get problem => link == Link.failing || link == Link.refused;
+  bool get problem =>
+      link == Link.failing || link == Link.refused || link == Link.blocked;
 }
 
 /// The connection's mark: quiet while it's live, pulsing signal while it
@@ -159,8 +192,10 @@ class ConnectionDot extends StatelessWidget {
       Link.live =>
         quiet ? Dot(color: palette.textFaint) : const SizedBox.shrink(),
       Link.connecting => const LiveDot(),
-      Link.failing || Link.refused => Dot(color: palette.danger),
-      Link.moved => Dot(color: palette.textFaint),
+      Link.failing ||
+      Link.refused ||
+      Link.blocked => Dot(color: palette.danger),
+      Link.moved || Link.off => Dot(color: palette.textFaint),
     };
   }
 }
@@ -295,6 +330,24 @@ class ConnectionDialog extends StatelessWidget {
       builder: (context, _) {
         final connection = Connection(backend, machine: machine);
         final error = backend.tunnel.value?.error ?? '';
+        // This Mac's own, off or blocked: what starts it, not Reconnect.
+        final setup = SetupScope.of(context);
+        final (String, VoidCallback)? fix = setup == null
+            ? null
+            : switch (connection.link) {
+                Link.off => (
+                  'Start Claktory',
+                  () {
+                    unawaited(setup.startEngine());
+                    close();
+                  },
+                ),
+                Link.blocked => (
+                  'Open System Settings',
+                  () => unawaited(setup.openLoginItems()),
+                ),
+                _ => null,
+              };
         return FormFrame(
           title: connection.line,
           body: connection.details,
@@ -310,11 +363,13 @@ class ConnectionDialog extends StatelessWidget {
               ),
           ],
           error: null,
-          submitLabel: 'Reconnect',
-          onSubmit: () {
-            backend.reconnectNow();
-            close();
-          },
+          submitLabel: fix?.$1 ?? 'Reconnect',
+          onSubmit:
+              fix?.$2 ??
+              () {
+                backend.reconnectNow();
+                close();
+              },
           cancelLabel: 'Close',
           onCancel: close,
           secondary: Button(

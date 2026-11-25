@@ -8,6 +8,11 @@
 //! from Claktory starts it, after moving it to a model that can run if its
 //! own can't.
 //!
+//! "When Claktory quits" (friend bug #27) is needed when a new Claktory
+//! runs under its Mac's background service, which the Mac app can stop and
+//! start (`crate::service`): the person answers it
+//! (UpdateSettings.when_app_quits) or skips it, and it keeps running.
+//!
 //! The state lives in factory.db's `onboarding`, not config.json, so a
 //! backend from before it still reads the settings after a rollback. A
 //! Claktory with no row there (one from before it, or whose first run is
@@ -24,7 +29,8 @@ use crate::store::Store;
 
 pub(crate) const SCHEMA: &str = "
 -- A new Claktory's first-run steps still to do: 'model' (Connect a model),
--- needed or skipped. A step done has no row.
+-- needed or skipped; 'quit' (When Claktory quits, friend bug #27), needed
+-- or skipped. A step done has no row.
 CREATE TABLE onboarding (step TEXT PRIMARY KEY, state TEXT NOT NULL);
 ";
 
@@ -37,31 +43,47 @@ const PREFERRED: &[&str] =
 #[derive(Default)]
 pub(crate) struct State {
     model: Mutex<OnboardingStep>,
+    quit: Mutex<OnboardingStep>,
     /// Notified when the models available change.
     pub(crate) models_changed: Arc<tokio::sync::Notify>,
 }
 
 impl State {
     /// The steps as factory.db has them. A new Claktory (`created`) with no
-    /// model available starts with Connect a model needed.
-    pub(crate) fn load(store: &Store, created: bool, models: &[v1::Model]) -> rusqlite::Result<State> {
+    /// model available starts with Connect a model needed; one its Mac's
+    /// background service runs (`service`), with When Claktory quits.
+    pub(crate) fn load(store: &Store, created: bool, models: &[v1::Model], service: bool) -> rusqlite::Result<State> {
         if created && models.is_empty() {
             store.db().execute("INSERT OR REPLACE INTO onboarding (step, state) VALUES ('model', 'needed')", [])?;
         }
-        let state: Option<String> =
-            store.db().query_row("SELECT state FROM onboarding WHERE step = 'model'", [], |row| row.get(0)).optional()?;
-        let model = match state.as_deref() {
-            Some("needed") => OnboardingStep::Needed,
-            Some("skipped") => OnboardingStep::Skipped,
-            _ => OnboardingStep::Done,
+        if created && service {
+            store.db().execute("INSERT OR REPLACE INTO onboarding (step, state) VALUES ('quit', 'needed')", [])?;
+        }
+        let step = |name: &str| -> rusqlite::Result<OnboardingStep> {
+            let state: Option<String> =
+                store.db().query_row("SELECT state FROM onboarding WHERE step = ?1", [name], |row| row.get(0)).optional()?;
+            Ok(match state.as_deref() {
+                Some("needed") => OnboardingStep::Needed,
+                Some("skipped") => OnboardingStep::Skipped,
+                _ => OnboardingStep::Done,
+            })
         };
-        Ok(State { model: Mutex::new(model), models_changed: Arc::default() })
+        Ok(State { model: Mutex::new(step("model")?), quit: Mutex::new(step("quit")?), models_changed: Arc::default() })
     }
 
     /// What Settings.onboarding shows.
     pub(crate) fn view(&self) -> v1::Onboarding {
-        v1::Onboarding { model: (*lock(&self.model)).into() }
+        v1::Onboarding { model: (*lock(&self.model)).into(), when_app_quits: (*lock(&self.quit)).into() }
     }
+}
+
+/// The person answered When Claktory quits: done.
+pub(crate) fn when_app_quits_answered(factory: &Factory) -> rusqlite::Result<()> {
+    if *lock(&factory.onboarding.quit) != OnboardingStep::Done {
+        factory.store.db().execute("DELETE FROM onboarding WHERE step = 'quit'", [])?;
+        *lock(&factory.onboarding.quit) = OnboardingStep::Done;
+    }
+    Ok(())
 }
 
 impl Factory {
@@ -70,6 +92,11 @@ impl Factory {
         if request.skip_model && *lock(&self.onboarding.model) == OnboardingStep::Needed {
             self.store.db().execute("UPDATE onboarding SET state = 'skipped' WHERE step = 'model'", [])?;
             *lock(&self.onboarding.model) = OnboardingStep::Skipped;
+            self.broadcast_workspace(&self.lock());
+        }
+        if request.skip_when_app_quits && *lock(&self.onboarding.quit) == OnboardingStep::Needed {
+            self.store.db().execute("UPDATE onboarding SET state = 'skipped' WHERE step = 'quit'", [])?;
+            *lock(&self.onboarding.quit) = OnboardingStep::Skipped;
             self.broadcast_workspace(&self.lock());
         }
         Ok(())

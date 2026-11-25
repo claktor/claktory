@@ -83,6 +83,7 @@ class _Entry {
     required this.builder,
     this.overKeyboard = false,
     this.fullscreenDialog = false,
+    this.edgeToEdge = false,
     this.alive,
     this.done,
   }) : serial = ++_pushed;
@@ -96,6 +97,11 @@ class _Entry {
   final WidgetBuilder builder;
   final bool overKeyboard;
   final bool fullscreenDialog;
+
+  /// Drawn under the status bar, the notch and the home indicator: a
+  /// picture or video's page, whose chrome keeps clear of them itself
+  /// (mobile/viewer_chrome.dart).
+  final bool edgeToEdge;
   final bool Function()? alive;
   final Completer<Object?>? done;
 }
@@ -377,6 +383,7 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
       _stack.add(
         _Entry(
           id: 'file:$path',
+          edgeToEdge: _edgeToEdge(viewerLeaf(path).leaf.kind),
           alive: () => _stack.any((entry) => entry.id == files),
           builder: (context) {
             final leaf = viewerLeaf(path).leaf;
@@ -391,6 +398,12 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
     });
     _changed();
   }
+
+  /// Whether a viewer of [kind] fills the screen: a picture or video on a
+  /// phone (mobile/viewer_chrome.dart). An iPad in a narrow window keeps
+  /// them as they were, where its document host may show them.
+  bool _edgeToEdge(String kind) =>
+      (kind == 'image' || kind == 'video') && deviceIdiom(context) != Idiom.pad;
 
   /// A pane [showPane] (or [showFile]) asked for, to push once it's in its
   /// agent's layout; given up on after a while ([_waitingPaneTimer]).
@@ -475,6 +488,7 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
       _stack.add(
         _Entry(
           id: 'viewer:$agentId/$paneId',
+          edgeToEdge: _edgeToEdge(pane?.leaf.kind ?? ''),
           alive: () {
             final shown = agent();
             return shown != null && find(layoutOf(shown), paneId) != null;
@@ -708,6 +722,7 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
                       fullscreenDialog: entry.fullscreenDialog,
                       child: _Screen(
                         overKeyboard: entry.overKeyboard,
+                        edgeToEdge: entry.edgeToEdge,
                         child: Builder(builder: entry.builder),
                       ),
                     ),
@@ -866,16 +881,31 @@ class _Root extends StatelessWidget {
 /// A page whose pane can be searched shows the find bar at its foot while
 /// its find is open ([PhoneFindHost]).
 class _Screen extends StatelessWidget {
-  const _Screen({required this.child, this.overKeyboard = false, this.find});
+  const _Screen({
+    required this.child,
+    this.overKeyboard = false,
+    this.edgeToEdge = false,
+    this.find,
+  });
 
   final Widget child;
   final bool overKeyboard;
+
+  /// The whole screen, its safe areas left in the [MediaQuery] for what's
+  /// over the content ([_Entry.edgeToEdge]).
+  final bool edgeToEdge;
 
   /// The conversation's own, so its ⋯ list can offer Search.
   final GlobalKey<PhoneFindHostState>? find;
 
   @override
   Widget build(BuildContext context) {
+    if (edgeToEdge) {
+      return ColoredBox(
+        color: Palette.of(context).canvas,
+        child: PhoneFindHost(key: find, child: child),
+      );
+    }
     final safe = MediaQuery.paddingOf(context);
     final keyboard = MediaQuery.viewInsetsOf(context).bottom;
     final inner = withoutInsets(

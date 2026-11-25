@@ -511,7 +511,7 @@ pub(crate) fn save(factory: &Arc<Factory>, draft: &Draft, base: Option<u32>, by:
                 .query_row(
                     "SELECT version, deleted FROM pipe_handoff_types WHERE id = ?1 ORDER BY version DESC LIMIT 1",
                     [id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    crate::store::row2,
                 )
                 .optional()
         };
@@ -605,11 +605,7 @@ pub(crate) fn delete(factory: &Arc<Factory>, id: &str, by: &str) -> Result<(), S
     }
     let places = enabled_on(factory, id);
     if !places.is_empty() {
-        let places = match places.split_last() {
-            Some((last, [])) => last.clone(),
-            Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-            None => String::new(),
-        };
+        let places = factory_agent::text::list_and(&places);
         return Err(format!("“{}” is still forwarded by {places}. Turn it off there first.", schema.name));
     }
     {

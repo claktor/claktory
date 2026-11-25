@@ -264,6 +264,25 @@ impl Change {
     /// Charts", the parts joined. `names`: each agent's name now, by id.
     pub(crate) fn title(&self, names: &BTreeMap<String, String>) -> String {
         let who = if self.by.is_empty() { "You".to_owned() } else { names.get(&self.by).cloned().unwrap_or_else(|| self.by.clone()) };
+        let parts = self.parts(names, false);
+        if parts.is_empty() {
+            return format!("{who} changed nothing in {}", self.labels.app);
+        }
+        format!("{who} {}", parts.join("; "))
+    }
+
+    /// The change as something to do, as a proposal's grant lists it: "Let
+    /// Charts read Conversations; let Lea use Charts: View".
+    pub(crate) fn asked(&self, names: &BTreeMap<String, String>) -> String {
+        let said = self.parts(names, true).join("; ");
+        let mut letters = said.chars();
+        letters.next().map_or_else(String::new, |first| first.to_uppercase().chain(letters).collect())
+    }
+
+    /// Each thing it changes, done ("stopped Lea using Charts") or to do
+    /// ("stop Lea using Charts").
+    fn parts(&self, names: &BTreeMap<String, String>, to_do: bool) -> Vec<String> {
+        let (stopped, changed) = if to_do { ("stop", "change") } else { ("stopped", "changed") };
         let app = &self.labels.app;
         let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_owned());
         let source = |id: &str| self.labels.sources.get(id).cloned().unwrap_or_else(|| id.to_owned());
@@ -288,7 +307,7 @@ impl Change {
             parts.push(format!("let {app} read {}", and(&on)));
         }
         if !off.is_empty() {
-            parts.push(format!("stopped {app} reading {}", and(&off)));
+            parts.push(format!("{stopped} {app} reading {}", and(&off)));
         }
         for (agent, after) in &self.after.agents {
             let before = self.before.agents.get(agent).cloned().unwrap_or_default();
@@ -296,14 +315,14 @@ impl Change {
             let scopes: Vec<String> = after.scopes.iter().map(|id| scope(id)).collect();
             if after.scopes.is_empty() {
                 if !before.scopes.is_empty() {
-                    parts.push(format!("stopped {agent} using {app}"));
+                    parts.push(format!("{stopped} {agent} using {app}"));
                 }
                 continue;
             }
             if before.scopes.is_empty() {
                 parts.push(format!("let {agent} use {app}: {}", scopes.join(", ")));
             } else if before.scopes != after.scopes {
-                parts.push(format!("changed what {agent} can do in {app}: {}", scopes.join(", ")));
+                parts.push(format!("{changed} what {agent} can do in {app}: {}", scopes.join(", ")));
             }
             let heard: Vec<String> = after.hears.iter().filter(|kind| !before.hears.contains(kind)).map(|kind| event(kind)).collect();
             let unheard: Vec<String> = before.hears.iter().filter(|kind| !after.hears.contains(kind)).map(|kind| event(kind)).collect();
@@ -311,13 +330,10 @@ impl Change {
                 parts.push(format!("let {agent} hear from {app}: {}", heard.join(", ")));
             }
             if !unheard.is_empty() && !before.scopes.is_empty() {
-                parts.push(format!("stopped {agent} hearing from {app}: {}", unheard.join(", ")));
+                parts.push(format!("{stopped} {agent} hearing from {app}: {}", unheard.join(", ")));
             }
         }
-        if parts.is_empty() {
-            return format!("{who} changed nothing in {app}");
-        }
-        format!("{who} {}", parts.join("; "))
+        parts
     }
 }
 
@@ -328,11 +344,7 @@ pub(crate) fn possessive(name: &str) -> String {
 
 /// "A", "A and B", "A, B and C".
 pub(crate) fn and(items: &[String]) -> String {
-    match items {
-        [] => String::new(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    }
+    factory_agent::text::list_and(items)
 }
 
 /// What a change records.

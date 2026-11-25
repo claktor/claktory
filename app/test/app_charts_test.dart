@@ -319,6 +319,52 @@ void main() {
     expect(find.text('Runs by agent'), findsOneWidget);
   });
 
+  Future<void> showBars(WidgetTester tester, List<String> days) => _show(
+    tester,
+    [
+      _root(['bars']),
+      {
+        'id': 'bars',
+        'component': 'Chart',
+        'kind': 'bars',
+        'data': {'@path': '/runs'},
+        'label': 'Runs by day',
+      },
+    ],
+    {
+      'runs': _table(
+        ['day', 'runs'],
+        [
+          for (final (k, day) in days.indexed) [day, k + 1],
+        ],
+      ),
+    },
+  );
+
+  testWidgets("bars over days date their axis as a line chart's does, "
+      '"10/27"; the readout keeps its words (Zucchero row 378)', (
+    tester,
+  ) async {
+    await showBars(tester, ['2026-10-27', '2026-10-28', '2026-10-29']);
+    expect(find.text('10/27'), findsOneWidget);
+    expect(find.text('27 Oct'), findsNothing);
+    final chart = tester.getRect(find.byType(BarChart));
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    addTearDown(mouse.removePointer);
+    await mouse.moveTo(
+      Offset(chart.left + 40 + (chart.width - 40) / 6, chart.bottom - 40),
+    );
+    await tester.pump();
+    expect(find.text('27 Oct · 1'), findsOneWidget);
+  });
+
+  testWidgets('bars over hours within a day show the hour', (tester) async {
+    await showBars(tester, ['2026-10-27 13:00:00', '2026-10-27 14:00:00']);
+    expect(find.text('13:00'), findsOneWidget);
+    expect(find.text('14:00'), findsOneWidget);
+  });
+
   testWidgets('bounded however much an app sends, saying what is left out', (
     tester,
   ) async {
@@ -390,6 +436,119 @@ void main() {
     expect(find.text('and 50 more'), findsOneWidget);
     expect(find.text('item 199'), findsOneWidget);
     expect(find.text('item 200'), findsNothing);
+  });
+
+  testWidgets('a table wider than its place cuts its long text with "…", '
+      'numbers whole; the whole text still read out (Zucchero row 378)', (
+    tester,
+  ) async {
+    const long =
+        'A page title long enough to run well past the width of a phone';
+    final semantics = tester.ensureSemantics();
+    await _show(
+      tester,
+      [
+        _root(['pages']),
+        {
+          'id': 'pages',
+          'component': 'Table',
+          'data': {'@path': '/pages'},
+          'columns': [
+            {'name': 'page', 'title': 'Page', 'format': 'text'},
+            {'name': 'views', 'title': 'Views', 'format': 'number'},
+          ],
+        },
+      ],
+      {
+        'pages': _table(
+          ['page', 'views'],
+          [
+            [long, 1234567],
+            ['Home', 12],
+          ],
+        ),
+      },
+      size: const Size(480, 844),
+    );
+    expect(tester.takeException(), isNull);
+    RenderParagraph paragraph(String text) => tester.renderObject(
+      find.descendant(of: find.text(text), matching: find.byType(RichText)),
+    );
+    expect(paragraph(long).didExceedMaxLines, isTrue);
+    expect(paragraph('Home').didExceedMaxLines, isFalse);
+    expect(paragraph('1,234,567').didExceedMaxLines, isFalse);
+    // The table fits: its numbers end inside the screen, nothing to scroll.
+    expect(
+      tester.getRect(find.text('1,234,567')).right,
+      lessThanOrEqualTo(480),
+    );
+    final scroll = tester.state<ScrollableState>(
+      find.descendant(
+        of: find.byType(AppTableView),
+        matching: find.byType(Scrollable),
+      ),
+    );
+    expect(scroll.position.maxScrollExtent, 0);
+    expect(find.bySemanticsLabel(long), findsOneWidget);
+    semantics.dispose();
+  });
+
+  testWidgets("at the largest text a long cell's column is never wider than "
+      'the table\'s place, so its "…" shows (Scolippi 31339)', (tester) async {
+    tester.platformDispatcher.textScaleFactorTestValue = 3.1;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    const long = 'Compare the phone bar against Grafana at the largest size';
+    await _show(
+      tester,
+      [
+        _root(['pages']),
+        {
+          'id': 'pages',
+          'component': 'Table',
+          'data': {'@path': '/pages'},
+          'columns': [
+            {'name': 'page', 'title': 'Page', 'format': 'text'},
+            {'name': 'views', 'title': 'Views', 'format': 'number'},
+          ],
+        },
+      ],
+      {
+        'pages': _table(
+          ['page', 'views'],
+          [
+            [long, 12],
+          ],
+        ),
+      },
+      size: const Size(320, 844),
+    );
+    expect(tester.takeException(), isNull);
+    final cell = tester.getRect(find.text(long));
+    final place = tester.getRect(find.byType(AppTableView));
+    expect(cell.right, lessThanOrEqualTo(place.right + 0.5));
+  });
+
+  testWidgets('a narrow table keeps its cells whole', (tester) async {
+    await _show(
+      tester,
+      [
+        _root(['pages']),
+        {
+          'id': 'pages',
+          'component': 'Table',
+          'data': {'@path': '/pages'},
+        },
+      ],
+      {
+        'pages': _table(
+          ['page', 'views'],
+          [
+            ['Home', 12],
+          ],
+        ),
+      },
+    );
+    expect(tester.widget<Text>(find.text('Home')).maxLines, isNull);
   });
 
   testWidgets("data that isn't a table, or no rows, says so", (tester) async {
@@ -631,7 +790,7 @@ void main() {
     expect(bars.data.barGroups, hasLength(3));
     // The last bucket holds only Kai's 4: it comes last, not before his 3.
     expect(bars.data.barGroups.last.barRods.single.toY, 4);
-    expect(find.text('20 Nov 12:00'), findsOneWidget);
+    expect(find.text('12:00'), findsOneWidget);
     expect(find.textContaining('1,7'), findsNothing, reason: 'no raw ms');
   });
 
@@ -2129,7 +2288,9 @@ void main() {
       {'id': 'note', 'component': 'Text', 'text': 'A line of the page'},
     ];
 
-    for (final (width, scale) in [(402.0, 1.0), (320.0, 1.0), (320.0, 2.0)]) {
+    // The test's font is wide: 560 is about an SE's 320 in the app's (the
+    // SE itself, in Geist, is in app_charts_golden_test).
+    for (final (width, scale) in [(700.0, 1.0), (560.0, 1.0), (900.0, 2.0)]) {
       testWidgets('one line at $width wide, text ×$scale: the name gives way, '
           '••• stays at the end', (tester) async {
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -2142,15 +2303,7 @@ void main() {
           null,
           size: Size(width, 844),
         );
-        final ex = tester.takeException();
-        if (ex is FlutterError) {
-          for (final d in ex.diagnostics) {
-            // ignore: avoid_print
-            print(
-              'DBG ${d.toStringDeep(minLevel: DiagnosticLevel.info).split('\n').take(40).join('\n')}',
-            );
-          }
-        }
+        expect(tester.takeException(), isNull);
         final page = tester.getRect(find.text('A line of the page'));
         final inset = page.left;
         Rect of(String id) => tester.getRect(
@@ -2209,12 +2362,12 @@ void main() {
 
     testWidgets('only the name gives way while the others fit: their words '
         'stay whole (Scolippi 27597)', (tester) async {
-      // The test's font is wide: 480 is about an SE's 320 in the app's.
+      // The test's font is wide: 520 is about an SE's 320 in the app's.
       await _show(
         tester,
         bar('A dashboard with a long name'),
         null,
-        size: const Size(480, 844),
+        size: const Size(520, 844),
       );
       expect(tester.takeException(), isNull);
       bool cut(String words) => tester
@@ -2229,6 +2382,39 @@ void main() {
       expect(cut('30 days'), isFalse);
       expect(cut('Filters (2)'), isFalse);
     });
+
+    for (final scale in [2.0, 3.1]) {
+      testWidgets('at text ×$scale on an SE the name keeps its first letters: '
+          'it gives way to the floor the others have, then all evenly '
+          '(Zucchero row 381)', (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        tester.platformDispatcher.textScaleFactorTestValue = scale;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        await _show(
+          tester,
+          bar('Zucchero dashboard'),
+          null,
+          size: const Size(320, 844),
+        );
+        expect(tester.takeException(), isNull);
+        Rect of(String id) => tester.getRect(
+          find
+              .ancestor(of: find.text(id), matching: find.byType(Pressable))
+              .first,
+        );
+        final name = of('Zucchero dashboard').width;
+        final range = of('30 days').width;
+        final filters = of('Filters (2)').width;
+        // Never its chevron alone: as much as the least of the others.
+        expect(name, greaterThan(24));
+        expect(
+          name,
+          greaterThanOrEqualTo(math.min(range, filters) - 0.5),
+          reason: 'name $name, range $range, filters $filters',
+        );
+      });
+    }
 
     testWidgets('a short name keeps its words, the rest of the line '
         'empty before the others', (tester) async {
@@ -2650,6 +2836,251 @@ void main() {
       );
       expect(chartValue(37.8234, ''), '37.8');
       expect(chartValue(12345.6, 'tokens'), '12,346 tokens');
+    });
+  });
+
+  group('a world map', () {
+    Map<String, Object?> map(Map<String, Object?> props) => {
+      'id': 'm',
+      'component': 'Map',
+      'data': {'@path': '/data'},
+      ...props,
+    };
+
+    String? said(WidgetTester tester) =>
+        tester.getSemantics(find.byType(AppMap)).getSemanticsData().value;
+
+    test('a country by its code or its English name, as GeoIP spells it', () {
+      expect(countryName('gbr'), 'United Kingdom');
+      expect(countryName(' tr '), 'Turkey');
+      expect(countryName('Türkiye'), 'Turkey');
+      expect(countryName('TURKIYE'), 'Turkey');
+      expect(countryName('Netherlands'), 'Netherlands');
+      expect(countryName('DR Congo'), 'Democratic Republic of the Congo');
+      expect(countryName('Congo Republic'), 'Congo');
+      expect(countryName('Ivory Coast'), "Côte d'Ivoire");
+      expect(countryName('Côte d’Ivoire'), "Côte d'Ivoire");
+      expect(countryName('cote  d\'ivoire'), "Côte d'Ivoire");
+      expect(countryName('Hashemite Kingdom of Jordan'), 'Jordan');
+      expect(countryName('United States of America'), 'United States');
+      expect(countryName('UK'), 'United Kingdom');
+      expect(countryName('Bosnia and Herzegovina'), 'Bosnia and Herzegovina');
+      expect(countryName('Réunion'), 'Réunion');
+      expect(countryName('Unknown'), isNull);
+      expect(countryName('Other'), isNull);
+      expect(countryName('XX'), isNull);
+    });
+
+    testWidgets('places countries by code or name in any case, '
+        'sums rows of one country, and lists in words what it cannot '
+        'place', (tester) async {
+      final semantics = tester.ensureSemantics();
+      await _show(
+        tester,
+        [
+          _root(['m']),
+          map({'label': 'Users', 'unit': 'users'}),
+        ],
+        {
+          'data': _table(
+            ['country', 'users'],
+            [
+              ['US', 38],
+              ['usa', 2],
+              ['United States', 2],
+              ['de', 12],
+              ['FRA', 7],
+              ['Hidden (fewer than 5)', 9],
+              ['Unknown\u202E', 3],
+              ['IT', null],
+              ['', 1],
+            ],
+          ),
+        },
+        size: const Size(393, 852),
+      );
+      expect(
+        said(tester),
+        'United States 42 users, Germany 12 users, France 7 users. Not on '
+        'the map: Hidden (fewer than 5) 9 users, Unknown\\u{202E} 3 users, '
+        'Italy: no value, No country 1 users',
+      );
+      expect(
+        find.text(
+          'Not on the map: Hidden (fewer than 5) 9 users · '
+          'Unknown\\u{202E} 3 users · Italy: no value · No country 1 users',
+        ),
+        findsOneWidget,
+      );
+      // The legend: the least value to the most.
+      expect(find.text('7 users'), findsOneWidget);
+      expect(find.text('42 users'), findsOneWidget);
+      semantics.dispose();
+    });
+
+    testWidgets('a tap on a dot shows its country and value, and a tap on '
+        'it again closes it', (tester) async {
+      await _show(
+        tester,
+        [
+          _root(['m']),
+          // Taller than the world at a phone's width: no bands of sea.
+          map({'value': 'n', 'height': 372}),
+        ],
+        {
+          'data': _table(
+            ['where', 'n'],
+            [
+              ['BR', 5],
+              ['JP', 3],
+            ],
+          ),
+        },
+        size: const Size(393, 852),
+      );
+      final box = tester.getRect(
+        find.descendant(
+          of: find.byType(AppMap),
+          matching: find.byType(ClipRect),
+        ),
+      );
+      double mercator(double lat) =>
+          math.log(math.tan(math.pi / 4 + lat * math.pi / 360));
+      expect(
+        box.height,
+        moreOrLessEquals(
+          box.width * (mercator(76) - mercator(-56)) / (2 * math.pi),
+          epsilon: 0.5,
+        ),
+      );
+      // Brazil's dot, where the map puts it.
+      final brazil = Offset(
+        box.left + (-49.6 + 180) / 360 * box.width,
+        box.top +
+            (mercator(76) - mercator(-12.1)) /
+                (mercator(76) - mercator(-56)) *
+                box.height,
+      );
+      await tester.tapAt(brazil);
+      await tester.pump();
+      expect(find.text('Brazil'), findsOneWidget);
+      await tester.tapAt(brazil);
+      await tester.pump();
+      expect(find.text('Brazil'), findsNothing);
+      // Far from any dot: nothing.
+      await tester.tapAt(box.topLeft + const Offset(4, 4));
+      await tester.pump();
+      expect(find.text('Japan'), findsNothing);
+    });
+
+    testWidgets("thresholds color the dots and say their ranges; a map "
+        "without a table says it can't show", (tester) async {
+      await _show(
+        tester,
+        [
+          _root(['m', 'bad']),
+          map({
+            'thresholds': [
+              {'color': 'green'},
+              {'color': 'red', 'value': 10},
+            ],
+          }),
+          {'id': 'bad', 'component': 'Map', 'data': 'not a table'},
+        ],
+        {
+          'data': _table(
+            ['country', 'n'],
+            [
+              ['IN', 4],
+              ['CN', 20],
+            ],
+          ),
+        },
+        size: const Size(393, 852),
+      );
+      expect(find.text('< 10'), findsOneWidget);
+      expect(find.text('10+'), findsOneWidget);
+      expect(find.text("Can't show this map."), findsOneWidget);
+    });
+  });
+
+  group('a heatmap', () {
+    testWidgets('rows and columns in the order the data has them, cells '
+        'summed, an empty cell left empty, and a tap says a cell', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await _show(
+        tester,
+        [
+          _root(['h']),
+          {
+            'id': 'h',
+            'component': 'Chart',
+            'kind': 'heatmap',
+            'label': 'Sessions',
+            'data': {'@path': '/data'},
+            'x': 'hour',
+            'seriesBy': 'day',
+            'y': ['n'],
+          },
+        ],
+        {
+          'data': _table(
+            ['day', 'hour', 'n'],
+            [
+              ['Tue', '09', 3],
+              ['Mon', '09', 1],
+              ['Mon', '10', 2],
+              ['Mon', '10', 5],
+              ['Tue', '10', null],
+              // A row nothing is known for keeps its place, empty.
+              ['Wed', '09', null],
+              ['Wed', '10', null],
+            ],
+          ),
+        },
+        size: const Size(393, 852),
+      );
+      expect(
+        tester.getSemantics(find.byType(AppHeatmap)).getSemanticsData().value,
+        '3 by 2, from 1 to 7; the most, 7, at Mon · 10',
+      );
+      // Tue comes first, as the data has it: its row is on top.
+      final tue = tester.getRect(find.text('Tue'));
+      final mon = tester.getRect(find.text('Mon'));
+      expect(tue.top, lessThan(mon.top));
+      expect(tester.getRect(find.text('Wed')).top, greaterThan(mon.top));
+      final ten = tester.getRect(find.text('10').first);
+      await tester.tapAt(Offset(ten.center.dx, mon.center.dy));
+      await tester.pump();
+      expect(find.text('Mon · 10'), findsOneWidget);
+      semantics.dispose();
+    });
+
+    testWidgets('nothing to show without values', (tester) async {
+      await _show(
+        tester,
+        [
+          _root(['h']),
+          {
+            'id': 'h',
+            'component': 'Chart',
+            'kind': 'heatmap',
+            'data': {'@path': '/data'},
+            'y': ['n'],
+          },
+        ],
+        {
+          'data': _table(
+            ['day', 'hour', 'n'],
+            [
+              ['Mon', '09', null],
+            ],
+          ),
+        },
+      );
+      expect(find.text('Nothing to show.'), findsOneWidget);
     });
   });
 }

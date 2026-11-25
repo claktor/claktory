@@ -32,6 +32,12 @@ globset = "0.4"
 hkdf = "0.13"
 hmac = "0.13"
 htmd = "0.6"
+# Websites shared over pipes, as the receiving side opens them
+# (`pipes/share_listener.rs`): an HTTP/1.1 server on 127.0.0.1 and a client
+# over the pipe's stream; already linked through reqwest.
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 ignore = "0.4.34"
 # The private tunnel (remote.rs): pinned, the same as the app's (app/rust); ring, as the
 # process default, and no portmapper, so Factory never asks the router to open a port.

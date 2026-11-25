@@ -203,7 +203,7 @@ pub(crate) fn set(factory: &Arc<Factory>, pipe: &str, ids: Vec<String>) {
         return;
     };
     let Some(record) = factory.pipes.get(pipe) else { return };
-    let name = |id: &str| factory.lock().config.agent(id).map_or_else(|| id.to_owned(), |agent| agent.name.clone());
+    let name = |id: &str| factory.agent_name(id);
     for id in after.iter().filter(|id| !before.contains(id)) {
         tell(factory, id, &record, true);
     }

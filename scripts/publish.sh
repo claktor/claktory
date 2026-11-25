@@ -205,9 +205,9 @@ APPS_DIR=()
 # The video preview helper (#379), in Mac releases that have it.
 VIDEO_PREVIEW=()
 [[ -f "$RELEASE/claktory-video-preview" ]] && VIDEO_PREVIEW=(claktory-video-preview)
-# Agents' tools (tools/rg and its licenses), in releases that have them.
+# Agents' tools (tools/rg, tools/jq and their licenses), in releases that have them.
 TOOLS_DIR=()
-[[ -f "$RELEASE/tools/rg" ]] && TOOLS_DIR=(tools)
+[[ -d "$RELEASE/tools" ]] && TOOLS_DIR=(tools)
 COPYFILE_DISABLE=1 tar --no-xattrs --uid 0 --gid 0 --uname "" --gname "" -czf "$STAGE/$NAME" \
   -C "$RELEASE" "$APP_NAME" factoryd claktory-apps claktory-speech ${VIDEO_PREVIEW[@]+"${VIDEO_PREVIEW[@]}"} backend-version CHANGELOG.md ${SUPERVISOR_DIR[@]+"${SUPERVISOR_DIR[@]}"} ${APPS_DIR[@]+"${APPS_DIR[@]}"} ${TOOLS_DIR[@]+"${TOOLS_DIR[@]}"} \
   -C "$SRC" LICENSE.md \
@@ -241,9 +241,11 @@ for arch in ${LINUX[@]+"${LINUX[@]}"}; do
   check_no_qa_provider "$build/factoryd" || exit 1
   cp "$RELEASE/backend-version" "$RELEASE/CHANGELOG.md" "$build/"
   [[ ! -d "$RELEASE/apps" ]] || cp -R "$RELEASE/apps" "$build/apps"
-  # ripgrep, from the release's own pin (its source's build-rg.sh), when the Mac release has it.
+  # ripgrep and jq, from the release's own pins (its source's build-rg.sh
+  # and build-jq.sh), each when the Mac release has it.
   if [[ ${#TOOLS_DIR[@]} -gt 0 ]]; then
-    "$SRC/scripts/build-rg.sh" linux "$arch" "$build/tools/rg"
+    [[ ! -f "$RELEASE/tools/rg" ]] || "$SRC/scripts/build-rg.sh" linux "$arch" "$build/tools/rg"
+    [[ ! -f "$RELEASE/tools/jq" ]] || "$SRC/scripts/build-jq.sh" linux "$arch" "$build/tools/jq"
     cp -R "$RELEASE/tools/LICENSES" "$build/tools/LICENSES"
   fi
   linux_name="factory-$VERSION-linux-$arch.tar.gz"

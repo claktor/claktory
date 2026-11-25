@@ -76,7 +76,7 @@ const UPDATE_ABOUT: &str = "Change one of your proposals to Rivet still waiting 
 
 const WITHDRAW_ABOUT: &str = "Take back one of your proposals to Rivet still waiting for the person, as soon as it no longer applies: the need went away, or it was settled elsewhere. id: the proposal's id, which propose_to_rivet's result gave; reason: why, in a short line they read in Needs you's History (at most 300 characters). Without id, lists your proposals waiting, with their ids. It leaves their Needs you at once; a checklist item it was for stays as it is, so update the item yourself. You can take back only your own proposals.";
 
-const ABOUT: &str = "Propose a message for Rivet, the admin agent, which only the person can message: for a conclusion Rivet should act on, such as adding an agent. The person approves it, with a comment, or dismisses it, and you're told which; approved, Rivet gets it from the person. Write it to stand alone, with all the context Rivet needs: Rivet can't see your conversation. item: the checklist item it's for (12 for #12, or Ana#12), whenever one waits on it: the proposal shows as that item in the person's Needs you, so don't also ask them about it.";
+const ABOUT: &str = "Propose a message for Rivet, the admin agent, which only the person can message: for a conclusion Rivet should act on, such as adding an agent. The person approves it, with a comment, or dismisses it, and you're told which; approved, Rivet gets it from the person. Write it to stand alone, with all the context Rivet needs: Rivet can't see your conversation. item: the checklist item it's for (12 for #12, or Ana#12), whenever one waits on it: the proposal shows as that item in the person's Needs you, so don't also ask them about it. grants: when it asks Rivet to give something it gives only on the person's card (an app's access, a pipe widened, an app uninstalled keeping its data, Continue automatically), name each exactly, as that tool's arguments: {tool: \"apps_set_access\", args: {app, sources, agents}}, or pipes_settings, apps_uninstall (keep_data true) or models_auto_continue with theirs, reason left out. The card shows them in Claktory's words, and approving it lets Rivet make each once, within a day, without asking again; name only what the work needs.";
 
 /// Rivet: the admin agent proposals go to. The one with Rivet's id if it's
 /// an admin agent, else the first admin agent in the settings.
@@ -95,13 +95,30 @@ struct ProposeArgs {
     /// The checklist item it's for (12, or Ana#12).
     #[serde(default)]
     item: Option<String>,
+    /// What it asks Rivet to give, exactly (`crate::proposal_grants`).
+    #[serde(default)]
+    grants: Vec<crate::proposal_grants::Asked>,
+}
+
+/// The grants parameter, in propose_to_rivet and proposal_update.
+fn grants_parameter() -> serde_json::Value {
+    json!({
+        "type": "array",
+        "maxItems": 8,
+        "items": {
+            "type": "object",
+            "required": ["tool", "args"],
+            "properties": {"tool": {"type": "string", "enum": crate::proposal_grants::TOOLS}, "args": {"type": "object"}},
+            "additionalProperties": false,
+        },
+    })
 }
 
 pub(crate) fn tool(factory: &Arc<Factory>, agent: &str) -> Tool {
     let parameters = json!({
         "type": "object",
         "required": ["message"],
-        "properties": {"message": {"type": "string", "minLength": 1}, "item": {"type": "string"}},
+        "properties": {"message": {"type": "string", "minLength": 1}, "item": {"type": "string"}, "grants": grants_parameter()},
         "additionalProperties": false,
     });
     crate::extensions::tool(
@@ -110,7 +127,7 @@ pub(crate) fn tool(factory: &Arc<Factory>, agent: &str) -> Tool {
         ABOUT,
         parameters,
         crate::extensions::typed_handler(factory, agent, |factory, agent, args: ProposeArgs| {
-            propose(factory, agent, args.message, args.item.as_deref())
+            propose(factory, agent, args.message, args.item.as_deref(), &args.grants)
         }),
     )
 }
@@ -119,10 +136,16 @@ pub(crate) fn update_tool(factory: &Arc<Factory>, agent: &str) -> Tool {
     let parameters = json!({
         "type": "object",
         "required": ["id", "message"],
-        "properties": {"id": {"type": "string"}, "message": {"type": "string", "minLength": 1}, "reason": {"type": "string"}},
+        "properties": {"id": {"type": "string"}, "message": {"type": "string", "minLength": 1}, "reason": {"type": "string"}, "grants": grants_parameter()},
         "additionalProperties": false,
     });
-    crate::extensions::tool(UPDATE_TOOL, "Change a proposal", UPDATE_ABOUT, parameters, crate::extensions::typed_handler(factory, agent, update))
+    crate::extensions::tool(
+        UPDATE_TOOL,
+        "Change a proposal",
+        UPDATE_ABOUT,
+        parameters,
+        crate::extensions::typed_handler(factory, agent, update),
+    )
 }
 
 pub(crate) fn withdraw_tool(factory: &Arc<Factory>, agent: &str) -> Tool {
@@ -142,12 +165,18 @@ pub(crate) fn withdraw_tool(factory: &Arc<Factory>, agent: &str) -> Tool {
 
 /// Records the agent's proposal, or says why not. The result names it, so
 /// its conversation shows it after the call.
-fn propose(factory: &Factory, agent: &str, text: String, item: Option<&str>) -> Result<ToolResult, String> {
+fn propose(
+    factory: &Arc<Factory>,
+    agent: &str,
+    text: String,
+    item: Option<&str>,
+    grants: &[crate::proposal_grants::Asked],
+) -> Result<ToolResult, String> {
     let text = text.trim().to_owned();
     if text.is_empty() {
         return Err("The message is empty; nothing was proposed.".to_owned());
     }
-    let person = {
+    let (person, rivet_id) = {
         let inner = factory.lock();
         // A chat proposes as any agent does; it's never an admin.
         if !crate::chats::kept(factory, agent) {
@@ -162,15 +191,17 @@ fn propose(factory: &Factory, agent: &str, text: String, item: Option<&str>) -> 
         if !inner.models.iter().any(|model| model.id == rivet.model) {
             return Err(format!("{} has no model available, so it can't act on a proposal; nothing was proposed.", rivet.name));
         }
-        inner.config.person().to_owned()
+        (inner.config.person().to_owned(), rivet.id.clone())
     };
+    // What it asks Rivet to give, resolved now, as the tools would.
+    let resolved =
+        crate::proposal_grants::resolve_all(factory, agent, &rivet_id, grants).map_err(|why| format!("{why} Nothing was proposed."))?;
     // The checklist item it's for: it shows as that item in Needs you. A
     // chat has no checklist.
     let (item, linked) = if crate::chats::kept(factory, agent) {
         (String::new(), None)
     } else {
-        crate::extensions::checklist::item_for(factory, agent, item)
-            .map_err(|problem| format!("item: {problem}. Nothing was proposed."))?
+        crate::extensions::checklist::item_for(factory, agent, item).map_err(|problem| format!("item: {problem}. Nothing was proposed."))?
     };
     // Read a pipe: the card says so, and where from.
     let routes = crate::pipes::agents::routes(factory, agent);
@@ -182,7 +213,9 @@ fn propose(factory: &Factory, agent: &str, text: String, item: Option<&str>) -> 
             params![agent, text, now_ms(), taint.as_ref().map(serde_json::Value::to_string)],
         )
         .map_err(|error| format!("Couldn't record the proposal: {error}"))?;
-        db.last_insert_rowid()
+        let id = db.last_insert_rowid();
+        crate::proposal_grants::keep(&db, id, grants, &resolved).map_err(|error| format!("Couldn't record the proposal: {error}"))?;
+        id
     };
     if !item.is_empty() {
         crate::extensions::checklist::link(&factory.store, &crate::extensions::checklist::Card::Proposal(id), agent, &item);
@@ -194,13 +227,18 @@ fn propose(factory: &Factory, agent: &str, text: String, item: Option<&str>) -> 
     let take_back = if crate::chats::kept(factory, agent) {
         String::new()
     } else {
-        format!(" Its id is {id}: if it stops applying before they decide on the card (they settle it in your chat, say), take it back with proposal_withdraw, or change it with proposal_update if what you propose changes.")
+        format!(
+            " Its id is {id}: if it stops applying before they decide on the card (they settle it in your chat, say), take it back with proposal_withdraw, or change it with proposal_update if what you propose changes."
+        )
     };
     let said =
         format!("Proposed; {person} will approve or dismiss it.{take_back}{}", crate::extensions::checklist::taken_for(linked, &person));
     let mut details = json!({"proposal": id, "text": text});
     if let Some(taint) = taint {
         details["taint"] = taint;
+    }
+    if !resolved.is_empty() {
+        details["grants"] = crate::proposal_grants::details(&resolved);
     }
     Ok(ToolResult::text(said, details))
 }
@@ -215,7 +253,8 @@ pub(crate) fn proposed(tool: &str, is_error: bool, details: &serde_json::Value) 
     let id = details.get("proposal")?.as_str()?.to_owned();
     let text = details.get("text").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
     let taint = details.get("taint").map(crate::pipes::agents::routes_from_json).unwrap_or_default();
-    Some(v1::Proposal { id, text, state: ProposalState::Pending.into(), taint, revision: 1, ..Default::default() })
+    let grants = details.get("grants").map(crate::proposal_grants::from_details).unwrap_or_default();
+    Some(v1::Proposal { id, text, state: ProposalState::Pending.into(), taint, revision: 1, grants, ..Default::default() })
 }
 
 /// A proposal as recorded.
@@ -243,19 +282,24 @@ struct Row {
 const COLUMNS: &str = "id, text, state, comment, decided, taint, replied, reason, created, revision, updated, update_reason";
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
+    row_at(row, 0)
+}
+
+/// A proposal's COLUMNS, from column `at` on.
+fn row_at(row: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Row> {
     Ok(Row {
-        id: row.get(0)?,
-        text: row.get(1)?,
-        state: row.get(2)?,
-        comment: row.get(3)?,
-        decided: row.get(4)?,
-        taint: row.get(5)?,
-        replied: row.get(6)?,
-        reason: row.get(7)?,
-        created: row.get(8)?,
-        revision: row.get(9)?,
-        updated: row.get(10)?,
-        update_reason: row.get(11)?,
+        id: row.get(at)?,
+        text: row.get(at + 1)?,
+        state: row.get(at + 2)?,
+        comment: row.get(at + 3)?,
+        decided: row.get(at + 4)?,
+        taint: row.get(at + 5)?,
+        replied: row.get(at + 6)?,
+        reason: row.get(at + 7)?,
+        created: row.get(at + 8)?,
+        revision: row.get(at + 9)?,
+        updated: row.get(at + 10)?,
+        update_reason: row.get(at + 11)?,
     })
 }
 
@@ -284,7 +328,37 @@ impl Row {
             revision: u32::try_from(self.revision).unwrap_or(1),
             updated_ms: self.updated.unwrap_or_default(),
             update_reason: self.update_reason.clone(),
+            grants: Vec::new(),
         }
+    }
+
+    /// The proposal as its card shows it, with its grants.
+    fn shown(&self, db: &rusqlite::Connection) -> v1::Proposal {
+        v1::Proposal { grants: crate::proposal_grants::shown(db, self.id), ..self.to_proto() }
+    }
+}
+
+/// The proposal's card redraws as it is now (one of its grants was used).
+pub(crate) fn refresh(factory: &Factory, id: i64) {
+    let found = {
+        let db = factory.store.db();
+        db.query_row(&format!("SELECT agent, {COLUMNS} FROM proposals WHERE id = ?1"), [id], |found| {
+            let agent: String = found.get(0)?;
+            let proposal = self::row_at(found, 1)?;
+            Ok((agent, proposal))
+        })
+        .ok()
+        .map(|(agent, proposal)| (agent, proposal.shown(&db)))
+    };
+    let Some((agent, proposal)) = found else { return };
+    let mut inner = factory.lock();
+    let entry = inner
+        .agents
+        .get_mut(&agent)
+        .and_then(|runtime| runtime.transcript.as_mut())
+        .and_then(|transcript| transcript.set_proposal(proposal));
+    if let Some(entry) = entry {
+        factory.send_change(&inner, &agent, crate::transcript::Change::Entry(entry));
     }
 }
 
@@ -292,10 +366,11 @@ impl Row {
 /// conversation, and those it changed as they are now.
 pub(crate) fn restore(store: &Store, agent: &str, transcript: &mut Transcript) -> rusqlite::Result<()> {
     let db = store.db();
-    let mut statement = db.prepare(&format!("SELECT {COLUMNS} FROM proposals WHERE agent = ?1 AND (state != 'pending' OR revision > 1) ORDER BY id"))?;
-    let rows = statement.query_map([agent], row)?;
+    let mut statement =
+        db.prepare(&format!("SELECT {COLUMNS} FROM proposals WHERE agent = ?1 AND (state != 'pending' OR revision > 1) ORDER BY id"))?;
+    let rows: Vec<Row> = statement.query_map([agent], row)?.collect::<rusqlite::Result<_>>()?;
     for row in rows {
-        transcript.set_proposal(row?.to_proto());
+        transcript.set_proposal(row.shown(&db));
     }
     Ok(())
 }
@@ -349,6 +424,9 @@ pub(crate) fn decide(
         return Err(RequestError::Proposal(format!("This proposal was already {}.", row.state)));
     }
     crate::extensions::ask::seen(revision, row.revision, row.updated).map_err(RequestError::Proposal)?;
+    // What it asks Rivet to give, in Claktory's words: approved (not
+    // answered), Rivet reads them apart from the agent's words.
+    let grants = if approve && !reply { crate::proposal_grants::shown(&factory.store.db(), number) } else { Vec::new() };
     // Who it's for, and what Rivet reads.
     let (rivet_name, person, delivery) = {
         let inner = factory.lock();
@@ -375,7 +453,18 @@ pub(crate) fn decide(
                     None => crate::chats::signed(factory, agent),
                 };
                 let mut message = String::new();
-                if reply {
+                if !grants.is_empty() {
+                    let proposer = from.map_or_else(|| signed.clone(), |from| from.name.clone());
+                    message = crate::proposal_grants::message(
+                        config.person_capitalized(),
+                        &signed,
+                        &proposer,
+                        &row.id.to_string(),
+                        comment,
+                        &row.text,
+                        &grants,
+                    );
+                } else if reply {
                     // Their comment is what to do; the proposal only says
                     // what it was about.
                     let (person, named) = (config.person(), config.person_capitalized());
@@ -387,7 +476,9 @@ pub(crate) fn decide(
                     message.push_str(comment);
                     message.push_str("\n\n");
                 }
-                let _ = write!(message, "{signed} proposes:\n\n{}", row.text);
+                if grants.is_empty() {
+                    let _ = write!(message, "{signed} proposes:\n\n{}", row.text);
+                }
                 Some((rivet.id.clone(), message))
             }
         };
@@ -397,9 +488,11 @@ pub(crate) fn decide(
     let state = if approve { "approved" } else { "dismissed" };
     let decided = now_ms();
     // Kept only if nothing decided or changed it meanwhile.
+    // Only the admin agent it goes to may use its grants.
+    let sent_to = delivery.as_ref().map(|(rivet, _)| rivet.clone()).unwrap_or_default();
     let claimed = factory.store.db().execute(
-        "UPDATE proposals SET state = ?2, comment = ?3, decided = ?4, replied = ?5 WHERE id = ?1 AND state = 'pending' AND revision = ?6",
-        params![number, state, comment, decided, reply, row.revision],
+        "UPDATE proposals SET state = ?2, comment = ?3, decided = ?4, replied = ?5, rivet = ?7 WHERE id = ?1 AND state = 'pending' AND revision = ?6",
+        params![number, state, comment, decided, reply, row.revision, sent_to],
     )?;
     if claimed == 0 {
         let now = factory.store.db().query_row("SELECT state FROM proposals WHERE id = ?1", [number], |row| row.get::<_, String>(0));
@@ -412,13 +505,14 @@ pub(crate) fn decide(
     if let Some((rivet, message)) = &delivery
         && let Err(error) = factory.send_message(rivet, message, None, "", &[])
     {
-        factory
-            .store
-            .db()
-            .execute("UPDATE proposals SET state = 'pending', comment = '', decided = NULL, replied = 0 WHERE id = ?1", [number])?;
+        factory.store.db().execute(
+            "UPDATE proposals SET state = 'pending', comment = '', decided = NULL, replied = 0, rivet = '' WHERE id = ?1",
+            [number],
+        )?;
         return Err(error);
     }
     (row.state, row.comment, row.decided, row.replied) = (state.to_owned(), comment.to_owned(), Some(decided), reply);
+    let shown_grants = crate::proposal_grants::shown(&factory.store.db(), number);
     // Its entry shows the decision.
     {
         let mut inner = factory.lock();
@@ -426,7 +520,7 @@ pub(crate) fn decide(
             .agents
             .get_mut(agent)
             .and_then(|runtime| runtime.transcript.as_mut())
-            .and_then(|transcript| transcript.set_proposal(row.to_proto()));
+            .and_then(|transcript| transcript.set_proposal(v1::Proposal { grants: shown_grants, ..row.to_proto() }));
         if let Some(entry) = entry {
             factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
             // It no longer waits for the person (Agent.waiting_seqs).
@@ -534,12 +628,13 @@ fn withdraw(factory: &Arc<Factory>, agent: &str, args: crate::extensions::ask::W
     (proposal.state, proposal.decided, proposal.reason) = ("withdrawn".to_owned(), Some(decided), reason);
     // Its card shows it withdrawn, and it no longer waits for the person.
     {
+        let shown = proposal.shown(&factory.store.db());
         let mut inner = factory.lock();
         let entry = inner
             .agents
             .get_mut(agent)
             .and_then(|runtime| runtime.transcript.as_mut())
-            .and_then(|transcript| transcript.set_proposal(proposal.to_proto()));
+            .and_then(|transcript| transcript.set_proposal(shown));
         if let Some(entry) = entry {
             factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
         }
@@ -567,6 +662,9 @@ struct UpdateArgs {
     message: String,
     #[serde(default)]
     reason: Option<String>,
+    /// Its grants from now on; left out, those it has, resolved again.
+    #[serde(default)]
+    grants: Option<Vec<crate::proposal_grants::Asked>>,
 }
 
 /// proposal_update (#428): changes the text of one of the agent's own
@@ -608,9 +706,15 @@ fn update(factory: &Arc<Factory>, agent: &str, args: UpdateArgs) -> Result<ToolR
     if proposal.revision > MAX_UPDATES {
         return Err(too_many_updates("proposal", number));
     }
-    if text == proposal.text {
+    let kept = crate::proposal_grants::asked_of(&factory.store.db(), number);
+    if text == proposal.text && args.grants.as_ref().is_none_or(|grants| grants.is_empty() && kept.is_empty()) {
         return Err(format!("That's what proposal {number} already says. Nothing was changed."));
     }
+    // Its grants, resolved again as things are now.
+    let asked = args.grants.unwrap_or(kept);
+    let rivet_id = rivet(&factory.lock().config).map(|rivet| rivet.id.clone()).unwrap_or_default();
+    let resolved =
+        crate::proposal_grants::resolve_all(factory, agent, &rivet_id, &asked).map_err(|why| format!("{why} Nothing was changed."))?;
     // Read a pipe or a web page since it proposed: the card says so now.
     let routes = crate::pipes::agents::routes(factory, agent);
     if !routes.is_empty() {
@@ -630,15 +734,18 @@ fn update(factory: &Arc<Factory>, agent: &str, args: UpdateArgs) -> Result<ToolR
     if claimed == 0 {
         return Err(format!("{person} just decided proposal {number}, so it wasn't changed; you'll be told what they decided."));
     }
+    crate::proposal_grants::keep(&factory.store.db(), number, &asked, &resolved)
+        .map_err(|error| format!("Couldn't change its grants: {error}"))?;
     (proposal.text, proposal.revision, proposal.updated, proposal.update_reason) = (text, proposal.revision + 1, Some(now), reason);
     // Its card redraws in place; it still waits, at the same seq.
     {
+        let shown = proposal.shown(&factory.store.db());
         let mut inner = factory.lock();
         let entry = inner
             .agents
             .get_mut(agent)
             .and_then(|runtime| runtime.transcript.as_mut())
-            .and_then(|transcript| transcript.set_proposal(proposal.to_proto()));
+            .and_then(|transcript| transcript.set_proposal(shown));
         if let Some(entry) = entry {
             factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
         }

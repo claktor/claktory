@@ -189,7 +189,7 @@ fn check_person_blocked(factory: &Arc<Factory>) -> rusqlite::Result<()> {
              AND dismissed_at IS NULL AND blocked_since <= ?1 ORDER BY agent, id",
         )?;
         let since = now_ms() - ASK_WITHIN_MINUTES.saturating_mul(factory.nudge_minute());
-        let rows = statement.query_map([since], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
+        let rows = statement.query_map([since], crate::store::row4)?;
         rows.collect::<Result<_, _>>()?
     };
     if rows.is_empty() {

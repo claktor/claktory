@@ -277,28 +277,10 @@ impl Injected<'_> {
     /// (mode 0700, the files 0600), which the caller removes when the
     /// command ends.
     fn environment(&self, dir: &Path) -> std::io::Result<Vec<(String, Zeroizing<String>)>> {
-        use std::io::Write;
-        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-        let mut environment = Vec::with_capacity(self.variables.len());
-        let mut made = false;
-        for (index, variable) in self.variables.iter().enumerate() {
-            if !variable.file {
-                environment.push((variable.variable.clone(), variable.value.clone()));
-                continue;
-            }
-            if !made {
-                remove_secret_files(dir);
-                std::fs::DirBuilder::new().mode(0o700).create(dir)?;
-                made = true;
-            }
-            let safe = !variable.variable.is_empty() && variable.variable.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
-            let name = if safe { variable.variable.clone() } else { format!("secret-{index}") };
-            let path = dir.join(name);
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
-            file.write_all(&variable.bytes())?;
-            environment.push((variable.variable.clone(), Zeroizing::new(path.display().to_string())));
-        }
-        Ok(environment)
+        crate::secrets::command_environment(&self.variables, dir, || {
+            remove_secret_files(dir);
+            Ok(())
+        })
     }
 
     /// The filter a command's log goes through, and the values it hides:

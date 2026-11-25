@@ -36,7 +36,11 @@ fn when(ms: i64) -> String {
     if day(ms) == day(crate::transcript::now_ms()) { local_time(ms, "%H:%M") } else { local_time(ms, "%-d %b %H:%M") }
 }
 
-/// The note's text, and its line for people.
+/// The note's text, and its line for people: `change` is what the person
+/// (or `by`) did, `told` how the conversation the agent remembers changed
+/// (going back after a switch it hadn't heard of yet changes it to another
+/// version).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn write(
     factory: &Factory,
     id: &str,
@@ -45,13 +49,15 @@ pub(super) fn write(
     closed: usize,
     by: By<'_>,
     change: Change,
+    told: Change,
 ) -> (String, String) {
     let (person, who, subject, names) = {
         let inner = factory.lock();
         let config = &inner.config;
         let person = config.person().to_owned();
+        // It starts the note and its line: "The person" when they have no name.
         let who = match config.agent(by.agent) {
-            _ if by.agent.is_empty() => person.clone(),
+            _ if by.agent.is_empty() => config.person_capitalized().to_owned(),
             Some(agent) => agent.name.clone(),
             None => by.agent.to_owned(),
         };
@@ -64,21 +70,19 @@ pub(super) fn write(
     let (from, to) = (local_time(since, "%H:%M"), local_time(branch.set_aside_ms, "%H:%M"));
     let count = if branch.messages == 1 { "1 message".to_owned() } else { format!("{} messages", branch.messages) };
     let at = local_time(since, "%m-%d %H:%M");
-    let (mut text, summary) = match change {
-        Change::Back => (
-            format!(
-                "{who} took your conversation back to {at}. What came after ({from}–{to}, {count}) is kept as another version {person} can switch back to. You remember only what's above."
-            ),
-            // The line people see names whose conversation it was: the
-            // person reads it too, where "your" would be theirs (row 756).
-            format!("{who} took {} conversation back to {}", crate::apps::changes::possessive(&subject), when(since)),
+    let mut text = match told {
+        Change::Back => format!(
+            "{who} took your conversation back to {at}. What came after ({from}–{to}, {count}) is kept as another version {person} can switch back to. You remember only what's above."
         ),
-        Change::Switched => (
-            format!(
-                "{who} switched you to another version of your conversation, which parts from the one you were in at {at}. The part you were in ({from}–{to}, {count}) is kept as another version {person} can switch back to. You remember only what's above."
-            ),
-            format!("{who} switched {subject} to another version"),
+        Change::Switched => format!(
+            "{who} switched you to another version of your conversation, which parts from the one you were in at {at}. The part you were in ({from}–{to}, {count}) is kept as another version {person} can switch back to. You remember only what's above."
         ),
+    };
+    let summary = match change {
+        // The line people see names whose conversation it was: the person
+        // reads it too, where "your" would be theirs (row 756).
+        Change::Back => format!("{who} took {} conversation back to {}", crate::apps::changes::possessive(&subject), when(since)),
+        Change::Switched => format!("{who} switched {subject} to another version"),
     };
     let reason = by.reason.trim();
     if !by.agent.is_empty() && !reason.is_empty() {
@@ -128,7 +132,7 @@ fn lines(
     let agents = listed(sent.iter().map(|(to, count, first)| format!("{} ×{count} (“{first}”)", name(to))).collect());
     let piped: Vec<(String, i64)> = db
         .prepare("SELECT pipe, COUNT(*) FROM pipe_messages WHERE agent = ?1 AND author = 'my_agent' AND created >= ?2 GROUP BY pipe ORDER BY MIN(seq)")
-        .and_then(|mut statement| statement.query_map(rusqlite::params![id, since], |row| Ok((row.get(0)?, row.get(1)?)))?.collect())
+        .and_then(|mut statement| statement.query_map(rusqlite::params![id, since], crate::store::row2)?.collect())
         .unwrap_or_default();
     let pipes = listed(
         piped

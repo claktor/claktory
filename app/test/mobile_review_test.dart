@@ -436,6 +436,17 @@ void main() {
       find.text('Your comments on lines go to Builder with your answer.'),
       findsNothing,
     );
+    // The picture runs edge to edge; the bar keeps clear of the home
+    // indicator, and a pull down doesn't leave the question.
+    final bar = tester.getRect(find.byKey(const ValueKey('phone-review-bar')));
+    expect(bar.bottom, lessThanOrEqualTo(852 - 34));
+    await tester.timedDragFrom(
+      const Offset(196, 300),
+      const Offset(0, 320),
+      const Duration(milliseconds: 300),
+    );
+    await pumpFrames(tester);
+    expect(find.text('Builder asks you to review this'), findsOneWidget);
     await tester.tap(find.text('Approve'));
     await pumpFrames(tester);
     expect(harness.backend.sent.where((m) => m.hasAnswerAsk()), hasLength(1));

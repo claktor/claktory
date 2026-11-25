@@ -147,7 +147,13 @@ async fn get_json(what: &str, request: reqwest::RequestBuilder) -> Result<Value,
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(Error::Other(format!("{what}: HTTP {}: {}", status.as_u16(), error_message(status, &text))));
+        let message = format!("{what}: HTTP {}: {}", status.as_u16(), error_message(status, &text));
+        // The access token not taken (expired early, or ended): the caller
+        // refreshes it once and asks again.
+        if crate::accounts::refused_error(status.as_u16(), &text) {
+            return Err(Error::Models { code: crate::errors::UNAUTHORIZED, message });
+        }
+        return Err(Error::Other(message));
     }
     serde_json::from_str(&text).map_err(|error| Error::Other(format!("{what}: unreadable answer: {error}")))
 }

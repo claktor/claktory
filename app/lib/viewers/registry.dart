@@ -19,7 +19,7 @@ import 'loading_progress.dart';
 import 'pdf.dart';
 import 'preview_badge.dart';
 import 'previews.dart';
-import '../paced.dart' show FilePreviews;
+import '../paced.dart' show FilePreviews, lostWhileReading;
 import 'text.dart';
 import 'video.dart';
 import '../visible_codes.dart' show shownName;
@@ -77,9 +77,12 @@ final _viewers = <Viewer>[
         defaultTargetPlatform == TargetPlatform.macOS ||
             defaultTargetPlatform == TargetPlatform.iOS
         ? PdfViewer(key: ValueKey(leaf.path), path: leaf.path)
-        : ViewerProblem(
+        // In a pane all the same: on a phone its header, with Back, and
+        // Share… to save it or open it in another app (Sale, Bruno 30855).
+        : _problemPane(
+            context,
+            leaf.path,
             'To see this PDF, open it on a Mac, iPhone or iPad.',
-            path: leaf.path,
           ),
   ),
   Viewer(
@@ -103,12 +106,21 @@ Viewer? viewerFor(String kind) {
 /// [leaf]'s viewer, or a line saying this app can't show its kind yet.
 Widget viewerBody(BuildContext context, ViewLeaf leaf) =>
     viewerFor(leaf.kind)?.build(context, leaf) ??
+    _problemPane(
+      context,
+      leaf.path,
+      "Claktory can't show this kind of file here yet.",
+    );
+
+/// A pane for a file this app can't show: why, in a pane with its header
+/// (Back on a phone), and Share… so it can still go to an app that can
+/// (#418).
+Widget _problemPane(BuildContext context, String path, String text) =>
     PaneScaffold(
-      // Shown here or not, it can still go to an app that can (#418).
-      share: leaf.path,
-      body: ViewerProblem(
-        "Claktory can't show this kind of file here yet.",
-        path: leaf.path,
+      share: path,
+      body: ColoredBox(
+        color: Palette.of(context).canvas,
+        child: ViewerProblem(text, path: path),
       ),
     );
 
@@ -238,6 +250,12 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
     final connecting = now && !_wasConnected;
     _wasConnected = now;
     if (connecting && (failure != null || file == null)) unawaited(reload());
+    // The original, given up on with the connection: on from where it
+    // got, as Share carries on, rather than waiting for Try again (Bruno
+    // 29790).
+    if (connecting && originalLoad is OriginalFailed && _originalLost) {
+      unawaited(loadOriginal());
+    }
   }
 
   /// The file changed on the machine: read it again, and say who did it.
@@ -282,6 +300,23 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
 
   /// Where loading the original in place of the preview has got.
   OriginalLoad originalLoad = const OriginalNotLoaded();
+
+  /// Whether the original failed for want of the connection, so it's
+  /// asked for again once that's back.
+  bool _originalLost = false;
+
+  /// The original couldn't come ([error], when a request failed): the
+  /// preview stays, and the badge says so. Lost with the connection, it
+  /// carries on by itself once that's back.
+  @protected
+  void originalFailed(Object? error) {
+    wantOriginal = false;
+    _originalLost =
+        error is RequestFailure &&
+        (_lostWith.contains(error.message) ||
+            !(_backend?.connected.value ?? true));
+    if (mounted) setState(() => originalLoad = const OriginalFailed());
+  }
 
   Future<void> reload() async {
     try {
@@ -370,9 +405,8 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
         originalLoad = const OriginalNotLoaded();
       });
       loaded(read);
-    } on RequestFailure {
-      wantOriginal = false;
-      if (mounted) setState(() => originalLoad = const OriginalFailed());
+    } on RequestFailure catch (error) {
+      originalFailed(error);
     }
   }
 
@@ -483,3 +517,11 @@ class HeaderTextButton extends StatelessWidget {
     );
   }
 }
+
+/// What a read lost with its connection fails with: given up on after a
+/// drop, or asked for while not connected.
+const _lostWith = {
+  lostWhileReading,
+  'Connection lost.',
+  'Not connected to the backend.',
+};

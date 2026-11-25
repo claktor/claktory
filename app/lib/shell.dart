@@ -14,6 +14,7 @@ import 'chats.dart' show ChatView, selectedChat;
 import 'compatibility.dart';
 import 'connect_step.dart';
 import 'connection.dart' show Connection;
+import 'engine.dart' show WhenAppQuitsStep, asksWhenAppQuits;
 import 'devices.dart' show FactoryChooser, thisDeviceKind;
 import 'map.dart';
 import 'monitors_overview.dart' show MonitorsOverview;
@@ -162,6 +163,9 @@ class _ShellState extends State<Shell> {
           ? const SignInStep()
           : asksName(context)
           ? const NameStep()
+          // What quitting the Mac app does (friend bug #27).
+          : asksWhenAppQuits(context)
+          ? const WhenAppQuitsStep()
           : asksModel(context)
           ? const ModelStep()
           : null;

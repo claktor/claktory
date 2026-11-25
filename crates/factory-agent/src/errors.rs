@@ -186,6 +186,11 @@ impl Error {
 /// doesn't accept, or a sign-in whose token it won't refresh.
 pub const REFUSED: &str = "refused";
 
+/// `Error::Models`' code when the provider answered 401 to a sign-in's
+/// access token (expired early, or ended): a refresh may bring it back, so
+/// it's tried once before the sign-in counts as refused.
+pub const UNAUTHORIZED: &str = "unauthorized";
+
 /// `Error::Models`' code when the sign-ins are locked away with the
 /// person's secrets until they open (`credentials::locked_error`).
 pub const LOCKED: &str = "locked";
@@ -194,6 +199,11 @@ impl Error {
     /// Whether the provider refused the credentials (`REFUSED`).
     pub fn is_refused(&self) -> bool {
         matches!(self, Error::Models { code: REFUSED, .. })
+    }
+
+    /// Whether the provider didn't take the access token (`UNAUTHORIZED`).
+    pub fn is_unauthorized(&self) -> bool {
+        matches!(self, Error::Models { code: UNAUTHORIZED, .. })
     }
 
     /// Whether the sign-ins are locked away (`LOCKED`).

@@ -162,6 +162,24 @@ enum TunnelPath { none, direct, relayed }
 
 enum TunnelPhase { idle, dialing, connected, failed }
 
+/// What a direct path crosses.
+enum TunnelReach {
+  /// Not direct, or not connected.
+  none,
+
+  /// This machine itself.
+  local,
+
+  /// The same network: a private or link-local address.
+  lan,
+
+  /// Tailscale's addresses.
+  tailnet,
+
+  /// Across the internet.
+  public,
+}
+
 /// Why this device's relay can't be reached, in a word.
 enum TunnelRelayTrouble {
   none,
@@ -216,6 +234,10 @@ class TunnelStatus {
   /// out, and the app's connect window with it (#413).
   final int dialTimeoutMs;
 
+  /// What a direct path crosses, from its address (never the address):
+  /// for diagnostics, per route.
+  final TunnelReach reach;
+
   const TunnelStatus({
     required this.phase,
     required this.path,
@@ -227,6 +249,7 @@ class TunnelStatus {
     required this.received,
     required this.linkReceived,
     required this.dialTimeoutMs,
+    required this.reach,
   });
 
   @override
@@ -240,7 +263,8 @@ class TunnelStatus {
       relayTrouble.hashCode ^
       received.hashCode ^
       linkReceived.hashCode ^
-      dialTimeoutMs.hashCode;
+      dialTimeoutMs.hashCode ^
+      reach.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -256,5 +280,6 @@ class TunnelStatus {
           relayTrouble == other.relayTrouble &&
           received == other.received &&
           linkReceived == other.linkReceived &&
-          dialTimeoutMs == other.dialTimeoutMs;
+          dialTimeoutMs == other.dialTimeoutMs &&
+          reach == other.reach;
 }

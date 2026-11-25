@@ -1082,6 +1082,7 @@ class Backend implements AppViewTransport {
     // Recordings kept on this device from before, sent once connected.
     KeptVoices.of(this);
     _note(ConnectionKind.lifecycle, {ConnectionKey.app: AppLife.started});
+    deviceNetwork.addListener(_networkKnown);
     _network ??= deviceNetworkMoves.listen((path) {
       _note(ConnectionKind.network, {ConnectionKey.net: netKind(path)});
       networkMoved();
@@ -1121,9 +1122,16 @@ class Backend implements AppViewTransport {
           ? ConnectionRoute.tunnel
           : ConnectionRoute.plain;
       _tryStarted = DateTime.now();
+      _readyDue = false;
+      _tryNet = switch (deviceNetwork.value) {
+        final path? => netKind(path),
+        null => null,
+      };
+      if (_tryNet != null) _netTold = true;
       _note(ConnectionKind.connect, {
         ConnectionKey.attempt: tryNumber,
         ConnectionKey.route: _tryRoute,
+        ConnectionKey.net: ?_tryNet,
       });
       ConnectionFailure why;
       int? closeCode;
@@ -1668,6 +1676,7 @@ class Backend implements AppViewTransport {
         received: 0,
         linkReceived: 0,
         dialTimeoutMs: 0,
+        reach: TunnelReach.none,
       );
       throw TunnelOpenFailure('$error');
     }
@@ -1729,6 +1738,7 @@ class Backend implements AppViewTransport {
     if (shown != null &&
         shown.phase == status.phase &&
         shown.path == status.path &&
+        shown.reach == status.reach &&
         shown.error == status.error &&
         shown.failure == status.failure &&
         shown.relayConnected == status.relayConnected &&
@@ -1758,9 +1768,11 @@ class Backend implements AppViewTransport {
             : Duration.zero,
       );
     }
-    if (shown?.path != status.path && status.path != TunnelPath.none) {
+    if ((shown?.path != status.path || shown?.reach != status.reach) &&
+        status.path != TunnelPath.none) {
       _note(ConnectionKind.path, {
         ConnectionKey.route: _pathRoute(status.path),
+        ConnectionKey.reach: ?_reach(status.reach),
       });
     }
     tunnel.value = status;
@@ -1830,6 +1842,7 @@ class Backend implements AppViewTransport {
     _quiet?.cancel();
     _sleepWatch?.cancel();
     unawaited(_network?.cancel());
+    deviceNetwork.removeListener(_networkKnown);
     _wakeUp();
     await _socket?.close();
     await forwards.stopAll();
@@ -2281,6 +2294,8 @@ class Backend implements AppViewTransport {
     String text = '',
     bool dismiss = false,
     bool reply = false,
+    bool resolve = false,
+    AskAnsweredFrom from = AskAnsweredFrom.ASK_ANSWERED_FROM_UNSPECIFIED,
     List<Attachment> attachments = const [],
     int? step,
     int? revision,
@@ -2292,6 +2307,10 @@ class Backend implements AppViewTransport {
         text: text,
         dismiss: dismiss || reply,
         reply: reply,
+        // Ends a card with a thread, deciding nothing.
+        resolve: resolve,
+        // Where the person answered it: their conversation, or Needs you.
+        from: from,
         attachments: attachments,
         // A procedure's step (0-based): Done, or with [dismiss], Can't do
         // this.
@@ -2502,6 +2521,13 @@ class Backend implements AppViewTransport {
   /// is a sentence to show.
   Future<void> restoreBackendService() =>
       _request(ClientMessage(restoreBackendService: RestoreBackendService()));
+
+  /// Stops Claktory on this Mac (friend bug #27, BackendService.can_stop):
+  /// [quitting], as the app quits, only when Settings.when_app_quits says
+  /// so; else the person's switch, and it stays off until they start it.
+  /// Acked, then the connection closes. A refusal is a sentence to show.
+  Future<void> stopEngine({required bool quitting}) =>
+      _request(ClientMessage(stopEngine: StopEngine(quitting: quitting)));
 
   /// Signs out of [accountId] (`Account.id`), or of all the provider's
   /// accounts when it's empty.
@@ -3449,6 +3475,46 @@ class Backend implements AppViewTransport {
     ),
   );
 
+  /// Shares a website on this computer with pipes or a group's
+  /// (pipe-port-sharing.md); refused, why in the person's words ("Port 7420
+  /// is Claktory's own.").
+  Future<void> sharePipeWebsite(SharePipeWebsite share) =>
+      _request(ClientMessage(sharePipeWebsite: share));
+
+  /// Stops one of this side's shares on every pipe at once.
+  Future<void> stopPipeShare(String shareId) =>
+      _request(ClientMessage(stopPipeShare: StopPipeShare(shareId: shareId)));
+
+  /// The one-time addresses that open a share another Claktory shares with
+  /// this one in the browser, its server here started if it wasn't.
+  Future<PipeShareOpened> openPipeShare(String shareId) async {
+    final reply = await _call(
+      ClientMessage(openPipeShare: OpenPipeShare(shareId: shareId)),
+    );
+    if (!reply.hasPipeShareOpened()) {
+      throw const RequestFailure("Couldn't open it. Try again.");
+    }
+    return reply.pipeShareOpened;
+  }
+
+  /// Hides a share another Claktory shares with this one, or shows it.
+  Future<void> hidePipeShare(String shareId, bool hidden) => _request(
+    ClientMessage(
+      hidePipeShare: HidePipeShare(shareId: shareId, hidden: hidden),
+    ),
+  );
+
+  /// Whether [port] could be shared, and whether something answers on it.
+  Future<PipeSharePort> checkPipeSharePort(int port) async {
+    final reply = await _call(
+      ClientMessage(checkPipeSharePort: CheckPipeSharePort(port: port)),
+    );
+    if (!reply.hasPipeSharePort()) {
+      throw const RequestFailure("Couldn't check the port. Try again.");
+    }
+    return reply.pipeSharePort;
+  }
+
   Future<void> setPipeGroupCollapsed(String groupId, bool collapsed) =>
       _request(
         ClientMessage(
@@ -4127,7 +4193,12 @@ class Backend implements AppViewTransport {
           ConnectionKey.route: _tryRoute == ConnectionRoute.tunnel
               ? _pathRoute(_tunnel?.status.path ?? TunnelPath.none)
               : _tryRoute,
+          // The network, when it wasn't known yet as the try began (the
+          // first try after a launch, before the system has told it).
+          if (_tryNet == null && deviceNetwork.value != null)
+            ConnectionKey.net: netKind(deviceNetwork.value!),
         }, started == null ? Duration.zero : _welcomedAt!.difference(started));
+        if (deviceNetwork.value != null) _netTold = true;
         _sendDiagnosticsEvery();
         // The backend forgets a watch when the connection closes.
         if (_watching.isNotEmpty) fireAndLog(watchFiles(_watching));
@@ -4259,6 +4330,8 @@ class Backend implements AppViewTransport {
       case ServerMessage_Body.monitorList:
       case ServerMessage_Body.monitorHistory:
       case ServerMessage_Body.branches:
+      case ServerMessage_Body.pipeShareOpened:
+      case ServerMessage_Body.pipeSharePort:
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.monitorsChanged:
         // The Monitors page asks again while it's on screen.
@@ -4340,6 +4413,7 @@ class Backend implements AppViewTransport {
         // A message kind from a newer backend; nothing to do with it yet.
         break;
     }
+    _readyAfter(message.whichBody());
   }
 
   /// Records [kind] for [diagnostics], while they're on; and once enough
@@ -4367,6 +4441,70 @@ class Backend implements AppViewTransport {
         TunnelRelayTrouble.network => RelayTrouble.network,
         TunnelRelayTrouble.other => RelayTrouble.other,
       };
+
+  static PathReach? _reach(TunnelReach reach) => switch (reach) {
+    TunnelReach.none => null,
+    TunnelReach.local => PathReach.local,
+    TunnelReach.lan => PathReach.lan,
+    TunnelReach.tailnet => PathReach.tailnet,
+    TunnelReach.public => PathReach.public,
+  };
+
+  /// The device's network as the try began, when known.
+  NetKind? _tryNet;
+
+  /// Whether the device's network has been said since the app started:
+  /// on a try's connect or connected, or, when the system tells it only
+  /// after both (Android's first answer can take a second, Sale), as a
+  /// `network` event with app=started: the network at launch, not a move.
+  var _netTold = false;
+
+  void _networkKnown() {
+    final path = deviceNetwork.value;
+    if (path == null || _netTold || _tries == 0) return;
+    _netTold = true;
+    _note(ConnectionKind.network, {
+      ConnectionKey.net: netKind(path),
+      ConnectionKey.app: AppLife.started,
+    });
+  }
+
+  /// Whether the connection was welcomed and isn't [ConnectionKind.ready]
+  /// yet, and whether its Workspace is in.
+  var _readyDue = false;
+  var _readyWorkspace = false;
+
+  /// Notes [ConnectionKind.ready] once the welcome's sync is in: the
+  /// Workspace (whole, or the patch that resumes it), then, when an agent
+  /// is shown, its conversation, which the Claktory sends straight after
+  /// it. How long since the try began, and what the tunnel's connection
+  /// had received by then.
+  void _readyAfter(ServerMessage_Body body) {
+    if (body == ServerMessage_Body.welcome) {
+      _readyDue = true;
+      _readyWorkspace = false;
+      return;
+    }
+    if (!_readyDue) return;
+    if (!_readyWorkspace) {
+      _readyWorkspace =
+          body == ServerMessage_Body.workspace ||
+          body == ServerMessage_Body.workspacePatch;
+      // An agent shown: its conversation follows.
+      if (!_readyWorkspace || workspace.workspace.selectedAgentId.isNotEmpty) {
+        return;
+      }
+    } else if (body != ServerMessage_Body.transcript) {
+      return;
+    }
+    _readyDue = false;
+    final started = _tryStarted;
+    final through = _tryRoute == ConnectionRoute.tunnel ? _tunnel : null;
+    _note(ConnectionKind.ready, {
+      ConnectionKey.attempt: _tries,
+      if (through != null) ConnectionKey.bytes: through.status.linkReceived,
+    }, started == null ? Duration.zero : DateTime.now().difference(started));
+  }
 
   static ConnectionRoute _pathRoute(TunnelPath path) => switch (path) {
     TunnelPath.direct => ConnectionRoute.direct,

@@ -249,6 +249,19 @@ void main() {
 
     final mic = find.byType(PhoneMicButton);
 
+    testWidgets('the mic reads Record a voice message in an empty box, and '
+        'Add a voice note beside Send', (tester) async {
+      final semantics = tester.ensureSemantics();
+      await conversation(tester);
+      expect(find.bySemanticsLabel('Record a voice message'), findsOneWidget);
+      expect(find.bySemanticsLabel('Add a voice note'), findsNothing);
+      await tester.enterText(find.byType(EditableText).last, 'Hi Mike');
+      await pumpFrames(tester);
+      expect(find.bySemanticsLabel('Add a voice note'), findsOneWidget);
+      expect(find.bySemanticsLabel('Record a voice message'), findsNothing);
+      semantics.dispose();
+    });
+
     testWidgets('held beside Send with text written, let go adds it; Send '
         'sends both', (tester) async {
       final harness = await conversation(tester);
@@ -325,6 +338,130 @@ void main() {
       final field = tester.getRect(find.byType(EditableText).last);
       expect(field.width, greaterThanOrEqualTo(120));
       expect(field.right, lessThanOrEqualTo(rects[1].left));
+    });
+
+    testWidgets('an iPhone SE at the largest text: the voice note\'s chip '
+        'fits, its length and × whole, and × takes it out', (tester) async {
+      final semantics = tester.ensureSemantics();
+      tester.platformDispatcher.textScaleFactorTestValue = 3.12;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      await conversation(tester, size: const Size(375, 667));
+      await tester.enterText(
+        find.byType(EditableText).last,
+        'Look at the login page',
+      );
+      await pumpFrames(tester);
+      await tester.tap(mic);
+      await io(tester);
+      recorder.hear(0.5, const Duration(seconds: 3));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('add-voice-note')));
+      await io(tester);
+      await pumpFrames(tester);
+      expect(tester.takeException(), isNull);
+      expect(_chip, findsOneWidget);
+      final chip = tester.getRect(_chip);
+      expect(chip.left, greaterThanOrEqualTo(0));
+      expect(chip.right, lessThanOrEqualTo(375));
+      final note = tester.widget<VoiceNoteChip>(_chip);
+      final length = tester.getRect(
+        find.descendant(
+          of: _chip,
+          matching: find.text(voiceDuration(note.duration)),
+        ),
+      );
+      expect(length.right, lessThanOrEqualTo(chip.right));
+      expect(length.bottom, lessThanOrEqualTo(chip.bottom));
+      final remove = find.bySemanticsLabel('Remove voice note');
+      final x = tester.getRect(remove);
+      expect(x.right, lessThanOrEqualTo(chip.right));
+      expect(x.width, greaterThanOrEqualTo(44));
+      await tester.tap(remove);
+      await pumpFrames(tester);
+      // Over 30 s, it asks first.
+      expect(find.text('Delete this voice note?'), findsOneWidget);
+      // The sheet scrolls to its Delete at this size.
+      await tester.ensureVisible(find.text('Delete'));
+      await pumpFrames(tester);
+      await tester.tap(find.text('Delete'));
+      await io(tester);
+      await pumpFrames(tester);
+      expect(_chip, findsNothing);
+      semantics.dispose();
+    });
+    testWidgets('an iPhone SE at the largest text: recording, the chip, '
+        'sent offline, queued and failed, nothing overflows', (tester) async {
+      tester.platformDispatcher.textScaleFactorTestValue = 3.12;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final harness = await conversation(tester, size: const Size(375, 667));
+      await tester.enterText(
+        find.byType(EditableText).last,
+        'Look at the login page',
+      );
+      await pumpFrames(tester);
+      expect(tester.takeException(), isNull);
+      final gesture = await tester.startGesture(tester.getCenter(mic));
+      await tester.pump(const Duration(milliseconds: 250));
+      await io(tester);
+      recorder.hear(0.5, const Duration(seconds: 2));
+      await tester.pump();
+      await gesture.up();
+      await io(tester);
+      await pumpFrames(tester);
+      expect(tester.takeException(), isNull);
+      expect(_chip, findsOneWidget);
+
+      // Sent with the connection down: "Not sent yet", Retry and Delete.
+      harness.backend.refuse = 'Not connected to the backend.';
+      harness.backend.connected.value = false;
+      await pumpFrames(tester);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.byType(SendButton));
+      await io(tester);
+      await pumpFrames(tester);
+      expect(tester.takeException(), isNull);
+      expect(find.text('Not sent yet'), findsOneWidget);
+      harness.backend.refuse = null;
+      harness.backend.connected.value = true;
+      await io(tester);
+      await pumpFrames(tester);
+      expect(tester.takeException(), isNull);
+
+      QueuedMessages queued(Transcription transcription) => QueuedMessages(
+        agentId: 'mike',
+        messages: [
+          QueuedMessage(
+            id: Int64(7),
+            source: 'person',
+            text: 'Look at the login page',
+            typed: 'Look at the login page',
+            attachments: [Attachment(path: '/u/Voice.m4a', name: 'Voice.m4a')],
+            transcription: transcription,
+          ),
+        ],
+      );
+      // Waiting to be heard: the transcribing line under it.
+      harness.backend.queued.apply(
+        queued(
+          Transcription(
+            state: TranscriptionState.TRANSCRIPTION_STATE_PENDING,
+            durationMs: Int64(42000),
+          ),
+        ),
+      );
+      await pumpFrames(tester);
+      expect(tester.takeException(), isNull);
+      harness.backend.queued.apply(
+        queued(
+          Transcription(
+            state: TranscriptionState.TRANSCRIPTION_STATE_FAILED,
+            error: 'The speech model could not read this recording.',
+            durationMs: Int64(42000),
+          ),
+        ),
+      );
+      await pumpFrames(tester);
+      expect(tester.takeException(), isNull);
     });
   });
 

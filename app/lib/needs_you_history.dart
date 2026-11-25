@@ -21,7 +21,7 @@ import 'scope.dart';
 import 'selection.dart' show CopyShape, Unselectable;
 import 'taint_label.dart';
 import 'usage.dart' show formatAge;
-import 'visible_codes.dart' show proseCodes;
+import 'visible_codes.dart' show proseCodes, visibleCodes;
 
 /// How many records a page of history asks for.
 const historyPage = 50;
@@ -387,6 +387,8 @@ String historyOutcome(
   // person's dismissal.
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_WITHDRAWN =>
     'Withdrawn by ${agent ?? 'the agent'}',
+  // Talked through on the card and ended with no decision.
+  NeedsYouOutcome.NEEDS_YOU_OUTCOME_RESOLVED => 'Resolved',
   _ => '',
 };
 
@@ -573,7 +575,11 @@ class HistoryRow extends StatelessWidget {
                     ),
                     if (record.title.isNotEmpty)
                       Text(
-                        record.title,
+                        // A grant's sentence names agents, apps and paths:
+                        // every hidden character by its code (Fugo).
+                        record.proposalId.isNotEmpty
+                            ? visibleCodes(record.title)
+                            : record.title,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyles.body.copyWith(
@@ -599,6 +605,19 @@ class HistoryRow extends StatelessWidget {
                         onTap: () => showReportTypeRecord(context, record),
                         builder: (context, hovered) => Text(
                           'See what comes through',
+                          style: TextStyles.caption.copyWith(
+                            color: hovered ? palette.text : palette.signal,
+                          ),
+                        ),
+                      ),
+                    // Made with no card of its own: the person approved
+                    // it in an agent's proposal, which this opens.
+                    if (record.proposalId.isNotEmpty)
+                      Pressable(
+                        onTap: () => openRecordProposal(context, record),
+                        builder: (context, hovered) => Text(
+                          'Approved in ${proposerName(workspace, record)}'
+                          "'s proposal",
                           style: TextStyles.caption.copyWith(
                             color: hovered ? palette.text : palette.signal,
                           ),
@@ -751,6 +770,33 @@ void openHistoryRecord(BuildContext context, NeedsYouRecord record) {
     return;
   }
   if (agent == null) return;
+  _openAgentAt(context, agent, record.seq.toInt());
+}
+
+/// The name of the agent whose proposal [record] was approved in: as it is
+/// now, or its id once it's deleted.
+String proposerName(Workspace workspace, NeedsYouRecord record) =>
+    workspace.agents
+        .where((agent) => agent.id == record.proposalAgentId)
+        .firstOrNull
+        ?.name ??
+    record.proposalAgentId;
+
+/// Opens the proposal [record] was approved in, in its agent's
+/// conversation (at its end when the proposal is no longer loaded).
+void openRecordProposal(BuildContext context, NeedsYouRecord record) {
+  final backend = AppScope.of(context);
+  backend.needsYouHistoryNext = true;
+  final agent = backend.workspace.workspace.agents
+      .where((agent) => agent.id == record.proposalAgentId)
+      .firstOrNull;
+  if (agent == null) return;
+  _openAgentAt(context, agent, record.proposalSeq.toInt());
+}
+
+/// Opens [agent]'s conversation at [seq] (0: at its end).
+void _openAgentAt(BuildContext context, Agent agent, int seq) {
+  final backend = AppScope.of(context);
   AppScope.closePage(context);
   fireAndLog(() async {
     // A pipe's liaison's conversation shows in its pipe.
@@ -759,9 +805,7 @@ void openHistoryRecord(BuildContext context, NeedsYouRecord record) {
     } else {
       await backend.selectAgent(agent.id);
     }
-    if (record.seq > 0) {
-      backend.reveal.reachSeq(agent.id, record.seq.toInt());
-    }
+    if (seq > 0) backend.reveal.reachSeq(agent.id, seq);
   }());
   PhoneNavigation.of(context)?.value = true;
 }

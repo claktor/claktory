@@ -18,6 +18,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
+import 'claktory_identity.dart' show claktoryName;
 import 'controls.dart';
 import 'forms.dart' show FormFrame;
 import 'mobile/haptics.dart';
@@ -365,7 +366,12 @@ class _FetchingState extends State<_Fetching> {
     } on RequestFailure catch (failure) {
       if (mounted && !_cancelled) {
         setState(() {
-          _error = failure.message;
+          // Offline when it started, or when Try again was pressed: the
+          // Claktory by its name, not the request's generic words
+          // (Abbacchio's row 1065). It carries on once it's back.
+          _error = failure.message == 'Not connected to the backend.'
+              ? 'Not connected to ${claktoryName(_backend)}.'
+              : failure.message;
           _received = _written;
         });
       }
@@ -455,15 +461,18 @@ class _FetchingState extends State<_Fetching> {
           : 'Share ${_name(paths.single)}',
       body: many ? 'File ${index + 1} of ${paths.length}' : null,
       fields: [
-        LoadingProgress(
-          name: many ? _name(paths[index]) : null,
-          label: 'Loading…',
-          received: _received,
-          size: _size,
-          // Given up on, it says so and nothing else (Abbacchio's row
-          // 1024: "carries on from here" beside it).
-          connected: _error == null ? _backend.connected : _given,
-        ),
+        // Failed before anything came (offline from the start): only the
+        // error, not an empty bar under it (Sale's row 104).
+        if (_error == null || _size > 0)
+          LoadingProgress(
+            name: many ? _name(paths[index]) : null,
+            label: 'Loading…',
+            received: _received,
+            size: _size,
+            // Given up on, it says so and nothing else (Abbacchio's row
+            // 1024: "carries on from here" beside it).
+            connected: _error == null ? _backend.connected : _given,
+          ),
       ],
       error: _error,
       submitLabel: 'Try again',

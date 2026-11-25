@@ -1203,6 +1203,7 @@ fn a_put_says_what_to_fix_and_which_panels_fail() {
         "rivet",
     );
     assert!(!kept.is_error, "{}", kept.text);
+    assert!(kept.text.starts_with("Kept \"Notes\" (notes) as _rev 1.\n"), "a new one has no version before it: {}", kept.text);
     assert!(kept.text.contains("Panel broken's query failed: no such table: nowhere"), "{}", kept.text);
     assert!(kept.text.contains("Panel mine shows nothing until the person gives Charts Rivet's database"), "{}", kept.text);
     assert_eq!(model::ids(&mut host), vec!["claktory", "notes"]);
@@ -1786,4 +1787,120 @@ fn an_agents_stat_style_is_checked_and_a_fixed_color_kept() {
     assert_eq!(stat(1)["color"], "red");
     assert_eq!(stat(2)["color"], "muted");
     assert!(stat(3).get("color").is_none());
+}
+
+// ---- Maps and heatmaps (0.7.0) ----
+
+#[test]
+fn the_person_makes_a_world_map_and_an_hour_by_weekday_heatmap() {
+    let (mut app, mut host) = opened(true);
+    host.press(&mut app, "s1", "Edit");
+    host.press(&mut app, "s1", "Add panel");
+    host.choose(&mut app, "s1", "ed_kind", "World map");
+    assert_eq!(host.button_words("s1", &host.component("s1", "ed_kind")), "Show as: World map");
+    // A map's settings: its countries and unit, colors, dot sizes,
+    // decimals and legend; no column along the bottom, no series.
+    for id in ["ed_location", "ed_unit", "ed_thresholds", "ed_size_min", "ed_size_max", "ed_decimals", "ed_legend"] {
+        assert!(host.tree("s1").iter().any(|component| component["id"] == id), "{id}");
+    }
+    for id in ["ed_x", "ed_series", "ed_reduce", "ed_color_mode", "ed_line", "ed_points", "ed_min", "ed_max"] {
+        assert!(host.tree("s1").iter().all(|component| component["id"] != id), "{id}");
+    }
+    assert_eq!(host.component("s1", "ed_thresholds")["placeholder"], "Green to red by value");
+    host.enter("s1", "/editor/title", json!("Users by country"));
+    host.enter(
+        "s1",
+        "/editor/sql",
+        json!("SELECT 'de' AS country, 12 AS users UNION ALL SELECT 'USA', 30 UNION ALL SELECT 'Hidden (fewer than 5)', 23 UNION ALL SELECT 'FR', NULL"),
+    );
+    host.enter("s1", "/editor/location", json!("country"));
+    host.enter("s1", "/editor/unit", json!("users"));
+    host.enter("s1", "/editor/size_min", json!("41"));
+    host.press(&mut app, "s1", "Save");
+    assert!(host.shows("s1", "Enter dot sizes from 1 to 40, or leave them empty."), "{:?}", host.words("s1"));
+    host.enter("s1", "/editor/size_min", json!("12"));
+    host.enter("s1", "/editor/size_max", json!("4"));
+    host.press(&mut app, "s1", "Save");
+    assert!(host.shows("s1", "Make the smallest dot no bigger than the largest."), "{:?}", host.words("s1"));
+    host.enter("s1", "/editor/size_min", json!("3"));
+    host.enter("s1", "/editor/size_max", json!("20"));
+    host.enter("s1", "/editor/thresholds", json!("blue, 20 orange"));
+    host.press(&mut app, "s1", "Run");
+    let preview = host.component("s1", "ed_preview_body");
+    assert_eq!(
+        preview,
+        json!({"id": "ed_preview_body", "component": "Map", "data": {"@path": "/editor/preview/data"}, "label": "Users by country",
+               "height": 296, "location": "country", "thresholds": [{"color": "blue"}, {"color": "orange", "value": 20.0}],
+               "sizeMin": 3, "sizeMax": 20, "unit": "users"})
+    );
+    host.press(&mut app, "s1", "Save");
+    let dashboard = host.dashboard("claktory");
+    let index = dashboard.panels.iter().position(|panel| panel.id == "users_by_country").unwrap();
+    let viz = &dashboard.panels[index].viz;
+    assert_eq!((viz.kind.as_str(), viz.location.as_deref(), viz.size_min, viz.size_max), ("map", Some("country"), Some(3.0), Some(20.0)));
+    // Every row goes to the map, the ones it can't place and the null too:
+    // the renderer lists them in words, never as 0.
+    let data = &host.surface("s1").data["panels"][index]["data"];
+    assert_eq!(data["rows"].as_array().unwrap().len(), 4, "{data}");
+    assert_eq!(data["rows"][3], json!(["FR", null]));
+
+    // An hour by weekday grid: hours along the bottom, days as its rows.
+    host.press(&mut app, "s1", "Add panel");
+    host.choose(&mut app, "s1", "ed_kind", "Heatmap");
+    assert_eq!(host.component("s1", "ed_series")["label"], "Rows");
+    for id in ["ed_x", "ed_series", "ed_unit", "ed_decimals", "ed_legend"] {
+        assert!(host.tree("s1").iter().any(|component| component["id"] == id), "{id}");
+    }
+    for id in ["ed_location", "ed_thresholds", "ed_size_min", "ed_min", "ed_max", "ed_line", "ed_points"] {
+        assert!(host.tree("s1").iter().all(|component| component["id"] != id), "{id}");
+    }
+    host.enter("s1", "/editor/title", json!("Active by hour"));
+    host.enter(
+        "s1",
+        "/editor/sql",
+        json!("WITH RECURSIVE h(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM h WHERE n < 167) SELECT printf('%02d:00', n % 24) AS hour, CASE n / 24 WHEN 0 THEN 'Mon' WHEN 1 THEN 'Tue' WHEN 2 THEN 'Wed' WHEN 3 THEN 'Thu' WHEN 4 THEN 'Fri' WHEN 5 THEN 'Sat' ELSE 'Sun' END AS day, n AS active FROM h"),
+    );
+    host.enter("s1", "/editor/x", json!("hour"));
+    host.enter("s1", "/editor/series_by", json!("day"));
+    host.press(&mut app, "s1", "Save");
+    let dashboard = host.dashboard("claktory");
+    let index = dashboard.panels.iter().position(|panel| panel.id == "active_by_hour").unwrap();
+    let chart = host.component("s1", &format!("p{index}_body"));
+    assert_eq!((&chart["component"], &chart["kind"], &chart["x"], &chart["seriesBy"]), (&json!("Chart"), &json!("heatmap"), &json!("hour"), &json!("day")));
+    // Each of its 168 cells: a sample would leave holes.
+    assert_eq!(host.surface("s1").data["panels"][index]["data"]["rows"].as_array().unwrap().len(), 168);
+}
+
+#[test]
+fn an_agents_map_and_heatmap_are_checked_and_drawn() {
+    let (mut app, mut host) = opened(true);
+    let mut dashboard = host.dashboard("claktory");
+    let mut map = panel("users", "Users", "activity", "SELECT 'DE' AS country, 3 AS users", "map");
+    map.viz = Viz { size_min: Some(0.5), size_max: Some(41.0), location: Some(String::new()), ..map.viz };
+    let mut grid = panel("grid", "Grid", "activity", "SELECT 1 AS hour, 'Mon' AS day, 2 AS n", "heatmap");
+    grid.viz.color = Some("red".into());
+    dashboard.panels.extend([map, grid]);
+    let problems = dashboard.problems(&sources());
+    let at = dashboard.panels.len() - 2;
+    for expected in [
+        format!("panels[{at}].viz.size_min: 1 to 40"),
+        format!("panels[{at}].viz.size_max: 1 to 40"),
+        format!("panels[{at}].viz.location: a column's name"),
+        format!("panels[{}].viz.color: one of palette, agent, signal, muted", at + 1),
+    ] {
+        assert!(problems.contains(&expected), "{expected} in {problems:#?}");
+    }
+    let viz = &mut dashboard.panels[at].viz;
+    *viz = Viz { size_min: Some(8.0), size_max: Some(4.0), location: Some("country".into()), color: Some("purple".into()), y: vec!["users".into()], ..viz.clone() };
+    assert!(dashboard.problems(&sources()).iter().any(|problem| *problem == format!("panels[{at}].viz.size_min: at most size_max")));
+    dashboard.panels[at].viz.size_max = None;
+    dashboard.panels[at + 1].viz.color = None;
+    assert!(dashboard.problems(&sources()).is_empty(), "{:?}", dashboard.problems(&sources()));
+    model::save(&mut host, dashboard, Some(1), "rivet").unwrap();
+    host.press(&mut app, "s1", "Edit");
+    let map = host.component("s1", &format!("p{at}_body"));
+    assert_eq!(
+        (&map["component"], &map["location"], &map["value"], &map["color"], &map["sizeMin"], map.get("sizeMax")),
+        (&json!("Map"), &json!("country"), &json!("users"), &json!("purple"), &json!(8), None)
+    );
 }

@@ -195,6 +195,10 @@ struct Row {
     reason: String,
     /// QUESTION, REVIEW and PROPOSAL: how many times its agent changed it (#428).
     updates: u32,
+    /// APP_ACCESS and PROPOSAL_GRANT made on an approved proposal: its id,
+    /// and its agent.
+    proposal: String,
+    proposer: String,
     /// All the text a search looks in, lowercase.
     search: String,
 }
@@ -270,6 +274,8 @@ impl Row {
             member: String::new(),
             reason: String::new(),
             updates: 0,
+            proposal: String::new(),
+            proposer: String::new(),
             search: String::new(),
         }
     }
@@ -314,13 +320,13 @@ fn outcome(
     Ok(if row.get::<_, bool>(replied)? { Outcome::Replied } else if state == when.0 { when.1 } else { otherwise })
 }
 
-/// A card its agent withdrew (#407, state 'withdrawn') wins over `decided`,
-/// the outcome its other states give.
 /// How many times a card was changed (#428), from its version.
 fn updates(revision: i64) -> u32 {
     u32::try_from(revision - 1).unwrap_or(0)
 }
 
+/// A card its agent withdrew (#407, state 'withdrawn') wins over `decided`,
+/// the outcome its other states give.
 fn withdrawn(row: &rusqlite::Row<'_>, state: usize, decided: Outcome) -> rusqlite::Result<Outcome> {
     Ok(if row.get::<_, String>(state)? == "withdrawn" { Outcome::Withdrawn } else { decided })
 }
@@ -401,13 +407,15 @@ fn from_factory(
 ) -> rusqlite::Result<()> {
     found.add(rows(
         db,
-        "SELECT id, agent, title, answer, state, created, decided, taint, review, body, replied, reason, revision FROM asks
+        "SELECT id, agent, title, answer, state, created, decided, taint, review, body, replied, reason, revision, resolved FROM asks
          WHERE state IN ('answered', 'dismissed', 'withdrawn') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
         window,
         |row| {
             let review: String = row.get(8)?;
             let kind = if review.is_empty() { Kind::Question } else { Kind::Review };
             let outcome = withdrawn(row, 4, outcome(row, 4, 10, ("answered", Outcome::Answered), Outcome::Dismissed)?)?;
+            // Talked through on its card and ended with Resolve (#430).
+            let outcome = if row.get::<_, bool>(13)? { Outcome::Resolved } else { outcome };
             let mut found = Row::new(kind, row.get::<_, i64>(0)?.to_string(), row.get(1)?, outcome, row.get(5)?, row.get(6)?);
             found.title = cut(&row.get::<_, String>(2)?, MAX_TITLE);
             found.reply = cut(&row.get::<_, String>(3)?, MAX_REPLY);
@@ -580,6 +588,7 @@ fn from_factory(
         },
     )?);
     from_app_access(db, window, names, found)?;
+    from_proposal_grants(db, window, found)?;
     from_model_changes(db, window, names, found)?;
     from_conversation_changes(db, window, names, found)?;
     from_member_changes(db, window, names, found)?;
@@ -656,6 +665,11 @@ fn from_app_access(db: &Connection, window: &Window, names: &HashMap<String, Str
         let outcome = if card { Outcome::Approved } else { Outcome::Changed };
         let mut row = Row::new(Kind::AppAccess, change.id.to_string(), agent, outcome, asked, change.at);
         row.title = cut(&change.title(&names), MAX_TITLE);
+        // Made on an approved proposal (`crate::proposal_grants`).
+        if !card && let Some((proposal, _)) = change.reference.strip_prefix("proposal:").and_then(|grant| grant.split_once(':')) {
+            row.proposal = proposal.to_owned();
+            row.proposer = db.query_row("SELECT agent FROM proposals WHERE id = ?1", [proposal], |row| row.get(0)).unwrap_or_default();
+        }
         row.app = AppAccess {
             change: change.id.to_string(),
             undone: change.undone_by.is_some(),
@@ -680,6 +694,27 @@ fn from_app_access(db: &Connection, window: &Window, names: &HashMap<String, Str
             found.reply = cut(&row.get::<_, String>(7)?, MAX_REPLY);
             found.app = AppAccess { app: row.get(2)?, reason: cut(&card.reason, MAX_REPLY), card: id, ..AppAccess::default() };
             Ok(found.searched(&[&card.app_name, &card.reason]))
+        },
+    )?);
+    Ok(())
+}
+
+/// Changes an admin agent made with no card of their own, approved in an
+/// agent's proposal (`crate::proposal_grants`), other than an app's
+/// access (APP_ACCESS says so).
+fn from_proposal_grants(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::Result<()> {
+    found.add(rows(
+        db,
+        "SELECT g.proposal, g.idx, g.summary, g.used, g.used_by, p.agent FROM proposal_grants g JOIN proposals p ON p.id = g.proposal
+         WHERE g.used IS NOT NULL AND json_extract(g.what, '$.kind') != 'app' AND g.used >= ?1 AND g.used < ?2 ORDER BY g.used DESC LIMIT ?3",
+        window,
+        |row| {
+            let (proposal, idx, used): (i64, i64, i64) = (row.get(0)?, row.get(1)?, row.get(3)?);
+            let mut found = Row::new(Kind::ProposalGrant, format!("{proposal}:{idx}"), row.get(4)?, Outcome::Changed, used, used);
+            found.title = cut(&row.get::<_, String>(2)?, MAX_TITLE);
+            found.proposal = proposal.to_string();
+            found.proposer = row.get(5)?;
+            Ok(found.searched(&[]))
         },
     )?);
     Ok(())
@@ -726,11 +761,7 @@ fn forward_title(change: &Change<'_>, names: &HashMap<String, String>, projects:
 /// "\"Task request\" and \"Question\"": the names their authors wrote.
 fn type_names(schemas: &[&crate::pipes::handoff::schema::Schema]) -> String {
     let names: Vec<String> = schemas.iter().map(|schema| format!("\u{201C}{}\u{201D}", schema.name)).collect();
-    match names.as_slice() {
-        [] => String::new(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    }
+    factory_agent::text::list_and(&names)
 }
 
 /// Claktory's sentence for a report type made, changed or deleted: "Rivet
@@ -861,6 +892,11 @@ fn card<'a>(entries: impl DoubleEndedIterator<Item = &'a v1::Entry>, row: &Row) 
             {
                 Vec::new()
             }
+            (Some(Entry::ToolCall(call)), Kind::ProposalGrant)
+                if crate::proposal_grants::grant_of(call).as_deref() == Some(row.id.as_str()) =>
+            {
+                Vec::new()
+            }
             (Some(Entry::ToolCall(call)), Kind::Conversation)
                 if crate::fork::history::change_of(call).as_deref() == Some(row.conversation.change.as_str()) =>
             {
@@ -898,9 +934,10 @@ impl Factory {
             let chats = self.chats.ids();
             rows.iter()
                 .filter(|row| !piped(row.kind))
-                .filter(|row| inner.config.agent(&row.agent).is_some() || chats.contains(&row.agent))
-                .filter(|row| inner.agents.get(&row.agent).is_none_or(|runtime| runtime.transcript.is_none()))
-                .map(|row| row.agent.clone())
+                .flat_map(|row| [row.agent.clone(), row.proposer.clone()])
+                .filter(|agent| !agent.is_empty())
+                .filter(|agent| inner.config.agent(agent).is_some() || chats.contains(agent))
+                .filter(|agent| inner.agents.get(agent).is_none_or(|runtime| runtime.transcript.is_none()))
                 .collect()
         };
         let reads = futures_util::future::join_all(unheld.iter().map(|agent| self.ensure_loaded(agent))).await;
@@ -977,6 +1014,18 @@ impl Factory {
                 {
                     taint = crate::pipes::agents::routes_from_json(&stored);
                 }
+                // The proposal it was approved in, in its agent's conversation.
+                let proposal_seq = inner
+                    .agents
+                    .get(&row.proposer)
+                    .and_then(|runtime| runtime.transcript.as_ref())
+                    .and_then(|transcript| {
+                        transcript.in_memory().rev().find_map(|entry| match &entry.kind {
+                            Some(Entry::Proposal(proposal)) if !row.proposal.is_empty() && proposal.id == row.proposal => Some(entry.seq),
+                            _ => None,
+                        })
+                    })
+                    .unwrap_or_default();
                 v1::NeedsYouRecord {
                     kind: row.kind.into(),
                     agent_id: if chat { String::new() } else { row.agent.clone() },
@@ -1018,6 +1067,9 @@ impl Factory {
                         _ => row.model.subject,
                     },
                     updates: row.updates,
+                    proposal_id: row.proposal,
+                    proposal_agent_id: row.proposer,
+                    proposal_seq,
                 }
             })
             .collect();

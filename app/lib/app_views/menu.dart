@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/rendering.dart' show RenderAbstractViewport;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -248,6 +249,7 @@ class _AppMenuListState extends State<AppMenuList> {
   final _scroll = ScrollController();
   final _keys = <int, GlobalKey>{};
   late final _focus = FocusNode(debugLabel: 'Menu', onKeyEvent: _onKey);
+  final _field = FocusNode(debugLabel: 'Menu search');
 
   /// The row the keys are on, in [_matching]'s order.
   var _highlighted = 0;
@@ -268,10 +270,15 @@ class _AppMenuListState extends State<AppMenuList> {
     final chosen = widget.options.indexWhere((option) => option.selected);
     _highlighted = math.max(0, chosen);
     _query.addListener(() => setState(() => _highlighted = 0));
-    // The chosen one in the middle of the list where it can be.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || chosen < 0) return;
-      _reveal(chosen, 0.5);
+      if (!mounted) return;
+      // A pointer's menu takes the keys at once, even from the button
+      // clicked or a field elsewhere that had them (autofocus waits for
+      // nothing else to be focused): typing filters straight away.
+      if (!widget.touch) (_searchable ? _field : _focus).requestFocus();
+      // The chosen one in the middle of the list where it can be, the
+      // list starting with a whole row.
+      if (chosen >= 0) _center(chosen);
     });
   }
 
@@ -280,10 +287,53 @@ class _AppMenuListState extends State<AppMenuList> {
     _query.dispose();
     _scroll.dispose();
     _focus.dispose();
+    _field.dispose();
     super.dispose();
   }
 
   GlobalKey _key(int index) => _keys.putIfAbsent(index, GlobalKey.new);
+
+  /// Scrolls [index]'s row to the middle of the list, then up to the top
+  /// of the row the list would start in, so none starts cut under the
+  /// search field.
+  void _center(int index) {
+    if (!_scroll.hasClients) return;
+    final position = _scroll.position;
+    double? top(int i) {
+      final box = _keys[i]?.currentContext?.findRenderObject();
+      final content = box is RenderBox
+          ? RenderAbstractViewport.maybeOf(box)
+          : null;
+      if (box is! RenderBox || content == null) return null;
+      return content.getOffsetToReveal(box, 0).offset;
+    }
+
+    final row = top(index);
+    final box = _keys[index]?.currentContext?.findRenderObject();
+    if (row == null || box is! RenderBox) return;
+    final middle = row - (position.viewportDimension - box.size.height) / 2;
+    var target = middle.clamp(
+      position.minScrollExtent,
+      position.maxScrollExtent,
+    );
+    // The last row starting at or above where the list would start.
+    double? snapped;
+    for (final i in _keys.keys) {
+      final at = top(i);
+      if (at != null &&
+          at <= target + 0.5 &&
+          (snapped == null || at > snapped)) {
+        snapped = at;
+      }
+    }
+    if (snapped != null && target > position.minScrollExtent) {
+      target = snapped.clamp(
+        position.minScrollExtent,
+        position.maxScrollExtent,
+      );
+    }
+    position.jumpTo(target);
+  }
 
   void _reveal(int index, double alignment) {
     final row = _keys[index]?.currentContext;
@@ -391,6 +441,7 @@ class _AppMenuListState extends State<AppMenuList> {
                   : const EdgeInsets.fromLTRB(Space.xs, Space.xs, Space.xs, 0),
               child: TextField(
                 controller: _query,
+                focusNode: _field,
                 placeholder: 'Search',
                 semanticsLabel: 'Search',
                 kind: InputKind.text,

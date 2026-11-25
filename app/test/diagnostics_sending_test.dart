@@ -10,6 +10,7 @@ import 'dart:io';
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/diagnostics_record.dart';
+import 'package:factory_app/network.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/state.dart';
 import 'package:factory_app/tunnel_client.dart';
@@ -35,6 +36,8 @@ const _allowedKeys = {
   'attempt',
   'welcomed',
   'err',
+  'reach',
+  'bytes',
 };
 final _token = RegExp(r'^([a-z_]+)=([0-9]+|[a-z]+)$');
 
@@ -44,6 +47,9 @@ final _token = RegExp(r'^([a-z_]+)=([0-9]+|[a-z]+)$');
 class _Far {
   late final HttpServer server;
   var share = true;
+
+  /// An agent shown: its conversation follows the Workspace, after this.
+  Duration? conversationAfter;
   final received = <DiagnosticEvent>[];
   var requests = 0;
   final _sockets = <WebSocket>[];
@@ -64,6 +70,14 @@ class _Far {
               ).writeToBuffer(),
             )
             ..add(_workspace().writeToBuffer());
+          if (conversationAfter case final after?) {
+            Timer(after, () {
+              socket.add(
+                ServerMessage(transcript: Transcript(agentId: 'a1'))
+                    .writeToBuffer(),
+              );
+            });
+          }
         } else if (message.hasSendDiagnostics()) {
           requests++;
           if (!share) {
@@ -85,7 +99,11 @@ class _Far {
   }
 
   ServerMessage _workspace() => ServerMessage(
-    workspace: Workspace(diagnostics: Diagnostics(share: share)),
+    workspace: Workspace(
+      diagnostics: Diagnostics(share: share),
+      selectedAgentId: conversationAfter == null ? null : 'a1',
+      agents: [if (conversationAfter != null) Agent(id: 'a1', name: 'Ana')],
+    ),
   );
 
   /// Turns them on or off, as Settings would: every device is told.
@@ -112,13 +130,19 @@ class _Tunnels implements Tunnels {
   /// What the next one opened says first.
   TunnelStatus? first;
 
+  /// Called as each opens.
+  void Function()? opening;
+
   @override
   Future<Tunnel> open({
     required String deviceKey,
     required String endpointId,
     required List<String> relays,
     List<String> addresses = const [],
-  }) async => last = FakeTunnel(port)..status = first ?? tunnelStatus();
+  }) async {
+    opening?.call();
+    return last = FakeTunnel(port)..status = first ?? tunnelStatus();
+  }
 
   @override
   Future<({String device, String backend})> pairingIds({
@@ -264,6 +288,121 @@ void main() {
     expectAllowed(far.received);
     await app.close();
   });
+
+  test('a connection says which network it began on, what its direct path '
+      'crosses, and when it was ready, with what it took (Polpo §4)', () async {
+    DiagnosticsRecorder(folder)
+      ..select(_endpoint)
+      ..share(true);
+    final recorder = DiagnosticsRecorder(folder);
+    final app = backend(recorder);
+    deviceNetwork.value = const NetworkPath(
+      satisfied: true,
+      interfaces: ['cellular'],
+    );
+    addTearDown(() => deviceNetwork.value = null);
+    far.conversationAfter = const Duration(milliseconds: 400);
+    tunnels.first = tunnelStatus(
+      reach: TunnelReach.tailnet,
+      linkReceived: 4321,
+    );
+    app.connectTo(parsePairingCode(_code));
+    unawaited(app.run());
+    await until(() => far.received.any((event) => event.kind == 'ready'));
+    final connect = far.received.firstWhere((event) => event.kind == 'connect');
+    expect(
+      connect.detail,
+      matches(RegExp(r'^attempt=\d+ route=tunnel net=cellular$')),
+    );
+    final path = far.received.firstWhere((event) => event.kind == 'path');
+    expect(path.detail, 'route=direct reach=tailnet');
+    // Once the conversation shown came, not with the Workspace before it.
+    final ready = far.received.firstWhere((event) => event.kind == 'ready');
+    expect(ready.detail, matches(RegExp(r'^attempt=\d+ bytes=4321$')));
+    expect(ready.durationMs.toInt(), greaterThanOrEqualTo(400));
+    expect(far.received.where((event) => event.kind == 'ready'), hasLength(1));
+    // A direct path that moves to the internet says so.
+    tunnels.last!.status = tunnelStatus(reach: TunnelReach.public);
+    await until(
+      () => far.received.any(
+        (event) => event.detail == 'route=direct reach=public',
+      ),
+    );
+    expectAllowed(far.received);
+    await app.close();
+  });
+
+  test('the first try after a launch, before the system has told the '
+      'network, says it once connected (Sale)', () async {
+    DiagnosticsRecorder(folder)
+      ..select(_endpoint)
+      ..share(true);
+    final recorder = DiagnosticsRecorder(folder);
+    final app = backend(recorder);
+    deviceNetwork.value = null;
+    addTearDown(() => deviceNetwork.value = null);
+    tunnels.opening = () => deviceNetwork.value = const NetworkPath(
+      satisfied: true,
+      interfaces: ['wifi'],
+    );
+    app.connectTo(parsePairingCode(_code));
+    unawaited(app.run());
+    await until(() => far.received.any((event) => event.kind == 'connected'));
+    expect(
+      far.received.firstWhere((event) => event.kind == 'connect').detail,
+      matches(RegExp(r'^attempt=\d+ route=tunnel$')),
+    );
+    expect(
+      far.received.firstWhere((event) => event.kind == 'connected').detail,
+      matches(RegExp(r'^attempt=\d+ route=direct net=wifi$')),
+    );
+    await app.close();
+  });
+
+  test(
+    'when the system tells the network only after the first try '
+    'connected (Android, Sale), it is said once, as the network at launch',
+    () async {
+      DiagnosticsRecorder(folder)
+        ..select(_endpoint)
+        ..share(true);
+      final recorder = DiagnosticsRecorder(folder);
+      final app = backend(recorder);
+      deviceNetwork.value = null;
+      addTearDown(() => deviceNetwork.value = null);
+      app.connectTo(parsePairingCode(_code));
+      unawaited(app.run());
+      await until(() => far.received.any((event) => event.kind == 'ready'));
+      deviceNetwork.value = const NetworkPath(
+        satisfied: true,
+        interfaces: ['wifi'],
+      );
+      await until(() => far.received.any((event) => event.kind == 'network'));
+      expect(
+        far.received.where((event) => event.kind == 'network').single.detail,
+        'net=wifi app=started',
+      );
+      for (final kind in ['connect', 'connected']) {
+        expect(
+          far.received.firstWhere((event) => event.kind == kind).detail,
+          isNot(contains('net=')),
+        );
+      }
+      // The same network told again (a flag changing): nothing more.
+      deviceNetwork.value = const NetworkPath(
+        satisfied: true,
+        interfaces: ['wifi'],
+        expensive: true,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(
+        far.received.where((event) => event.kind == 'network'),
+        hasLength(1),
+      );
+      expectAllowed(far.received);
+      await app.close();
+    },
+  );
 
   test('a launch whose relay comes up a little after says only how long '
       'it took: no bare up=0 before it (Zucchero, #388)', () async {

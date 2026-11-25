@@ -62,12 +62,7 @@ impl Extension for Conversations {
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
-        let agent_only = json!({
-            "type": "object",
-            "required": ["agent"],
-            "properties": {"agent": {"type": "string", "minLength": 1}},
-            "additionalProperties": false,
-        });
+        let agent_only = super::agent_parameters();
         let fork_parameters = json!({
             "type": "object",
             "required": ["agent", "point", "reason"],

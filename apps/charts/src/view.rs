@@ -101,6 +101,10 @@ pub struct Draft {
     pub color_mode: String,
     /// A stat's spark line shows.
     pub graph: bool,
+    /// A map's column of countries, and its dots' sizes ("" for unset).
+    pub location: String,
+    pub size_min: String,
+    pub size_max: String,
 }
 
 impl Default for Draft {
@@ -126,6 +130,9 @@ impl Default for Draft {
             thresholds: String::new(),
             color_mode: COLOR_MODE.into(),
             graph: true,
+            location: String::new(),
+            size_min: String::new(),
+            size_max: String::new(),
         }
     }
 }
@@ -205,6 +212,9 @@ impl Draft {
             thresholds: thresholds_text(if legacy_stat(viz) { &legacy } else { &viz.thresholds }),
             color_mode: viz.color_mode.clone().unwrap_or_else(|| COLOR_MODE.into()),
             graph: viz.graph.as_deref() != Some("none"),
+            location: viz.location.clone().unwrap_or_default(),
+            size_min: optional(viz.size_min),
+            size_max: optional(viz.size_max),
         }
     }
 
@@ -240,6 +250,9 @@ impl Draft {
             thresholds: text("thresholds").trim().to_owned(),
             color_mode: or("color_mode", defaults.color_mode),
             graph: context["graph"].as_bool().unwrap_or(true),
+            location: text("location").trim().to_owned(),
+            size_min: text("size_min").trim().to_owned(),
+            size_max: text("size_max").trim().to_owned(),
         }
     }
 
@@ -252,6 +265,7 @@ impl Draft {
             "line_width": [self.line_width], "fill": [self.fill], "points": [self.points], "legend": self.legend,
             "min": self.min, "max": self.max, "decimals": self.decimals,
             "reduce": [self.reduce], "thresholds": self.thresholds, "color_mode": [self.color_mode], "graph": self.graph,
+            "location": self.location, "size_min": self.size_min, "size_max": self.size_max,
         })
     }
 
@@ -260,6 +274,10 @@ impl Draft {
         let number = |text: &str| text.is_empty() || text.parse::<f64>().is_ok_and(f64::is_finite);
         if !number(&self.min) || !number(&self.max) {
             return Some("Enter numbers for min and max, or leave them empty to fit the data.".into());
+        }
+        let size = |text: &str| text.is_empty() || text.parse::<f64>().is_ok_and(|size| (1.0..=40.0).contains(&size));
+        if !size(&self.size_min) || !size(&self.size_max) {
+            return Some("Enter dot sizes from 1 to 40, or leave them empty.".into());
         }
         if !self.decimals.is_empty() && !self.decimals.parse::<u32>().is_ok_and(|decimals| decimals <= 10) {
             return Some("Enter a whole number from 0 to 10 for decimals, or leave it empty.".into());
@@ -281,6 +299,11 @@ impl Draft {
             && min >= max
         {
             return Some("Make min lower than max.".into());
+        }
+        if let (Some(low), Some(high)) = (viz.size_min, viz.size_max)
+            && low > high
+        {
+            return Some("Make the smallest dot no bigger than the largest.".into());
         }
         viz.style_problems().first().map(|(field, why)| format!("{field}: {why}."))
     }
@@ -320,6 +343,9 @@ impl Draft {
             thresholds: read_thresholds(&self.thresholds).unwrap_or(kept.thresholds),
             color_mode: Some(self.color_mode.clone()).filter(|mode| !mode.is_empty() && mode != COLOR_MODE),
             graph: (!self.graph).then(|| "none".into()),
+            location: optional(&self.location),
+            size_min: number(&self.size_min),
+            size_max: number(&self.size_max),
         }
     }
 
@@ -1030,7 +1056,7 @@ fn panel_card(index: usize, panel: &Panel, outcome: &Outcome, editing: bool) -> 
 
 /// Whether `kind` is one Charts draws.
 pub fn drawable(kind: &str) -> bool {
-    kind == "stat" || kind == "table" || CHART_KINDS.contains(&kind)
+    kind == "stat" || kind == "table" || kind == "map" || CHART_KINDS.contains(&kind)
 }
 
 /// A panel's body as `id`, bound to its data at `at`: its Stat, Chart or
@@ -1072,6 +1098,23 @@ pub fn panel_body(id: &str, at: &str, title: &str, viz: &Viz, grid: Grid, outcom
                 stat["decimals"] = json!(decimals);
             }
             stat
+        }
+        "map" => {
+            let mut map = json!({"id": id, "component": "Map", "data": path("data"), "label": title, "height": height(grid)});
+            if let Some(location) = &viz.location {
+                map["location"] = json!(location);
+            }
+            if let Some(value) = viz.y.first() {
+                map["value"] = json!(value);
+            }
+            if let Some(color) = viz.color.as_deref().filter(|color| model::COLOR_NAMES.contains(color)) {
+                map["color"] = json!(color);
+            }
+            if !viz.thresholds.is_empty() {
+                map["thresholds"] = json!(viz.thresholds);
+            }
+            style(&mut map, viz);
+            map
         }
         "table" => {
             let mut table = json!({"id": format!("{id}_table"), "component": "Table", "data": path("data")});
@@ -1123,6 +1166,8 @@ fn style(chart: &mut Value, viz: &Viz) {
     set("max", viz.max.map(number));
     set("decimals", viz.decimals.map(Value::from));
     set("legend", viz.legend.map(Value::from));
+    set("sizeMin", viz.size_min.map(number));
+    set("sizeMax", viz.size_max.map(number));
 }
 
 /// A panel's data, where its body looks for it.
@@ -1135,6 +1180,8 @@ pub fn panel_data(viz: &Viz, outcome: &Outcome, rows: usize) -> Value {
         Outcome::Table(_) if !drawable(&viz.kind) => json!({"error": format!("Charts can't draw \"{}\".", viz.kind)}),
         Outcome::Table(table) if viz.kind == "stat" => stat(table, viz.reduce.as_deref().unwrap_or("sum")),
         Outcome::Table(table) if viz.kind == "table" => json!({"data": truncate(table, TABLE_ROWS.min(rows))}),
+        // A sample would leave holes in a grid or a map: the first rows.
+        Outcome::Table(table) if viz.kind == "heatmap" || viz.kind == "map" => json!({"data": truncate(table, rows)}),
         Outcome::Table(table) => json!({"data": downsample(table, rows, viz.series_by.as_deref())}),
     }
 }
@@ -1213,13 +1260,15 @@ pub fn downsample(table: &Value, most: usize, series_by: Option<&str>) -> Value 
 
 // ---- The editor ----
 
-const KIND_LABELS: [(&str, &str); 7] = [
+const KIND_LABELS: [(&str, &str); 9] = [
     ("stat", "Number"),
     ("timeseries", "Line"),
     ("bars", "Bars"),
     ("stackedBars", "Stacked bars"),
     ("pie", "Pie"),
     ("scatter", "Scatter"),
+    ("heatmap", "Heatmap"),
+    ("map", "World map"),
     ("table", "Table"),
 ];
 const WIDTHS: [(u32, &str); 5] = [(3, "Quarter"), (4, "Third"), (6, "Half"), (8, "Two thirds"), (12, "Full")];
@@ -1263,6 +1312,7 @@ pub fn editor_components(editor: &Editor, sources: &[DataSource], kind_open: boo
         "min": {"@path": "/editor/min"}, "max": {"@path": "/editor/max"}, "decimals": {"@path": "/editor/decimals"},
         "legend": {"@path": "/editor/legend"}, "reduce": {"@path": "/editor/reduce"},
         "thresholds": {"@path": "/editor/thresholds"}, "color_mode": {"@path": "/editor/color_mode"}, "graph": {"@path": "/editor/graph"},
+        "location": {"@path": "/editor/location"}, "size_min": {"@path": "/editor/size_min"}, "size_max": {"@path": "/editor/size_max"},
     });
     let field = |id: &str, label: &str, key: &str, placeholder: &str, variant: &str| json!({"id": id, "component": "TextField", "label": label, "value": {"@path": format!("/editor/{key}")}, "placeholder": placeholder, "variant": variant});
     let mut sources: Vec<Value> =
@@ -1299,6 +1349,10 @@ pub fn editor_components(editor: &Editor, sources: &[DataSource], kind_open: boo
         json!({"id": "ed_max", "component": "TextField", "label": "Max", "value": {"@path": "/editor/max"}, "placeholder": "Auto", "variant": "number", "weight": 1}),
         json!({"id": "ed_decimals", "component": "TextField", "label": "Decimals", "value": {"@path": "/editor/decimals"}, "placeholder": "Auto", "variant": "number", "weight": 1}),
         json!({"id": "ed_legend", "component": "CheckBox", "label": "Legend", "value": {"@path": "/editor/legend"}}),
+        json!({"id": "ed_location", "component": "TextField", "label": "Countries", "value": {"@path": "/editor/location"}, "placeholder": "The first text column", "weight": 1}),
+        json!({"id": "ed_sizes", "component": "Row", "align": "start", "children": ["ed_size_min", "ed_size_max"]}),
+        json!({"id": "ed_size_min", "component": "TextField", "label": "Smallest dot", "value": {"@path": "/editor/size_min"}, "placeholder": "2", "variant": "number", "weight": 1}),
+        json!({"id": "ed_size_max", "component": "TextField", "label": "Largest dot", "value": {"@path": "/editor/size_max"}, "placeholder": "15", "variant": "number", "weight": 1}),
     ];
     // Show as: a menu, as Grafana's visualization picker; choosing one
     // draws the settings that kind has, and only those (Abbacchio, Bruno
@@ -1319,11 +1373,30 @@ pub fn editor_components(editor: &Editor, sources: &[DataSource], kind_open: boo
         "scatter" => (&[], &["ed_points", "ed_axis", "ed_legend"]),
         "bars" | "stackedBars" => (&[], &["ed_axis", "ed_legend"]),
         "pie" => (&[], &["ed_legend"]),
+        "heatmap" => (&[], &["ed_axis", "ed_legend"]),
+        "map" => (&[], &["ed_thresholds", "ed_sizes", "ed_axis", "ed_legend"]),
         _ => (&[], &[]),
     };
-    // A number's axis is its decimals alone.
-    if draft.kind == "stat" {
+    // A number's, a grid's and a map's axis is its decimals alone.
+    let decimals_only = matches!(draft.kind.as_str(), "stat" | "heatmap" | "map");
+    if decimals_only {
         out.iter_mut().find(|component| component["id"] == "ed_axis").expect("the axis")["children"] = json!(["ed_decimals"]);
+    }
+    let find = |out: &mut Vec<Value>, id: &str| out.iter_mut().position(|component| component["id"] == id).expect(id);
+    match draft.kind.as_str() {
+        // A map is placed by its countries: no column along the bottom.
+        "map" => {
+            let at = find(&mut out, "ed_columns");
+            out[at]["children"] = json!(["ed_location", "ed_unit"]);
+            let at = find(&mut out, "ed_thresholds");
+            out[at]["placeholder"] = json!("Green to red by value");
+        }
+        // A grid's rows are its series.
+        "heatmap" => {
+            let at = find(&mut out, "ed_series");
+            out[at]["label"] = json!("Rows");
+        }
+        _ => {}
     }
     let mut col: Vec<String> = ["ed_heading", "ed_title", "ed_source", "ed_sql", "ed_help", "ed_kind"].map(String::from).to_vec();
     if kind_open {
@@ -1336,10 +1409,19 @@ pub fn editor_components(editor: &Editor, sources: &[DataSource], kind_open: boo
     col.extend(after.iter().map(|id| (*id).to_owned()));
     // What isn't shown isn't sent.
     let shown: Vec<&str> = before.iter().chain(after).copied().collect();
-    let style = ["ed_reduce", "ed_thresholds", "ed_color_mode", "ed_graph", "ed_line", "ed_fill", "ed_points", "ed_axis", "ed_min", "ed_max", "ed_legend"];
+    let style = [
+        "ed_reduce", "ed_thresholds", "ed_color_mode", "ed_graph", "ed_line", "ed_fill", "ed_points", "ed_axis", "ed_min", "ed_max", "ed_legend",
+        "ed_sizes", "ed_size_min", "ed_size_max",
+    ];
     out.retain(|component| {
         let id = component["id"].as_str().unwrap_or_default();
-        !style.contains(&id) || shown.contains(&id) || (id.starts_with("ed_m") && shown.contains(&"ed_axis") && draft.kind != "stat")
+        let inside = match id {
+            "ed_min" | "ed_max" => shown.contains(&"ed_axis") && !decimals_only,
+            "ed_size_min" | "ed_size_max" => shown.contains(&"ed_sizes"),
+            _ => false,
+        };
+        let map = draft.kind == "map";
+        (!style.contains(&id) || shown.contains(&id) || inside) && (id != "ed_location" || map) && !(map && (id == "ed_x" || id == "ed_series"))
     });
     if let Some(preview) = &editor.preview {
         let viz = draft.viz(None);

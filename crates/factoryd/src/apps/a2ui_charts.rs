@@ -1,4 +1,4 @@
-//! The chart family of Claktory's A2UI catalog: Chart, Stat and Table, the
+//! The chart family of Claktory's A2UI catalog: Chart, Stat, Table and Map, the
 //! kinds of value only they take (a query's answer, series, a spark, a
 //! Stat's color, a Table's columns) and their rules across properties.
 //! `a2ui.rs` checks everything else and asks here for these.
@@ -75,7 +75,9 @@ const FLAG: super::Kind = super::Kind::Chart(Kind::Flag);
 pub(super) fn catalog(component: &str) -> Option<Props> {
     Some(match component {
         "Chart" => &[
-            ("kind", Choice(&["timeseries", "bars", "stackedBars", "pie", "scatter"]), true),
+            // heatmap: a grid of x's values by seriesBy's, each cell
+            // colored by its y (an hour by weekday, say).
+            ("kind", Choice(&["timeseries", "bars", "stackedBars", "pie", "scatter", "heatmap"]), true),
             ("data", TABLE, true),
             ("x", Text, false),
             ("y", SERIES, false),
@@ -118,6 +120,28 @@ pub(super) fn catalog(component: &str) -> Option<Props> {
             ("height", super::Kind::Chart(Kind::Range(60.0, 480.0)), false),
         ],
         "Table" => &[("data", TABLE, true), ("columns", COLUMNS, false)],
+        // A world map, as Grafana's geomap with a country lookup: a dot at
+        // each country (ISO 3166-1 alpha-2 or alpha-3 in `location`; the
+        // first text column when left out) sized and colored by `value`
+        // (the last numeric column), on a map the app bundles. Rows it
+        // can't place are listed under it in words.
+        "Map" => &[
+            ("data", TABLE, true),
+            ("location", Text, false),
+            ("value", Text, false),
+            ("label", DynString, false),
+            ("unit", DynString, false),
+            ("decimals", super::Kind::Chart(Kind::Whole(0, 10)), false),
+            // Colored by thresholds, or one color; left out, green to
+            // yellow to red by value.
+            ("thresholds", super::Kind::Chart(Kind::Thresholds), false),
+            ("color", STAT_COLOR, false),
+            // A dot's radius from the least value to the most, in pixels.
+            ("sizeMin", super::Kind::Chart(Kind::Range(1.0, 40.0)), false),
+            ("sizeMax", super::Kind::Chart(Kind::Range(1.0, 40.0)), false),
+            ("legend", FLAG, false),
+            ("height", super::Kind::Chart(Kind::Range(120.0, 480.0)), false),
+        ],
         _ => return None,
     })
 }
@@ -127,7 +151,7 @@ pub(super) fn catalog(component: &str) -> Option<Props> {
 /// Charts app may set for a newer catalog than this one, after a roll-back
 /// say. What's left out never reaches a device; known keys are still checked.
 pub(super) fn lenient(component: &str) -> bool {
-    matches!(component, "Chart" | "Stat" | "Row")
+    matches!(component, "Chart" | "Stat" | "Row" | "Map")
 }
 
 /// Rules across a component's properties, once each property is checked on
@@ -147,6 +171,12 @@ pub(super) fn component(name: &str, fields: &Map<String, Value>, at: &str) -> Re
         && from >= to
     {
         return Err(invalid(format!("{at}/timeFrom"), "timeFrom is before timeTo"));
+    }
+    if name == "Map"
+        && let (Some(least), Some(most)) = (fields.get("sizeMin").and_then(Value::as_f64), fields.get("sizeMax").and_then(Value::as_f64))
+        && least > most
+    {
+        return Err(invalid(format!("{at}/sizeMin"), "sizeMin is at most sizeMax"));
     }
     Ok(())
 }
@@ -379,6 +409,47 @@ mod tests {
             let error = apply(&mut content, component(wrong.clone())).unwrap_err();
             assert!(error.contains(why), "{wrong}: {error}");
         }
+    }
+
+    #[test]
+    fn maps_and_heatmaps_take_a_querys_answer() {
+        let mut content = created();
+        let users = json!({"columns": ["country", "users"], "rows": [["DE", 12], ["usa", 40], ["Hidden (fewer than 5)", 9], ["FR", null]]});
+        let hours = json!({"columns": ["day", "hour", "active"], "rows": [["Mon", "14:00", 3], ["Tue", "14:00", null]]});
+        let good = json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [
+            {"id": "map", "component": "Map", "data": users},
+            {"id": "styled", "component": "Map", "data": {"@path": "/users"}, "location": "country", "value": "users",
+             "label": "Users by country", "unit": "users", "decimals": 0, "thresholds": [{"color": "green"}, {"color": "red", "value": 10}],
+             "color": "blue", "sizeMin": 1, "sizeMax": 40, "legend": false, "height": 300},
+            {"id": "same", "component": "Map", "data": users, "sizeMin": 8, "sizeMax": 8},
+            {"id": "grid", "component": "Chart", "kind": "heatmap", "data": hours, "x": "hour", "y": ["active"], "seriesBy": "day"},
+        ]}});
+        apply(&mut content, good).unwrap();
+        let component = |component: Value| json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [component]}});
+        for (wrong, why) in [
+            (json!({"id": "m", "component": "Map"}), "Map needs data"),
+            (json!({"id": "m", "component": "Map", "data": users, "location": 1}), "this is a string"),
+            (json!({"id": "m", "component": "Map", "data": users, "value": {"@path": "/v"}}), "this is a string"),
+            (json!({"id": "m", "component": "Map", "data": users, "sizeMin": 0}), "from 1 to 40"),
+            (json!({"id": "m", "component": "Map", "data": users, "sizeMax": 41}), "from 1 to 40"),
+            (json!({"id": "m", "component": "Map", "data": users, "sizeMin": 20, "sizeMax": 10}), "sizeMin is at most sizeMax"),
+            (json!({"id": "m", "component": "Map", "data": users, "color": "#00ff00"}), "signal, muted, agent"),
+            (json!({"id": "m", "component": "Map", "data": users, "thresholds": [{"color": "red", "value": 1}]}), "the base"),
+            (json!({"id": "m", "component": "Map", "data": users, "height": 100}), "from 120 to 480"),
+            (json!({"id": "m", "component": "Map", "data": users, "legend": 1}), "true or false"),
+            (json!({"id": "m", "component": "Map", "data": users, "@tiles": "https://x"}), "has no property \"@tiles\""),
+            (
+                json!({"id": "c", "component": "Chart", "kind": "heatmap", "data": hours, "y": ["a", "b"], "seriesBy": "day"}),
+                "y names one column",
+            ),
+        ] {
+            let error = apply(&mut content, component(wrong.clone())).unwrap_err();
+            assert!(error.contains(why), "{wrong}: {error}");
+        }
+        // A newer catalog's settings on a Map are left out, as on a Chart.
+        let newer = component(json!({"id": "m", "component": "Map", "data": users, "basemap": "satellite"}));
+        let Ok(Applied::Changed(sent)) = apply(&mut content, newer) else { panic!("applied") };
+        assert!(!sent.contains("basemap"));
     }
 
     #[test]

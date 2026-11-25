@@ -258,6 +258,16 @@ pub(crate) const ALL: [&dyn Extension; 26] = [
     &web::Web,
 ];
 
+/// Parameters for a tool that requires only a nonempty agent string.
+pub(crate) fn agent_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["agent"],
+        "properties": {"agent": {"type": "string", "minLength": 1}},
+        "additionalProperties": false,
+    })
+}
+
 /// An extension's tool. Its schema isn't enforced while sampling (strict
 /// tools): providers cap how many optional parameters strict tools may have
 /// in all, and extensions would soon exceed it. So optional parameters are

@@ -472,7 +472,7 @@ pub(crate) fn recheck(factory: &Arc<Factory>) {
     let forwards: Vec<(String, String)> = {
         let db = factory.store.db();
         let result = db.prepare("SELECT kind, target FROM pipe_handoff_forwards WHERE recipient != ''").and_then(|mut statement| {
-            statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()
+            statement.query_map([], crate::store::row2)?.collect::<rusqlite::Result<Vec<_>>>()
         });
         result.unwrap_or_else(|error| {
             tracing::error!(%error, "could not read where reports go");
@@ -556,11 +556,7 @@ pub(crate) fn type_names(factory: &Factory, types: &[String]) -> String {
         .filter_map(|id| types::current(factory, id))
         .map(|schema| format!("\"{}\"", super::agents::escape(&schema.name)))
         .collect();
-    match names.as_slice() {
-        [] => "no report types".to_owned(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    }
+    if names.is_empty() { "no report types".to_owned() } else { factory_agent::text::list_and(&names) }
 }
 
 /// Tells the pipe's liaisons which report types it forwards now: their
@@ -640,7 +636,7 @@ pub(crate) fn forwarding_to(factory: &Factory, agent: &str) -> Option<Vec<String
     let rows: Vec<(String, String)> = {
         let db = factory.store.db();
         let result = db.prepare("SELECT kind, target FROM pipe_handoff_forwards WHERE recipient = ?1 ORDER BY target").and_then(
-            |mut statement| statement.query_map([agent], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>(),
+            |mut statement| statement.query_map([agent], crate::store::row2)?.collect::<rusqlite::Result<Vec<_>>>(),
         );
         match result {
             Ok(rows) => rows,

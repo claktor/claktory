@@ -255,7 +255,7 @@ pub fn coding_tools(cwd: &Path, extra_dirs: &[PathBuf], background: Option<bash:
             "Apply exact replacements to an existing file and return a unified diff. Each oldText must match exactly once in the original file, or set replaceAll to replace every occurrence; a unique match that differs only in leading or trailing whitespace on each line is accepted. Edits must not overlap; errors name each failing edit.",
         ),
     ];
-    tools.push(Tool::new(cwd, ToolKind::Bash, "bash", "Run command", "Run bash. Every command starts in your working folder, so don't cd there first; a cd lasts only for that command. Unhandled failures stop the script (errexit and pipefail); use if or || for expected failures. Piping to head can cause SIGPIPE; use a draining filter such as sed -n instead. command is the shell script itself, not a bash -c/bash -lc invocation — put the script text directly in command. Use rg for search, run tests, and inspect git diff. timeout is seconds (default 120, maximum 600). A command still running at its timeout moves to the background and keeps running, and you get an event when it ends (one that starts with sleep is stopped instead). Set run_in_background up front for servers, watchers and anything you know is long: it returns at once with a task id and a log file, and the command is stopped after 30 minutes unless timeout says otherwise (up to 7200). Never wait with sleep: background tasks and messages wake you by themselves. Output up to 30,000 characters comes back whole; past that you get its start, its end and the path of the whole output. Every result ends with the exit status and how long the command took; tool updates contain output as it arrives. Files written by commands inherit the environment's resource limits."));
+    tools.push(Tool::new(cwd, ToolKind::Bash, "bash", "Run command", "Run bash. Every command starts in your working folder, so don't cd there first; a cd lasts only for that command. Unhandled failures stop the script (errexit and pipefail); use if or || for expected failures. Piping to head can cause SIGPIPE; use a draining filter such as sed -n instead. command is the shell script itself, not a bash -c/bash -lc invocation — put the script text directly in command. Run tests and inspect git diff. timeout is seconds (default 120, maximum 600). A command still running at its timeout moves to the background and keeps running, and you get an event when it ends (one that starts with sleep is stopped instead). Set run_in_background up front for servers, watchers and anything you know is long: it returns at once with a task id and a log file, and the command is stopped after 30 minutes unless timeout says otherwise (up to 7200). Never wait with sleep: background tasks and messages wake you by themselves. Output up to 30,000 characters comes back whole; past that you get its start, its end and the path of the whole output. Every result ends with the exit status and how long the command took; tool updates contain output as it arrives. Files written by commands inherit the environment's resource limits."));
     for tool in &mut tools {
         tool.extra_dirs = extra_dirs.to_vec();
         if tool.kind == ToolKind::Bash {
@@ -278,6 +278,57 @@ pub fn secrets(tools: &mut [Tool]) {
             tool.spec.description = format!("{} {SECRETS_HINT}", tool.spec.description).into();
         }
     }
+}
+
+/// Tells bash's description about the programs Claktory gives every agent
+/// (ripgrep, jq), each only when it resolves on `path`, the PATH the
+/// agent's commands run with, as its context starts: one can be missing (a
+/// build not installed from a release, a Linux install without its tools),
+/// and the description never claims a program the machine lacks, or agents
+/// learn it fails and stop trying it.
+pub fn installed(tools: &mut [Tool], path: &str) {
+    let hints: Vec<&str> = INSTALLED.iter().filter(|(program, _)| on_path(program, path)).map(|(_, hint)| *hint).collect();
+    if hints.is_empty() {
+        return;
+    }
+    for tool in tools.iter_mut().filter(|tool| tool.kind == ToolKind::Bash) {
+        let description = tool.spec.description.to_string();
+        let hints: Vec<&str> = hints.iter().copied().filter(|hint| !description.contains(hint)).collect();
+        if hints.is_empty() {
+            continue;
+        }
+        let hints = hints.join(" ");
+        tool.spec.description = match description.split_once(HINTS_BEFORE) {
+            Some((before, after)) => format!("{before}{hints} {HINTS_BEFORE}{after}"),
+            None => format!("{description} {hints}"),
+        }
+        .into();
+    }
+}
+
+/// Each program `installed` names, and what it says of it.
+const INSTALLED: [(&str, &str); 2] = [
+    ("rg", "ripgrep (rg) is installed: prefer it to grep -r and find for searching code and files."),
+    ("jq", "jq is installed: use it to read and filter JSON."),
+];
+
+/// The sentence of bash's description the programs' hints go before.
+const HINTS_BEFORE: &str = "Run tests and inspect git diff.";
+
+/// Whether `program` is an executable file in one of `path`'s folders.
+fn on_path(program: &str, path: &str) -> bool {
+    std::env::split_paths(path).filter(|dir| !dir.as_os_str().is_empty()).any(|dir| {
+        let Ok(metadata) = std::fs::metadata(dir.join(program)) else { return false };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            metadata.is_file()
+        }
+    })
 }
 
 const SECRETS_HINT: &str = "secrets names secrets granted to you: their variables are set for that command only, and their values are hidden in all output; never print or save a value yourself.";

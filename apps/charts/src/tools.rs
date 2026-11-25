@@ -186,7 +186,9 @@ fn put(host: &mut impl Host, args: &Value, caller: &str) -> ToolOutput {
             Outcome::NotGranted(label) => waiting.push(json!({"panel": panel.id, "source": label})),
         }
     }
-    let mut text = format!("Kept \"{}\" ({}) as _rev {}; the version before it is kept too.", saved.name, saved.id, saved.rev);
+    let mut text = format!("Kept \"{}\" ({}) as _rev {}", saved.name, saved.id, saved.rev);
+    // A new dashboard has no version before it to speak of.
+    text.push_str(if model::previous(host, &saved.id).is_some() { "; the version before it is kept too." } else { "." });
     for failure in &failed {
         text.push_str(&format!(
             "\nPanel {}'s query failed: {}",

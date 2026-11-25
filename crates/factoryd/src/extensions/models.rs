@@ -28,6 +28,8 @@ use crate::factory::{AgentChange, Factory, Inner};
 pub(crate) const ID: &str = "models";
 /// The option that gives it models_set; off, it only lists (friend bug #8).
 pub(crate) const CAN_SET: &str = "can_set";
+/// The tool that puts one of a provider's accounts in another place.
+pub(crate) const ORDER_TOOL: &str = "models_account_order";
 
 static MANIFEST: Manifest = Manifest {
     id: ID,
@@ -48,7 +50,8 @@ static MANIFEST: Manifest = Manifest {
 const LIST: &str = "The models agents can run on now, by provider, each with its exact id (what an agent's model setting takes), its name, its efforts and its context size, and each provider's state: signed in or not, and whether it can take requests now (an account at its usage limit, out of credit or needing a new sign-in can't), and each subscription's limits: how much of each is used and when it resets. query: words that must all be in the id or the name, such as \"opus\" or \"sonnet 4.6\" (\"-\", \".\" and \"_\" alike). provider: one provider, by id or name, such as \"openrouter\".";
 const SET: &str = "Put an agent on a model, an effort, or both, from its next step; Claktory tells it. agent: its id or name (you included). model: an id exactly as models_list gives it. effort: one the model lists; left out, the agent keeps its effort if the model takes it, else gets \"high\" or the model's strongest. reason: why, in a sentence for the person, who sees every change in their History and can undo it. Refused for a model that isn't available now, saying which are close.";
 const REFRESH: &str = "Ask a provider for its list of models again now, as the person's refresh in Settings → Providers does, when a model they expect isn't listed (one just released, say). provider: its id or name, such as \"anthropic\"; left out, every signed-in provider whose list can be asked. Says how many models it lists after.";
-const AUTO_CONTINUE: &str = "Admin only: ask the person to turn Continue automatically (Settings → Providers) on or off, when they ask. On, an agent or chat waiting on a usage limit continues on another signed-in provider by itself, which spends that account's usage or credit. on: true or false; reason: why, in a sentence they read on the card. A card opens in your conversation (and their Needs you), and only their approval changes it; you're told which in an event.";
+const AUTO_CONTINUE: &str = "Admin only: ask the person to turn Continue automatically (Settings → Providers) on or off, when they ask. On, an agent or chat waiting on a usage limit continues on another signed-in provider by itself, which spends that account's usage or credit. on: true or false; reason: why, in a sentence they read on the card. A card opens in your conversation (and their Needs you), and only their approval changes it; you're told which in an event. proposal: the id of an approved proposal whose grants name it, once you've reviewed it: then it's made without a card when it's within one of them; otherwise the card opens as usual and the answer says why.";
+const ORDER: &str = "Put one of a provider's accounts (its subscriptions and keys) in another place in their order, as the person's drag in Settings → Providers does, when they ask (\"use Julie's account last\"). The order is a priority: each request goes to the first account with room, and back to an earlier one as soon as it has room again (its limit reset). provider: its id or name. account: its email or name as models_list shows it, or a word only it has (\"julie\"). position: \"first\", \"last\" or a place counted from 1. A key from the environment always comes last.";
 const TRY_NOW: &str = "Have an agent waiting on a provider's usage limit or credit try again now, as the person's Try now beside the wait does, when they say usage is back (a reset claimed, credit added). agent: its id or name. Claktory asks the provider again: with room, the agent carries on; without, it keeps waiting, with the provider's new time.";
 /// The longest reason kept.
 const MOST_REASON: usize = 500;
@@ -108,25 +111,32 @@ impl Extension for Models {
         let auto_parameters = json!({
             "type": "object",
             "required": ["on", "reason"],
-            "properties": {"on": {"type": "boolean"}, "reason": {"type": "string", "minLength": 1, "maxLength": MOST_REASON}},
+            "properties": {"on": {"type": "boolean"}, "reason": {"type": "string", "minLength": 1, "maxLength": MOST_REASON}, "proposal": {"type": "string"}},
             "additionalProperties": false,
         });
         let auto = admin.then(|| {
-            super::tool(
+            async_tool(
+                factory,
+                agent,
                 crate::card_actions::AUTO_CONTINUE_TOOL,
                 "Continue automatically",
                 AUTO_CONTINUE,
                 auto_parameters,
-                super::typed_handler(factory, agent, auto_continue),
+                auto_continue,
             )
         });
         if !can_set(factory, agent) {
             return [list, refresh].into_iter().chain(auto).collect();
         }
-        let try_parameters = json!({
+        let try_parameters = super::agent_parameters();
+        let order_parameters = json!({
             "type": "object",
-            "required": ["agent"],
-            "properties": {"agent": {"type": "string", "minLength": 1}},
+            "required": ["provider", "account", "position"],
+            "properties": {
+                "provider": {"type": "string", "minLength": 1},
+                "account": {"type": "string", "minLength": 1},
+                "position": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "string", "enum": ["first", "last"]}]},
+            },
             "additionalProperties": false,
         });
         vec![
@@ -134,6 +144,7 @@ impl Extension for Models {
             refresh,
             async_tool(factory, agent, "models_set", "Change an agent's model", SET, set_parameters, set),
             async_tool(factory, agent, "models_try_now", "Try a waiting agent now", TRY_NOW, try_parameters, try_now),
+            async_tool(factory, agent, ORDER_TOOL, "Order a provider's accounts", ORDER, order_parameters, order),
         ]
         .into_iter()
         .chain(auto)
@@ -176,6 +187,9 @@ fn list(factory: &Arc<Factory>, agent: &str, args: ListArgs) -> Result<ToolResul
             let usage = inner.usage.get(&key).or(account.usage.as_ref());
             let plan = inner.plans.get(&key).unwrap_or(&account.plan);
             usage_lines.extend(usage.and_then(|usage| limits(account, plan, usage)));
+        }
+        if provider.accounts.len() > 1 && hidden.is_none() {
+            let _ = writeln!(text, "- {}", order_line(provider));
         }
         match &hidden {
             Some(read) if !usage_lines.is_empty() => {
@@ -505,11 +519,15 @@ struct TryArgs {
 struct AutoArgs {
     on: bool,
     reason: String,
+    /// An approved proposal that names it (`crate::proposal_grants`).
+    #[serde(default)]
+    proposal: Option<String>,
 }
 
 /// models_auto_continue (#423): asks the person, on a card, to turn
 /// Continue automatically on or off; only their approval does.
-fn auto_continue(factory: &Arc<Factory>, agent: &str, args: AutoArgs) -> Result<ToolResult, String> {
+async fn auto_continue(factory: Arc<Factory>, agent: String, args: AutoArgs) -> Result<ToolResult, String> {
+    let (factory, agent) = (&factory, agent.as_str());
     let (me, person) = {
         let inner = factory.lock();
         let me = super::caller(&inner.config, agent)?;
@@ -536,7 +554,8 @@ fn auto_continue(factory: &Arc<Factory>, agent: &str, args: AutoArgs) -> Result<
         ("Turn off Continue automatically", "agents and chats waiting on a usage limit would wait until you continue them")
     };
     let description = format!("{me} asks to change it in Settings → Providers: {what}.");
-    crate::card_actions::ask(factory, agent, title, &description, &reason, &crate::card_actions::Action::AutoContinue { on: args.on })
+    let action = crate::card_actions::Action::AutoContinue { on: args.on };
+    crate::card_actions::ask_or_proposed(factory, agent, title, &description, &reason, &action, args.proposal.as_deref()).await
 }
 
 /// models_try_now: an agent waiting on its provider's usage asks again now,
@@ -560,6 +579,103 @@ async fn try_now(factory: Arc<Factory>, caller: String, args: TryArgs) -> Result
         format!("Asked {name}'s provider again: {name} isn't waiting any more and carries on.")
     };
     Ok(ToolResult::text(said, json!({"agent": id})))
+}
+
+#[derive(Deserialize)]
+struct OrderArgs {
+    provider: String,
+    account: String,
+    position: serde_json::Value,
+}
+
+/// models_account_order: puts one of a provider's accounts in another place
+/// in the order requests try them, as the person's drag in Settings →
+/// Providers does (`Factory::move_account`). The order is a priority: each
+/// request goes to the first account with room.
+async fn order(factory: Arc<Factory>, caller: String, args: OrderArgs) -> Result<ToolResult, String> {
+    super::untainted(
+        &factory,
+        &caller,
+        "change the order of a provider's accounts",
+        "change it in Settings → Providers. Nothing was changed.",
+    )?;
+    let (provider_id, account_id, label, position) = {
+        let inner = factory.lock();
+        super::caller(&inner.config, &caller)?;
+        let provider = match chosen(&inner.providers, &args.provider)?.as_slice() {
+            [provider] => *provider,
+            _ => return Err(format!("Name one provider, not \"{}\". Nothing was changed.", args.provider.trim())),
+        };
+        let account = order_account(provider, &args.account)?;
+        let stored = provider.accounts.iter().filter(|account| account.can_sign_out).count();
+        // A place given as text ("2") is taken as the number it is.
+        let place = match &args.position {
+            serde_json::Value::Number(number) => number.as_u64(),
+            serde_json::Value::String(word) => word.trim().parse::<u64>().ok(),
+            _ => None,
+        };
+        let position = match (&args.position, place) {
+            (serde_json::Value::String(word), _) if word.trim().eq_ignore_ascii_case("first") => 0,
+            (serde_json::Value::String(word), _) if word.trim().eq_ignore_ascii_case("last") => stored.saturating_sub(1),
+            (_, Some(place)) if place >= 1 => usize::try_from(place - 1).unwrap_or(usize::MAX).min(stored.saturating_sub(1)),
+            _ => return Err("position: \"first\", \"last\" or a place counted from 1. Nothing was changed.".to_owned()),
+        };
+        if !account.can_sign_out {
+            return Err(format!(
+                "{} is a key from Claktory's environment: it always comes after the accounts signed in. Nothing was changed.",
+                shown(provider, account)
+            ));
+        }
+        (provider.id.clone(), account.id.clone(), shown(provider, account), position)
+    };
+    let position = u32::try_from(position).unwrap_or(u32::MAX);
+    factory.move_account(&provider_id, &account_id, position).await.map_err(|error| format!("{error} Nothing was changed."))?;
+    let inner = factory.lock();
+    let provider = inner.providers.iter().find(|provider| provider.id == provider_id).ok_or("The provider is gone.")?;
+    let person = inner.config.person_capitalized();
+    let text = format!(
+        "Moved {label} among {}'s accounts. {} Each request goes to the first with room, so once an earlier account's limit resets, the next request goes back to it. {person} sees the order in Settings → Providers.",
+        provider.name,
+        order_line(provider)
+    );
+    Ok(ToolResult::text(text, json!({})))
+}
+
+/// The provider's account `named` names: its id, its name as shown
+/// (`shown`: its label, or "Account 2" as the app calls one without), or a
+/// word only its label has ("julie").
+fn order_account<'a>(provider: &'a v1::Provider, named: &str) -> Result<&'a v1::Account, String> {
+    let named = named.trim();
+    let lower = named.to_lowercase();
+    let exact = |account: &&v1::Account| account.id == named || shown(provider, account).eq_ignore_ascii_case(named);
+    if let Some(account) = provider.accounts.iter().find(exact) {
+        return Ok(account);
+    }
+    let found: Vec<&v1::Account> = provider.accounts.iter().filter(|account| account.label.to_lowercase().contains(&lower)).collect();
+    let all = || provider.accounts.iter().map(|account| shown(provider, account)).collect::<Vec<_>>().join(", ");
+    match found.as_slice() {
+        [account] => Ok(account),
+        [] => Err(format!("{} has no account \"{named}\": its accounts are {}. Nothing was changed.", provider.name, all())),
+        several => {
+            let names: Vec<String> = several.iter().map(|account| shown(provider, account)).collect();
+            Err(format!("Several of {}'s accounts match \"{named}\": {}. Name one. Nothing was changed.", provider.name, names.join(", ")))
+        }
+    }
+}
+
+/// "Accounts, in the order requests use them: 1. ana@example.com (in use),
+/// 2. julie@example.com".
+fn order_line(provider: &v1::Provider) -> String {
+    let accounts: Vec<String> = provider
+        .accounts
+        .iter()
+        .enumerate()
+        .map(|(place, account)| {
+            let mark = if account.in_use { " (in use)" } else { "" };
+            format!("{}. {}{mark}", place + 1, shown(provider, account))
+        })
+        .collect();
+    format!("Accounts, in the order requests use them: {}.", accounts.join(", "))
 }
 
 fn can_set(factory: &Factory, agent: &str) -> bool {
@@ -730,6 +846,16 @@ fn reset_time(at: u64) -> String {
         Ok(ms) if !soon => crate::transcript::local_time(ms, "%a %-d %b %H:%M"),
         _ => factory_agent::accounts::when(at),
     }
+}
+
+/// How an account is named to be told apart: its label, else by its place,
+/// as the app names it ("Account 2").
+fn shown(provider: &v1::Provider, account: &v1::Account) -> String {
+    if !account.label.is_empty() {
+        return account.label.clone();
+    }
+    let place = provider.accounts.iter().position(|known| known.id == account.id).unwrap_or_default();
+    format!("Account {}", place + 1)
 }
 
 /// How an account is named; `hide`: as "an account" whatever its label.

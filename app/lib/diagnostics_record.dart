@@ -65,7 +65,12 @@ enum ConnectionKind implements DiagnosticKind {
   path,
 
   /// The connection was made afresh: why.
-  reconnect;
+  reconnect,
+
+  /// Usable after a welcome: the Workspace and the conversation shown are
+  /// in, how long after the try began, and how many bytes the tunnel's
+  /// connection had received by then.
+  ready;
 
   @override
   DiagnosticArea get area => DiagnosticArea.connection;
@@ -104,7 +109,13 @@ enum ConnectionKey implements DiagnosticKey {
   welcomed,
 
   /// Why the relay can't be reached, roughly: [RelayTrouble] (#388).
-  err;
+  err,
+
+  /// What a direct path crosses: [PathReach].
+  reach,
+
+  /// Bytes received, a count.
+  bytes;
 
   @override
   String get wire => switch (this) {
@@ -114,6 +125,10 @@ enum ConnectionKey implements DiagnosticKey {
 }
 
 enum AppLife implements DiagnosticWord { started, background, back }
+
+/// What a direct path crosses, from its address (never the address): this
+/// machine, the same network, a tailnet or the internet.
+enum PathReach implements DiagnosticWord { local, lan, tailnet, public }
 
 /// Why this device's relay can't be reached, in a word: the class of the
 /// tunnel's last error for it, never the error itself (it can name hosts).

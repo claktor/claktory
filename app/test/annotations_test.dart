@@ -806,6 +806,19 @@ void _imageTests() {
     /// The image's box on screen.
     Rect picture(WidgetTester tester) => tester.getRect(find.byType(RawImage));
 
+    testWidgets('a comment let go of lets its region go too, so no outline '
+        'stays (Zucchero on #217)', (tester) async {
+      await showChart(tester);
+      final controller = _controller(tester);
+      controller.selection.value = const Region(area);
+      controller.comment();
+      expect(controller.composing, isA<Region>());
+      controller.cancel();
+      expect(controller.composing, isNull);
+      expect(controller.selection.value, isNull);
+      await settle(tester);
+    });
+
     testWidgets("a comment's region shows, with its card beside it", (
       tester,
     ) async {

@@ -279,6 +279,59 @@ pub struct Status {
     /// How long the next dial has ([DIAL_TIMEOUTS]), in ms: the app waits
     /// at least that long for its connection through the tunnel.
     pub dial_timeout_ms: u32,
+    /// What kind of network the direct path crosses, from its address
+    /// (never the address itself); [Reach::None] while the path isn't
+    /// direct.
+    pub reach: Reach,
+}
+
+/// What a direct path crosses, from the other side's address (Polpo's
+/// efficiency study §4: per route, LAN or tailnet or the internet).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Reach {
+    /// Not direct, or not connected.
+    #[default]
+    None,
+    /// This machine itself (loopback).
+    Local,
+    /// A private or link-local address: the same network.
+    Lan,
+    /// Tailscale's CGNAT range (100.64.0.0/10) or its IPv6 prefix.
+    Tailnet,
+    /// Any other address: across the internet, a hole punched.
+    Public,
+}
+
+impl Reach {
+    pub fn of(addr: &std::net::SocketAddr) -> Self {
+        use std::net::IpAddr;
+        match addr.ip().to_canonical() {
+            IpAddr::V4(ip) => {
+                let [a, b, ..] = ip.octets();
+                if ip.is_loopback() {
+                    Reach::Local
+                } else if a == 100 && (64..128).contains(&b) {
+                    Reach::Tailnet
+                } else if ip.is_private() || ip.is_link_local() {
+                    Reach::Lan
+                } else {
+                    Reach::Public
+                }
+            }
+            IpAddr::V6(ip) => {
+                let s = ip.segments();
+                if ip.is_loopback() {
+                    Reach::Local
+                } else if s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0 {
+                    Reach::Tailnet
+                } else if (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 {
+                    Reach::Lan
+                } else {
+                    Reach::Public
+                }
+            }
+        }
+    }
 }
 
 /// Why a home relay can't be reached, in a word (#388): from iroh's last
@@ -926,6 +979,7 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
             let mut status = shared.status.lock().unwrap();
             status.phase = Phase::Idle;
             status.path = Path::None;
+            status.reach = Reach::None;
             *slot = None;
             return None;
         }
@@ -953,6 +1007,7 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
         status.error.clear();
         status.failure = Failure::None;
         status.path = path_of(&connection);
+        status.reach = reach_of(&connection);
     }
     shared.connected();
     tokio::spawn(follow(connection.clone(), shared.clone()));
@@ -968,8 +1023,12 @@ async fn follow(connection: Connection, shared: Arc<Shared>) {
         let shared = shared.clone();
         async move {
             loop {
-                let path = path_of(&connection);
-                shared.status.lock().unwrap().path = path;
+                let (path, reach) = (path_of(&connection), reach_of(&connection));
+                {
+                    let mut status = shared.status.lock().unwrap();
+                    status.path = path;
+                    status.reach = reach;
+                }
                 // Wrapping: only whether it moved matters.
                 shared.link_received.store(connection.stats().udp_rx.bytes as u32, Ordering::Relaxed);
                 tokio::time::sleep(Duration::from_millis(500)).await;
@@ -982,6 +1041,7 @@ async fn follow(connection: Connection, shared: Arc<Shared>) {
             let (said, failure) = explain_closed(&error);
             let mut status = shared.status.lock().unwrap();
             status.path = Path::None;
+            status.reach = Reach::None;
             if failure == Failure::None {
                 status.phase = Phase::Idle;
             } else {
@@ -991,6 +1051,18 @@ async fn follow(connection: Connection, shared: Arc<Shared>) {
             }
         }
         _ = update => {}
+    }
+}
+
+/// What the selected path crosses, when it's direct.
+fn reach_of(connection: &Connection) -> Reach {
+    let paths = connection.paths();
+    match paths.iter().find(|path| path.is_selected()) {
+        Some(path) => match path.remote_addr() {
+            iroh::TransportAddr::Ip(addr) => Reach::of(addr),
+            _ => Reach::None,
+        },
+        None => Reach::None,
     }
 }
 
@@ -1173,6 +1245,7 @@ impl Shared {
         let mut status = self.status.lock().unwrap();
         status.phase = Phase::Idle;
         status.path = Path::None;
+        status.reach = Reach::None;
         status.error.clear();
         status.failure = Failure::None;
     }
@@ -1181,6 +1254,7 @@ impl Shared {
         let mut status = self.status.lock().unwrap();
         status.phase = Phase::Failed;
         status.path = Path::None;
+        status.reach = Reach::None;
         status.error = said.to_owned();
         status.failure = failure;
     }
@@ -1277,6 +1351,27 @@ mod tests {
         // Never reached, so never chosen as its home: iroh says no more.
         assert_eq!(status.relay_trouble, RelayTrouble::Unchosen, "{status:?}");
         tunnel.close().await;
+    }
+
+    /// A direct path's address says what it crosses, in a word (Polpo's
+    /// study §4): never the address itself.
+    #[test]
+    fn a_direct_path_says_what_it_crosses() {
+        let reach = |addr: &str| Reach::of(&addr.parse().unwrap());
+        assert_eq!(reach("127.0.0.1:1"), Reach::Local);
+        assert_eq!(reach("[::1]:1"), Reach::Local);
+        assert_eq!(reach("192.168.1.20:7"), Reach::Lan);
+        assert_eq!(reach("10.0.0.2:7"), Reach::Lan);
+        assert_eq!(reach("172.20.1.1:7"), Reach::Lan);
+        assert_eq!(reach("169.254.3.4:7"), Reach::Lan);
+        assert_eq!(reach("[fe80::1]:7"), Reach::Lan);
+        assert_eq!(reach("[fd12::1]:7"), Reach::Lan);
+        assert_eq!(reach("100.101.2.3:7"), Reach::Tailnet);
+        assert_eq!(reach("[fd7a:115c:a1e0::5]:7"), Reach::Tailnet);
+        assert_eq!(reach("[::ffff:100.64.0.1]:7"), Reach::Tailnet);
+        assert_eq!(reach("100.128.0.1:7"), Reach::Public);
+        assert_eq!(reach("49.12.7.63:7"), Reach::Public);
+        assert_eq!(reach("[2a01:4f8::1]:7"), Reach::Public);
     }
 
     /// While the endpoint is still measuring the network, no home relay
@@ -1420,6 +1515,7 @@ mod tests {
         let status = tunnel.status();
         assert_eq!(status.phase, Phase::Connected);
         assert_eq!(status.path, Path::Direct, "same machine, no relays");
+        assert!(matches!(status.reach, Reach::Local | Reach::Lan), "{:?}", status.reach);
         assert!(status.error.is_empty());
 
         // A closed socket ends its stream; the echo ends it back.

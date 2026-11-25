@@ -1610,7 +1610,8 @@ class _TranscriptViewState extends State<TranscriptView>
                 // A voice message says how its
                 // transcription goes instead.
                 if (voice != null && !sending)
-                  const TranscribingLine()
+                  // Wraps at the largest text sizes.
+                  const Flexible(child: TranscribingLine())
                 else
                   // Wraps: a quiet one's words name the agent.
                   Flexible(
@@ -2660,6 +2661,7 @@ class _EntryViewState extends State<EntryView> {
           entry.askPerson,
           agentId: AppScope.of(context).transcript.agentId,
           seq: seq,
+          from: AskAnsweredFrom.ASK_ANSWERED_FROM_CONVERSATION,
         ),
         Space.l,
       ),
@@ -3120,10 +3122,13 @@ class _NotSent extends StatelessWidget {
         ),
       ),
     );
+    // A line, or as many as the largest text sizes need, at the end.
     return Padding(
       padding: const EdgeInsets.only(top: 2, left: Space.m, right: Space.m),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
+      child: Wrap(
+        alignment: WrapAlignment.end,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: Space.s,
         children: [
           HoverCard(
             holdToShow: true,
@@ -3136,9 +3141,7 @@ class _NotSent extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(width: Space.s),
           action('Retry', onRetry),
-          const SizedBox(width: Space.s),
           action(edit.$1, edit.$2),
         ],
       ),
@@ -3399,6 +3402,12 @@ class _ProposalCardState extends State<ProposalCard> {
               reason: proposal.updateReason,
             ),
           ],
+          // What approving also lets Rivet do, in Claktory's words, apart
+          // from the agent's.
+          if (proposal.grants.isNotEmpty) ...[
+            const SizedBox(height: Space.m),
+            ProposalGrants(proposal: proposal, rivetName: name),
+          ],
           const SizedBox(height: Space.m),
           if (proposal.withdrawn)
             // Taken back by the agent that made it (#407), not dismissed.
@@ -3420,8 +3429,12 @@ class _ProposalCardState extends State<ProposalCard> {
                     child: Text(
                       _error ??
                           (typed
-                              ? '$name gets the proposal with your comment '
-                                    'and does what you say.'
+                              ? proposal.grants.isEmpty
+                                    ? '$name gets the proposal with your '
+                                          'comment and does what you say.'
+                                    : '$name gets the proposal with your '
+                                          'comment, but nothing above is '
+                                          'allowed without asking you.'
                               : 'If you approve, $name gets it as your '
                                     'message.'),
                       style: TypeScale.of(context).caption.copyWith(
@@ -3485,8 +3498,7 @@ class _ProposalCardState extends State<ProposalCard> {
                         ),
                         if (decided > 0)
                           TextSpan(
-                            text:
-                                '  ${cardTime(context, decided)}',
+                            text: '  ${cardTime(context, decided)}',
                             style: TextStyle(color: palette.textFaint),
                           ),
                       ],
@@ -3510,6 +3522,160 @@ class _ProposalCardState extends State<ProposalCard> {
         ],
       ),
     );
+  }
+}
+
+/// How long an approved proposal's grants stay usable, from its approval.
+const proposalGrantWindow = Duration(hours: 24);
+
+/// What a proposal's heading over its grants says, by its state: what
+/// approving lets [rivet] do, did let it do, or what it still has to ask
+/// for.
+String proposalGrantsHeading(Proposal proposal, String rivet) {
+  if (proposal.state == ProposalState.PROPOSAL_STATE_APPROVED &&
+      !proposal.replied) {
+    return 'Approving let $rivet do this, once, within a day:';
+  }
+  if (proposal.withdrawn ||
+      proposal.replied ||
+      proposal.state == ProposalState.PROPOSAL_STATE_DISMISSED) {
+    return '$rivet still needs your OK for this:';
+  }
+  return 'Approving also lets $rivet do this, once, within a day:';
+}
+
+/// What a proposal asks Rivet to give (Proposal.grants), under the agent's
+/// text and set apart from it as Claktory's own words: a hairline box on
+/// `canvas` with Claktory's heading, each grant's sentence as a bullet in
+/// body `text`, and its warnings under it in the warning box the consent
+/// cards use (`signal` at 6%, its border at 40%). Names and paths show
+/// every hidden character by its code (visibleCodes, Fugo). Once approved,
+/// each says whether Rivet used it, and when.
+class ProposalGrants extends StatelessWidget {
+  const ProposalGrants({
+    super.key,
+    required this.proposal,
+    required this.rivetName,
+  });
+
+  final Proposal proposal;
+  final String rivetName;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final approved =
+        proposal.state == ProposalState.PROPOSAL_STATE_APPROVED &&
+        !proposal.replied;
+    final pending =
+        !proposal.withdrawn &&
+        proposal.state != ProposalState.PROPOSAL_STATE_APPROVED &&
+        proposal.state != ProposalState.PROPOSAL_STATE_DISMISSED;
+    final decided = proposal.decidedAtMs.toInt();
+    // Past its day, an unused grant is gone.
+    final ended =
+        approved &&
+        decided > 0 &&
+        DateTime.now().millisecondsSinceEpoch >=
+            decided + proposalGrantWindow.inMilliseconds;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(Space.s),
+      decoration: BoxDecoration(
+        color: palette.canvas,
+        border: Border.all(color: palette.hairline),
+        borderRadius: BorderRadius.circular(Radii.control),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            proposalGrantsHeading(proposal, rivetName),
+            style: type.caption.copyWith(
+              color: palette.textMuted,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          for (final grant in proposal.grants)
+            ..._grant(context, grant, pending, approved, ended),
+        ],
+      ),
+    );
+  }
+
+  /// One grant: while it can still be used (pending, or approved and
+  /// neither used nor past its day) in text with its warnings; once it
+  /// can't, muted, its warnings left out.
+  List<Widget> _grant(
+    BuildContext context,
+    ProposalGrant grant,
+    bool pending,
+    bool approved,
+    bool ended,
+  ) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final live = pending || (approved && grant.usedMs == 0 && !ended);
+    return [
+      Padding(
+        padding: const EdgeInsets.only(left: Space.xs, top: Space.xs),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '•  ${visibleCodes(grant.summary)}',
+              style: type.body.copyWith(
+                color: live ? palette.text : palette.textMuted,
+              ),
+            ),
+            if (approved)
+              Padding(
+                padding: const EdgeInsets.only(left: Space.m),
+                child: Text(
+                  grant.usedMs > 0
+                      ? 'Done · ${cardTime(context, grant.usedMs.toInt())}'
+                      : ended
+                      ? 'Not used'
+                      : 'Not used yet',
+                  style: type.caption.copyWith(
+                    color: grant.usedMs > 0
+                        ? palette.textMuted
+                        : palette.textFaint,
+                  ),
+                ),
+              ),
+            if (grant.warnings.isNotEmpty && live)
+              Padding(
+                padding: const EdgeInsets.only(left: Space.m, top: Space.xs),
+                child: Container(
+                  padding: const EdgeInsets.all(Space.s),
+                  decoration: BoxDecoration(
+                    color: palette.signal.withValues(alpha: 0.06),
+                    border: Border.all(
+                      color: palette.signal.withValues(alpha: 0.4),
+                    ),
+                    borderRadius: BorderRadius.circular(Radii.control),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final (i, warning) in grant.warnings.indexed)
+                        Padding(
+                          padding: EdgeInsets.only(top: i == 0 ? 0 : Space.xs),
+                          child: Text(
+                            visibleCodes(warning),
+                            style: type.body.copyWith(color: palette.text),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    ];
   }
 }
 

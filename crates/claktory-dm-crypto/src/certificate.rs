@@ -105,10 +105,13 @@ fn ascii_id(what: &str, id: &str, most: usize) -> Result<(), Error> {
     Ok(())
 }
 
-/// A character that shows nothing, or shows as something else: the same
-/// set the app's review card marks (`hiddenCharacter` in
-/// app/lib/people/review.dart), plus every control character and the
-/// braille blank. Friends see these names.
+/// A character that shows nothing, or shows as something else: the set the
+/// app's review card marks (`hiddenCharacter` in app/lib/people/review.dart),
+/// plus every control character, the braille blank and U+FFF0–FFF8. Friends
+/// see these names. It holds every character `factory_agent::text::hidden`
+/// does but the variation selectors, which `hidden_in` judges by where they
+/// stand (factoryd's tests/all/hidden_characters.rs checks it); this crate
+/// is built into the app too, so it keeps its own copy.
 pub fn hidden(c: char) -> bool {
     let rune = u32::from(c);
     c.is_control()
@@ -127,7 +130,7 @@ pub fn hidden(c: char) -> bool {
         || rune == 0x3164
         || rune == 0xfeff
         || rune == 0xffa0
-        || (0xfff9..=0xfffb).contains(&rune)
+        || (0xfff0..=0xfffb).contains(&rune)
         || (0x1d173..=0x1d17a).contains(&rune)
         || (0xe0000..=0xe0fff).contains(&rune)
 }
@@ -147,23 +150,27 @@ fn check_name(name: &str) -> Result<(), Error> {
 /// a variation selector only right after a visible character. Also what a
 /// device checks of names it shows that came from elsewhere (E8's history).
 pub fn one_line(text: &str, most: usize) -> bool {
-    if text.trim().is_empty() || text.len() > most {
-        return false;
-    }
+    !text.trim().is_empty() && text.len() <= most && hidden_in(text).next().is_none()
+}
+
+/// The characters of `text` that show nothing or show as something else:
+/// those `hidden` names, and a variation selector (U+FE00–FE0F) anywhere but
+/// right after a visible character, where it's an emoji's own.
+pub fn hidden_in(text: &str) -> impl Iterator<Item = char> + '_ {
     let mut after_visible = false;
-    for c in text.chars() {
+    text.chars().filter(move |&c| {
         if ('\u{fe00}'..='\u{fe0f}').contains(&c) {
-            if !after_visible {
-                return false;
-            }
+            let stray = !after_visible;
             after_visible = false;
+            stray
         } else if hidden(c) {
-            return false;
+            after_visible = false;
+            true
         } else {
             after_visible = !c.is_whitespace();
+            false
         }
-    }
-    true
+    })
 }
 
 impl Leaf {
@@ -304,7 +311,19 @@ pub(crate) mod tests {
         let mut bad = leaf(LeafKind::Device, "acct-1", "dev-1", [7; 32]);
         bad.name = "a\u{202e}gnp.exe".to_owned();
         assert!(LeafCertificate::issue(&identity, bad).is_err());
-        for hidden in ["a\u{2028}b", "a\u{2063}b", "soft\u{ad}hyphen", "\u{3164}", "a\u{fe0f}\u{fe0f}", " \u{fe0f}", "a\u{e0041}"] {
+        for hidden in [
+            "a\u{2028}b",
+            "a\u{2063}b",
+            "soft\u{ad}hyphen",
+            "\u{3164}",
+            "a\u{fe0f}\u{fe0f}",
+            " \u{fe0f}",
+            "a\u{e0041}",
+            "a\u{e0065}b",
+            "a\u{061c}b",
+            "Ana\u{3164}",
+            "a\u{fff0}b",
+        ] {
             let mut bad = leaf(LeafKind::Device, "acct-1", "dev-1", [7; 32]);
             bad.name = hidden.to_owned();
             assert!(LeafCertificate::issue(&identity, bad).is_err(), "{hidden:?}");
@@ -312,6 +331,8 @@ pub(crate) mod tests {
         let mut heart = leaf(LeafKind::Device, "acct-1", "dev-1", [7; 32]);
         heart.name = "Ana\u{2764}\u{fe0f} iPad".to_owned();
         assert!(LeafCertificate::issue(&identity, heart).is_ok(), "an emoji's own selector");
+        let found: Vec<char> = hidden_in("\u{fe0f}A\u{2764}\u{fe0f}\u{fe0f}\u{e0065}\u{61c} \u{fe0e}\u{3164}").collect();
+        assert_eq!(found, ['\u{fe0f}', '\u{fe0f}', '\u{e0065}', '\u{61c}', '\u{fe0e}', '\u{3164}']);
         assert!(LeafCertificate::issue(&identity, leaf(LeafKind::Device, "", "dev-1", [7; 32])).is_err());
         assert!(LeafCertificate::issue(&identity, leaf(LeafKind::Claktory, "acct-1", "no-epoch", [7; 32])).is_err());
         let id = claktory_leaf_id("mac-mini-1a2b", 3);

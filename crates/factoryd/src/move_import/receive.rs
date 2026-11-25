@@ -34,6 +34,7 @@ use super::{
     FORMAT, ImportError, Manifest, PathMap, State, Step, dir, failed, finish, fresh, load_state, local_disk, lock, not_running, on_path,
     path_map, platform, problems, read_manifest, report, running, running_here, save_state, steps, too_new, undo,
 };
+use crate::locking::lock as locked;
 use crate::encoding::{hex, unhex};
 use crate::home::Home;
 use crate::move_wire::{self, Entry, Frame, Kind, ReceiveCode};
@@ -367,10 +368,6 @@ struct Ctx {
     /// The text for the person once the source committed and this side
     /// finished: the move is done, whatever happens to the session.
     done: Arc<std::sync::Mutex<Option<String>>>,
-}
-
-fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Writes what's queued on `out`, in order, while the session reads.

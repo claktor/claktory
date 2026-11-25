@@ -93,15 +93,17 @@ if [[ -f "$RELEASE/claktory-speech" ]]; then
   chmod 755 "$HOME_DIR/bin/claktory-speech.new"
   mv -f "$HOME_DIR/bin/claktory-speech.new" "$HOME_DIR/bin/claktory-speech"
 fi
-# Agents' tools (ripgrep), in <home>/tools, which factoryd puts first on
-# agents' PATH (releases before it have none). Its licenses go with it.
-if [[ -f "$RELEASE/tools/rg" ]]; then
-  mkdir -p "$HOME_DIR/tools"
-  cp "$RELEASE/tools/rg" "$HOME_DIR/tools/rg.new"
-  chmod 755 "$HOME_DIR/tools/rg.new"
-  mv -f "$HOME_DIR/tools/rg.new" "$HOME_DIR/tools/rg"
-  if [[ -d "$RELEASE/tools/LICENSES" ]]; then rm -rf "$HOME_DIR/tools/LICENSES"; cp -R "$RELEASE/tools/LICENSES" "$HOME_DIR/tools/LICENSES"; fi
-fi
+# Agents' tools (ripgrep, jq), in <home>/tools, which factoryd puts first on
+# agents' PATH (releases before them have none). Their licenses go with them.
+for tool in rg jq; do
+  if [[ -f "$RELEASE/tools/$tool" ]]; then
+    mkdir -p "$HOME_DIR/tools"
+    cp "$RELEASE/tools/$tool" "$HOME_DIR/tools/$tool.new"
+    chmod 755 "$HOME_DIR/tools/$tool.new"
+    mv -f "$HOME_DIR/tools/$tool.new" "$HOME_DIR/tools/$tool"
+  fi
+done
+if [[ -d "$RELEASE/tools/LICENSES" ]]; then rm -rf "$HOME_DIR/tools/LICENSES"; cp -R "$RELEASE/tools/LICENSES" "$HOME_DIR/tools/LICENSES"; fi
 cp "$RELEASE/factoryd" "$BIN-supervisor.new"
 chmod 755 "$BIN-supervisor.new"
 mv -f "$BIN-supervisor.new" "$BIN-supervisor"

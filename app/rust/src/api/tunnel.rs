@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use flutter_rust_bridge::frb;
 
 use crate::forward;
-use crate::tunnel::{self, Failure, Path, Phase, RelayTrouble};
+use crate::tunnel::{self, Failure, Path, Phase, Reach, RelayTrouble};
 
 /// The tunnels' own runtime: iroh's tasks outlive any one call from Dart.
 /// Made on first use, and made afresh by [fresh_runtime] when it stops
@@ -149,6 +149,13 @@ impl TunnelHandle {
             received: status.received,
             link_received: status.link_received,
             dial_timeout_ms: status.dial_timeout_ms,
+            reach: match status.reach {
+                Reach::None => TunnelReach::None,
+                Reach::Local => TunnelReach::Local,
+                Reach::Lan => TunnelReach::Lan,
+                Reach::Tailnet => TunnelReach::Tailnet,
+                Reach::Public => TunnelReach::Public,
+            },
         }
     }
 
@@ -269,6 +276,23 @@ pub struct TunnelStatus {
     /// How long the next dial has, in ms: it grows after dials that timed
     /// out, and the app's connect window with it (#413).
     pub dial_timeout_ms: u32,
+    /// What a direct path crosses, from its address (never the address):
+    /// for diagnostics, per route.
+    pub reach: TunnelReach,
+}
+
+/// What a direct path crosses.
+pub enum TunnelReach {
+    /// Not direct, or not connected.
+    None,
+    /// This machine itself.
+    Local,
+    /// The same network: a private or link-local address.
+    Lan,
+    /// Tailscale's addresses.
+    Tailnet,
+    /// Across the internet.
+    Public,
 }
 
 /// Why this device's relay can't be reached, in a word.

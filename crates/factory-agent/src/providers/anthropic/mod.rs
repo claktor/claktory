@@ -1,4 +1,5 @@
 pub mod auth;
+mod binding;
 pub mod files;
 pub mod oauth;
 #[cfg(any(test, feature = "qa-provider"))]
@@ -391,7 +392,9 @@ fn set_cache_ttl(params: &mut Value, ttl: CacheTtl) {
     }
 }
 
-/// `buildParams` with the default short cache retention.
+/// `buildParams` with the default short cache retention, and what its
+/// thinking is bound to (`binding`). `unbound`: every earlier thinking block
+/// is left out, not only those made under another system prompt or tools.
 fn build_params(
     model: &Model,
     context: &LlmContext,
@@ -399,13 +402,10 @@ fn build_params(
     max_tokens: u64,
     thinking: &Thinking,
     refs: &FileRefs,
-) -> Result<Value, String> {
-    let normalize = |id: &str, _source: &AssistantMessage| normalize_tool_call_id(id);
-    let transformed = transform_messages(&context.messages, model, Some(&normalize));
+    unbound: bool,
+) -> Result<(Value, String), String> {
     let control = ephemeral();
     let mut params = model_params(model);
-    params
-        .insert("messages".into(), Value::Array(convert_messages(&transformed, oauth, compat_flag(model, "allowEmptySignature", false), refs)?));
     params.insert("max_tokens".into(), json!(max_tokens));
     params.insert("stream".into(), json!(true));
     let prompt = context.system_prompt.as_deref().filter(|prompt| !prompt.is_empty());
@@ -422,6 +422,14 @@ fn build_params(
     if !context.tools.is_empty() {
         params.insert("tools".into(), Value::Array(convert_tools(&context.tools, oauth, model)?));
     }
+    let bound = binding::digest(params.get("system"), params.get("tools"));
+    let normalize = |id: &str, _source: &AssistantMessage| normalize_tool_call_id(id);
+    let mut transformed = transform_messages(&context.messages, model, Some(&normalize));
+    binding::leave_out(&mut transformed, model, &bound, unbound);
+    params.insert(
+        "messages".into(),
+        Value::Array(convert_messages(&transformed, oauth, compat_flag(model, "allowEmptySignature", false), refs)?),
+    );
     if model.reasoning {
         match thinking {
             Thinking::Adaptive(effort) => {
@@ -458,7 +466,7 @@ fn build_params(
         // a rate-limited fallback model, returns the refusal as it is.
         params.insert("fallbacks".into(), json!("default"));
     }
-    Ok(Value::Object(params))
+    Ok((Value::Object(params), bound))
 }
 
 /// The client headers: Claude Code identity for an OAuth token, the API key otherwise; caller headers win.
@@ -875,8 +883,12 @@ async fn request(
     let (mut refs, fresh) = image_refs(model, options, oauth, &images).await;
     check_cancelled(options)?;
     let mut retried = false;
+    // Refused for thinking bound to another conversation: sent again once,
+    // with none of it (`binding`).
+    let mut unbound = false;
     let response = loop {
-        let mut params = build_params(model, context, oauth, max_tokens, thinking, &refs)?;
+        let (mut params, bound) = build_params(model, context, oauth, max_tokens, thinking, &refs, unbound)?;
+        binding::mark(&mut parser.output, &bound, unbound);
         // The only lifetime it can ask for beyond its own 5 minutes.
         if options.cache_ttl == CacheTtl::OneHour {
             set_cache_ttl(&mut params, options.cache_ttl);
@@ -898,6 +910,11 @@ async fn request(
             files.files.refuse(&files.account, &refs, fresh);
             refs.clear();
             retried = true;
+            continue;
+        }
+        if !unbound && binding::refused(status, &text) {
+            tracing::warn!(model = %model.id, "Anthropic refused earlier thinking as bound to another conversation; sending it again without");
+            unbound = true;
             continue;
         }
         if let Some((resets_at, claim)) = limit {

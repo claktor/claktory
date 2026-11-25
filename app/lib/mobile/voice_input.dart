@@ -168,9 +168,14 @@ class PhoneMicButton extends StatelessWidget {
     required this.voice,
     required this.recording,
     this.unavailable,
+    this.label = 'Record a voice message',
   });
 
   final PhoneVoice voice;
+
+  /// What VoiceOver and TalkBack call it: "Add a voice note" beside Send,
+  /// with text in the box (#425).
+  final String label;
 
   /// The recording itself, to tell a release that sends from one that
   /// came before recording began.
@@ -192,7 +197,7 @@ class PhoneMicButton extends StatelessWidget {
         return Semantics(
           container: true,
           button: true,
-          label: 'Record a voice message',
+          label: label,
           onTap: voice.tap,
           excludeSemantics: true,
           child: NoDrawerGesture(
@@ -251,7 +256,7 @@ class PhoneMicButton extends StatelessWidget {
                         alignment: Alignment.center,
                         child: ExtensionGlyph(
                           icon: 'mic',
-                          name: 'Record a voice message',
+                          name: label,
                           color: held
                               ? const Color(0xFFFFFFFF)
                               : (unavailable == null

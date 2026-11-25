@@ -54,6 +54,17 @@ backend() {
       mv -f "$DEV_HOME/tools/rg.new" "$DEV_HOME/tools/rg"
     fi
   fi
+  # jq the same way (scripts/build-jq.sh), built once into its cache.
+  if [[ "$(uname)" == Darwin && -x "$ROOT/scripts/build-jq.sh" ]]; then
+    local jq="${CLAKTORY_JQ_CACHE:-$HOME/Library/Caches/claktory-jq}/dev-jq"
+    [[ -x "$jq" && "$("$jq" --version)" == "jq-$(sed -n 's/^JQ_VERSION=//p' "$ROOT/scripts/build-jq.sh")" ]] ||
+      "$ROOT/scripts/build-jq.sh" mac "$jq" --dev
+    if ! cmp -s "$jq" "$DEV_HOME/tools/jq"; then
+      mkdir -p "$DEV_HOME/tools"
+      cp "$jq" "$DEV_HOME/tools/jq.new"
+      mv -f "$DEV_HOME/tools/jq.new" "$DEV_HOME/tools/jq"
+    fi
+  fi
   # Phone-sized video previews (#379), on a Mac: factoryd finds it beside itself.
   local preview_src="$ROOT/app/macos/VideoPreview/main.swift" preview="$ROOT/target/debug/claktory-video-preview"
   if [[ "$(uname)" == Darwin && -f "$preview_src" ]]; then

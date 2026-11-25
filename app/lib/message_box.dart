@@ -840,6 +840,9 @@ class _MessageBoxState extends State<MessageBox> {
           VoiceNotes.of(backend),
         ]),
         builder: (context, _) {
+          // With something written, what's recorded is added to it as its
+          // voice note (#425), not sent on its own.
+          final adding = _hasDraft;
           final mic = KeyedSubtree(
             key: _micKey,
             child: PhoneMicButton(
@@ -847,11 +850,9 @@ class _MessageBoxState extends State<MessageBox> {
               voice: _phoneVoice,
               recording: _voice,
               unavailable: voiceUnavailable(workspace.speechModel),
+              label: adding ? 'Add a voice note' : 'Record a voice message',
             ),
           );
-          // With something written, what's recorded is added to it as its
-          // voice note (#425), not sent on its own.
-          final adding = _hasDraft;
           return PhoneComposerRow(
             accent: target.accent,
             onAttach: target.takesFiles ? _pick : null,

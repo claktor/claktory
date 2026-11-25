@@ -594,6 +594,7 @@ pub(crate) fn table(bytes: &[u8], file: &FileId, shown: &str) -> Result<rusqlite
         AuthAction::Select | AuthAction::Recursive => Authorization::Allow,
         AuthAction::Function { function_name } if !function_name.eq_ignore_ascii_case("load_extension") => Authorization::Allow,
         AuthAction::Read { table_name, .. } if table_name == TABLE => Authorization::Allow,
+        AuthAction::Read { table_name, column_name: "" } if super::data::derived(table_name, &[TABLE]) => Authorization::Allow,
         _ => Authorization::Deny,
     }))
     .map_err(failed)?;
@@ -677,7 +678,19 @@ mod tests {
             ]
         );
         assert_eq!(rows(&db, "SELECT severity, sum(count) FROM rows GROUP BY 1 ORDER BY 1")[0], [Text("high".into()), Integer(3)]);
-        for sql in ["DELETE FROM rows", "ATTACH 'x.db' AS x", "SELECT * FROM sqlite_master", "CREATE TABLE t (a)"] {
+        // A grouped WITH used twice is materialised, and SQLite asks to read
+        // it with no column for NOT EXISTS (Carne 30029).
+        let twice = "WITH c AS (SELECT severity, sum(count) AS n FROM rows GROUP BY severity) \
+                     SELECT severity, n FROM c UNION ALL SELECT 'none', 0 WHERE NOT EXISTS (SELECT 1 FROM c) ORDER BY 1";
+        assert_eq!(rows(&db, twice), [vec![Text("high".into()), Integer(3)], vec![Text("low".into()), Integer(2)]]);
+        for sql in [
+            "DELETE FROM rows",
+            "ATTACH 'x.db' AS x",
+            "SELECT * FROM sqlite_master",
+            "SELECT count(*) FROM sqlite_schema",
+            "SELECT count(*) FROM pragma_table_info('rows')",
+            "CREATE TABLE t (a)",
+        ] {
             assert!(db.prepare(sql).and_then(|mut statement| statement.execute([])).is_err(), "{sql}");
         }
 

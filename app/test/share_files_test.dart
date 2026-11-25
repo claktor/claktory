@@ -330,6 +330,49 @@ void main() {
     expect(offsets.sublist(0, 4), [0, _mb, 2 * _mb, 2 * _mb]);
   });
 
+  testWidgets('started offline, it names the Claktory, and carries on by '
+      "itself once it's back (Abbacchio's row 1065)", (tester) async {
+    final harness = await _phone(
+      tester,
+      entries: [
+        Entry(
+          seq: Int64(1),
+          user: UserText(
+            text: 'The take',
+            attachments: [
+              Attachment(path: _clip, name: 'clip.mp4', size: Int64(9)),
+            ],
+          ),
+        ),
+      ],
+    );
+    harness.backend.holdRead = (request) async {
+      if (!harness.backend.connected.value) {
+        throw const RequestFailure('Not connected to the backend.');
+      }
+    };
+    await tester.longPress(find.text('clip.mp4'));
+    await pumpFrames(tester);
+    harness.backend.connected.value = false;
+    await tester.tap(find.text('Share…'));
+    await pumpFrames(tester);
+    await _work(tester, () => _shows('Not connected to ', contains: true));
+    await pumpFrames(tester);
+    expect(find.textContaining('the backend'), findsNothing);
+    final said = tester
+        .widget<Text>(find.textContaining('Not connected to '))
+        .data!;
+    expect(said, isNot(contains('backend')));
+    expect(said, endsWith('.'));
+    // Nothing came yet: no empty bar under it.
+    expect(find.text('Loading…'), findsNothing);
+    expect(sheet.shared, isEmpty);
+
+    harness.backend.connected.value = true;
+    await _work(tester, () => sheet.shared.isNotEmpty);
+    expect(sheet.shared.single.single.data.length, 20 * 1024 * 1024);
+  });
+
   testWidgets("a message's files: touch and hold one for Share… or all of "
       'them, sent together', (tester) async {
     final harness = await _phone(
@@ -431,6 +474,41 @@ void main() {
       String.fromCharCodes(sheet.shared.single.single.data),
       '# The plan\n\nShip it.\n',
     );
+  });
+
+  testWidgets("on Android a PDF it can't show is still in a pane: Back, and "
+      'Share… in More (Sale, Bruno 30855)', (tester) async {
+    const report = '/w/report.pdf';
+    final harness = await _phone(tester, platform: TargetPlatform.android);
+    harness.backend.files[report] = _file(
+      report,
+      '%PDF-1.7 report'.codeUnits,
+      mime: 'application/pdf',
+    );
+    tester
+        .widget<PhoneRoutesScope>(find.byType(PhoneRoutesScope))
+        .routes
+        .showFile('a1', report);
+    await _work(tester);
+    await pumpFrames(tester);
+    expect(
+      find.text('To see this PDF, open it on a Mac, iPhone or iPad.'),
+      findsOneWidget,
+    );
+    final semantics = tester.ensureSemantics();
+    expect(find.bySemanticsLabel('Back'), findsWidgets);
+    await tester.tap(find.bySemanticsLabel('More').last);
+    await pumpFrames(tester);
+    semantics.dispose();
+    await tester.tap(find.text('Share…').last);
+    await pumpFrames(tester);
+    await _work(tester, () => sheet.shared.isNotEmpty);
+    await pumpFrames(tester);
+    expect(
+      String.fromCharCodes(sheet.shared.single.single.data),
+      '%PDF-1.7 report',
+    );
+    expect(sheet.mimes.single.single, 'application/pdf');
   });
 
   testWidgets('what a share cut short left goes at launch', (tester) async {

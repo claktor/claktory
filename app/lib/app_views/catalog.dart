@@ -587,6 +587,35 @@ class _Renderer {
           timeFrom: from,
           timeTo: to,
         );
+      case 'Map':
+        final color = c['color'];
+        return AppMap(
+          table: AppTable.from(resolveValue(surface, c['data'], scope)),
+          location: c['location'] is String ? c['location']! as String : null,
+          value: c['value'] is String ? c['value']! as String : null,
+          label: string(c['label'], scope),
+          unit: string(c['unit'], scope),
+          decimals: switch (c['decimals']) {
+            final num n when n >= 0 && n <= 10 && n == n.roundToDouble() =>
+              n.toInt(),
+            _ => null,
+          },
+          thresholds: _thresholds(c['thresholds']),
+          color: color is String ? color : null,
+          sizeMin: switch (c['sizeMin']) {
+            final num n when n >= 1 && n <= 40 => n.toDouble(),
+            _ => 2,
+          },
+          sizeMax: switch (c['sizeMax']) {
+            final num n when n >= 1 && n <= 40 => n.toDouble(),
+            _ => 15,
+          },
+          legend: c['legend'] != false,
+          height: switch (c['height']) {
+            final num n when n >= 120 && n <= 480 => n.toDouble(),
+            _ => null,
+          },
+        );
       case 'Stat':
         final color = c['color'];
         return AppStat(
@@ -600,22 +629,7 @@ class _Renderer {
           color: color is String ? color : null,
           // Grafana's settings: each read only when it's the right kind of
           // value, else the renderer's default.
-          thresholds: switch (c['thresholds']) {
-            final List steps when steps.isNotEmpty && steps.length <= 10 => [
-              for (final (i, step) in steps.indexed)
-                if (step is Map && step['color'] is String)
-                  (
-                    value: i == 0
-                        ? null
-                        : switch (step['value']) {
-                            final num n when n.isFinite => n.toDouble(),
-                            _ => null,
-                          },
-                    color: step['color']! as String,
-                  ),
-            ],
-            _ => null,
-          },
+          thresholds: _thresholds(c['thresholds']),
           colorMode: switch (c['colorMode']) {
             final String m
                 when const {
@@ -720,6 +734,24 @@ class _Renderer {
       _ => false,
     };
   }
+
+  /// A Stat's or Map's thresholds, when they're a list of steps.
+  static List<StatStep>? _thresholds(Object? value) => switch (value) {
+    final List steps when steps.isNotEmpty && steps.length <= 10 => [
+      for (final (i, step) in steps.indexed)
+        if (step is Map && step['color'] is String)
+          (
+            value: i == 0
+                ? null
+                : switch (step['value']) {
+                    final num n when n.isFinite => n.toDouble(),
+                    _ => null,
+                  },
+            color: step['color']! as String,
+          ),
+    ],
+    _ => null,
+  };
 
   /// Component [id]'s weight as a flex, when it has one.
   int? _weightOf(String id) => switch (surface.components[id]?['weight']) {
@@ -1640,11 +1672,16 @@ class _More extends StatelessWidget {
 /// weighted one: a dashboard's name, range, filters and •••): the
 /// unweighted ones at their own width, the weighted ones sharing the rest
 /// by weight, so the last stays at the line's end. The weighted ones give
-/// way first, down to [leastWeighted] (its chevron alone: the dashboard's
-/// name matters least, the range and filters' values most);
-/// only where the others don't fit even then (large text on a small
-/// phone) do they shrink, in proportion to what they have above it. Each
-/// button's words end in "…" where its room ends.
+/// way first, down to [leastButton] (their first letters and "…": the
+/// dashboard's name says where you are), or [leastWeighted] for one
+/// without words; only where the others don't fit even then (large text
+/// on a small phone) do they shrink, in proportion to what they have
+/// above it, and where even every button's least doesn't fit, all give
+/// way evenly. Each button's words end in "…" where its room ends. Where
+/// a button would keep less than a letter and "…" (the largest text on a
+/// small phone), the weighted ones take a line of their own and the
+/// others go under it, as Grafana's phone bar puts its title above its
+/// controls.
 class _BarLayout extends MultiChildRenderObjectWidget {
   const _BarLayout({
     required this.weights,
@@ -1658,22 +1695,53 @@ class _BarLayout extends MultiChildRenderObjectWidget {
   /// Whether each child has words, which can end in "…".
   final List<bool> hasWords;
 
-  /// The least a button with words gives way to: an icon and "…".
-  static const leastButton = 64.0;
+  /// The least a button with words gives way to at the normal text size,
+  /// grown with it: its first letters and "…".
+  static const leastButton = 48.0;
 
-  /// The least the weighted ones give way to: a chevron and its gap.
+  /// The least a weighted one without words gives way to: a chevron and
+  /// its gap.
   static const leastWeighted = 24.0;
 
+  /// [leastButton] at the text size: first letters at any size.
+  static double _least(BuildContext context) =>
+      MediaQuery.textScalerOf(context).scale(leastButton);
+
+  /// What a button's words and chevron take besides its words: its
+  /// padding, the chevron and the gap before it.
+  static const buttonChrome = 24.0;
+
+  /// The least a button with words keeps a letter and "…" in at the text
+  /// size: under it the bar takes more lines (see [_RenderBar._lines]).
+  static double _readable(BuildContext context) {
+    final painter = TextPainter(
+      text: TextSpan(text: 'A…', style: TypeScale.of(context).body),
+      textScaler: MediaQuery.textScalerOf(context),
+      textDirection: Directionality.of(context),
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width.ceilToDouble() + buttonChrome;
+  }
+
   @override
-  RenderObject createRenderObject(BuildContext context) =>
-      _RenderBar(weights, hasWords, Directionality.of(context));
+  RenderObject createRenderObject(BuildContext context) => _RenderBar(
+    weights,
+    hasWords,
+    Directionality.of(context),
+    _least(context),
+    _readable(context),
+  );
 
   @override
   void updateRenderObject(BuildContext context, _RenderBar renderObject) {
     renderObject
       ..weights = weights
       ..hasWords = hasWords
-      ..direction = Directionality.of(context);
+      ..direction = Directionality.of(context)
+      ..least = _least(context)
+      ..readable = _readable(context);
   }
 }
 
@@ -1683,7 +1751,27 @@ class _RenderBar extends RenderBox
     with
         ContainerRenderObjectMixin<RenderBox, _BarParentData>,
         RenderBoxContainerDefaultsMixin<RenderBox, _BarParentData> {
-  _RenderBar(this._weights, this._hasWords, this._direction);
+  _RenderBar(
+    this._weights,
+    this._hasWords,
+    this._direction,
+    this._least,
+    this._readable,
+  );
+
+  double _least;
+  set least(double value) {
+    if (value == _least) return;
+    _least = value;
+    markNeedsLayout();
+  }
+
+  double _readable;
+  set readable(double value) {
+    if (value == _readable) return;
+    _readable = value;
+    markNeedsLayout();
+  }
 
   List<bool> _hasWords;
   set hasWords(List<bool> value) {
@@ -1744,52 +1832,115 @@ class _RenderBar extends RenderBox
   }
 
   @override
-  double computeMinIntrinsicHeight(double width) => _children.fold(
-    0.0,
-    (most, child) =>
-        math.max(most, child.getMinIntrinsicHeight(double.infinity)),
+  double computeMinIntrinsicHeight(double width) => _height(
+    width,
+    (child, _) => child.getMinIntrinsicHeight(double.infinity),
   );
 
   @override
-  double computeMaxIntrinsicHeight(double width) => _children.fold(
-    0.0,
-    (most, child) =>
-        math.max(most, child.getMaxIntrinsicHeight(double.infinity)),
+  double computeMaxIntrinsicHeight(double width) => _height(
+    width,
+    (child, _) => child.getMaxIntrinsicHeight(double.infinity),
   );
 
-  /// Each child's width on a line [width] wide.
-  List<double> _widths(double width) {
+  /// The bar's height on a line [width] wide: its lines', each as tall as
+  /// its tallest child ([tall] of a child at its width), [_gap] apart.
+  double _height(double width, double Function(RenderBox, double) tall) {
     final children = _children;
-    final natural = [
-      for (final child in children) child.getMaxIntrinsicWidth(double.infinity),
+    final lines = _lines(width);
+    var height = 0.0;
+    for (final line in lines) {
+      height += line.fold(
+        0.0,
+        (most, slot) => math.max(most, tall(children[slot.$1], slot.$2)),
+      );
+    }
+    return height + _gap * math.max(0, lines.length - 1);
+  }
+
+  List<double> get _natural => [
+    for (final child in _children) child.getMaxIntrinsicWidth(double.infinity),
+  ];
+
+  /// The bar's lines on [width]: each child's index and width. One line
+  /// while each button with words keeps at least a letter and "…" on it;
+  /// where it wouldn't (the largest text on a small phone), the weighted
+  /// ones (the dashboard's name) on a line of their own, as Grafana's
+  /// title is, and the others under it, on as many lines as they need to
+  /// keep theirs.
+  List<List<(int, double)>> _lines(double width) {
+    final natural = _natural;
+    final all = [for (var i = 0; i < natural.length; i++) i];
+    List<(int, double)> fit(List<int> line) => [
+      for (final (k, w) in _fit(line, natural, width).indexed) (line[k], w),
     ];
-    if (!width.isFinite) return natural;
-    final room = math.max(0.0, width - _gap * math.max(0, children.length - 1));
+    final one = fit(all);
+    if (!width.isFinite) return [one];
+    double readable(int i) =>
+        _words(i) ? math.min(natural[i], _readable) : natural[i];
+    final squeezed = one.any(
+      (slot) => _words(slot.$1) && slot.$2 < readable(slot.$1) - 0.5,
+    );
+    final first = [
+      for (final i in all)
+        if (_weight(i) != null) i,
+    ];
+    if (!squeezed || first.isEmpty || first.length == all.length) return [one];
+    final lines = [fit(first)];
+    var line = <int>[];
+    var used = 0.0;
+    for (final i in all) {
+      if (_weight(i) != null) continue;
+      final need = readable(i);
+      if (line.isNotEmpty && used + _gap + need > width) {
+        lines.add(fit(line));
+        line = [];
+        used = 0;
+      }
+      used += (line.isEmpty ? 0 : _gap) + need;
+      line.add(i);
+    }
+    if (line.isNotEmpty) lines.add(fit(line));
+    return lines;
+  }
+
+  /// The widths of [line]'s children on a line [width] wide: the
+  /// unweighted ones at their own width, the weighted ones sharing the
+  /// rest, giving way as [_BarLayout] says.
+  List<double> _fit(List<int> line, List<double> natural, double width) {
+    if (!width.isFinite) return [for (final i in line) natural[i]];
+    final room = math.max(0.0, width - _gap * math.max(0, line.length - 1));
     var fixed = 0.0;
-    var wanted = 0.0;
     var total = 0;
-    for (var i = 0; i < children.length; i++) {
-      final weight = _weight(i);
-      if (weight == null) {
-        fixed += natural[i];
-      } else {
-        wanted += natural[i];
+    for (final i in line) {
+      if (_weight(i) case final weight?) {
         total += weight;
+      } else {
+        fixed += natural[i];
       }
     }
+    // The least each gives way to: words keep an icon or their first
+    // letters and "…", a weighted one of icons alone its chevron, one of
+    // icons alone its width.
+    double floor(int i) => _words(i)
+        ? math.min(natural[i], _least)
+        : _weight(i) != null
+        ? math.min(natural[i], _BarLayout.leastWeighted)
+        : natural[i];
     // The weighted ones' share: the rest of the line, or on a short line
     // their least.
-    final keep = math.min(wanted, _BarLayout.leastWeighted);
-    final shared = math.max(room - fixed, keep);
+    var keep = 0.0;
+    for (final i in line) {
+      if (_weight(i) != null) keep += floor(i);
+    }
+    final shared = total == 0 ? 0.0 : math.max(room - fixed, keep);
     final left = room - shared;
-    final widths = [...natural];
+    final widths = {for (final i in line) i: natural[i]};
     if (fixed > left) {
       // The others with words give way, each by what it has above its
-      // least (an icon and "…"); one of icons alone keeps its width.
-      double floor(int i) =>
-          _words(i) ? math.min(natural[i], _BarLayout.leastButton) : natural[i];
+      // least.
       final others = [
-        for (var i = 0; i < children.length; i++)
+        for (final i in line)
           if (_weight(i) == null) i,
       ];
       final slack = others.fold(0.0, (sum, i) => sum + natural[i] - floor(i));
@@ -1801,67 +1952,103 @@ class _RenderBar extends RenderBox
         }
       }
     }
-    // Where even their least doesn't fit (icons alone at a large text
-    // size), the weighted ones give up the rest of their share.
-    var given = shared;
-    final rest = [
-      for (var i = 0; i < children.length; i++)
-        if (_weight(i) == null) widths[i],
-    ].fold(0.0, (sum, w) => sum + w);
-    if (rest + given > room) given = math.max(0.0, room - rest);
-    for (var i = 0; i < children.length; i++) {
+    for (final i in line) {
       if (_weight(i) case final weight?) {
-        widths[i] = total == 0 ? 0.0 : given * weight / total;
+        widths[i] = shared * weight / total;
       }
     }
-    return widths;
+    // Where even their least doesn't fit, all that can give way do so
+    // evenly; icons alone keep their width.
+    final used = widths.values.fold(0.0, (sum, w) => sum + w);
+    if (used > room) {
+      bool gives(int i) => _words(i) || _weight(i) != null;
+      var stays = 0.0;
+      var giving = 0.0;
+      for (final i in line) {
+        if (gives(i)) {
+          giving += widths[i]!;
+        } else {
+          stays += widths[i]!;
+        }
+      }
+      final scale = giving == 0
+          ? 0.0
+          : (math.max(0.0, room - stays) / giving).clamp(0.0, 1.0);
+      for (final i in line) {
+        if (gives(i)) widths[i] = widths[i]! * scale;
+      }
+    }
+    return [for (final i in line) widths[i]!];
   }
+
+  /// The width the bar takes: its line's, or all of [width] on several.
+  double _width(List<List<(int, double)>> lines, double width) =>
+      lines.length > 1
+      ? width
+      : lines.single.fold(0.0, (sum, slot) => sum + slot.$2) +
+            _gap * math.max(0, lines.single.length - 1);
 
   @override
   Size computeDryLayout(BoxConstraints constraints) {
-    final widths = _widths(constraints.maxWidth);
-    var height = 0.0;
-    for (final (i, child) in _children.indexed) {
-      height = math.max(
-        height,
-        child.getDryLayout(BoxConstraints(maxWidth: widths[i])).height,
-      );
-    }
-    final width =
-        widths.fold(0.0, (sum, w) => sum + w) +
-        _gap * math.max(0, widths.length - 1);
-    return constraints.constrain(Size(width, height));
+    final lines = _lines(constraints.maxWidth);
+    final height = _height(
+      constraints.maxWidth,
+      (child, width) =>
+          child.getDryLayout(BoxConstraints(maxWidth: width)).height,
+    );
+    return constraints.constrain(
+      Size(_width(lines, constraints.maxWidth), height),
+    );
   }
 
   @override
   void performLayout() {
     final children = _children;
-    final widths = _widths(constraints.maxWidth);
-    var height = 0.0;
-    for (final (i, child) in children.indexed) {
-      child.layout(
-        BoxConstraints(maxWidth: widths[i], maxHeight: constraints.maxHeight),
-        parentUsesSize: true,
-      );
-      height = math.max(height, child.size.height);
+    final lines = _lines(constraints.maxWidth);
+    final heights = <double>[];
+    for (final line in lines) {
+      var height = 0.0;
+      for (final (i, width) in line) {
+        children[i].layout(
+          BoxConstraints(maxWidth: width, maxHeight: constraints.maxHeight),
+          parentUsesSize: true,
+        );
+        height = math.max(height, children[i].size.height);
+      }
+      heights.add(height);
     }
-    final width =
-        widths.fold(0.0, (sum, w) => sum + w) +
-        _gap * math.max(0, widths.length - 1);
-    size = constraints.constrain(Size(width, height));
+    size = constraints.constrain(
+      Size(
+        _width(lines, constraints.maxWidth),
+        heights.fold(0.0, (sum, h) => sum + h) +
+            _gap * math.max(0, lines.length - 1),
+      ),
+    );
     // Left to right (right to left in a right-to-left language), each in
-    // its slot, centred on the line.
-    var x = 0.0;
-    for (final (i, child) in children.indexed) {
-      final slot = widths[i];
-      final left = _direction == TextDirection.ltr
-          ? x
-          : size.width - x - child.size.width;
-      (child.parentData! as _BarParentData).offset = Offset(
-        left,
-        (size.height - child.size.height) / 2,
-      );
-      x += slot + _gap;
+    // its slot, centred on its line; the last of icons alone (•••) at the
+    // end of its line.
+    var y = 0.0;
+    for (final (l, line) in lines.indexed) {
+      var x = 0.0;
+      for (final (k, (i, slot)) in line.indexed) {
+        final child = children[i];
+        final last =
+            lines.length > 1 &&
+            k == line.length - 1 &&
+            i == children.length - 1 &&
+            !_words(i) &&
+            _weight(i) == null;
+        if (last) x = math.max(x, size.width - slot);
+        final left = _direction == TextDirection.ltr
+            ? x
+            : size.width - x - child.size.width;
+        (child.parentData! as _BarParentData).offset = Offset(
+          left,
+          y + (heights[l] - child.size.height) / 2,
+        );
+        x += slot + _gap;
+      }
+      y += heights[l] + _gap;
     }
   }
 

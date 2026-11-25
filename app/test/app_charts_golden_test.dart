@@ -13,11 +13,14 @@ import 'dart:ui' as ui;
 import 'package:factory_app/app_views/app_view.dart';
 import 'package:factory_app/app_views/charts.dart';
 import 'package:factory_app/app_views/transport.dart';
+import 'package:factory_app/controls.dart' show ExtensionGlyph, Pressable;
+import 'package:factory_app/mobile/device.dart';
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart' as pb;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -140,6 +143,23 @@ Future<void> _golden(WidgetTester tester, String name) => expectLater(
   find.byKey(_canvas),
   matchesGoldenFile('goldens/charts_${name}_$_shade.png'),
 );
+
+/// Where [lon], [lat] is on the one map shown: Web Mercator from 76°N
+/// to 56°S, as the map draws the world.
+Offset _onMap(WidgetTester tester, double lon, double lat) {
+  final box = tester.getRect(
+    find.descendant(of: find.byType(AppMap), matching: find.byType(ClipRect)),
+  );
+  double mercator(double lat) =>
+      math.log(math.tan(math.pi / 4 + lat * math.pi / 360));
+  return Offset(
+    box.left + (lon + 180) / 360 * box.width,
+    box.top +
+        (mercator(76) - mercator(lat)) /
+            (mercator(76) - mercator(-56)) *
+            box.height,
+  );
+}
 
 /// The theme the scenes are drawn in: each runs in both.
 var _shade = 'dark';
@@ -510,6 +530,105 @@ void main() {
         brightness: brightness,
       );
       await _golden(tester, 'bars');
+    });
+
+    testWidgets('${brightness.name}: a world map, one country tapped', (
+      tester,
+    ) async {
+      _shade = brightness.name;
+      await _show(
+        tester,
+        [
+          {
+            'id': 'root',
+            'component': 'Column',
+            'children': ['p'],
+          },
+          ..._card('p', {
+            'component': 'Map',
+            'label': 'Users by country',
+            'data': {'@path': '/data'},
+            'location': 'country',
+            'value': 'users',
+          }),
+        ],
+        {
+          'data': {
+            'columns': ['country', 'users'],
+            'rows': [
+              ['US', 412],
+              ['GB', 120],
+              ['DE', 96],
+              ['FR', 70],
+              ['IT', 41],
+              ['BRA', 55],
+              ['IN', 88],
+              ['JP', 33],
+              ['AU', 18],
+              ['ZA', 9],
+              ['ca', 47],
+              ['Hidden (fewer than 5)', 12],
+            ],
+          },
+        },
+        height: 420,
+        brightness: brightness,
+      );
+      await tester.tapAt(_onMap(tester, 10.4, 51.1)); // Germany
+      await tester.pump();
+      await _golden(tester, 'map');
+    });
+
+    testWidgets('${brightness.name}: an hour by weekday heatmap', (
+      tester,
+    ) async {
+      _shade = brightness.name;
+      const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      await _show(
+        tester,
+        [
+          {
+            'id': 'root',
+            'component': 'Column',
+            'children': ['p'],
+          },
+          ..._card('p', {
+            'component': 'Chart',
+            'kind': 'heatmap',
+            'label': 'Sessions by hour',
+            'data': {'@path': '/data'},
+            'x': 'hour',
+            'seriesBy': 'day',
+            'y': ['sessions'],
+            'height': 200,
+          }),
+        ],
+        {
+          'data': {
+            'columns': ['day', 'hour', 'sessions'],
+            'rows': [
+              for (final (d, day) in days.indexed)
+                for (var h = 0; h < 24; h++)
+                  if (!(d == 6 && h < 6))
+                    [
+                      day,
+                      h.toString().padLeft(2, '0'),
+                      math
+                          .max(
+                            0,
+                            (d < 5 ? 30 : 12) *
+                                    math.sin((h - 6) / 15 * math.pi) +
+                                (h * 7 + d * 3) % 5,
+                          )
+                          .round(),
+                    ],
+            ],
+          },
+        },
+        height: 400,
+        brightness: brightness,
+      );
+      await _golden(tester, 'heatmap');
     });
 
     for (final (width, scale) in [(402.0, 1.0), (320.0, 1.0), (320.0, 1.6)]) {
@@ -896,6 +1015,64 @@ void main() {
     });
   }
 
+  // Abbacchio's row 1082: a range's start isn't a step, however near one.
+  testWidgets('at a 90-day range starting hours before a step, the axis '
+      'labels its steps alone, never its start beside the first', (
+    tester,
+  ) async {
+    final from = DateTime(2026, 8, 26, 21, 13);
+    final to = from.add(const Duration(days: 90));
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await _show(
+      tester,
+      [
+        {
+          'id': 'root',
+          'component': 'Column',
+          'children': ['c'],
+        },
+        {
+          'id': 'c',
+          'component': 'Chart',
+          'kind': 'timeseries',
+          'data': {'@path': '/d'},
+          'x': 'day',
+          'height': 296,
+          'timeFrom': from.millisecondsSinceEpoch,
+          'timeTo': to.millisecondsSinceEpoch,
+        },
+      ],
+      {
+        'd': {
+          'columns': ['day', 'tokens'],
+          'rows': [
+            for (var d = 20; d <= 24; d++) ['2026-11-$d', 1000 * d],
+          ],
+        },
+      },
+      width: 560,
+      height: 500,
+    );
+    final labels = [
+      for (final text in find.byType(Text).evaluate())
+        if (RegExp(r'^\d\d/\d\d$').hasMatch((text.widget as Text).data ?? ''))
+          (
+            (text.widget as Text).data!,
+            tester.getRect(find.byWidget(text.widget)),
+          ),
+    ]..sort((a, b) => a.$2.left.compareTo(b.$2.left));
+    expect(labels.first.$1, '08/27');
+    expect(labels.map((label) => label.$1), isNot(contains('08/26')));
+    for (var i = 1; i < labels.length; i++) {
+      expect(
+        labels[i].$2.left,
+        greaterThanOrEqualTo(labels[i - 1].$2.right),
+        reason: '${labels[i - 1]} and ${labels[i]} overlap',
+      );
+    }
+  });
+
   // Scolippi's F1 against Grafana 13.3.1, in Geist as the phone draws it.
   testWidgets('a time label each hour over six hours on a phone, the '
       'ends included', (tester) async {
@@ -953,4 +1130,161 @@ void main() {
     }
     expect(labels.last.right, lessThanOrEqualTo(_phone));
   });
+
+  // A dashboard's bar on an SE (320 points), as a phone draws it in Geist:
+  // at the normal text size on one line, the name giving way alone, the
+  // range and variable whole; larger, every button keeps at least a letter
+  // and "…", and at the largest the name takes a line of its own above
+  // the others, as Grafana's title does (Zucchero row 381, Scolippi
+  // 31336).
+  for (final (scale, filters) in [
+    (1.0, 1),
+    (1.6, 1),
+    (2.0, 1),
+    (2.5, 1),
+    (3.1, 1),
+    (3.1, 2),
+  ]) {
+    testWidgets("a dashboard's bar on an SE at text ×$scale with $filters "
+        'variable(s): every button keeps a letter', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      debugDeviceCapabilities = DeviceCapabilities(idiom: Idiom.phone);
+      addTearDown(() {
+        debugDefaultTargetPlatformOverride = null;
+        debugDeviceCapabilities = null;
+      });
+      tester.platformDispatcher.textScaleFactorTestValue = scale;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      List<Map<String, Object?>> button(
+        String id,
+        List<Map<String, Object?>> face, {
+        int? weight,
+      }) => [
+        {
+          'id': id,
+          'component': 'Button',
+          'child': '${id}_c',
+          'variant': 'borderless',
+          'weight': ?weight,
+          'action': {
+            'event': {'name': 'menu', 'context': <String, Object?>{}},
+          },
+        },
+        {
+          'id': '${id}_c',
+          'component': 'List',
+          'direction': 'horizontal',
+          'align': 'center',
+          'children': [for (final part in face) part['id']],
+        },
+        ...face,
+      ];
+      List<Map<String, Object?>> menu(String id, String text) => button(id, [
+        {'id': '${id}_t', 'component': 'Text', 'text': text},
+        {'id': '${id}_i', 'component': 'Icon', 'name': 'chevron-down'},
+      ]);
+      final variables = ['Agent: All', 'Fruit: Apples'].take(filters);
+      await _show(tester, width: 320, [
+        {
+          'id': 'root',
+          'component': 'Column',
+          'children': ['bar'],
+        },
+        {
+          'id': 'bar',
+          'component': 'Row',
+          'children': [
+            'name',
+            'range',
+            for (var k = 0; k < filters; k++) 'v$k',
+            'more',
+          ],
+        },
+        ...button('name', weight: 1, [
+          {
+            'id': 'name_t',
+            'component': 'Text',
+            'text': 'Claktory usage',
+            'variant': 'heading',
+          },
+          {'id': 'name_i', 'component': 'Icon', 'name': 'chevron-down'},
+        ]),
+        ...menu('range', '7 days'),
+        for (final (k, text) in variables.indexed) ...menu('v$k', text),
+        ...button('more', [
+          {'id': 'more_i', 'component': 'Icon', 'name': 'ellipsis'},
+        ]),
+      ], null);
+      expect(tester.takeException(), isNull);
+      Rect button$(Finder of) => tester.getRect(
+        find.ancestor(of: of, matching: find.byType(Pressable)).first,
+      );
+      final labels = ['Claktory usage', '7 days', ...variables];
+      for (final text in labels) {
+        final paragraph = tester.renderObject<RenderParagraph>(
+          find.descendant(of: find.text(text), matching: find.byType(RichText)),
+        );
+        // Room for a letter and "…" at its size, or its words whole.
+        final least = TextPainter(
+          text: TextSpan(text: 'A…', style: paragraph.text.style),
+          textScaler: paragraph.textScaler,
+          textDirection: TextDirection.ltr,
+        )..layout();
+        expect(
+          paragraph.size.width,
+          greaterThanOrEqualTo(least.width - 0.5),
+          reason: '$text at ×$scale',
+        );
+        least.dispose();
+        final rect = button$(find.text(text));
+        expect(rect.left, greaterThanOrEqualTo(0), reason: text);
+        expect(rect.right, lessThanOrEqualTo(320), reason: text);
+      }
+      final more = button$(
+        find.byWidgetPredicate(
+          (w) => w is ExtensionGlyph && w.icon == 'ellipsis',
+        ),
+      );
+      expect(more.right, lessThanOrEqualTo(320));
+      final name = button$(find.text('Claktory usage'));
+      final range = button$(find.text('7 days'));
+      if (scale == 1.0) {
+        // One line; "Clak…" as before, the others whole.
+        expect(range.center.dy, moreOrLessEquals(name.center.dy, epsilon: 1));
+        final paragraph = tester.renderObject<RenderParagraph>(
+          find.descendant(
+            of: find.text('Claktory usage'),
+            matching: find.byType(RichText),
+          ),
+        );
+        expect(
+          paragraph
+              .getPositionForOffset(
+                Offset(paragraph.size.width, paragraph.size.height / 2),
+              )
+              .offset,
+          greaterThanOrEqualTo(4),
+        );
+        for (final text in labels.skip(1)) {
+          expect(
+            tester
+                .renderObject<RenderParagraph>(
+                  find.descendant(
+                    of: find.text(text),
+                    matching: find.byType(RichText),
+                  ),
+                )
+                .didExceedMaxLines,
+            isFalse,
+            reason: text,
+          );
+        }
+      }
+      if (scale == 3.1) {
+        // The name on its own line, the others under it.
+        expect(range.top, greaterThanOrEqualTo(name.bottom));
+        expect(more.top, greaterThanOrEqualTo(name.bottom));
+      }
+    });
+  }
 }

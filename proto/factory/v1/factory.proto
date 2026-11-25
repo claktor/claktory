@@ -382,6 +382,15 @@ message ClientMessage {
     AddModel add_model = 214;
     // Claktory's background service back in charge (friend bug #24).
     RestoreBackendService restore_backend_service = 215;
+    // Websites shared over pipes (pipe-port-sharing.md): only from a
+    // person's app, never an agent's tool.
+    SharePipeWebsite share_pipe_website = 216;
+    StopPipeShare stop_pipe_share = 217;
+    OpenPipeShare open_pipe_share = 218;
+    HidePipeShare hide_pipe_share = 219;
+    CheckPipeSharePort check_pipe_share_port = 220;
+    // Stops Claktory on this Mac (StopEngine, friend bug #27).
+    StopEngine stop_engine = 221;
   }
 }
 
@@ -432,6 +441,112 @@ message PipeGroup {
   uint32 position = 5;
   // ms since 1970.
   int64 created_ms = 6;
+}
+
+// A website shared over pipes (pipe-port-sharing.md): one on this computer
+// that this Claktory shares (mine), or one another Claktory shares with
+// this one over a pipe (theirs). It reaches only each pipe's pinned peer
+// while that pipe is open: a paused pipe's share waits and works again on
+// resume; a pipe closed, or whose other side became another account, ends
+// it on that pipe for good. Pipe messages go first: its traffic is held to
+// a rate (about 25 MB/s direct, 5 MB/s relayed, 64 connections at once).
+message PipeShare {
+  // This Claktory's id for it (the other side has its own).
+  string id = 1;
+  // This side shares it; false: another Claktory shares it with this one.
+  bool mine = 2;
+  // What it's called. Theirs: the other side's words; show them plain,
+  // never as a link.
+  string name = 3;
+  // Mine: the port on this computer it shares. Theirs: the sharer's
+  // number, which this side's address uses when it's free here.
+  uint32 port = 4;
+  // Mine: the pipes it reaches now, open or not (group_id's pipes when it
+  // follows a group). Theirs: the one pipe it came over.
+  repeated string pipe_ids = 5;
+  // Mine: the group it follows: a pipe moved into the group gets it too,
+  // one moved out stops getting it. Empty when it's shared with chosen
+  // pipes (pipe_ids).
+  string group_id = 6;
+  // ms since 1970.
+  int64 created_ms = 7;
+  // It can be used now. Mine: at least one of its pipes is open. Theirs:
+  // its pipe is open.
+  bool live = 8;
+  // Theirs: where it opens in this computer's browser,
+  // "http://s-<random>.localhost:<port>/", the same for as long as it
+  // lasts (Copy address copies it). Known from when it arrives.
+  string address = 9;
+  // Theirs: the same at "http://127.0.0.1:<port>/", for a browser that
+  // can't open *.localhost addresses (Safari).
+  string fallback_address = 10;
+  // Theirs: this computer serves it now. From its first Open, it stays up
+  // for as long as the share lasts, across restarts.
+  bool listening = 11;
+  // Theirs: why this computer can't serve it, in a sentence ("Port 3000 is
+  // in use on this Mac."); empty when it can.
+  string listener_problem = 12;
+  // Theirs: the person hid it (HidePipeShare).
+  bool hidden = 13;
+}
+
+// Shares a website on this computer (Share a website… in a pipe's or a
+// group's settings) with the pipes named, or with a group's. Answered with
+// the Workspace, or an Error saying why for the person ("Port 7420 is
+// Claktory's own.").
+message SharePipeWebsite {
+  // A port on this computer, 1 to 65535; never one of Claktory's own.
+  uint32 port = 1;
+  // One line, at most 80 characters: what the other side sees it called.
+  string name = 2;
+  // Open pipes to share it with; or
+  repeated string pipe_ids = 3;
+  // a group: it reaches the group's pipes and follows the group.
+  string group_id = 4;
+}
+
+// Stops a share of this side's on every pipe at once: its connections end
+// now, and each pipe's other side is told.
+message StopPipeShare {
+  string share_id = 1;
+}
+
+// Opens a share another Claktory shares with this one (theirs): starts
+// this computer's server for it if it isn't up, and answers
+// PipeShareOpened.
+message OpenPipeShare {
+  string share_id = 1;
+}
+
+// The address to open, once: it carries a code good for a minute that
+// signs this browser in to the share. Open one in the default browser:
+// `url` (*.localhost), or `fallback_url` (127.0.0.1) where that browser
+// can't open *.localhost addresses (Safari).
+message PipeShareOpened {
+  string share_id = 1;
+  string url = 2;
+  string fallback_url = 3;
+}
+
+// Hides a share another Claktory shares with this one, or shows it again.
+message HidePipeShare {
+  string share_id = 1;
+  bool hidden = 2;
+}
+
+// Whether a port could be shared, before Share: answered with
+// PipeSharePort.
+message CheckPipeSharePort {
+  uint32 port = 1;
+}
+
+message PipeSharePort {
+  uint32 port = 1;
+  // Something on this computer answers on it now.
+  bool listening = 2;
+  // Why it can't be shared, in a sentence ("Port 7420 is Claktory's
+  // own."); empty when it can.
+  string problem = 3;
 }
 
 message ServerMessage {
@@ -572,6 +687,10 @@ message ServerMessage {
     MonitorsChanged monitors_changed = 73;
     // The answer to ListBranches, to the asker only.
     Branches branches = 74;
+    // The answer to OpenPipeShare, to the asker only.
+    PipeShareOpened pipe_share_opened = 78;
+    // The answer to CheckPipeSharePort, to the asker only.
+    PipeSharePort pipe_share_port = 79;
   }
   // Resuming the Workspace on reconnect (#378), only to an app whose Hello
   // has workspace_patches. On a message carrying a Workspace or a
@@ -1295,6 +1414,9 @@ message UpdateSettings {
   // `notifications` is (B4): what the app sends for one switch, so two
   // devices changing different ones don't undo each other.
   optional NotificationSettingsChange notification_change = 36;
+  // Settings.when_app_quits (friend bug #27); UNSPECIFIED is refused. Also
+  // answers Onboarding.when_app_quits.
+  optional QuitMode when_app_quits = 37;
 }
 
 // Replaces a settings file that has an error (`Workspace.config_error`) with
@@ -2439,6 +2561,10 @@ message Workspace {
   // How this Claktory's backend runs on its Mac (friend bug #24): unset,
   // or state UNSPECIFIED, shows nothing.
   BackendService backend_service = 47;
+  // Websites shared over pipes: those this Claktory shares, and those
+  // other Claktories share with it. One stopped or ended is gone from it;
+  // the pipes' chats keep the lines saying so.
+  repeated PipeShare pipe_shares = 48;
 }
 
 // Claktory's background service on a Mac (friend bug #24): the LaunchAgent
@@ -2456,6 +2582,13 @@ message BackendService {
   // Restore was asked for: this backend stops in a moment, and the service
   // starts it again. Show "Restarting…" until the app reconnects.
   bool restoring = 4;
+  // RUNNING under this Mac's background service: the Mac app on this Mac
+  // can stop it (StopEngine) and start it (`factoryd install --start`),
+  // so it shows the switch (friend bug #27). False everywhere else.
+  bool can_stop = 5;
+  // StopEngine was taken: it stops in a moment. Show "Stopping…" until the
+  // connection closes.
+  bool stopping = 6;
 }
 
 enum BackendServiceState {
@@ -2474,6 +2607,22 @@ enum BackendServiceState {
 // can_restore): the backend stops, and the service starts it again. Ack,
 // then the connection closes; refused, saying why, when it can't.
 message RestoreBackendService {}
+
+// Stops Claktory on this Mac (friend bug #27): its background service
+// stops it and won't start it again, at login either, until the Mac app
+// starts it (`factoryd install --start`). Agents' runs stop where they are
+// and carry on at the next start, as after an update; monitors wait. Ack,
+// then BackendService.stopping, then the connection closes. Only from the
+// app on this Mac (a connection with this machine's token), and refused
+// while an update is going in or on trial, or where BackendService.can_stop
+// is false.
+message StopEngine {
+  // The app is quitting (⌘Q): stops only when Settings.when_app_quits is
+  // STOP, and starts again when the app opens. False (the person's switch):
+  // stops whatever the setting, and stays stopped when the app opens, until
+  // the person starts it (`factoryd install --check` says held).
+  bool quitting = 1;
+}
 
 // Agents and chats waiting on one provider's usage limit or credit
 // (Workspace.provider_waits): what Needs you shows for them, all at once.
@@ -3628,6 +3777,24 @@ message Settings {
   // How Claktory follows up on blocked checklist items (#282), as set:
   // each its default until changed. Kept in factory.db, not config.json.
   ChecklistSettings checklist = 33;
+  // What happens to Claktory on this Mac when its app quits (friend bug
+  // #27): KEEP_RUNNING until the person chooses (every Claktory from before
+  // it), never UNSPECIFIED. Only matters where BackendService.can_stop.
+  // Kept in factory.db.
+  QuitMode when_app_quits = 34;
+}
+
+// What happens to Claktory on its Mac when the Mac app quits (friend bug
+// #27).
+enum QuitMode {
+  QUIT_MODE_UNSPECIFIED = 0;
+  // Agents keep working with the app closed, and Claktory starts by itself
+  // when the person logs in.
+  QUIT_MODE_KEEP_RUNNING = 1;
+  // Claktory runs only while the app is open: quitting the app stops it
+  // (StopEngine quitting), and nothing starts it at login; opening the app
+  // starts it (`factoryd install --start`).
+  QUIT_MODE_STOP = 2;
 }
 
 // Settings → Checklist (#282): how Claktory follows up on blocked checklist
@@ -3662,6 +3829,12 @@ message Onboarding {
   // Claktory starts it), moved first to a model that can run if its own
   // can't.
   OnboardingStep model = 1;
+  // "When Claktory quits" (friend bug #27): NEEDED on a new Claktory that
+  // its Mac's background service runs (BackendService.can_stop), until the
+  // person answers (UpdateSettings.when_app_quits turns it DONE) or skips
+  // it (SetOnboarding.skip_when_app_quits: SKIPPED, and it keeps running).
+  // DONE everywhere else, and on every Claktory from before it.
+  OnboardingStep when_app_quits = 2;
 }
 
 enum OnboardingStep {
@@ -3676,6 +3849,9 @@ enum OnboardingStep {
 message SetOnboarding {
   // "Connect a model" (Onboarding.model): skipped until a model is available.
   bool skip_model = 1;
+  // "When Claktory quits" (Onboarding.when_app_quits): skipped for good,
+  // keeping Claktory running.
+  bool skip_when_app_quits = 2;
 }
 
 // How long a provider's (or one model's) prompt cache is asked to last.
@@ -4686,6 +4862,29 @@ message Proposal {
   // Why it changed it last, in the agent's words (at most 300 characters);
   // empty if it gave no reason.
   string update_reason = 12;
+  // What it asks Rivet to give (propose_to_rivet's grants), resolved by
+  // Claktory when it was proposed, in Claktory's words: show them under the
+  // agent's text, apart from it, as what approving it also lets Rivet do,
+  // each once, within a day, without a card of its own. Empty for most
+  // proposals.
+  repeated ProposalGrant grants = 13;
+}
+
+// Something an agent's proposal asks Rivet to give (propose_to_rivet's
+// grants), resolved by Claktory when it was proposed. Approving the
+// proposal lets Rivet make it once, within 24 hours, without a card of its
+// own; anything broader, later or by a Rivet that has read from outside
+// gets its card as before.
+message ProposalGrant {
+  // Claktory's sentence for it, as its own card would say it ("Charts
+  // reads account-aggregates.csv in Ops", "Carne gets Charts: Edit
+  // dashboards"). Claktory's words, never the agent's.
+  string summary = 1;
+  // Claktory's warnings, as that card would show them ("Charts can reach
+  // api.example.com on the internet…"); empty for none.
+  repeated string warnings = 2;
+  // When Rivet made it on this approval, in ms since 1970; 0 while unused.
+  int64 used_ms = 3;
 }
 
 // A device an agent adds for the person (an admin agent's devices_add tool,
@@ -7705,9 +7904,45 @@ message AskPerson {
   // holds both for older apps. Both empty on every other card.
   string action_description = 18;
   string action_reason = 19;
+  // The talk on the card so far (#430), oldest first: empty until its
+  // agent first answers the person on it (ask_reply). Each ask_reply adds
+  // the person's words that closed the round before (their reply, or their
+  // comment on approving or dismissing it) and then the agent's answer, and
+  // makes the card PENDING again at a new revision, with `answer` and
+  // decided_ms cleared: it waits again (Agent.waiting_seqs) and notifies as
+  // a new card does. A procedure still on its way whose last step done has
+  // the person's comment can be answered too: it stays PENDING at its step,
+  // at a new revision, and notifies again. Sort it in Needs you by its last
+  // message's at_ms, so it rises. Show the thread above the card's buttons, with Reply
+  // (AnswerAsk.reply) and Resolve (AnswerAsk.resolve) beside them.
+  repeated AskThreadMessage thread = 20;
+  // Ended with Resolve (AnswerAsk.resolve, #430): talked through, with no
+  // decision. state is ANSWERED; `answer` is the person's optional comment.
+  // Show "Resolved", never as approved.
+  bool resolved = 21;
 }
 
 // One step of a procedure (AskPerson.steps).
+// One message of the talk on a card (AskPerson.thread, #430).
+message AskThreadMessage {
+  // The agent's (ask_reply); false: the person's.
+  bool from_agent = 1;
+  // In the agent's words or the person's: Markdown, shown as theirs.
+  string text = 2;
+  int64 at_ms = 3;
+}
+
+// Where the person answered a card from (AnswerAsk.from, #430): the agent
+// is told, so it answers them there.
+enum AskAnsweredFrom {
+  // An app before #430: the agent isn't told where.
+  ASK_ANSWERED_FROM_UNSPECIFIED = 0;
+  // The agent's conversation.
+  ASK_ANSWERED_FROM_CONVERSATION = 1;
+  // Needs you.
+  ASK_ANSWERED_FROM_NEEDS_YOU = 2;
+}
+
 message AskStep {
   // What to do, in the agent's words (Markdown, short; may hold a fenced
   // command, which the card gives a Copy button).
@@ -7767,7 +8002,8 @@ message AnswerAsk {
   // it's about counts as answered (no asking again). `text` is needed;
   // `dismiss` is ignored; `attachments` go with it. Refused for a procedure
   // (`step`) and for an ask that wants a written answer (wants_text),
-  // whose cards stay as they are.
+  // whose cards stay as they are, unless the card has a thread
+  // (AskPerson.thread, #430): then it's Reply, to answer the agent again.
   bool reply = 7;
   // The card's version the person answered (AskPerson.revision, #428).
   // Another version is refused, "This card changed. Look at it again.",
@@ -7775,6 +8011,15 @@ message AnswerAsk {
   // out (an app before #428), it's taken for the card as it is, unless its
   // agent changed it in the last 30 seconds, when it's refused the same way.
   optional uint32 revision = 8;
+  // Resolve (#430): end a card that has a thread (AskPerson.thread) with
+  // no decision, talked through. `text` is the person's optional comment;
+  // `dismiss` and `reply` are ignored. The card closes ANSWERED with
+  // AskPerson.resolved, and its agent is told (quietly without a comment).
+  // Refused for a card without a thread.
+  bool resolve = 9;
+  // Where the person answered from: the agent is told, and asked to answer
+  // their words on the card (ask_reply) so they reach them there.
+  AskAnsweredFrom from = 10;
 }
 
 // A chat: a one-off conversation of the person's, beside their agents but
@@ -8320,6 +8565,18 @@ message NeedsYouRecord {
   // none. title is the card as it was last. Show it quietly ("Updated
   // twice"), never as a record of its own.
   uint32 updates = 25;
+  // Made with no card of its own because the person approved it in an
+  // agent's proposal (ProposalGrant): the proposal's id (Proposal.id), to
+  // say "approved in Bruno's proposal" and open it. APP_ACCESS and
+  // PROPOSAL_GRANT only; empty otherwise.
+  string proposal_id = 26;
+  // proposal_id's agent, whose proposal it was (its name is in the
+  // workspace, or its id once it's deleted).
+  string proposal_agent_id = 27;
+  // The proposal's entry in proposal_agent_id's conversation, to open it
+  // there; 0 when it's no longer in the conversation as loaded (after
+  // /clear, say): open the conversation at its end then.
+  uint64 proposal_seq = 28;
 }
 
 enum NeedsYouRecordKind {
@@ -8399,6 +8656,14 @@ enum NeedsYouRecordKind {
   // reading it", "Rivet stopped Mike sending to this pipe"). The
   // person's own changes in the pipe's settings aren't listed.
   NEEDS_YOU_RECORD_KIND_PIPE_MEMBER = 16;
+  // An admin agent (Rivet) made a change with no card of its own because
+  // the person approved it in an agent's proposal (ProposalGrant): a pipe's
+  // settings, an app uninstalled with its data kept, or Continue
+  // automatically. Outcome CHANGED, agent_id who made it, title Claktory's
+  // sentence (the grant's summary), proposal_id and proposal_agent_id the
+  // proposal. A change to an app's access made so is APP_ACCESS, with
+  // proposal_id set.
+  NEEDS_YOU_RECORD_KIND_PROPOSAL_GRANT = 17;
 }
 
 enum NeedsYouOutcome {
@@ -8419,6 +8684,9 @@ enum NeedsYouOutcome {
   // ask_withdraw, proposal_withdraw; QUESTION, REVIEW and PROPOSAL only):
   // decided_ms is when, agent_reason its reason, and `reply` is empty.
   NEEDS_YOU_OUTCOME_WITHDRAWN = 8;
+  // An agent's question talked through on its card and ended with Resolve
+  // (#430), without a decision.
+  NEEDS_YOU_OUTCOME_RESOLVED = 9;
 }
 
 // ---- Browser control ----

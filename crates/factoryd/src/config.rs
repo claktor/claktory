@@ -54,6 +54,8 @@ const SHIPPED_RIVET_PROMPTS: &[&str] = &[
     "7601e81140d2bbdf3b77c2847d1987e69eb0833c830f9941727d1dca2f5676b3",
     // Newer models (#404).
     "4e315740e5d8c4014539d2972757bf68675bd12488859aca14aa025555bf346f",
+    // Approved proposals' grants: review before passing the id.
+    "5956a04b1a664ec031dc4c546b0ba7b365f0d19f0b3e4152e6b9ffce2d021d72",
 ];
 /// Rivet is interactive, so it gets medium effort, the Opus 5.5 default.
 const RIVET_EFFORT: &str = "medium";

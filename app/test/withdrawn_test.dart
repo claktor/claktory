@@ -264,4 +264,40 @@ void main() {
     await settle(tester);
     expect(find.text('Restart the build server?'), findsOneWidget);
   });
+
+  testWidgets('open in Needs you when its agent takes it back, its row says '
+      'Withdrawn, not Answered (Zucchero row 405)', (tester) async {
+    final workspace = snapshot();
+    workspace.agents.last.waitingSeqs.add(Int64(7));
+    final harness = Harness(workspace);
+    harness.backend.entriesById['a1/7'] = Entry(
+      seq: Int64(7),
+      timestampMs: Int64(500),
+      askPerson: _ask(),
+    );
+    await harness.show(tester, size: const Size(1200, 900));
+    await settle(tester);
+    harness.page.value = AppPage.inbox;
+    await pumpFrames(tester);
+    await settle(tester);
+    await tester.tap(find.text('Restart the build server?').first);
+    await settle(tester);
+    // Its agent takes it back.
+    harness.backend.entriesById['a1/7'] = Entry(
+      seq: Int64(7),
+      timestampMs: Int64(500),
+      askPerson: _ask(withdrawn: true),
+    );
+    final after = harness.backend.workspace.workspace.deepCopy();
+    after.agents.last.waitingSeqs.clear();
+    await harness.apply(tester, after);
+    await settle(tester);
+    await settle(tester);
+    expect(
+      find.textContaining('Withdrawn by Builder', findRichText: true),
+      findsOneWidget,
+    );
+    expect(find.text('Withdrawn'), findsOneWidget);
+    expect(find.text('Answered'), findsNothing);
+  });
 }

@@ -37,6 +37,18 @@
 //                near the top: as Needs you goes to a card. Prints
 //                "scrolled" with the message's words around TEXT, or
 //                "not found: TEXT"
+//   tap TEXT     taps the last widget whose text, button label (a glyph
+//                button's, such as "Expand") or semantics label has TEXT in
+//                it, in any case, scrolled into view first, then runs about
+//                a second:
+//                prints "tapped: TEXT" or "not found: TEXT"
+//   drag DY [X Y]  drags DY points down (up, negative) from the view's
+//                centre, or from X Y, slowly and held still before letting
+//                go, so nothing flings: positive shows what's higher up.
+//                Prints "dragged: DY"
+//   pan DX DY [X Y]  the same drag, DX points across (right, positive;
+//                left, negative) and DY down: positive shows what's further
+//                left. Prints "panned: DX DY"
 //   voice FILE   records FILE (.m4a) as a voice message from the mic and
 //                sends it once it has played; FILE.levels (or backup.levels
 //                for backup.m4a) beside it holds
@@ -61,15 +73,17 @@ import 'dart:ui' as ui;
 import 'package:factory_app/backend.dart' show RequestFailure, localPort;
 import 'package:factory_app/explorer.dart' show openFile;
 import 'package:factory_app/main.dart' as app;
-import 'package:factory_app/controls.dart' show Button;
+import 'package:factory_app/controls.dart' show Button, GlyphButton;
 import 'package:factory_app/message_box.dart' show MessageBox;
 import 'package:factory_app/recorder.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/sidebar.dart';
 import 'package:factory_app/sight.dart' show Sight;
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart' show EditableText;
+import 'package:flutter/widgets.dart'
+    show EditableText, RichText, Semantics, Text;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
@@ -400,6 +414,87 @@ void main() {
               }
               // ignore: avoid_print
               print('scrolled: ${first.snippet}');
+            case 'tap':
+              // Whatever its case: "expand" finds "Expand Launch.png".
+              final wanted = arg.toLowerCase();
+              bool has(String? text) =>
+                  text?.toLowerCase().contains(wanted) ?? false;
+              final target = find.byWidgetPredicate(
+                (widget) => switch (widget) {
+                  Text(:final data, :final textSpan) => has(
+                    data ?? textSpan?.toPlainText(),
+                  ),
+                  RichText(:final text) => has(text.toPlainText()),
+                  GlyphButton(:final label) => has(label),
+                  Semantics(:final properties) => has(properties.label),
+                  _ => false,
+                },
+              );
+              if (target.evaluate().isEmpty) {
+                // ignore: avoid_print
+                print('not found: $arg');
+                continue;
+              }
+              // Neither pumps: the scroll jumps, and the tap is two pointer
+              // events, which the steps below draw.
+              await tester.ensureVisible(target.last);
+              await step();
+              await tester.tap(target.last, warnIfMissed: false);
+              final until = DateTime.now().add(const Duration(seconds: 1));
+              while (DateTime.now().isBefore(until)) {
+                await tick();
+              }
+              // ignore: avoid_print
+              print('tapped: $arg');
+            case 'drag' || 'pan':
+              final parts = [
+                for (final part in arg.split(' '))
+                  if (part.isNotEmpty) double.tryParse(part),
+              ];
+              if (parts.isEmpty || parts.contains(null)) {
+                // ignore: avoid_print
+                print('$verb: not a number: $arg');
+                continue;
+              }
+              final pan = verb == 'pan';
+              if (pan && parts.length < 2) {
+                // ignore: avoid_print
+                print('pan: needs DX DY: $arg');
+                continue;
+              }
+              final at = pan ? 2 : 1;
+              final delta = pan
+                  ? Offset(parts[0]!, parts[1]!)
+                  : Offset(0, parts[0]!);
+              final view = binding.renderViews.first.size;
+              final from = parts.length >= at + 2
+                  ? Offset(parts[at]!, parts[at + 1]!)
+                  : view.center(Offset.zero);
+              // Through a gesture of its own, which never pumps (the
+              // tester's drags do, which the benchmark policy never runs):
+              // about 1000 points a second, in steps the frames draw.
+              final gesture = await tester.startGesture(
+                from,
+                kind: PointerDeviceKind.mouse,
+              );
+              final moves = (delta.distance / 50).clamp(10, 200).round();
+              for (var i = 0; i < moves; i++) {
+                await gesture.moveBy(delta / moves.toDouble());
+                await tick();
+              }
+              // Still for a moment, so letting go flings nothing.
+              final still = DateTime.now().add(
+                const Duration(milliseconds: 250),
+              );
+              while (DateTime.now().isBefore(still)) {
+                await tick();
+              }
+              await gesture.up();
+              for (var i = 0; i < 5; i++) {
+                await tick();
+              }
+              // ignore: avoid_print
+              print('${pan ? 'panned' : 'dragged'}: $arg');
             case 'page':
               scope.page.value = AppPage.values.byName(arg);
             case 'file':

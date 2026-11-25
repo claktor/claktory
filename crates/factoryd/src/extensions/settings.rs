@@ -204,7 +204,8 @@ enum Change {
     Diagnostics(bool),
     KeepAwake(bool),
     Settings(Box<v1::UpdateSettings>, String),
-    Notify(String, v1::NotifyMode),
+    /// The agent's id, how it's called (`called`) and the mode.
+    Notify(String, String, v1::NotifyMode),
     Voice(bool),
     Pin(v1::PinApp),
 }
@@ -252,7 +253,7 @@ fn changes(factory: &Factory, agent: &str, args: SettingsArgs) -> Result<Vec<Cha
                 "never" => v1::NotifyMode::Never,
                 other => return Err(format!("{name}'s Notify me is default, always or never, not \"{other}\".")),
             };
-            changes.push(Change::Notify(found.id.clone(), mode));
+            changes.push(Change::Notify(found.id.clone(), called(found), mode));
         }
     }
     if let Some(given) = args.checklist {
@@ -308,9 +309,9 @@ async fn apply(factory: &Arc<Factory>, change: Change) -> Result<String, String>
             factory.update_settings(*request).await.map_err(error)?;
             Ok(what)
         }
-        Change::Notify(id, mode) => {
+        Change::Notify(id, called, mode) => {
             factory.update_agent(&id, AgentChange { notify: Some(mode), ..Default::default() }).await.map_err(error)?;
-            Ok(format!("{id}'s Notify me"))
+            Ok(format!("{called}'s Notify me"))
         }
         Change::Voice(true) => {
             crate::speech::model::install(factory).map_err(error)?;
@@ -363,6 +364,16 @@ async fn settings(factory: Arc<Factory>, agent: String, args: SettingsArgs) -> R
 }
 
 /// Every setting the tool covers, as it is now.
+/// An agent as the person knows it: its name, and its id too when that
+/// reads differently ("Frontend (app-frontend)").
+fn called(agent: &AgentConfig) -> String {
+    match agent.name.as_str() {
+        "" => agent.id.clone(),
+        name if name.eq_ignore_ascii_case(&agent.id) => name.to_owned(),
+        name => format!("{name} ({})", agent.id),
+    }
+}
+
 fn now(factory: &Factory) -> String {
     let mut text = String::new();
 
@@ -424,7 +435,10 @@ fn now(factory: &Factory) -> String {
         .agents
         .iter()
         .filter(|(_, mode)| !mode.is_default())
-        .map(|(id, mode)| format!("{id} {}", if *mode == crate::notify::Mode::Always { "always" } else { "never" }))
+        .map(|(id, mode)| {
+            let called = factory.lock().config.agent(id).map_or_else(|| id.clone(), called);
+            format!("{called} {}", if *mode == crate::notify::Mode::Always { "always" } else { "never" })
+        })
         .collect();
     let _ = writeln!(text, "Agents' Notify me: {}", if modes.is_empty() { "all default".to_owned() } else { format!("{}; the rest default", modes.join(", ")) });
 

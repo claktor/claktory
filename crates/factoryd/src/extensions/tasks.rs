@@ -274,7 +274,7 @@ fn run_stop(factory: &Factory, asker: &str, args: serde_json::Value) -> Result<T
         Some(owner) => owner,
         None => return Err("Say whose task: agent is an agent's id.".to_owned()),
     };
-    let by = factory.lock().config.agent(asker).map_or_else(|| asker.to_owned(), |agent| agent.name.clone());
+    let by = factory.agent_name(asker);
     let task = args.task.trim();
     stop(factory, &owner, task, &by)?;
     let said = if owner == asker {

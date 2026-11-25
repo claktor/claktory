@@ -401,7 +401,7 @@ fn series(export: &serde_json::Value, window: &str, metric: &str) -> Vec<(i64, i
         .as_array()
         .unwrap()
         .iter()
-        .filter(|row| row["window"] == window && row["metric"] == metric)
+        .filter(|row| row["window"] == window && row["metric"] == metric && row["dimension"] == "none")
         .map(|row| (row["bucket_start_ms"].as_i64().unwrap() / 1000, row["value"].as_i64().unwrap()))
         .collect()
 }
@@ -432,11 +432,11 @@ async fn the_charts_export_has_global_counts_for_completed_days_only() {
     assert_eq!(series(&today, "today", "registered_claktories"), [(first_day, 2)]);
     assert_eq!(series(&today, "rolling30", "contact_claktories").len(), 90, "rolling30 for completed days only");
     let partial = today["rows"].as_array().unwrap().iter().filter(|row| row["window"] == "today").collect::<Vec<_>>();
-    assert_eq!(partial.len(), 11, "each global metric of a day, rolling30 aside");
+    assert_eq!(partial.len(), 14, "each global metric of a day, rolling30 aside");
     assert!(partial.iter().all(|row| row["status"] == "partial" && row["bucket_start_ms"].as_i64() == Some(first_day * 1000)));
     // Again later, the same rows rewritten: nothing keeps the earlier ones.
     instance.advance(60);
-    assert_eq!(export(&instance)["rows"].as_array().unwrap().iter().filter(|row| row["window"] == "today").count(), 11);
+    assert_eq!(export(&instance)["rows"].as_array().unwrap().iter().filter(|row| row["window"] == "today").count(), 14);
 
     // The next day, one of them is in touch again, with more work.
     instance.advance(86_400);
@@ -467,6 +467,10 @@ async fn the_charts_export_has_global_counts_for_completed_days_only() {
                 "window"
             ]
         );
+        // Hours, Claktories per user and countries have tests of their own.
+        if row["window"] == "hour" || row["dimension"] == "claktory_count" || row["dimension"] == "country" {
+            continue;
+        }
         let partial = row["window"] == "today";
         let status = if partial { "partial" } else { "ok" };
         assert_eq!((row["dimension"].as_str(), row["label"].as_str(), row["status"].as_str()), (Some("none"), Some("All"), Some(status)));
@@ -502,8 +506,9 @@ async fn the_charts_export_has_global_counts_for_completed_days_only() {
     assert_eq!(snapshot("model_connected_claktories"), [(first_day, 2)]);
     assert_eq!(snapshot("first_run_claktories"), [(first_day, 1)]);
 
-    // Nothing of any one of them: no id, email, address, place, model or version.
-    for private in [&claktories[0].id, &claktories[1].id, "p0@example.com", "203.0.113", "Netherlands", "Amsterdam", "gpt-5.6", "v0.1.19", "anthropic"] {
+    // Nothing of any one of them: no id, email, address, place finer than
+    // its country, model or version.
+    for private in [&claktories[0].id, &claktories[1].id, "p0@example.com", "203.0.113", "Amsterdam", "North Holland", "Lyon", "gpt-5.6", "v0.1.19", "anthropic"] {
         assert!(!text.contains(private), "{private} in the export");
     }
 
@@ -532,10 +537,10 @@ fn the_charts_export_leaves_the_connection_as_it_was() {
 }
 
 /// Slice 2 (#411): a month's breakdowns are published once it's over,
-/// write once, each category with five Claktories behind it or folded
-/// into Other, and nothing of any one Claktory.
+/// write once, every category exact (Matt, Bruno 29945), and nothing of
+/// any one Claktory but counts.
 #[tokio::test]
-async fn a_month_is_published_once_with_small_groups_folded_and_nothing_of_any_one() {
+async fn a_month_is_published_once_exact_and_nothing_of_any_one() {
     let instance = start_located().await;
     let mut ids = Vec::new();
     for number in 0..6 {
@@ -594,23 +599,25 @@ async fn a_month_is_published_once_with_small_groups_folded_and_nothing_of_any_o
     };
     assert_eq!(value("requests", "none", "All"), Some(120));
     assert_eq!(value("requests", "provider", "anthropic"), Some(120));
-    // Opus has six behind it; Haiku's five go into Other, which the one
-    // unlisted model alone couldn't make safe.
+    // Every listed model its own, exact (Matt, Bruno 29945); the unlisted
+    // one is Other.
     assert_eq!(value("requests", "model", "claude-opus-4-8"), Some(60));
-    assert_eq!(value("requests", "model", "Other"), Some(60));
-    assert_eq!(value("requests", "model", "claude-haiku-4-5"), None);
-    // France alone is too few, and Other then takes in the Netherlands.
-    assert_eq!(value("backend_claktories", "country", "Other"), Some(6));
+    assert_eq!(value("requests", "model", "claude-haiku-4-5"), Some(50));
+    assert_eq!(value("requests", "model", "Other"), Some(10));
+    // Countries are exact, one included (Matt, Bruno 29402).
+    assert_eq!(value("backend_claktories", "country", "Netherlands"), Some(5));
+    assert_eq!(value("backend_claktories", "country", "France"), Some(1));
+    assert_eq!(value("backend_claktories", "country", "Other"), None);
     assert_eq!(value("backend_claktories", "backend_version", "v0.1.9"), Some(6));
     assert_eq!(value("backend_claktories", "backend_platform", "macos-arm64"), Some(6));
     assert_eq!(value("contact_claktories", "none", "All"), Some(6));
-    for private in [ids[0].as_str(), ids[5].as_str(), "someones-own-model", "France", "Netherlands", "Amsterdam", "m0@example.com", "203.0.113"] {
+    for private in [ids[0].as_str(), ids[5].as_str(), "someones-own-model", "Amsterdam", "North Holland", "Lyon", "m0@example.com", "203.0.113"] {
         assert!(!text.contains(private), "{private} in the export");
     }
 }
 
 #[test]
-fn too_few_claktories_leave_a_breakdown_suppressed_and_only_its_total() {
+fn a_breakdown_of_one_or_two_claktories_is_exact_too() {
     let dir = std::env::temp_dir().join(format!("claktory-publish-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("account.db");
@@ -645,9 +652,263 @@ fn too_few_claktories_leave_a_breakdown_suppressed_and_only_its_total() {
         rows,
         [
             ("none".into(), "All".into(), "ok".into(), Some(15), String::new()),
-            ("provider".into(), "Other".into(), "suppressed".into(), None, String::new()),
-            ("model".into(), "Other".into(), "suppressed".into(), None, String::new()),
+            ("provider".into(), "anthropic".into(), "ok".into(), Some(15), String::new()),
+            ("model".into(), "claude-opus-4-8".into(), "ok".into(), Some(15), String::new()),
         ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A database of its own, for counts set up row by row.
+fn scratch(name: &str) -> (std::path::PathBuf, rusqlite::Connection) {
+    let dir = std::env::temp_dir().join(format!("claktory-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let conn = db::open(&dir.join("account.db")).unwrap();
+    (dir, conn)
+}
+
+fn add_account(conn: &rusqlite::Connection, id: &str, created: i64) {
+    conn.execute(
+        "INSERT INTO accounts (id, email, created, last_sign_in) VALUES (?1, ?1 || '@example.com', ?2, ?2)",
+        rusqlite::params![id, created],
+    )
+    .unwrap();
+}
+
+fn add_claktory(conn: &rusqlite::Connection, id: &str, account: &str, created: i64, last_seen: i64, country: &str, revoked: Option<i64>) {
+    conn.execute(
+        "INSERT INTO claktories (id, account_id, name, backend_key, token_hash, epoch, created, last_seen, version, platform, revoked_at, country)
+         VALUES (?1, ?2, 'Mac', 'key', ?1, 1, ?3, ?4, 'v0.1.21', 'macos-arm64', ?5, ?6)",
+        rusqlite::params![id, account, created, last_seen, revoked, country],
+    )
+    .unwrap();
+}
+
+fn seen_on(conn: &rusqlite::Connection, claktory: &str, account: &str, at: i64) {
+    conn.execute("INSERT INTO seen_days (claktory_id, account_id, day) VALUES (?1, ?2, ?3)", rusqlite::params![claktory, account, db::day(at)])
+        .unwrap();
+}
+
+/// The rows of `window` and `metric`: (bucket start, dimension, label, value, status).
+fn rows_of(export: &serde_json::Value, window: &str, metric: &str) -> Vec<(i64, String, String, Option<i64>, String)> {
+    export["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["window"] == window && row["metric"] == metric)
+        .map(|row| {
+            (
+                row["bucket_start_ms"].as_i64().unwrap() / 1000,
+                row["dimension"].as_str().unwrap().to_owned(),
+                row["label"].as_str().unwrap().to_owned(),
+                row["value"].as_i64(),
+                row["status"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// #411 follow-up: users are accounts, each counted once however many
+/// Claktories it has, by the same rules as the Claktories' counts.
+#[test]
+fn users_are_accounts_counted_once_whatever_their_claktories() {
+    let (dir, conn) = scratch("users");
+    let today = 1_795_000_000 / 86_400 * 86_400;
+    let now = today + 12 * 3600 + 1800;
+    let yesterday = today - 86_400;
+    add_account(&conn, "a1", today - 10 * 86_400);
+    add_account(&conn, "a2", yesterday + 100);
+    add_account(&conn, "a3", today + 100);
+    // An account with no Claktory is still a registered user.
+    add_account(&conn, "a4", today - 5 * 86_400);
+    add_claktory(&conn, "c1a", "a1", today - 10 * 86_400, now, "Netherlands", None);
+    add_claktory(&conn, "c1b", "a1", today - 9 * 86_400, now, "Netherlands", None);
+    add_claktory(&conn, "c1c", "a1", today - 9 * 86_400, now, "Netherlands", Some(today - 2 * 86_400));
+    add_claktory(&conn, "c2", "a2", yesterday + 200, now, "France", None);
+    add_claktory(&conn, "c3", "a3", today + 200, now, "France", None);
+    seen_on(&conn, "c1a", "a1", today - 3 * 86_400);
+    for (claktory, account) in [("c1a", "a1"), ("c1b", "a1"), ("c2", "a2")] {
+        seen_on(&conn, claktory, account, yesterday);
+    }
+    seen_on(&conn, "c3", "a3", today);
+    let out: serde_json::Value = serde_json::from_str(&stats::export(&conn, now).unwrap()).unwrap();
+    let on = |window: &str, metric: &str, at: i64| series(&out, window, metric).into_iter().find(|(day, _)| *day == at).unwrap().1;
+
+    assert_eq!((on("day", "registered_users", yesterday), on("day", "new_users", yesterday)), (3, 1));
+    assert_eq!((on("day", "registered_users", yesterday - 86_400), on("day", "new_users", yesterday - 86_400)), (2, 0));
+    // Two Claktories of one account are one user.
+    assert_eq!((on("day", "contact_users", yesterday), on("day", "contact_claktories", yesterday)), (2, 3));
+    assert_eq!(on("day", "contact_users", today - 3 * 86_400), 1);
+    assert_eq!(on("rolling30", "contact_users", yesterday), 2);
+    // Today's, partial, like the Claktories'.
+    for (metric, value) in [("registered_users", 4), ("new_users", 1), ("contact_users", 1)] {
+        assert_eq!(rows_of(&out, "today", metric), [(today, "none".into(), "All".into(), Some(value), "partial".into())], "{metric}");
+    }
+    assert!(rows_of(&out, "rolling30", "contact_users").iter().all(|(day, ..)| *day < today));
+
+    // Claktories per user, of those registered by yesterday's end and not
+    // removed: a1's two, a2's one.
+    assert_eq!(series(&out, "snapshot", "claktories_per_user_x100"), [(yesterday, 150)]);
+    let per_user = rows_of(&out, "snapshot", "users_with_claktories");
+    assert_eq!(per_user[0], (yesterday, "none".into(), "All".into(), Some(2), "ok".into()));
+    // One user with one and one with two, exact (Matt, Bruno 29945).
+    assert_eq!(
+        per_user[1..],
+        [
+            (yesterday, "claktory_count".into(), "1".into(), Some(1), "ok".into()),
+            (yesterday, "claktory_count".into(), "2".into(), Some(1), "ok".into()),
+            (yesterday, "claktory_count".into(), "3-5".into(), Some(0), "ok".into()),
+            (yesterday, "claktory_count".into(), "6+".into(), Some(0), "ok".into()),
+        ]
+    );
+    // By country now: those in touch in the 30 days ending yesterday, a1
+    // and a2 (a3, only today, isn't yet), and their three Claktories.
+    let country = |metric: &str| -> Vec<(i64, String, Option<i64>)> {
+        rows_of(&out, "rolling30", metric)
+            .into_iter()
+            .filter(|(_, dimension, ..)| dimension == "country")
+            .map(|(start, _, label, value, _)| (start, label, value))
+            .collect()
+    };
+    assert_eq!(country("contact_users"), [(yesterday, "France".into(), Some(1)), (yesterday, "Netherlands".into(), Some(1))]);
+    assert_eq!(country("contact_claktories"), [(yesterday, "Netherlands".into(), Some(2)), (yesterday, "France".into(), Some(1))]);
+    let text = out.to_string();
+    for private in ["a1", "c1a", "@example.com"] {
+        assert!(!text.contains(private), "{private} in the export");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #411 follow-up: each UTC hour of the last 28 days, what checked in and
+/// what worked, exact (Matt, Bruno 29945), the two latest partial.
+#[test]
+fn each_hour_counts_what_checked_in_and_worked_exactly() {
+    let (dir, conn) = scratch("hours");
+    let current = 1_795_000_000 / 3600 * 3600;
+    let now = current + 1800;
+    let (busy, few) = (current - 3 * 3600, current - 4 * 3600);
+    let period = |claktory: &str, id: &str, received: i64| {
+        conn.execute(
+            "INSERT INTO periods (claktory_id, id, from_time, to_time, received) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![claktory, id, received - 3600, received, received],
+        )
+        .unwrap();
+    };
+    let worked = |claktory: &str, hour: i64, minutes: i64| {
+        conn.execute(
+            "INSERT INTO activity (claktory_id, hour, agent_minutes, agents_working, runs) VALUES (?1, ?2, ?3, 1, 1)",
+            rusqlite::params![claktory, hour, minutes],
+        )
+        .unwrap();
+    };
+    // Six Claktories of three users, each checking in twice in the busy
+    // hour and working half of it; a deleted account's work adds an hour.
+    for at in 0..6 {
+        let (claktory, account) = (format!("b{at}"), format!("u{}", at / 2));
+        add_claktory(&conn, &claktory, &account, current - 86_400, now, "France", None);
+        period(&claktory, &format!("{claktory}-1"), busy + 60);
+        period(&claktory, &format!("{claktory}-2"), busy + 3000);
+        worked(&claktory, busy, 30);
+    }
+    worked("", busy, 60);
+    // Four Claktories working hard.
+    for at in 0..4 {
+        let claktory = format!("f{at}");
+        add_claktory(&conn, &claktory, &format!("v{at}"), current - 86_400, now, "France", None);
+        worked(&claktory, few, 600);
+    }
+    // Five checking in in the last hour, its work not in yet.
+    for at in 0..5 {
+        period(&format!("b{at}"), &format!("b{at}-3"), current - 3600 + 600);
+    }
+    // Too long ago to be in it.
+    period("b0", "b0-old", current - 28 * 86_400 - 60);
+
+    let out: serde_json::Value = serde_json::from_str(&stats::export(&conn, now).unwrap()).unwrap();
+    let hours: Vec<&serde_json::Value> = out["rows"].as_array().unwrap().iter().filter(|row| row["window"] == "hour").collect();
+    assert_eq!(hours.len(), 28 * 24 * 4);
+    for row in &hours {
+        assert_eq!((row["dimension"].as_str(), row["label"].as_str()), (Some("none"), Some("All")));
+        assert_eq!(row["bucket_end_ms"].as_i64().unwrap() - row["bucket_start_ms"].as_i64().unwrap(), 3_600_000);
+        assert!(row["value"].as_i64().is_some_and(|value| value >= 0) && row["status"] != "suppressed", "{row}");
+    }
+    let first = hours.iter().map(|row| row["bucket_start_ms"].as_i64().unwrap() / 1000).min().unwrap();
+    assert_eq!(first, current - (28 * 24 - 1) * 3600);
+    let at = |metric: &str, hour: i64| {
+        rows_of(&out, "hour", metric).into_iter().find(|(start, ..)| *start == hour).map(|(_, _, _, value, status)| (value, status)).unwrap()
+    };
+    let ok = |value: i64| (Some(value), "ok".to_owned());
+    // Each Claktory once in its hour, however often it checked in.
+    assert_eq!(at("online_claktories", busy), ok(6));
+    assert_eq!(at("working_claktories", busy), ok(6));
+    // Each user once.
+    assert_eq!(at("working_users", busy), ok(3));
+    // 3 hours of agents' work plus the deleted account's one: 4 agents on average.
+    assert_eq!(at("agents_working_avg_x100", busy), ok(400));
+    assert_eq!(at("working_claktories", few), ok(4));
+    assert_eq!(at("working_users", few), ok(4));
+    assert_eq!(at("agents_working_avg_x100", few), ok(4000));
+    // The last hour is partial; the current one is too, and empty so far.
+    assert_eq!(at("online_claktories", current - 3600), (Some(5), "partial".to_owned()));
+    assert_eq!(at("online_claktories", current), (Some(0), "partial".to_owned()));
+    assert_eq!(at("online_claktories", busy + 3600), ok(0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #411 follow-up: users by country in a month's publication, each user
+/// once whatever their Claktories, every country exact (Matt, Bruno
+/// 29402).
+#[test]
+fn a_month_maps_users_by_country_each_once_and_every_country_exact() {
+    let (dir, mut conn) = scratch("users-by-country");
+    let (start, end) = stats::month_bounds("2026-10").unwrap();
+    let mid = start + 10 * 86_400;
+    let user = |account: &str, claktories: &[(&str, &str, i64)]| {
+        add_account(&conn, account, start - 86_400);
+        for (claktory, country, last_seen) in claktories {
+            add_claktory(&conn, claktory, account, start - 86_400, *last_seen, country, None);
+            seen_on(&conn, claktory, account, mid);
+        }
+    };
+    // Five users in the Netherlands, one of them with three Claktories.
+    user("n1", &[("n1a", "Netherlands", mid), ("n1b", "Netherlands", mid), ("n1c", "Netherlands", mid)]);
+    for at in 2..=5 {
+        user(&format!("n{at}"), &[(&format!("n{at}a"), "Netherlands", mid)]);
+    }
+    // Four users in Germany with six Claktories.
+    user("g1", &[("g1a", "Germany", mid), ("g1b", "Germany", mid), ("g1c", "Germany", mid)]);
+    for at in 2..=4 {
+        user(&format!("g{at}"), &[(&format!("g{at}a"), "Germany", mid)]);
+    }
+    // One whose Claktory last in touch is in France; one in a place that
+    // isn't a country's name.
+    user("f1", &[("f1a", "Germany", mid - 86_400), ("f1b", "France", mid)]);
+    user("o1", &[("o1a", "Paris, 75001", mid)]);
+    // A deleted account's day, under its stand-in.
+    seen_on(&conn, "deleted-x", "deleted-x", mid);
+    stats::publish(&mut conn, "2026-10", end + 10).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&stats::export(&conn, end + 20).unwrap()).unwrap();
+    let users = rows_of(&out, "month", "contact_users");
+    let shown: Vec<(String, String, Option<i64>)> = users.into_iter().map(|(_, dimension, label, value, _)| (dimension, label, value)).collect();
+    assert_eq!(
+        shown,
+        [
+            ("none".into(), "All".into(), Some(12)),
+            ("country".into(), "Netherlands".into(), Some(5)),
+            ("country".into(), "Germany".into(), Some(4)),
+            ("country".into(), "France".into(), Some(1)),
+            ("country".into(), "Unknown".into(), Some(1)),
+            ("country".into(), "Other".into(), Some(1)),
+        ]
+    );
+    assert!(!out.to_string().contains("75001"));
+    // Claktories by country: Germany's seven, f1's first among them.
+    let germany = rows_of(&out, "month", "backend_claktories").into_iter().find(|(_, dimension, label, ..)| dimension == "country" && label == "Germany");
+    assert_eq!(germany.map(|row| row.3), Some(Some(7)));
+    // By country only in a month and the latest 30 days, never by day or hour.
+    assert!(
+        out["rows"].as_array().unwrap().iter().all(|row| row["dimension"] != "country" || row["window"] == "month" || row["window"] == "rolling30")
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -930,7 +930,9 @@ pub(crate) fn change(factory: &Arc<Factory>, agent: &str, actor: &str, changes: 
             }
         }
         let kind = past(action);
-        save(&factory.store, &monitor, now, actor, Some((kind, &monitor.reason)), false).map_err(db_error)?;
+        // Its history says who resumed it, as it does who paused it.
+        let detail = if action == Action::Resume { &by } else { &monitor.reason };
+        save(&factory.store, &monitor, now, actor, Some((kind, detail)), false).map_err(db_error)?;
         drop(processes);
         run::forget_live(factory, &monitor);
         said.push(format!("m{} {kind}", monitor.id));

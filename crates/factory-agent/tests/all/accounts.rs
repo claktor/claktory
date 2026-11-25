@@ -1508,6 +1508,199 @@ async fn a_usage_read_marks_a_refused_sign_in() {
     assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+/// ChatGPT's answer to an access token it no longer takes, as it gave it
+/// for an hour to a sign-in whose stored expiry was still far off.
+fn token_expired() -> Answer {
+    json_answer(
+        401,
+        Vec::new(),
+        json!({"error": {"message": "Your authentication token has expired. Please try signing in again.", "type": "invalid_request_error", "code": "token_expired"}}),
+    )
+}
+
+/// A ChatGPT sign-in's refresh: counted, and giving `to` as the new access
+/// token, or, with none, refused as OpenAI refuses a refresh token already
+/// spent (they rotate: each is good for one refresh).
+struct Renewing {
+    refreshes: Arc<std::sync::atomic::AtomicUsize>,
+    to: Option<String>,
+}
+
+impl OAuthFlow for Renewing {
+    fn name(&self) -> &str {
+        "ChatGPT Plus/Pro (Codex Subscription)"
+    }
+
+    fn is_subscription(&self) -> bool {
+        true
+    }
+
+    fn login<'a>(&'a self, _interaction: &'a dyn AuthInteraction) -> AuthFuture<'a, Result<Credential, Error>> {
+        Box::pin(async { Err(Error::Aborted) })
+    }
+
+    fn refresh<'a>(&'a self, _credential: Credential, _cancel: CancellationToken) -> AuthFuture<'a, Result<Credential, Error>> {
+        self.refreshes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let to = self.to.clone();
+        Box::pin(async move {
+            // Slow enough for parallel callers to queue behind it.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            match to {
+                Some(access) => Ok(Credential::Oauth {
+                    access,
+                    refresh: "r-renewed".into(),
+                    expires: now_ms() + 3_600_000,
+                    account_id: None,
+                    extra: serde_json::Map::new(),
+                }),
+                None => {
+                    let body = r#"{"error": {"message": "Your refresh token has already been used to generate a new access token. Please try signing in again.", "type": "invalid_request_error", "code": "refresh_token_reused"}}"#;
+                    Err(refusal(refresh_refused(400, body), format!("OpenAI Codex token refresh failed (400): {body}")))
+                }
+            }
+        })
+    }
+
+    fn to_auth(&self, credential: &Credential) -> Result<RequestAuth, Error> {
+        let Credential::Oauth { access, .. } = credential else { return Err(Error::Other("not oauth".into())) };
+        Ok(RequestAuth { api_key: Some(access.clone()), ..RequestAuth::default() })
+    }
+}
+
+/// The real providers on `base_url`, ChatGPT's sign-in refreshing as `flow`.
+fn renewing_registry(file: &std::path::Path, base_url: &str, flow: Renewing) -> Registry {
+    let base: &'static str = Box::leak(base_url.to_owned().into_boxed_str());
+    let mut providers = default_providers();
+    for provider in &mut providers {
+        provider.base_url = base;
+        if provider.id == "openai-codex" {
+            provider.oauth = Some(Arc::new(flow.clone_flow()));
+        }
+    }
+    Registry::with_providers(FileCredentialStore::new(file.to_path_buf()), no_env(), providers)
+}
+
+impl Renewing {
+    fn clone_flow(&self) -> Renewing {
+        Renewing { refreshes: self.refreshes.clone(), to: self.to.clone() }
+    }
+}
+
+fn stored_access(file: &std::path::Path) -> String {
+    let stored: Value = serde_json::from_str(&std::fs::read_to_string(file).expect("file")).expect("json");
+    stored["openai-codex"]["access"].as_str().expect("access").to_owned()
+}
+
+/// Bruno #28876: ChatGPT stopped taking a sign-in's access token an hour
+/// before its stored expiry, and Claktory kept sending it until every
+/// ChatGPT model vanished. A 401 now refreshes the sign-in at once, once
+/// for any number of callers, and the read carries on with the new token.
+#[tokio::test]
+async fn a_token_the_provider_stops_taking_is_refreshed_at_once() {
+    logged();
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let (old, new) = (codex_token("renew-old"), codex_token("renew-new"));
+    let expired = old.clone();
+    let usage = json!({"plan_type": "pro", "rate_limit": {"primary_window": {"used_percent": 12.0, "limit_window_seconds": 18_000, "reset_at": 1_900_000_000}}});
+    let server = mock(Arc::new(move |seen| {
+        if seen.token == expired {
+            token_expired()
+        } else if seen.path.ends_with("/codex/usage") {
+            json_answer(200, Vec::new(), usage.clone())
+        } else {
+            codex_reply()
+        }
+    }))
+    .await;
+    // Its stored expiry an hour off: no refresh before asking.
+    store_accounts(&file, "openai-codex", vec![account("renew-401", "a@x.com", &old)]);
+    let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let registry = renewing_registry(&file, &server.base_url, Renewing { refreshes: refreshes.clone(), to: Some(new.clone()) });
+
+    // Three reads at once (the app's usage, plan and model list, say): one refresh.
+    let reads = futures_util::future::join_all((0..3).map(|_| registry.account_usage("openai-codex", Some("renew-401")))).await;
+    for read in reads {
+        let usage = read.expect("read").expect("a subscription");
+        assert!(!usage.limits.is_empty(), "{usage:?}");
+    }
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1, "single-flight");
+    assert_eq!(stored_access(&file), new, "kept");
+    let tokens = server.tokens("/codex/usage");
+    assert_eq!(tokens.iter().filter(|token| **token == new).count(), 3, "{tokens:?}");
+    let accounts = registry.accounts("openai-codex").await.expect("accounts");
+    assert!(!accounts[0].sign_in_again, "still signed in");
+
+    // An agent's request does the same: the 401, a refresh, the reply.
+    store_accounts(&file, "openai-codex", vec![account("renew-401", "a@x.com", &old)]);
+    let (notes, said) = recorder();
+    let luna = model("openai-codex", "gpt-5.6-luna", &format!("{}/backend-api", server.base_url));
+    let options = StreamOptions { transport: Transport::Sse, ..StreamOptions::default() };
+    let reply = ask(&registry, &notes, &luna, options).await;
+    assert!(reply.is_ok(), "{reply:?}");
+    assert_eq!(server.tokens("/codex/responses"), [old, new.clone()]);
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(stored_access(&file), new);
+    assert!(said.lock().is_empty(), "nothing to tell: {:?}", said.lock());
+
+    // Each attempt and how it went is logged, never a token.
+    let log = logged();
+    let lines: Vec<&str> = log.lines().filter(|line| line.contains("renew-401")).collect();
+    assert!(lines.iter().any(|line| line.contains("refreshing a sign-in") && line.contains("didn't take its access token")), "{lines:#?}");
+    assert_eq!(
+        lines.iter().filter(|line| line.contains("outcome=\"refreshed\"") || line.contains("outcome=refreshed")).count(),
+        2,
+        "{lines:#?}"
+    );
+    assert!(lines.iter().any(|line| line.contains("refreshed meanwhile")), "{lines:#?}");
+    assert!(!log.contains(&new) && !log.contains("r-renewed"), "no token in the log");
+}
+
+/// When the refresh after a 401 is refused too (OpenAI's refresh tokens are
+/// single-use, so a copy that refreshed first spends ours), the sign-in is
+/// marked to sign in to again, saying why, and isn't asked again.
+#[tokio::test]
+async fn a_token_whose_refresh_is_refused_lands_signed_out_saying_why() {
+    logged();
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let old = codex_token("reused-old");
+    let server = mock(Arc::new(|_| token_expired())).await;
+    store_accounts(&file, "openai-codex", vec![account("reused-401", "a@x.com", &old)]);
+    let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let registry = renewing_registry(&file, &server.base_url, Renewing { refreshes: refreshes.clone(), to: None });
+
+    let read = registry.account_usage("openai-codex", Some("reused-401")).await.expect_err("refused");
+    assert!(read.is_refused(), "{read}");
+    let said = read.to_string();
+    assert!(said.contains("ChatGPT") && said.contains("refresh_token_reused") && said.contains("Sign in again"), "{said}");
+    let accounts = registry.accounts("openai-codex").await.expect("accounts");
+    assert!(accounts[0].sign_in_again, "signed out");
+    assert_eq!(stored_access(&file), old, "nothing replaced");
+    let stored: Value = serde_json::from_str(&std::fs::read_to_string(&file).expect("file")).expect("json");
+    assert!(stored["openai-codex"]["factoryRefusedSince"].as_u64().is_some_and(|since| since > 0), "{stored}");
+    // Skipped from now on, its token endpoint not asked again.
+    assert!(registry.account_usage("openai-codex", Some("reused-401")).await.expect("skipped").is_none());
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // An agent's request on it says to sign in again, with whose sign-in.
+    store_accounts(&file, "openai-codex", vec![account("reused-401", "a@x.com", &old)]);
+    let (notes, _) = recorder();
+    let luna = model("openai-codex", "gpt-5.6-luna", &format!("{}/backend-api", server.base_url));
+    let options = StreamOptions { transport: Transport::Sse, ..StreamOptions::default() };
+    let error = ask(&registry, &notes, &luna, options).await.expect_err("refused");
+    assert!(error.contains("Sign in again"), "{error}");
+    assert_eq!(server.tokens("/codex/responses"), std::slice::from_ref(&old), "asked once");
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(registry.accounts("openai-codex").await.expect("accounts")[0].sign_in_again);
+
+    let log = logged();
+    assert!(
+        log.lines().any(|line| line.contains("reused-401") && line.contains("refresh failed") && line.contains("refresh_token_reused")),
+        "the outcome is logged"
+    );
+}
+
 /// OpenRouter's answer to a streamed chat completion: "hi".
 fn openrouter_reply() -> Answer {
     let chunks = [
@@ -1622,4 +1815,68 @@ fn openrouter_spending_limits_are_told_apart_from_its_balance() {
     assert!(credit_error(402, &balance));
     let permission = json!({"error": {"code": 403, "message": "This model is not available in your region"}}).to_string();
     assert_eq!(spending_limit(403, &permission, None), None);
+}
+
+/// Bruno 30083: the accounts' order is a priority, looked at again for
+/// every request. On the third account because the first two are at their
+/// limits, the next request goes back to the first as soon as its limit
+/// resets, and to the second, ahead of the third, once a usage read shows it
+/// has room.
+#[tokio::test]
+async fn requests_go_back_to_the_first_account_with_room_in_the_order() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let (first, second, third) = (claude_token("first-30083"), claude_token("second-30083"), claude_token("julie-30083"));
+    // When each account's limit resets, in seconds; 0: it has room.
+    let soon = now_ms() / 1000 + 2;
+    let (first_resets, second_resets) = (Arc::new(AtomicU64::new(soon)), Arc::new(AtomicU64::new(now_ms() / 1000 + 3600)));
+    let (one, two, one_resets, two_resets) = (first.clone(), second.clone(), first_resets.clone(), second_resets.clone());
+    let server = mock(Arc::new(move |seen| {
+        let resets = match seen.token.as_str() {
+            token if token == one => one_resets.load(Ordering::SeqCst),
+            token if token == two => two_resets.load(Ordering::SeqCst),
+            _ => 0,
+        };
+        if resets == 0 { claude_reply() } else { claude_limit(resets) }
+    }))
+    .await;
+    store_accounts(
+        &file,
+        "anthropic",
+        vec![account("1", "ana@x.com", &first), account("2", "bo@x.com", &second), account("3", "julie@x.com", &third)],
+    );
+    let registry = registry(&file, &server.base_url);
+    let (notes, _) = recorder();
+    let model = claude(&server.base_url);
+    let asked = |from: usize| server.tokens("/v1/messages")[from..].to_vec();
+    let in_use = async || {
+        registry.accounts("anthropic").await.expect("accounts").into_iter().find(|account| account.in_use).map(|account| account.id)
+    };
+
+    // Both before it at their limits: Julie's takes it, and the next.
+    assert_eq!(ask(&registry, &notes, &model, StreamOptions::default()).await, Ok("hi".into()));
+    assert_eq!(asked(0), [first.clone(), second.clone(), third.clone()]);
+    assert_eq!(ask(&registry, &notes, &model, StreamOptions::default()).await, Ok("hi".into()));
+    assert_eq!(asked(3), std::slice::from_ref(&third), "the spent ones are skipped");
+    assert_eq!(in_use().await.as_deref(), Some("3"));
+
+    // The first's limit resets: the next request goes back to it.
+    tokio::time::sleep(Duration::from_millis((soon * 1000 + 100).saturating_sub(now_ms()))).await;
+    first_resets.store(0, Ordering::SeqCst);
+    assert_eq!(in_use().await.as_deref(), Some("1"), "shown back on the first at once");
+    assert_eq!(ask(&registry, &notes, &model, StreamOptions::default()).await, Ok("hi".into()));
+    assert_eq!(asked(4), std::slice::from_ref(&first));
+
+    // The first spent again; the second gets room before its time (a usage
+    // read shows it, after a reset claimed on Anthropic's site): it goes
+    // ahead of Julie's.
+    first_resets.store(now_ms() / 1000 + 3600, Ordering::SeqCst);
+    second_resets.store(0, Ordering::SeqCst);
+    assert!(registry.forget_spent_with_room("anthropic", Some("2"), &[]).await.expect("forgotten"));
+    assert_eq!(ask(&registry, &notes, &model, StreamOptions::default()).await, Ok("hi".into()));
+    assert_eq!(asked(5), [first.clone(), second.clone()]);
+    assert_eq!(ask(&registry, &notes, &model, StreamOptions::default()).await, Ok("hi".into()));
+    assert_eq!(asked(7), std::slice::from_ref(&second), "the first skipped, Julie's not asked");
+    assert_eq!(in_use().await.as_deref(), Some("2"));
 }

@@ -35,6 +35,7 @@ TunnelStatus tunnelStatus({
   int received = 0,
   int linkReceived = 0,
   int dialTimeoutMs = 0,
+  TunnelReach reach = TunnelReach.none,
 }) => TunnelStatus(
   phase: phase,
   path: path,
@@ -46,6 +47,7 @@ TunnelStatus tunnelStatus({
   received: received,
   linkReceived: linkReceived,
   dialTimeoutMs: dialTimeoutMs,
+  reach: reach,
 );
 
 /// A tunnel that's a local port: whatever listens there stands for the

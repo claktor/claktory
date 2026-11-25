@@ -229,6 +229,12 @@ enum ClientMessage_Body {
   refreshModels,
   addModel,
   restoreBackendService,
+  sharePipeWebsite,
+  stopPipeShare,
+  openPipeShare,
+  hidePipeShare,
+  checkPipeSharePort,
+  stopEngine,
   notSet
 }
 
@@ -442,6 +448,12 @@ class ClientMessage extends $pb.GeneratedMessage {
     RefreshModels? refreshModels,
     AddModel? addModel,
     RestoreBackendService? restoreBackendService,
+    SharePipeWebsite? sharePipeWebsite,
+    StopPipeShare? stopPipeShare,
+    OpenPipeShare? openPipeShare,
+    HidePipeShare? hidePipeShare,
+    CheckPipeSharePort? checkPipeSharePort,
+    StopEngine? stopEngine,
   }) {
     final result = ClientMessage._();
     if (id != null) result.id = id;
@@ -673,6 +685,13 @@ class ClientMessage extends $pb.GeneratedMessage {
     if (addModel != null) result.addModel = addModel;
     if (restoreBackendService != null)
       result.restoreBackendService = restoreBackendService;
+    if (sharePipeWebsite != null) result.sharePipeWebsite = sharePipeWebsite;
+    if (stopPipeShare != null) result.stopPipeShare = stopPipeShare;
+    if (openPipeShare != null) result.openPipeShare = openPipeShare;
+    if (hidePipeShare != null) result.hidePipeShare = hidePipeShare;
+    if (checkPipeSharePort != null)
+      result.checkPipeSharePort = checkPipeSharePort;
+    if (stopEngine != null) result.stopEngine = stopEngine;
     return result;
   }
 
@@ -894,6 +913,12 @@ class ClientMessage extends $pb.GeneratedMessage {
     213: ClientMessage_Body.refreshModels,
     214: ClientMessage_Body.addModel,
     215: ClientMessage_Body.restoreBackendService,
+    216: ClientMessage_Body.sharePipeWebsite,
+    217: ClientMessage_Body.stopPipeShare,
+    218: ClientMessage_Body.openPipeShare,
+    219: ClientMessage_Body.hidePipeShare,
+    220: ClientMessage_Body.checkPipeSharePort,
+    221: ClientMessage_Body.stopEngine,
     0: ClientMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -1107,7 +1132,13 @@ class ClientMessage extends $pb.GeneratedMessage {
       212,
       213,
       214,
-      215
+      215,
+      216,
+      217,
+      218,
+      219,
+      220,
+      221
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -1537,6 +1568,18 @@ class ClientMessage extends $pb.GeneratedMessage {
     ..aOM<RestoreBackendService>(
         215, _omitFieldNames ? '' : 'restoreBackendService',
         subBuilder: RestoreBackendService.$_createMessage)
+    ..aOM<SharePipeWebsite>(216, _omitFieldNames ? '' : 'sharePipeWebsite',
+        subBuilder: SharePipeWebsite.$_createMessage)
+    ..aOM<StopPipeShare>(217, _omitFieldNames ? '' : 'stopPipeShare',
+        subBuilder: StopPipeShare.$_createMessage)
+    ..aOM<OpenPipeShare>(218, _omitFieldNames ? '' : 'openPipeShare',
+        subBuilder: OpenPipeShare.$_createMessage)
+    ..aOM<HidePipeShare>(219, _omitFieldNames ? '' : 'hidePipeShare',
+        subBuilder: HidePipeShare.$_createMessage)
+    ..aOM<CheckPipeSharePort>(220, _omitFieldNames ? '' : 'checkPipeSharePort',
+        subBuilder: CheckPipeSharePort.$_createMessage)
+    ..aOM<StopEngine>(221, _omitFieldNames ? '' : 'stopEngine',
+        subBuilder: StopEngine.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1768,6 +1811,12 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(213)
   @$pb.TagNumber(214)
   @$pb.TagNumber(215)
+  @$pb.TagNumber(216)
+  @$pb.TagNumber(217)
+  @$pb.TagNumber(218)
+  @$pb.TagNumber(219)
+  @$pb.TagNumber(220)
+  @$pb.TagNumber(221)
   ClientMessage_Body whichBody() => _ClientMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -1976,6 +2025,12 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(213)
   @$pb.TagNumber(214)
   @$pb.TagNumber(215)
+  @$pb.TagNumber(216)
+  @$pb.TagNumber(217)
+  @$pb.TagNumber(218)
+  @$pb.TagNumber(219)
+  @$pb.TagNumber(220)
+  @$pb.TagNumber(221)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -4419,6 +4474,75 @@ class ClientMessage extends $pb.GeneratedMessage {
   void clearRestoreBackendService() => $_clearField(215);
   @$pb.TagNumber(215)
   RestoreBackendService ensureRestoreBackendService() => $_ensure(207);
+
+  /// Websites shared over pipes (pipe-port-sharing.md): only from a
+  /// person's app, never an agent's tool.
+  @$pb.TagNumber(216)
+  SharePipeWebsite get sharePipeWebsite => $_getN(208);
+  @$pb.TagNumber(216)
+  set sharePipeWebsite(SharePipeWebsite value) => $_setField(216, value);
+  @$pb.TagNumber(216)
+  $core.bool hasSharePipeWebsite() => $_has(208);
+  @$pb.TagNumber(216)
+  void clearSharePipeWebsite() => $_clearField(216);
+  @$pb.TagNumber(216)
+  SharePipeWebsite ensureSharePipeWebsite() => $_ensure(208);
+
+  @$pb.TagNumber(217)
+  StopPipeShare get stopPipeShare => $_getN(209);
+  @$pb.TagNumber(217)
+  set stopPipeShare(StopPipeShare value) => $_setField(217, value);
+  @$pb.TagNumber(217)
+  $core.bool hasStopPipeShare() => $_has(209);
+  @$pb.TagNumber(217)
+  void clearStopPipeShare() => $_clearField(217);
+  @$pb.TagNumber(217)
+  StopPipeShare ensureStopPipeShare() => $_ensure(209);
+
+  @$pb.TagNumber(218)
+  OpenPipeShare get openPipeShare => $_getN(210);
+  @$pb.TagNumber(218)
+  set openPipeShare(OpenPipeShare value) => $_setField(218, value);
+  @$pb.TagNumber(218)
+  $core.bool hasOpenPipeShare() => $_has(210);
+  @$pb.TagNumber(218)
+  void clearOpenPipeShare() => $_clearField(218);
+  @$pb.TagNumber(218)
+  OpenPipeShare ensureOpenPipeShare() => $_ensure(210);
+
+  @$pb.TagNumber(219)
+  HidePipeShare get hidePipeShare => $_getN(211);
+  @$pb.TagNumber(219)
+  set hidePipeShare(HidePipeShare value) => $_setField(219, value);
+  @$pb.TagNumber(219)
+  $core.bool hasHidePipeShare() => $_has(211);
+  @$pb.TagNumber(219)
+  void clearHidePipeShare() => $_clearField(219);
+  @$pb.TagNumber(219)
+  HidePipeShare ensureHidePipeShare() => $_ensure(211);
+
+  @$pb.TagNumber(220)
+  CheckPipeSharePort get checkPipeSharePort => $_getN(212);
+  @$pb.TagNumber(220)
+  set checkPipeSharePort(CheckPipeSharePort value) => $_setField(220, value);
+  @$pb.TagNumber(220)
+  $core.bool hasCheckPipeSharePort() => $_has(212);
+  @$pb.TagNumber(220)
+  void clearCheckPipeSharePort() => $_clearField(220);
+  @$pb.TagNumber(220)
+  CheckPipeSharePort ensureCheckPipeSharePort() => $_ensure(212);
+
+  /// Stops Claktory on this Mac (StopEngine, friend bug #27).
+  @$pb.TagNumber(221)
+  StopEngine get stopEngine => $_getN(213);
+  @$pb.TagNumber(221)
+  set stopEngine(StopEngine value) => $_setField(221, value);
+  @$pb.TagNumber(221)
+  $core.bool hasStopEngine() => $_has(213);
+  @$pb.TagNumber(221)
+  void clearStopEngine() => $_clearField(221);
+  @$pb.TagNumber(221)
+  StopEngine ensureStopEngine() => $_ensure(213);
 }
 
 /// A new group at the end of the project's (Workspace.pipe_groups).
@@ -4898,6 +5022,742 @@ class PipeGroup extends $pb.GeneratedMessage {
   void clearCreatedMs() => $_clearField(6);
 }
 
+/// A website shared over pipes (pipe-port-sharing.md): one on this computer
+/// that this Claktory shares (mine), or one another Claktory shares with
+/// this one over a pipe (theirs). It reaches only each pipe's pinned peer
+/// while that pipe is open: a paused pipe's share waits and works again on
+/// resume; a pipe closed, or whose other side became another account, ends
+/// it on that pipe for good. Pipe messages go first: its traffic is held to
+/// a rate (about 25 MB/s direct, 5 MB/s relayed, 64 connections at once).
+class PipeShare extends $pb.GeneratedMessage {
+  factory PipeShare({
+    $core.String? id,
+    $core.bool? mine,
+    $core.String? name,
+    $core.int? port,
+    $core.Iterable<$core.String>? pipeIds,
+    $core.String? groupId,
+    $fixnum.Int64? createdMs,
+    $core.bool? live,
+    $core.String? address,
+    $core.String? fallbackAddress,
+    $core.bool? listening,
+    $core.String? listenerProblem,
+    $core.bool? hidden,
+  }) {
+    final result = PipeShare._();
+    if (id != null) result.id = id;
+    if (mine != null) result.mine = mine;
+    if (name != null) result.name = name;
+    if (port != null) result.port = port;
+    if (pipeIds != null) result.pipeIds.addAll(pipeIds);
+    if (groupId != null) result.groupId = groupId;
+    if (createdMs != null) result.createdMs = createdMs;
+    if (live != null) result.live = live;
+    if (address != null) result.address = address;
+    if (fallbackAddress != null) result.fallbackAddress = fallbackAddress;
+    if (listening != null) result.listening = listening;
+    if (listenerProblem != null) result.listenerProblem = listenerProblem;
+    if (hidden != null) result.hidden = hidden;
+    return result;
+  }
+
+  PipeShare._();
+
+  factory PipeShare.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeShare()..mergeFromBuffer(data, registry);
+  factory PipeShare.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeShare()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PipeShare',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PipeShare.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOB(2, _omitFieldNames ? '' : 'mine')
+    ..aOS(3, _omitFieldNames ? '' : 'name')
+    ..aI(4, _omitFieldNames ? '' : 'port', fieldType: $pb.PbFieldType.OU3)
+    ..pPS(5, _omitFieldNames ? '' : 'pipeIds')
+    ..aOS(6, _omitFieldNames ? '' : 'groupId')
+    ..aInt64(7, _omitFieldNames ? '' : 'createdMs')
+    ..aOB(8, _omitFieldNames ? '' : 'live')
+    ..aOS(9, _omitFieldNames ? '' : 'address')
+    ..aOS(10, _omitFieldNames ? '' : 'fallbackAddress')
+    ..aOB(11, _omitFieldNames ? '' : 'listening')
+    ..aOS(12, _omitFieldNames ? '' : 'listenerProblem')
+    ..aOB(13, _omitFieldNames ? '' : 'hidden')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeShare clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeShare copyWith(void Function(PipeShare) updates) =>
+      super.copyWith((message) => updates(message as PipeShare)) as PipeShare;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use PipeShare() / PipeShare.new instead')
+  static PipeShare create() => PipeShare._();
+  static $pb.GeneratedMessage $_createMessage() => PipeShare._();
+  @$core.override
+  PipeShare createEmptyInstance() => PipeShare._();
+  @$core.pragma('dart2js:noInline')
+  static PipeShare getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<PipeShare>(PipeShare.$_createMessage);
+  static PipeShare? _defaultInstance;
+
+  /// This Claktory's id for it (the other side has its own).
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  /// This side shares it; false: another Claktory shares it with this one.
+  @$pb.TagNumber(2)
+  $core.bool get mine => $_getBF(1);
+  @$pb.TagNumber(2)
+  set mine($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasMine() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMine() => $_clearField(2);
+
+  /// What it's called. Theirs: the other side's words; show them plain,
+  /// never as a link.
+  @$pb.TagNumber(3)
+  $core.String get name => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set name($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasName() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearName() => $_clearField(3);
+
+  /// Mine: the port on this computer it shares. Theirs: the sharer's
+  /// number, which this side's address uses when it's free here.
+  @$pb.TagNumber(4)
+  $core.int get port => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set port($core.int value) => $_setUnsignedInt32(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasPort() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearPort() => $_clearField(4);
+
+  /// Mine: the pipes it reaches now, open or not (group_id's pipes when it
+  /// follows a group). Theirs: the one pipe it came over.
+  @$pb.TagNumber(5)
+  $pb.PbList<$core.String> get pipeIds => $_getList(4);
+
+  /// Mine: the group it follows: a pipe moved into the group gets it too,
+  /// one moved out stops getting it. Empty when it's shared with chosen
+  /// pipes (pipe_ids).
+  @$pb.TagNumber(6)
+  $core.String get groupId => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set groupId($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasGroupId() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearGroupId() => $_clearField(6);
+
+  /// ms since 1970.
+  @$pb.TagNumber(7)
+  $fixnum.Int64 get createdMs => $_getI64(6);
+  @$pb.TagNumber(7)
+  set createdMs($fixnum.Int64 value) => $_setInt64(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasCreatedMs() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearCreatedMs() => $_clearField(7);
+
+  /// It can be used now. Mine: at least one of its pipes is open. Theirs:
+  /// its pipe is open.
+  @$pb.TagNumber(8)
+  $core.bool get live => $_getBF(7);
+  @$pb.TagNumber(8)
+  set live($core.bool value) => $_setBool(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasLive() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearLive() => $_clearField(8);
+
+  /// Theirs: where it opens in this computer's browser,
+  /// "http://s-<random>.localhost:<port>/", the same for as long as it
+  /// lasts (Copy address copies it). Known from when it arrives.
+  @$pb.TagNumber(9)
+  $core.String get address => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set address($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasAddress() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearAddress() => $_clearField(9);
+
+  /// Theirs: the same at "http://127.0.0.1:<port>/", for a browser that
+  /// can't open *.localhost addresses (Safari).
+  @$pb.TagNumber(10)
+  $core.String get fallbackAddress => $_getSZ(9);
+  @$pb.TagNumber(10)
+  set fallbackAddress($core.String value) => $_setString(9, value);
+  @$pb.TagNumber(10)
+  $core.bool hasFallbackAddress() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearFallbackAddress() => $_clearField(10);
+
+  /// Theirs: this computer serves it now. From its first Open, it stays up
+  /// for as long as the share lasts, across restarts.
+  @$pb.TagNumber(11)
+  $core.bool get listening => $_getBF(10);
+  @$pb.TagNumber(11)
+  set listening($core.bool value) => $_setBool(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasListening() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearListening() => $_clearField(11);
+
+  /// Theirs: why this computer can't serve it, in a sentence ("Port 3000 is
+  /// in use on this Mac."); empty when it can.
+  @$pb.TagNumber(12)
+  $core.String get listenerProblem => $_getSZ(11);
+  @$pb.TagNumber(12)
+  set listenerProblem($core.String value) => $_setString(11, value);
+  @$pb.TagNumber(12)
+  $core.bool hasListenerProblem() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearListenerProblem() => $_clearField(12);
+
+  /// Theirs: the person hid it (HidePipeShare).
+  @$pb.TagNumber(13)
+  $core.bool get hidden => $_getBF(12);
+  @$pb.TagNumber(13)
+  set hidden($core.bool value) => $_setBool(12, value);
+  @$pb.TagNumber(13)
+  $core.bool hasHidden() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearHidden() => $_clearField(13);
+}
+
+/// Shares a website on this computer (Share a website… in a pipe's or a
+/// group's settings) with the pipes named, or with a group's. Answered with
+/// the Workspace, or an Error saying why for the person ("Port 7420 is
+/// Claktory's own.").
+class SharePipeWebsite extends $pb.GeneratedMessage {
+  factory SharePipeWebsite({
+    $core.int? port,
+    $core.String? name,
+    $core.Iterable<$core.String>? pipeIds,
+    $core.String? groupId,
+  }) {
+    final result = SharePipeWebsite._();
+    if (port != null) result.port = port;
+    if (name != null) result.name = name;
+    if (pipeIds != null) result.pipeIds.addAll(pipeIds);
+    if (groupId != null) result.groupId = groupId;
+    return result;
+  }
+
+  SharePipeWebsite._();
+
+  factory SharePipeWebsite.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SharePipeWebsite()..mergeFromBuffer(data, registry);
+  factory SharePipeWebsite.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SharePipeWebsite()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SharePipeWebsite',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SharePipeWebsite.$_createMessage)
+    ..aI(1, _omitFieldNames ? '' : 'port', fieldType: $pb.PbFieldType.OU3)
+    ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..pPS(3, _omitFieldNames ? '' : 'pipeIds')
+    ..aOS(4, _omitFieldNames ? '' : 'groupId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SharePipeWebsite clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SharePipeWebsite copyWith(void Function(SharePipeWebsite) updates) =>
+      super.copyWith((message) => updates(message as SharePipeWebsite))
+          as SharePipeWebsite;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use SharePipeWebsite() / SharePipeWebsite.new instead')
+  static SharePipeWebsite create() => SharePipeWebsite._();
+  static $pb.GeneratedMessage $_createMessage() => SharePipeWebsite._();
+  @$core.override
+  SharePipeWebsite createEmptyInstance() => SharePipeWebsite._();
+  @$core.pragma('dart2js:noInline')
+  static SharePipeWebsite getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SharePipeWebsite>(
+          SharePipeWebsite.$_createMessage);
+  static SharePipeWebsite? _defaultInstance;
+
+  /// A port on this computer, 1 to 65535; never one of Claktory's own.
+  @$pb.TagNumber(1)
+  $core.int get port => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set port($core.int value) => $_setUnsignedInt32(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPort() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPort() => $_clearField(1);
+
+  /// One line, at most 80 characters: what the other side sees it called.
+  @$pb.TagNumber(2)
+  $core.String get name => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set name($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearName() => $_clearField(2);
+
+  /// Open pipes to share it with; or
+  @$pb.TagNumber(3)
+  $pb.PbList<$core.String> get pipeIds => $_getList(2);
+
+  /// a group: it reaches the group's pipes and follows the group.
+  @$pb.TagNumber(4)
+  $core.String get groupId => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set groupId($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasGroupId() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearGroupId() => $_clearField(4);
+}
+
+/// Stops a share of this side's on every pipe at once: its connections end
+/// now, and each pipe's other side is told.
+class StopPipeShare extends $pb.GeneratedMessage {
+  factory StopPipeShare({
+    $core.String? shareId,
+  }) {
+    final result = StopPipeShare._();
+    if (shareId != null) result.shareId = shareId;
+    return result;
+  }
+
+  StopPipeShare._();
+
+  factory StopPipeShare.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      StopPipeShare()..mergeFromBuffer(data, registry);
+  factory StopPipeShare.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      StopPipeShare()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'StopPipeShare',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: StopPipeShare.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'shareId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  StopPipeShare clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  StopPipeShare copyWith(void Function(StopPipeShare) updates) =>
+      super.copyWith((message) => updates(message as StopPipeShare))
+          as StopPipeShare;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use StopPipeShare() / StopPipeShare.new instead')
+  static StopPipeShare create() => StopPipeShare._();
+  static $pb.GeneratedMessage $_createMessage() => StopPipeShare._();
+  @$core.override
+  StopPipeShare createEmptyInstance() => StopPipeShare._();
+  @$core.pragma('dart2js:noInline')
+  static StopPipeShare getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<StopPipeShare>(
+          StopPipeShare.$_createMessage);
+  static StopPipeShare? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get shareId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set shareId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasShareId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearShareId() => $_clearField(1);
+}
+
+/// Opens a share another Claktory shares with this one (theirs): starts
+/// this computer's server for it if it isn't up, and answers
+/// PipeShareOpened.
+class OpenPipeShare extends $pb.GeneratedMessage {
+  factory OpenPipeShare({
+    $core.String? shareId,
+  }) {
+    final result = OpenPipeShare._();
+    if (shareId != null) result.shareId = shareId;
+    return result;
+  }
+
+  OpenPipeShare._();
+
+  factory OpenPipeShare.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      OpenPipeShare()..mergeFromBuffer(data, registry);
+  factory OpenPipeShare.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      OpenPipeShare()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'OpenPipeShare',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: OpenPipeShare.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'shareId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  OpenPipeShare clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  OpenPipeShare copyWith(void Function(OpenPipeShare) updates) =>
+      super.copyWith((message) => updates(message as OpenPipeShare))
+          as OpenPipeShare;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use OpenPipeShare() / OpenPipeShare.new instead')
+  static OpenPipeShare create() => OpenPipeShare._();
+  static $pb.GeneratedMessage $_createMessage() => OpenPipeShare._();
+  @$core.override
+  OpenPipeShare createEmptyInstance() => OpenPipeShare._();
+  @$core.pragma('dart2js:noInline')
+  static OpenPipeShare getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<OpenPipeShare>(
+          OpenPipeShare.$_createMessage);
+  static OpenPipeShare? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get shareId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set shareId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasShareId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearShareId() => $_clearField(1);
+}
+
+/// The address to open, once: it carries a code good for a minute that
+/// signs this browser in to the share. Open one in the default browser:
+/// `url` (*.localhost), or `fallback_url` (127.0.0.1) where that browser
+/// can't open *.localhost addresses (Safari).
+class PipeShareOpened extends $pb.GeneratedMessage {
+  factory PipeShareOpened({
+    $core.String? shareId,
+    $core.String? url,
+    $core.String? fallbackUrl,
+  }) {
+    final result = PipeShareOpened._();
+    if (shareId != null) result.shareId = shareId;
+    if (url != null) result.url = url;
+    if (fallbackUrl != null) result.fallbackUrl = fallbackUrl;
+    return result;
+  }
+
+  PipeShareOpened._();
+
+  factory PipeShareOpened.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeShareOpened()..mergeFromBuffer(data, registry);
+  factory PipeShareOpened.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeShareOpened()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PipeShareOpened',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PipeShareOpened.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'shareId')
+    ..aOS(2, _omitFieldNames ? '' : 'url')
+    ..aOS(3, _omitFieldNames ? '' : 'fallbackUrl')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeShareOpened clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeShareOpened copyWith(void Function(PipeShareOpened) updates) =>
+      super.copyWith((message) => updates(message as PipeShareOpened))
+          as PipeShareOpened;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use PipeShareOpened() / PipeShareOpened.new instead')
+  static PipeShareOpened create() => PipeShareOpened._();
+  static $pb.GeneratedMessage $_createMessage() => PipeShareOpened._();
+  @$core.override
+  PipeShareOpened createEmptyInstance() => PipeShareOpened._();
+  @$core.pragma('dart2js:noInline')
+  static PipeShareOpened getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PipeShareOpened>(
+          PipeShareOpened.$_createMessage);
+  static PipeShareOpened? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get shareId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set shareId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasShareId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearShareId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get url => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set url($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasUrl() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearUrl() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get fallbackUrl => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set fallbackUrl($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasFallbackUrl() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearFallbackUrl() => $_clearField(3);
+}
+
+/// Hides a share another Claktory shares with this one, or shows it again.
+class HidePipeShare extends $pb.GeneratedMessage {
+  factory HidePipeShare({
+    $core.String? shareId,
+    $core.bool? hidden,
+  }) {
+    final result = HidePipeShare._();
+    if (shareId != null) result.shareId = shareId;
+    if (hidden != null) result.hidden = hidden;
+    return result;
+  }
+
+  HidePipeShare._();
+
+  factory HidePipeShare.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      HidePipeShare()..mergeFromBuffer(data, registry);
+  factory HidePipeShare.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      HidePipeShare()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'HidePipeShare',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: HidePipeShare.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'shareId')
+    ..aOB(2, _omitFieldNames ? '' : 'hidden')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  HidePipeShare clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  HidePipeShare copyWith(void Function(HidePipeShare) updates) =>
+      super.copyWith((message) => updates(message as HidePipeShare))
+          as HidePipeShare;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use HidePipeShare() / HidePipeShare.new instead')
+  static HidePipeShare create() => HidePipeShare._();
+  static $pb.GeneratedMessage $_createMessage() => HidePipeShare._();
+  @$core.override
+  HidePipeShare createEmptyInstance() => HidePipeShare._();
+  @$core.pragma('dart2js:noInline')
+  static HidePipeShare getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<HidePipeShare>(
+          HidePipeShare.$_createMessage);
+  static HidePipeShare? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get shareId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set shareId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasShareId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearShareId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.bool get hidden => $_getBF(1);
+  @$pb.TagNumber(2)
+  set hidden($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasHidden() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearHidden() => $_clearField(2);
+}
+
+/// Whether a port could be shared, before Share: answered with
+/// PipeSharePort.
+class CheckPipeSharePort extends $pb.GeneratedMessage {
+  factory CheckPipeSharePort({
+    $core.int? port,
+  }) {
+    final result = CheckPipeSharePort._();
+    if (port != null) result.port = port;
+    return result;
+  }
+
+  CheckPipeSharePort._();
+
+  factory CheckPipeSharePort.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      CheckPipeSharePort()..mergeFromBuffer(data, registry);
+  factory CheckPipeSharePort.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      CheckPipeSharePort()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CheckPipeSharePort',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: CheckPipeSharePort.$_createMessage)
+    ..aI(1, _omitFieldNames ? '' : 'port', fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CheckPipeSharePort clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CheckPipeSharePort copyWith(void Function(CheckPipeSharePort) updates) =>
+      super.copyWith((message) => updates(message as CheckPipeSharePort))
+          as CheckPipeSharePort;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use CheckPipeSharePort() / CheckPipeSharePort.new instead')
+  static CheckPipeSharePort create() => CheckPipeSharePort._();
+  static $pb.GeneratedMessage $_createMessage() => CheckPipeSharePort._();
+  @$core.override
+  CheckPipeSharePort createEmptyInstance() => CheckPipeSharePort._();
+  @$core.pragma('dart2js:noInline')
+  static CheckPipeSharePort getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CheckPipeSharePort>(
+          CheckPipeSharePort.$_createMessage);
+  static CheckPipeSharePort? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.int get port => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set port($core.int value) => $_setUnsignedInt32(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPort() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPort() => $_clearField(1);
+}
+
+class PipeSharePort extends $pb.GeneratedMessage {
+  factory PipeSharePort({
+    $core.int? port,
+    $core.bool? listening,
+    $core.String? problem,
+  }) {
+    final result = PipeSharePort._();
+    if (port != null) result.port = port;
+    if (listening != null) result.listening = listening;
+    if (problem != null) result.problem = problem;
+    return result;
+  }
+
+  PipeSharePort._();
+
+  factory PipeSharePort.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeSharePort()..mergeFromBuffer(data, registry);
+  factory PipeSharePort.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PipeSharePort()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PipeSharePort',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PipeSharePort.$_createMessage)
+    ..aI(1, _omitFieldNames ? '' : 'port', fieldType: $pb.PbFieldType.OU3)
+    ..aOB(2, _omitFieldNames ? '' : 'listening')
+    ..aOS(3, _omitFieldNames ? '' : 'problem')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeSharePort clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PipeSharePort copyWith(void Function(PipeSharePort) updates) =>
+      super.copyWith((message) => updates(message as PipeSharePort))
+          as PipeSharePort;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use PipeSharePort() / PipeSharePort.new instead')
+  static PipeSharePort create() => PipeSharePort._();
+  static $pb.GeneratedMessage $_createMessage() => PipeSharePort._();
+  @$core.override
+  PipeSharePort createEmptyInstance() => PipeSharePort._();
+  @$core.pragma('dart2js:noInline')
+  static PipeSharePort getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PipeSharePort>(
+          PipeSharePort.$_createMessage);
+  static PipeSharePort? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.int get port => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set port($core.int value) => $_setUnsignedInt32(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPort() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPort() => $_clearField(1);
+
+  /// Something on this computer answers on it now.
+  @$pb.TagNumber(2)
+  $core.bool get listening => $_getBF(1);
+  @$pb.TagNumber(2)
+  set listening($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasListening() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearListening() => $_clearField(2);
+
+  /// Why it can't be shared, in a sentence ("Port 7420 is Claktory's
+  /// own."); empty when it can.
+  @$pb.TagNumber(3)
+  $core.String get problem => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set problem($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasProblem() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearProblem() => $_clearField(3);
+}
+
 enum ServerMessage_Body {
   welcome,
   error,
@@ -4968,6 +5828,8 @@ enum ServerMessage_Body {
   monitorHistory,
   monitorsChanged,
   branches,
+  pipeShareOpened,
+  pipeSharePort,
   notSet
 }
 
@@ -5046,6 +5908,8 @@ class ServerMessage extends $pb.GeneratedMessage {
     $core.String? workspaceRevision,
     $core.String? workspaceBaseRevision,
     $core.String? transcriptRevision,
+    PipeShareOpened? pipeShareOpened,
+    PipeSharePort? pipeSharePort,
   }) {
     final result = ServerMessage._();
     if (replyTo != null) result.replyTo = replyTo;
@@ -5125,6 +5989,8 @@ class ServerMessage extends $pb.GeneratedMessage {
       result.workspaceBaseRevision = workspaceBaseRevision;
     if (transcriptRevision != null)
       result.transcriptRevision = transcriptRevision;
+    if (pipeShareOpened != null) result.pipeShareOpened = pipeShareOpened;
+    if (pipeSharePort != null) result.pipeSharePort = pipeSharePort;
     return result;
   }
 
@@ -5208,6 +6074,8 @@ class ServerMessage extends $pb.GeneratedMessage {
     72: ServerMessage_Body.monitorHistory,
     73: ServerMessage_Body.monitorsChanged,
     74: ServerMessage_Body.branches,
+    78: ServerMessage_Body.pipeShareOpened,
+    79: ServerMessage_Body.pipeSharePort,
     0: ServerMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -5283,7 +6151,9 @@ class ServerMessage extends $pb.GeneratedMessage {
       71,
       72,
       73,
-      74
+      74,
+      78,
+      79
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'replyTo', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -5427,6 +6297,10 @@ class ServerMessage extends $pb.GeneratedMessage {
     ..aOS(75, _omitFieldNames ? '' : 'workspaceRevision')
     ..aOS(76, _omitFieldNames ? '' : 'workspaceBaseRevision')
     ..aOS(77, _omitFieldNames ? '' : 'transcriptRevision')
+    ..aOM<PipeShareOpened>(78, _omitFieldNames ? '' : 'pipeShareOpened',
+        subBuilder: PipeShareOpened.$_createMessage)
+    ..aOM<PipeSharePort>(79, _omitFieldNames ? '' : 'pipeSharePort',
+        subBuilder: PipeSharePort.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -5520,6 +6394,8 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(72)
   @$pb.TagNumber(73)
   @$pb.TagNumber(74)
+  @$pb.TagNumber(78)
+  @$pb.TagNumber(79)
   ServerMessage_Body whichBody() => _ServerMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -5590,6 +6466,8 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(72)
   @$pb.TagNumber(73)
   @$pb.TagNumber(74)
+  @$pb.TagNumber(78)
+  @$pb.TagNumber(79)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -6467,6 +7345,30 @@ class ServerMessage extends $pb.GeneratedMessage {
   $core.bool hasTranscriptRevision() => $_has(72);
   @$pb.TagNumber(77)
   void clearTranscriptRevision() => $_clearField(77);
+
+  /// The answer to OpenPipeShare, to the asker only.
+  @$pb.TagNumber(78)
+  PipeShareOpened get pipeShareOpened => $_getN(73);
+  @$pb.TagNumber(78)
+  set pipeShareOpened(PipeShareOpened value) => $_setField(78, value);
+  @$pb.TagNumber(78)
+  $core.bool hasPipeShareOpened() => $_has(73);
+  @$pb.TagNumber(78)
+  void clearPipeShareOpened() => $_clearField(78);
+  @$pb.TagNumber(78)
+  PipeShareOpened ensurePipeShareOpened() => $_ensure(73);
+
+  /// The answer to CheckPipeSharePort, to the asker only.
+  @$pb.TagNumber(79)
+  PipeSharePort get pipeSharePort => $_getN(74);
+  @$pb.TagNumber(79)
+  set pipeSharePort(PipeSharePort value) => $_setField(79, value);
+  @$pb.TagNumber(79)
+  $core.bool hasPipeSharePort() => $_has(74);
+  @$pb.TagNumber(79)
+  void clearPipeSharePort() => $_clearField(79);
+  @$pb.TagNumber(79)
+  PipeSharePort ensurePipeSharePort() => $_ensure(74);
 }
 
 class Hello extends $pb.GeneratedMessage {
@@ -10186,6 +11088,7 @@ class UpdateSettings extends $pb.GeneratedMessage {
     NotificationSettings? notifications,
     ChecklistSettings? checklist,
     NotificationSettingsChange? notificationChange,
+    QuitMode? whenAppQuits,
   }) {
     final result = UpdateSettings._();
     if (defaultModel != null) result.defaultModel = defaultModel;
@@ -10216,6 +11119,7 @@ class UpdateSettings extends $pb.GeneratedMessage {
     if (checklist != null) result.checklist = checklist;
     if (notificationChange != null)
       result.notificationChange = notificationChange;
+    if (whenAppQuits != null) result.whenAppQuits = whenAppQuits;
     return result;
   }
 
@@ -10266,6 +11170,8 @@ class UpdateSettings extends $pb.GeneratedMessage {
     ..aOM<NotificationSettingsChange>(
         36, _omitFieldNames ? '' : 'notificationChange',
         subBuilder: NotificationSettingsChange.$_createMessage)
+    ..aE<QuitMode>(37, _omitFieldNames ? '' : 'whenAppQuits',
+        enumValues: QuitMode.values)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -10542,6 +11448,17 @@ class UpdateSettings extends $pb.GeneratedMessage {
   void clearNotificationChange() => $_clearField(36);
   @$pb.TagNumber(36)
   NotificationSettingsChange ensureNotificationChange() => $_ensure(23);
+
+  /// Settings.when_app_quits (friend bug #27); UNSPECIFIED is refused. Also
+  /// answers Onboarding.when_app_quits.
+  @$pb.TagNumber(37)
+  QuitMode get whenAppQuits => $_getN(24);
+  @$pb.TagNumber(37)
+  set whenAppQuits(QuitMode value) => $_setField(37, value);
+  @$pb.TagNumber(37)
+  $core.bool hasWhenAppQuits() => $_has(24);
+  @$pb.TagNumber(37)
+  void clearWhenAppQuits() => $_clearField(37);
 }
 
 /// Replaces a settings file that has an error (`Workspace.config_error`) with
@@ -16903,6 +17820,7 @@ class Workspace extends $pb.GeneratedMessage {
     $core.Iterable<PipeGroup>? pipeGroups,
     $core.bool? usageAutoContinue,
     BackendService? backendService,
+    $core.Iterable<PipeShare>? pipeShares,
   }) {
     final result = Workspace._();
     if (projects != null) result.projects.addAll(projects);
@@ -16952,6 +17870,7 @@ class Workspace extends $pb.GeneratedMessage {
     if (pipeGroups != null) result.pipeGroups.addAll(pipeGroups);
     if (usageAutoContinue != null) result.usageAutoContinue = usageAutoContinue;
     if (backendService != null) result.backendService = backendService;
+    if (pipeShares != null) result.pipeShares.addAll(pipeShares);
     return result;
   }
 
@@ -17044,6 +17963,8 @@ class Workspace extends $pb.GeneratedMessage {
     ..aOB(46, _omitFieldNames ? '' : 'usageAutoContinue')
     ..aOM<BackendService>(47, _omitFieldNames ? '' : 'backendService',
         subBuilder: BackendService.$_createMessage)
+    ..pPM<PipeShare>(48, _omitFieldNames ? '' : 'pipeShares',
+        subBuilder: PipeShare.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -17516,6 +18437,12 @@ class Workspace extends $pb.GeneratedMessage {
   void clearBackendService() => $_clearField(47);
   @$pb.TagNumber(47)
   BackendService ensureBackendService() => $_ensure(46);
+
+  /// Websites shared over pipes: those this Claktory shares, and those
+  /// other Claktories share with it. One stopped or ended is gone from it;
+  /// the pipes' chats keep the lines saying so.
+  @$pb.TagNumber(48)
+  $pb.PbList<PipeShare> get pipeShares => $_getList(47);
 }
 
 /// Claktory's background service on a Mac (friend bug #24): the LaunchAgent
@@ -17527,12 +18454,16 @@ class BackendService extends $pb.GeneratedMessage {
     $core.String? reason,
     $core.bool? canRestore,
     $core.bool? restoring,
+    $core.bool? canStop,
+    $core.bool? stopping,
   }) {
     final result = BackendService._();
     if (state != null) result.state = state;
     if (reason != null) result.reason = reason;
     if (canRestore != null) result.canRestore = canRestore;
     if (restoring != null) result.restoring = restoring;
+    if (canStop != null) result.canStop = canStop;
+    if (stopping != null) result.stopping = stopping;
     return result;
   }
 
@@ -17554,6 +18485,8 @@ class BackendService extends $pb.GeneratedMessage {
     ..aOS(2, _omitFieldNames ? '' : 'reason')
     ..aOB(3, _omitFieldNames ? '' : 'canRestore')
     ..aOB(4, _omitFieldNames ? '' : 'restoring')
+    ..aOB(5, _omitFieldNames ? '' : 'canStop')
+    ..aOB(6, _omitFieldNames ? '' : 'stopping')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -17620,6 +18553,29 @@ class BackendService extends $pb.GeneratedMessage {
   $core.bool hasRestoring() => $_has(3);
   @$pb.TagNumber(4)
   void clearRestoring() => $_clearField(4);
+
+  /// RUNNING under this Mac's background service: the Mac app on this Mac
+  /// can stop it (StopEngine) and start it (`factoryd install --start`),
+  /// so it shows the switch (friend bug #27). False everywhere else.
+  @$pb.TagNumber(5)
+  $core.bool get canStop => $_getBF(4);
+  @$pb.TagNumber(5)
+  set canStop($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasCanStop() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearCanStop() => $_clearField(5);
+
+  /// StopEngine was taken: it stops in a moment. Show "Stopping…" until the
+  /// connection closes.
+  @$pb.TagNumber(6)
+  $core.bool get stopping => $_getBF(5);
+  @$pb.TagNumber(6)
+  set stopping($core.bool value) => $_setBool(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasStopping() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearStopping() => $_clearField(6);
 }
 
 /// Puts Claktory's background service back in charge (BackendService
@@ -17666,6 +18622,73 @@ class RestoreBackendService extends $pb.GeneratedMessage {
       $pb.GeneratedMessage.$_defaultFor<RestoreBackendService>(
           RestoreBackendService.$_createMessage);
   static RestoreBackendService? _defaultInstance;
+}
+
+/// Stops Claktory on this Mac (friend bug #27): its background service
+/// stops it and won't start it again, at login either, until the Mac app
+/// starts it (`factoryd install --start`). Agents' runs stop where they are
+/// and carry on at the next start, as after an update; monitors wait. Ack,
+/// then BackendService.stopping, then the connection closes. Only from the
+/// app on this Mac (a connection with this machine's token), and refused
+/// while an update is going in or on trial, or where BackendService.can_stop
+/// is false.
+class StopEngine extends $pb.GeneratedMessage {
+  factory StopEngine({
+    $core.bool? quitting,
+  }) {
+    final result = StopEngine._();
+    if (quitting != null) result.quitting = quitting;
+    return result;
+  }
+
+  StopEngine._();
+
+  factory StopEngine.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      StopEngine()..mergeFromBuffer(data, registry);
+  factory StopEngine.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      StopEngine()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'StopEngine',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: StopEngine.$_createMessage)
+    ..aOB(1, _omitFieldNames ? '' : 'quitting')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  StopEngine clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  StopEngine copyWith(void Function(StopEngine) updates) =>
+      super.copyWith((message) => updates(message as StopEngine)) as StopEngine;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use StopEngine() / StopEngine.new instead')
+  static StopEngine create() => StopEngine._();
+  static $pb.GeneratedMessage $_createMessage() => StopEngine._();
+  @$core.override
+  StopEngine createEmptyInstance() => StopEngine._();
+  @$core.pragma('dart2js:noInline')
+  static StopEngine getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<StopEngine>(StopEngine.$_createMessage);
+  static StopEngine? _defaultInstance;
+
+  /// The app is quitting (⌘Q): stops only when Settings.when_app_quits is
+  /// STOP, and starts again when the app opens. False (the person's switch):
+  /// stops whatever the setting, and stays stopped when the app opens, until
+  /// the person starts it (`factoryd install --check` says held).
+  @$pb.TagNumber(1)
+  $core.bool get quitting => $_getBF(0);
+  @$pb.TagNumber(1)
+  set quitting($core.bool value) => $_setBool(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasQuitting() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearQuitting() => $_clearField(1);
 }
 
 /// Agents and chats waiting on one provider's usage limit or credit
@@ -24183,6 +25206,7 @@ class Settings extends $pb.GeneratedMessage {
     $core.int? maxOpenPanes,
     NotificationSettings? notifications,
     ChecklistSettings? checklist,
+    QuitMode? whenAppQuits,
   }) {
     final result = Settings._();
     if (defaultModel != null) result.defaultModel = defaultModel;
@@ -24211,6 +25235,7 @@ class Settings extends $pb.GeneratedMessage {
     if (maxOpenPanes != null) result.maxOpenPanes = maxOpenPanes;
     if (notifications != null) result.notifications = notifications;
     if (checklist != null) result.checklist = checklist;
+    if (whenAppQuits != null) result.whenAppQuits = whenAppQuits;
     return result;
   }
 
@@ -24263,6 +25288,8 @@ class Settings extends $pb.GeneratedMessage {
         subBuilder: NotificationSettings.$_createMessage)
     ..aOM<ChecklistSettings>(33, _omitFieldNames ? '' : 'checklist',
         subBuilder: ChecklistSettings.$_createMessage)
+    ..aE<QuitMode>(34, _omitFieldNames ? '' : 'whenAppQuits',
+        enumValues: QuitMode.values)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -24540,6 +25567,19 @@ class Settings extends $pb.GeneratedMessage {
   void clearChecklist() => $_clearField(33);
   @$pb.TagNumber(33)
   ChecklistSettings ensureChecklist() => $_ensure(22);
+
+  /// What happens to Claktory on this Mac when its app quits (friend bug
+  /// #27): KEEP_RUNNING until the person chooses (every Claktory from before
+  /// it), never UNSPECIFIED. Only matters where BackendService.can_stop.
+  /// Kept in factory.db.
+  @$pb.TagNumber(34)
+  QuitMode get whenAppQuits => $_getN(23);
+  @$pb.TagNumber(34)
+  set whenAppQuits(QuitMode value) => $_setField(34, value);
+  @$pb.TagNumber(34)
+  $core.bool hasWhenAppQuits() => $_has(23);
+  @$pb.TagNumber(34)
+  void clearWhenAppQuits() => $_clearField(34);
 }
 
 /// Settings → Checklist (#282): how Claktory follows up on blocked checklist
@@ -24674,9 +25714,11 @@ class ChecklistSettings extends $pb.GeneratedMessage {
 class Onboarding extends $pb.GeneratedMessage {
   factory Onboarding({
     OnboardingStep? model,
+    OnboardingStep? whenAppQuits,
   }) {
     final result = Onboarding._();
     if (model != null) result.model = model;
+    if (whenAppQuits != null) result.whenAppQuits = whenAppQuits;
     return result;
   }
 
@@ -24694,6 +25736,8 @@ class Onboarding extends $pb.GeneratedMessage {
       package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
       createEmptyInstance: Onboarding.$_createMessage)
     ..aE<OnboardingStep>(1, _omitFieldNames ? '' : 'model',
+        enumValues: OnboardingStep.values)
+    ..aE<OnboardingStep>(2, _omitFieldNames ? '' : 'whenAppQuits',
         enumValues: OnboardingStep.values)
     ..hasRequiredFields = false;
 
@@ -24731,6 +25775,20 @@ class Onboarding extends $pb.GeneratedMessage {
   $core.bool hasModel() => $_has(0);
   @$pb.TagNumber(1)
   void clearModel() => $_clearField(1);
+
+  /// "When Claktory quits" (friend bug #27): NEEDED on a new Claktory that
+  /// its Mac's background service runs (BackendService.can_stop), until the
+  /// person answers (UpdateSettings.when_app_quits turns it DONE) or skips
+  /// it (SetOnboarding.skip_when_app_quits: SKIPPED, and it keeps running).
+  /// DONE everywhere else, and on every Claktory from before it.
+  @$pb.TagNumber(2)
+  OnboardingStep get whenAppQuits => $_getN(1);
+  @$pb.TagNumber(2)
+  set whenAppQuits(OnboardingStep value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasWhenAppQuits() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearWhenAppQuits() => $_clearField(2);
 }
 
 /// Skips steps of the first run. Answered with Ack, also when the step is
@@ -24738,9 +25796,11 @@ class Onboarding extends $pb.GeneratedMessage {
 class SetOnboarding extends $pb.GeneratedMessage {
   factory SetOnboarding({
     $core.bool? skipModel,
+    $core.bool? skipWhenAppQuits,
   }) {
     final result = SetOnboarding._();
     if (skipModel != null) result.skipModel = skipModel;
+    if (skipWhenAppQuits != null) result.skipWhenAppQuits = skipWhenAppQuits;
     return result;
   }
 
@@ -24758,6 +25818,7 @@ class SetOnboarding extends $pb.GeneratedMessage {
       package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
       createEmptyInstance: SetOnboarding.$_createMessage)
     ..aOB(1, _omitFieldNames ? '' : 'skipModel')
+    ..aOB(2, _omitFieldNames ? '' : 'skipWhenAppQuits')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -24791,6 +25852,17 @@ class SetOnboarding extends $pb.GeneratedMessage {
   $core.bool hasSkipModel() => $_has(0);
   @$pb.TagNumber(1)
   void clearSkipModel() => $_clearField(1);
+
+  /// "When Claktory quits" (Onboarding.when_app_quits): skipped for good,
+  /// keeping Claktory running.
+  @$pb.TagNumber(2)
+  $core.bool get skipWhenAppQuits => $_getBF(1);
+  @$pb.TagNumber(2)
+  set skipWhenAppQuits($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSkipWhenAppQuits() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSkipWhenAppQuits() => $_clearField(2);
 }
 
 /// How long a provider's (or one model's) prompt cache is asked to last.
@@ -30398,6 +31470,7 @@ class Proposal extends $pb.GeneratedMessage {
     $core.int? revision,
     $fixnum.Int64? updatedMs,
     $core.String? updateReason,
+    $core.Iterable<ProposalGrant>? grants,
   }) {
     final result = Proposal._();
     if (id != null) result.id = id;
@@ -30412,6 +31485,7 @@ class Proposal extends $pb.GeneratedMessage {
     if (revision != null) result.revision = revision;
     if (updatedMs != null) result.updatedMs = updatedMs;
     if (updateReason != null) result.updateReason = updateReason;
+    if (grants != null) result.grants.addAll(grants);
     return result;
   }
 
@@ -30442,6 +31516,8 @@ class Proposal extends $pb.GeneratedMessage {
     ..aI(10, _omitFieldNames ? '' : 'revision', fieldType: $pb.PbFieldType.OU3)
     ..aInt64(11, _omitFieldNames ? '' : 'updatedMs')
     ..aOS(12, _omitFieldNames ? '' : 'updateReason')
+    ..pPM<ProposalGrant>(13, _omitFieldNames ? '' : 'grants',
+        subBuilder: ProposalGrant.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -30592,6 +31668,100 @@ class Proposal extends $pb.GeneratedMessage {
   $core.bool hasUpdateReason() => $_has(11);
   @$pb.TagNumber(12)
   void clearUpdateReason() => $_clearField(12);
+
+  /// What it asks Rivet to give (propose_to_rivet's grants), resolved by
+  /// Claktory when it was proposed, in Claktory's words: show them under the
+  /// agent's text, apart from it, as what approving it also lets Rivet do,
+  /// each once, within a day, without a card of its own. Empty for most
+  /// proposals.
+  @$pb.TagNumber(13)
+  $pb.PbList<ProposalGrant> get grants => $_getList(12);
+}
+
+/// Something an agent's proposal asks Rivet to give (propose_to_rivet's
+/// grants), resolved by Claktory when it was proposed. Approving the
+/// proposal lets Rivet make it once, within 24 hours, without a card of its
+/// own; anything broader, later or by a Rivet that has read from outside
+/// gets its card as before.
+class ProposalGrant extends $pb.GeneratedMessage {
+  factory ProposalGrant({
+    $core.String? summary,
+    $core.Iterable<$core.String>? warnings,
+    $fixnum.Int64? usedMs,
+  }) {
+    final result = ProposalGrant._();
+    if (summary != null) result.summary = summary;
+    if (warnings != null) result.warnings.addAll(warnings);
+    if (usedMs != null) result.usedMs = usedMs;
+    return result;
+  }
+
+  ProposalGrant._();
+
+  factory ProposalGrant.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ProposalGrant()..mergeFromBuffer(data, registry);
+  factory ProposalGrant.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ProposalGrant()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ProposalGrant',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ProposalGrant.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'summary')
+    ..pPS(2, _omitFieldNames ? '' : 'warnings')
+    ..aInt64(3, _omitFieldNames ? '' : 'usedMs')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ProposalGrant clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ProposalGrant copyWith(void Function(ProposalGrant) updates) =>
+      super.copyWith((message) => updates(message as ProposalGrant))
+          as ProposalGrant;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ProposalGrant() / ProposalGrant.new instead')
+  static ProposalGrant create() => ProposalGrant._();
+  static $pb.GeneratedMessage $_createMessage() => ProposalGrant._();
+  @$core.override
+  ProposalGrant createEmptyInstance() => ProposalGrant._();
+  @$core.pragma('dart2js:noInline')
+  static ProposalGrant getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ProposalGrant>(
+          ProposalGrant.$_createMessage);
+  static ProposalGrant? _defaultInstance;
+
+  /// Claktory's sentence for it, as its own card would say it ("Charts
+  /// reads account-aggregates.csv in Ops", "Carne gets Charts: Edit
+  /// dashboards"). Claktory's words, never the agent's.
+  @$pb.TagNumber(1)
+  $core.String get summary => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set summary($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasSummary() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearSummary() => $_clearField(1);
+
+  /// Claktory's warnings, as that card would show them ("Charts can reach
+  /// api.example.com on the internet…"); empty for none.
+  @$pb.TagNumber(2)
+  $pb.PbList<$core.String> get warnings => $_getList(1);
+
+  /// When Rivet made it on this approval, in ms since 1970; 0 while unused.
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get usedMs => $_getI64(2);
+  @$pb.TagNumber(3)
+  set usedMs($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasUsedMs() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearUsedMs() => $_clearField(3);
 }
 
 /// A device an agent adds for the person (an admin agent's devices_add tool,
@@ -47821,6 +48991,8 @@ class AskPerson extends $pb.GeneratedMessage {
     $core.String? updateReason,
     $core.String? actionDescription,
     $core.String? actionReason,
+    $core.Iterable<AskThreadMessage>? thread,
+    $core.bool? resolved,
   }) {
     final result = AskPerson._();
     if (id != null) result.id = id;
@@ -47843,6 +49015,8 @@ class AskPerson extends $pb.GeneratedMessage {
     if (updateReason != null) result.updateReason = updateReason;
     if (actionDescription != null) result.actionDescription = actionDescription;
     if (actionReason != null) result.actionReason = actionReason;
+    if (thread != null) result.thread.addAll(thread);
+    if (resolved != null) result.resolved = resolved;
     return result;
   }
 
@@ -47882,6 +49056,9 @@ class AskPerson extends $pb.GeneratedMessage {
     ..aOS(17, _omitFieldNames ? '' : 'updateReason')
     ..aOS(18, _omitFieldNames ? '' : 'actionDescription')
     ..aOS(19, _omitFieldNames ? '' : 'actionReason')
+    ..pPM<AskThreadMessage>(20, _omitFieldNames ? '' : 'thread',
+        subBuilder: AskThreadMessage.$_createMessage)
+    ..aOB(21, _omitFieldNames ? '' : 'resolved')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -48115,9 +49292,119 @@ class AskPerson extends $pb.GeneratedMessage {
   $core.bool hasActionReason() => $_has(18);
   @$pb.TagNumber(19)
   void clearActionReason() => $_clearField(19);
+
+  /// The talk on the card so far (#430), oldest first: empty until its
+  /// agent first answers the person on it (ask_reply). Each ask_reply adds
+  /// the person's words that closed the round before (their reply, or their
+  /// comment on approving or dismissing it) and then the agent's answer, and
+  /// makes the card PENDING again at a new revision, with `answer` and
+  /// decided_ms cleared: it waits again (Agent.waiting_seqs) and notifies as
+  /// a new card does. A procedure still on its way whose last step done has
+  /// the person's comment can be answered too: it stays PENDING at its step,
+  /// at a new revision, and notifies again. Sort it in Needs you by its last
+  /// message's at_ms, so it rises. Show the thread above the card's buttons, with Reply
+  /// (AnswerAsk.reply) and Resolve (AnswerAsk.resolve) beside them.
+  @$pb.TagNumber(20)
+  $pb.PbList<AskThreadMessage> get thread => $_getList(19);
+
+  /// Ended with Resolve (AnswerAsk.resolve, #430): talked through, with no
+  /// decision. state is ANSWERED; `answer` is the person's optional comment.
+  /// Show "Resolved", never as approved.
+  @$pb.TagNumber(21)
+  $core.bool get resolved => $_getBF(20);
+  @$pb.TagNumber(21)
+  set resolved($core.bool value) => $_setBool(20, value);
+  @$pb.TagNumber(21)
+  $core.bool hasResolved() => $_has(20);
+  @$pb.TagNumber(21)
+  void clearResolved() => $_clearField(21);
 }
 
 /// One step of a procedure (AskPerson.steps).
+/// One message of the talk on a card (AskPerson.thread, #430).
+class AskThreadMessage extends $pb.GeneratedMessage {
+  factory AskThreadMessage({
+    $core.bool? fromAgent,
+    $core.String? text,
+    $fixnum.Int64? atMs,
+  }) {
+    final result = AskThreadMessage._();
+    if (fromAgent != null) result.fromAgent = fromAgent;
+    if (text != null) result.text = text;
+    if (atMs != null) result.atMs = atMs;
+    return result;
+  }
+
+  AskThreadMessage._();
+
+  factory AskThreadMessage.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AskThreadMessage()..mergeFromBuffer(data, registry);
+  factory AskThreadMessage.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AskThreadMessage()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AskThreadMessage',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AskThreadMessage.$_createMessage)
+    ..aOB(1, _omitFieldNames ? '' : 'fromAgent')
+    ..aOS(2, _omitFieldNames ? '' : 'text')
+    ..aInt64(3, _omitFieldNames ? '' : 'atMs')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AskThreadMessage clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AskThreadMessage copyWith(void Function(AskThreadMessage) updates) =>
+      super.copyWith((message) => updates(message as AskThreadMessage))
+          as AskThreadMessage;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AskThreadMessage() / AskThreadMessage.new instead')
+  static AskThreadMessage create() => AskThreadMessage._();
+  static $pb.GeneratedMessage $_createMessage() => AskThreadMessage._();
+  @$core.override
+  AskThreadMessage createEmptyInstance() => AskThreadMessage._();
+  @$core.pragma('dart2js:noInline')
+  static AskThreadMessage getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AskThreadMessage>(
+          AskThreadMessage.$_createMessage);
+  static AskThreadMessage? _defaultInstance;
+
+  /// The agent's (ask_reply); false: the person's.
+  @$pb.TagNumber(1)
+  $core.bool get fromAgent => $_getBF(0);
+  @$pb.TagNumber(1)
+  set fromAgent($core.bool value) => $_setBool(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasFromAgent() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearFromAgent() => $_clearField(1);
+
+  /// In the agent's words or the person's: Markdown, shown as theirs.
+  @$pb.TagNumber(2)
+  $core.String get text => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set text($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasText() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearText() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get atMs => $_getI64(2);
+  @$pb.TagNumber(3)
+  set atMs($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasAtMs() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearAtMs() => $_clearField(3);
+}
+
 class AskStep extends $pb.GeneratedMessage {
   factory AskStep({
     $core.String? text,
@@ -48227,6 +49514,8 @@ class AnswerAsk extends $pb.GeneratedMessage {
     $core.int? step,
     $core.bool? reply,
     $core.int? revision,
+    $core.bool? resolve,
+    AskAnsweredFrom? from,
   }) {
     final result = AnswerAsk._();
     if (agentId != null) result.agentId = agentId;
@@ -48237,6 +49526,8 @@ class AnswerAsk extends $pb.GeneratedMessage {
     if (step != null) result.step = step;
     if (reply != null) result.reply = reply;
     if (revision != null) result.revision = revision;
+    if (resolve != null) result.resolve = resolve;
+    if (from != null) result.from = from;
     return result;
   }
 
@@ -48263,6 +49554,9 @@ class AnswerAsk extends $pb.GeneratedMessage {
     ..aI(6, _omitFieldNames ? '' : 'step', fieldType: $pb.PbFieldType.OU3)
     ..aOB(7, _omitFieldNames ? '' : 'reply')
     ..aI(8, _omitFieldNames ? '' : 'revision', fieldType: $pb.PbFieldType.OU3)
+    ..aOB(9, _omitFieldNames ? '' : 'resolve')
+    ..aE<AskAnsweredFrom>(10, _omitFieldNames ? '' : 'from',
+        enumValues: AskAnsweredFrom.values)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -48355,7 +49649,8 @@ class AnswerAsk extends $pb.GeneratedMessage {
   /// it's about counts as answered (no asking again). `text` is needed;
   /// `dismiss` is ignored; `attachments` go with it. Refused for a procedure
   /// (`step`) and for an ask that wants a written answer (wants_text),
-  /// whose cards stay as they are.
+  /// whose cards stay as they are, unless the card has a thread
+  /// (AskPerson.thread, #430): then it's Reply, to answer the agent again.
   @$pb.TagNumber(7)
   $core.bool get reply => $_getBF(6);
   @$pb.TagNumber(7)
@@ -48378,6 +49673,31 @@ class AnswerAsk extends $pb.GeneratedMessage {
   $core.bool hasRevision() => $_has(7);
   @$pb.TagNumber(8)
   void clearRevision() => $_clearField(8);
+
+  /// Resolve (#430): end a card that has a thread (AskPerson.thread) with
+  /// no decision, talked through. `text` is the person's optional comment;
+  /// `dismiss` and `reply` are ignored. The card closes ANSWERED with
+  /// AskPerson.resolved, and its agent is told (quietly without a comment).
+  /// Refused for a card without a thread.
+  @$pb.TagNumber(9)
+  $core.bool get resolve => $_getBF(8);
+  @$pb.TagNumber(9)
+  set resolve($core.bool value) => $_setBool(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasResolve() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearResolve() => $_clearField(9);
+
+  /// Where the person answered from: the agent is told, and asked to answer
+  /// their words on the card (ask_reply) so they reach them there.
+  @$pb.TagNumber(10)
+  AskAnsweredFrom get from => $_getN(9);
+  @$pb.TagNumber(10)
+  set from(AskAnsweredFrom value) => $_setField(10, value);
+  @$pb.TagNumber(10)
+  $core.bool hasFrom() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearFrom() => $_clearField(10);
 }
 
 /// A chat: a one-off conversation of the person's, beside their agents but
@@ -51340,6 +52660,9 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     $core.String? subjectAgentId,
     $core.bool? superseded,
     $core.int? updates,
+    $core.String? proposalId,
+    $core.String? proposalAgentId,
+    $fixnum.Int64? proposalSeq,
   }) {
     final result = NeedsYouRecord._();
     if (kind != null) result.kind = kind;
@@ -51367,6 +52690,9 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     if (subjectAgentId != null) result.subjectAgentId = subjectAgentId;
     if (superseded != null) result.superseded = superseded;
     if (updates != null) result.updates = updates;
+    if (proposalId != null) result.proposalId = proposalId;
+    if (proposalAgentId != null) result.proposalAgentId = proposalAgentId;
+    if (proposalSeq != null) result.proposalSeq = proposalSeq;
     return result;
   }
 
@@ -51415,6 +52741,11 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     ..aOS(23, _omitFieldNames ? '' : 'subjectAgentId')
     ..aOB(24, _omitFieldNames ? '' : 'superseded')
     ..aI(25, _omitFieldNames ? '' : 'updates', fieldType: $pb.PbFieldType.OU3)
+    ..aOS(26, _omitFieldNames ? '' : 'proposalId')
+    ..aOS(27, _omitFieldNames ? '' : 'proposalAgentId')
+    ..a<$fixnum.Int64>(
+        28, _omitFieldNames ? '' : 'proposalSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -51704,6 +53035,42 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
   $core.bool hasUpdates() => $_has(24);
   @$pb.TagNumber(25)
   void clearUpdates() => $_clearField(25);
+
+  /// Made with no card of its own because the person approved it in an
+  /// agent's proposal (ProposalGrant): the proposal's id (Proposal.id), to
+  /// say "approved in Bruno's proposal" and open it. APP_ACCESS and
+  /// PROPOSAL_GRANT only; empty otherwise.
+  @$pb.TagNumber(26)
+  $core.String get proposalId => $_getSZ(25);
+  @$pb.TagNumber(26)
+  set proposalId($core.String value) => $_setString(25, value);
+  @$pb.TagNumber(26)
+  $core.bool hasProposalId() => $_has(25);
+  @$pb.TagNumber(26)
+  void clearProposalId() => $_clearField(26);
+
+  /// proposal_id's agent, whose proposal it was (its name is in the
+  /// workspace, or its id once it's deleted).
+  @$pb.TagNumber(27)
+  $core.String get proposalAgentId => $_getSZ(26);
+  @$pb.TagNumber(27)
+  set proposalAgentId($core.String value) => $_setString(26, value);
+  @$pb.TagNumber(27)
+  $core.bool hasProposalAgentId() => $_has(26);
+  @$pb.TagNumber(27)
+  void clearProposalAgentId() => $_clearField(27);
+
+  /// The proposal's entry in proposal_agent_id's conversation, to open it
+  /// there; 0 when it's no longer in the conversation as loaded (after
+  /// /clear, say): open the conversation at its end then.
+  @$pb.TagNumber(28)
+  $fixnum.Int64 get proposalSeq => $_getI64(27);
+  @$pb.TagNumber(28)
+  set proposalSeq($fixnum.Int64 value) => $_setInt64(27, value);
+  @$pb.TagNumber(28)
+  $core.bool hasProposalSeq() => $_has(27);
+  @$pb.TagNumber(28)
+  void clearProposalSeq() => $_clearField(28);
 }
 
 /// A Mac app can broker for its Chrome. Sent on every connection, and again

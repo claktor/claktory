@@ -1088,9 +1088,7 @@ impl Vault {
     /// A secret's values, decrypted.
     fn values_of(db: &Connection, vault_id: &str, vmk: &[u8; 32], id: &str) -> Result<Vec<Value>, VaultError> {
         let (version, sealed_dek, ask, name): (u32, Vec<u8>, bool, String) =
-            db.query_row("SELECT version, sealed_dek, ask, name FROM secrets WHERE id = ?1", [id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })?;
+            db.query_row("SELECT version, sealed_dek, ask, name FROM secrets WHERE id = ?1", [id], crate::store::row4)?;
         let version = version.to_string();
         let corrupt = || VaultError::Invalid(format!("The secret {name} can't be opened: the vault was changed outside Claktory."));
         let (dek, older) = open_dek(vmk, &sealed_dek, vault_id, id, &version, ask).ok_or_else(corrupt)?;

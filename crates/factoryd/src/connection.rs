@@ -240,7 +240,14 @@ pub(crate) async fn serve_stream<S: Stream>(
     };
     let (id, since) = (device.device.id.clone(), std::time::Instant::now());
     crate::diagnostics::record(&factory, crate::diagnostics::CONNECTION_AREA, "connected", &format!("device={id} via={via} app={version}"), 0);
-    let ended = session(&mut socket, &factory, connection, device.closed.clone()).await;
+    let mut sent =
+        Workspaces::resuming(connection.workspace_patches, factory.resumes.clone(), &connection.binding, &connection.workspace_revision);
+    // A device on another machine gets the Workspace at most once a second,
+    // and what a model writes at most every 0.1 s.
+    if remote {
+        sent = sent.paced(crate::patch::REMOTE_EVERY, crate::patch::REMOTE_TEXT_EVERY);
+    }
+    let ended = session(&mut socket, &factory, connection, &mut sent, device.closed.clone()).await;
     let how = match &ended {
         Ok(()) => "closed".to_owned(),
         Err(ConnectionError::Io(error) | ConnectionError::WebSocket(tungstenite::Error::Io(error))) => {
@@ -250,7 +257,15 @@ pub(crate) async fn serve_stream<S: Stream>(
         Err(ConnectionError::WebSocket(_)) => "websocket".to_owned(),
     };
     let stayed = i64::try_from(since.elapsed().as_millis()).unwrap_or(i64::MAX);
-    crate::diagnostics::record(&factory, crate::diagnostics::CONNECTION_AREA, "disconnected", &format!("device={id} via={via} end={how}"), stayed);
+    let tally = sent.tally.words();
+    tracing::info!(device = %id, via, %tally, "what a connection was sent");
+    crate::diagnostics::record(
+        &factory,
+        crate::diagnostics::CONNECTION_AREA,
+        "disconnected",
+        &format!("device={id} via={via} end={how} {tally}"),
+        stayed,
+    );
     ended?;
     tracing::info!("client disconnected");
     Ok(())
@@ -302,17 +317,16 @@ async fn session<S: Stream>(
     socket: &mut Socket<S>,
     factory: &Arc<Factory>,
     connection: Connection,
+    sent: &mut Workspaces,
     unpaired: Arc<tokio::sync::Notify>,
 ) -> Result<(), ConnectionError> {
     let mut vault_session = crate::vault::requests::Session::new(connection.device.clone(), connection.zoom_device.clone());
-    let mut sent =
-        Workspaces::resuming(connection.workspace_patches, factory.resumes.clone(), &connection.binding, &connection.workspace_revision);
     let (agent, revision) = &connection.held_transcript;
     let held = (!agent.is_empty() && !revision.is_empty()).then_some((agent.as_str(), revision.as_str()));
-    let mut events = sync(socket, &mut sent, factory, held).await?;
+    let mut events = sync(socket, sent, factory, held).await?;
     // Where this device was reading, for it alone, when it kept anything.
     if let Some(presentation) = crate::presentation::welcome(factory, &connection.binding) {
-        send(socket, 0, Body::Presentation(presentation)).await?;
+        out(socket, sent, 0, Body::Presentation(presentation)).await?;
     }
     factory.health.served();
     // A vault still locked after a restart tries the account service again.
@@ -337,21 +351,26 @@ async fn session<S: Stream>(
                 let reply = handle(factory, message.body, &connection, &mut vault_session).await;
                 // Deliver what the request changed before answering it, so a
                 // client that sees the ack also sees the new state.
-                flush(socket, &mut sent, &mut events, factory).await?;
-                send(socket, message.id, reply).await?;
+                flush(socket, sent, &mut events, factory).await?;
+                out(socket, sent, message.id, reply).await?;
             }
-            body = connection.views.next() => send(socket, 0, body).await?,
-            body = connection.browser.next() => send(socket, 0, body).await?,
-            body = connection.presentation.next() => send(socket, 0, body).await?,
-            body = connection.dictations.next() => send(socket, 0, body).await?,
+            body = connection.views.next() => out(socket, sent, 0, body).await?,
+            body = connection.browser.next() => out(socket, sent, 0, body).await?,
+            body = connection.presentation.next() => out(socket, sent, 0, body).await?,
+            body = connection.dictations.next() => out(socket, sent, 0, body).await?,
             event = events.recv() => match event {
-                Ok(event) => forward(socket, &mut sent, event).await?,
+                Ok(event) => forward(socket, sent, event).await?,
                 Err(RecvError::Lagged(missed)) => {
                     tracing::warn!(missed, "client fell behind; resending state");
-                    events = sync(socket, &mut sent, factory, None).await?;
+                    events = sync(socket, sent, factory, None).await?;
                 }
                 Err(RecvError::Closed) => return Ok(()),
             },
+            // What's held for a device on another machine, its while up.
+            () = until(sent.due()) => {
+                let due = sent.release_due();
+                send_all(socket, sent, due).await?;
+            }
         }
     }
 }
@@ -377,27 +396,29 @@ async fn sync<S: Stream>(
             transcript_revision: snapshot.transcript_revision,
             ..Default::default()
         };
-        socket.send(Message::Binary(message.encode_to_vec().into())).await?;
+        let frame: bytes::Bytes = message.encode_to_vec().into();
+        sent.tally.count(&frame);
+        socket.send(Message::Binary(frame)).await?;
     }
     // The pipe shown, its liaison's or alone: its messages, as selecting it
     // sends them. Read after the events were subscribed to, so one that
     // comes meanwhile is in it or follows (the client keeps each once).
     if !pipe.is_empty() {
-        send(socket, 0, Body::PipeTranscript(crate::pipes::transcript(factory, &pipe))).await?;
+        out(socket, sent, 0, Body::PipeTranscript(crate::pipes::transcript(factory, &pipe))).await?;
     }
     for explorer in snapshot.explorers {
-        send(socket, 0, Body::Explorer(explorer)).await?;
+        out(socket, sent, 0, Body::Explorer(explorer)).await?;
     }
     if let Some(view) = snapshot.view {
-        send(socket, 0, Body::ExtensionView(view)).await?;
+        out(socket, sent, 0, Body::ExtensionView(view)).await?;
     }
     if let Some(queued) = snapshot.queued {
-        send(socket, 0, Body::QueuedMessages(queued)).await?;
+        out(socket, sent, 0, Body::QueuedMessages(queued)).await?;
     }
     if let Some((transcript, queued)) = snapshot.chat {
-        send(socket, 0, Body::ChatTranscript(transcript)).await?;
+        out(socket, sent, 0, Body::ChatTranscript(transcript)).await?;
         if !queued.messages.is_empty() {
-            send(socket, 0, Body::ChatQueuedMessages(queued)).await?;
+            out(socket, sent, 0, Body::ChatQueuedMessages(queued)).await?;
         }
     }
     Ok(snapshot.events)
@@ -412,7 +433,11 @@ async fn flush<S: Stream>(
     loop {
         match events.try_recv() {
             Ok(event) => forward(socket, sent, event).await?,
-            Err(TryRecvError::Empty | TryRecvError::Closed) => return Ok(()),
+            // What it changed goes now, the Workspace too.
+            Err(TryRecvError::Empty | TryRecvError::Closed) => {
+                let held = sent.release();
+                return send_all(socket, sent, held).await;
+            }
             Err(TryRecvError::Lagged(missed)) => {
                 tracing::warn!(missed, "client fell behind; resending state");
                 *events = sync(socket, sent, factory, None).await?;
@@ -849,6 +874,25 @@ async fn handle(
         Some(Request::SetChatModel(request)) => crate::chats::choose_model(factory, &request.chat_id, &request.model),
         Some(Request::SetKeepAwake(request)) => crate::keep_awake::set(factory, request.on),
         Some(Request::RestoreBackendService(_)) => crate::service::restore(factory).await,
+        // Website sharing over pipes (pipes/shares.rs): the person's only.
+        Some(Request::SharePipeWebsite(request)) => crate::pipes::shares::share(factory, &request),
+        Some(Request::StopPipeShare(request)) => crate::pipes::shares::stop(factory, &request),
+        Some(Request::CheckPipeSharePort(request)) => {
+            return Body::PipeSharePort(crate::pipes::shares::check_port(factory, &request).await);
+        }
+        // The receiving side's (pipes/share_listener.rs).
+        Some(Request::OpenPipeShare(request)) => {
+            let opened = crate::pipes::share_listener::open(factory, &request.share_id).map_err(RequestError::Command);
+            return answer(opened, |opened| {
+                Body::PipeShareOpened(v1::PipeShareOpened { share_id: request.share_id, url: opened.url, fallback_url: opened.fallback_url })
+            });
+        }
+        Some(Request::HidePipeShare(request)) => {
+            crate::pipes::share_listener::set_hidden(factory, &request.share_id, request.hidden).map_err(RequestError::Command)
+        }
+        // Only this Mac's own app, by the connection's kind (its token),
+        // never by where it comes from (friend bug #27).
+        Some(Request::StopEngine(request)) => crate::service::stop(factory, !connection.remote, request.quitting).await,
         // Only this Mac's own app (its own device, either way in) turns it on.
         Some(Request::SetLidClosed(request)) => {
             crate::lid_closed::set(factory, !connection.remote, &request)
@@ -1005,11 +1049,37 @@ async fn read<S: Stream>(socket: &mut Socket<S>, frame: Option<Result<Message, t
     }
 }
 
-/// Sends an event, a Workspace only as what this app doesn't have yet.
+/// Sends an event, a Workspace only as what this app doesn't have yet (or
+/// later, held with others for a device on another machine, as what a
+/// model writes is).
 async fn forward<S: Stream>(socket: &mut Socket<S>, sent: &mut Workspaces, event: Event) -> Result<(), ConnectionError> {
-    if let Some(event) = sent.outgoing(event) {
-        socket.send(Message::Binary(event)).await?;
+    let frames = sent.frames(event);
+    send_all(socket, sent, frames).await
+}
+
+/// Sends encoded frames, counted.
+async fn send_all<S: Stream>(socket: &mut Socket<S>, sent: &mut Workspaces, frames: Vec<bytes::Bytes>) -> Result<(), ConnectionError> {
+    for frame in frames {
+        sent.tally.count(&frame);
+        socket.send(Message::Binary(frame)).await?;
     }
+    Ok(())
+}
+
+/// Waits until `at`, or for ever.
+async fn until(at: Option<std::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Sends a message of the session's, counted.
+async fn out<S: Stream>(socket: &mut Socket<S>, sent: &mut Workspaces, reply_to: u64, body: Body) -> Result<(), ConnectionError> {
+    let message = ServerMessage { reply_to, body: Some(body), ..Default::default() };
+    let frame: bytes::Bytes = message.encode_to_vec().into();
+    sent.tally.count(&frame);
+    socket.send(Message::Binary(frame)).await?;
     Ok(())
 }
 

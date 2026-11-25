@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:factory_app/annotations.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -20,6 +22,9 @@ class FakePlayback implements VideoPlayback {
     made.add(this);
   }
 
+  /// The size of what every new player plays.
+  static Size size = const Size(1280, 720);
+
   final _state = ValueNotifier(const PlaybackState());
   String? opened;
   final seeks = <double>[];
@@ -32,7 +37,7 @@ class FakePlayback implements VideoPlayback {
     playing: playing ?? _state.value.playing,
     position: position ?? _state.value.position,
     duration: 60,
-    size: const Size(1280, 720),
+    size: size,
   );
 
   @override
@@ -52,6 +57,9 @@ class FakePlayback implements VideoPlayback {
     seeks.add(seconds);
     _state.value = _with(position: seconds);
   }
+
+  /// The player can't play what it opened.
+  void fail(String error) => _state.value = PlaybackState(error: error);
 
   @override
   Widget view() => const ColoredBox(color: Color(0xFF000000));
@@ -225,6 +233,7 @@ void main() {
 
   setUp(() {
     FakePlayback.made.clear();
+    FakePlayback.size = const Size(1280, 720);
     newVideoPlayback = FakePlayback.new;
   });
 
@@ -260,6 +269,78 @@ void main() {
     expect(player.state.value.playing, isTrue);
   });
 
+  // An agent showing a video that's already open (Abbacchio's row 1117):
+  // the copy the player had open was written over and then deleted, so
+  // every second show said "Claktory can't play this video."
+  void showAgain(Harness harness) =>
+      harness.backend.highlights.pointedAt.value = (
+        keys: ['pane:a1:v1'],
+        at: DateTime.now(),
+      );
+
+  Future<void> diskWork(WidgetTester tester) async {
+    for (var i = 0; i < 6; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)),
+      );
+      await tester.pump();
+    }
+    await settle(tester);
+  }
+
+  testWidgets('shown again unchanged, it plays on from its copy, read '
+      'again only as far as its version', (tester) async {
+    final harness = await _showVideo(tester);
+    final player = FakePlayback.made.single;
+    final copy = player.opened!;
+    harness.backend.sent.clear();
+    showAgain(harness);
+    await diskWork(tester);
+    expect(FakePlayback.made, [player]);
+    expect(await tester.runAsync(() => File(copy).exists()), isTrue);
+    expect(find.text("Claktory can't play this video."), findsNothing);
+    expect(find.text('0:00 / 1:00'), findsOneWidget);
+    expect(
+      [
+        for (final m in harness.backend.sent)
+          if (m.hasReadFile()) m.readFile.maxBytes.toInt(),
+      ],
+      [1],
+    );
+  });
+
+  testWidgets('shown again after it changed, it plays the new version from '
+      'a copy of its own', (tester) async {
+    final harness = await _showVideo(tester);
+    final first = FakePlayback.made.single.opened!;
+    await FakePlayback.made.single.seek(42);
+    harness.backend.files[_path] = FileContent(
+      path: _path,
+      mime: 'video/mp4',
+      size: Int64(5 * 1024 * 1024),
+      data: List<int>.filled(5 * 1024 * 1024, 9),
+      sha256: 'v2',
+    );
+    showAgain(harness);
+    await diskWork(tester);
+    expect(FakePlayback.made, hasLength(2));
+    final second = FakePlayback.made.last.opened!;
+    expect(second, isNot(first));
+    expect(await tester.runAsync(() => File(second).length()), 5 * 1024 * 1024);
+    expect(await tester.runAsync(() => File(first).exists()), isFalse);
+    // From its beginning, not where the old one was (Abbacchio's 31289).
+    expect(FakePlayback.made.last.seeks, isEmpty);
+  });
+
+  testWidgets('Reload while it plays unchanged keeps playing', (tester) async {
+    await _showVideo(tester);
+    final player = FakePlayback.made.single;
+    await tester.tap(find.bySemanticsLabel('Reload').first);
+    await diskWork(tester);
+    expect(FakePlayback.made, [player]);
+    expect(await tester.runAsync(() => File(player.opened!).exists()), isTrue);
+  });
+
   testWidgets('a read that fails while connected says why, and Try again '
       'reads it again (#375)', (tester) async {
     final harness = await _showVideo(tester);
@@ -285,11 +366,39 @@ void main() {
     expect(find.text('0:00 / 1:00'), findsOneWidget);
   });
 
+  testWidgets("Reload after the player failed shows the read coming, not "
+      'the failure, then plays', (tester) async {
+    final harness = await _showVideo(tester);
+    FakePlayback.made.last.fail('demuxer');
+    await settle(tester);
+    expect(find.text("Claktory can't play this video."), findsOneWidget);
+    final hold = Completer<void>();
+    harness.backend.holdRead = (request) => hold.future;
+    await tester.tap(find.bySemanticsLabel('Reload'));
+    await settle(tester);
+    expect(find.text("Claktory can't play this video."), findsNothing);
+    expect(find.textContaining('Loading video'), findsOneWidget);
+    hold.complete();
+    for (var i = 0; i < 6; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)),
+      );
+      await tester.pump();
+    }
+    await settle(tester);
+    expect(find.text("Claktory can't play this video."), findsNothing);
+    expect(FakePlayback.made.last.opened, isNotNull);
+    expect(FakePlayback.made.last.state.value.ready, isTrue);
+  });
+
   testWidgets("a backend that can't read ranges says to update it", (
     tester,
   ) async {
-    await _showVideo(tester, ranged: false);
-    // Read again, from a backend that answers every read from the start.
+    final harness = await _showVideo(tester, ranged: false);
+    // A new version, read again from a backend that answers every read
+    // from the start.
+    harness.backend.files[_path] = harness.backend.files[_path]!.deepCopy()
+      ..sha256 = 'v2';
     await tester.tap(find.bySemanticsLabel('Reload').first);
     for (var i = 0; i < 4; i++) {
       await tester.runAsync(
@@ -328,6 +437,33 @@ void main() {
     await settle(tester);
     expect(_controller(tester).focused, 't1');
     expect(FakePlayback.made.single.seeks.last, 30);
+  });
+
+  testWidgets("a tall video in a short pane: Comment stays on one line at "
+      "the pane's corner, not squeezed into the frame (row 375)", (
+    tester,
+  ) async {
+    // As a 1080×1920 clip in a pane about 330 pt tall (Zucchero's): a
+    // frame some 45 pt wide.
+    FakePlayback.size = const Size(270, 4800);
+    await _showVideo(tester);
+    await settle(tester);
+    final word = find.descendant(
+      of: find.byType(CommentPick),
+      matching: find.text('Comment'),
+    );
+    final frame = tester.getRect(
+      find.byWidgetPredicate((widget) => widget is AspectRatio).first,
+    );
+    final words = tester.getRect(word);
+    expect(frame.width, lessThan(words.width), reason: 'a sliver of a frame');
+    final style = tester.widget<Text>(word).style ?? const TextStyle();
+    final line = (style.fontSize ?? 14) * (style.height ?? 1.5);
+    expect(words.height, lessThan(line * 1.6), reason: 'one line');
+    // Its tap still begins a comment.
+    await tester.tap(word);
+    await settle(tester);
+    expect(_controller(tester).selection.value, Moment(0));
   });
 
   testWidgets('Comment, then a drag along the timeline, makes a comment on '

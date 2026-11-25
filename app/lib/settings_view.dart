@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -25,6 +26,7 @@ import 'mobile/platform_policy.dart' show PhonePlatformPolicy;
 import 'mobile/metrics.dart';
 import 'model_select.dart' show ModelSelect;
 import 'mobile/navigation.dart';
+import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'move.dart' show BackendMove, MoveSettingRow;
 import 'notification_settings.dart'
     show NotificationSettingsView, notificationsSummary;
@@ -212,6 +214,9 @@ List<SettingsSection> settingsSectionsOf(
         UpdateCheckRow(workspace: workspace),
         // Keeping the Mac awake while agents work, on a Mac.
         if (workspace.keepAwake.available) _KeepAwake(workspace: workspace),
+        // What quitting the Mac app does, and turning Claktory off now,
+        // where its Mac's background service runs it (friend bug #27).
+        if (workspace.backendService.canStop) _Engine(workspace: workspace),
         // Moving this Claktory to another computer, from any device.
         MoveSettingRow(source: BackendMove(AppScope.of(context))),
       ],
@@ -1601,6 +1606,120 @@ class _HighlightsState extends State<_Highlights> with SettingRequests {
     );
   }
 }
+
+/// What happens to Claktory on its Mac when the Mac app quits, and the
+/// switch that turns it off now (friend bug #27): where its Mac's
+/// background service runs it (BackendService.can_stop). The choice from
+/// any device; the switch only in the app on that Mac, since only it can
+/// turn Claktory on again.
+class _Engine extends StatefulWidget {
+  const _Engine({required this.workspace});
+
+  final Workspace workspace;
+
+  @override
+  State<_Engine> createState() => _EngineState();
+}
+
+class _EngineState extends State<_Engine> with SettingRequests {
+  Future<void> _turnOff() async {
+    final backend = AppScope.of(context);
+    final sure = await showActions<bool>(
+      context,
+      title: 'Turn off Claktory?',
+      message: stopEngineMessage,
+      actions: const [SheetAction('Turn Off', true, destructive: true)],
+    );
+    if (sure != true || !mounted) return;
+    await run(() => backend.stopEngine(quitting: false));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final service = widget.workspace.backendService;
+    final mode =
+        widget.workspace.settings.whenAppQuits == QuitMode.QUIT_MODE_STOP
+        ? QuitMode.QUIT_MODE_STOP
+        : QuitMode.QUIT_MODE_KEEP_RUNNING;
+    final backend = AppScope.of(context);
+    final here =
+        backend.target == null && defaultTargetPlatform == TargetPlatform.macOS;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SettingRow(
+          label: 'When I quit Claktory',
+          top: true,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Select<QuitMode>(
+                title: 'When I quit Claktory',
+                value: mode,
+                options: const [
+                  SelectOption(
+                    QuitMode.QUIT_MODE_KEEP_RUNNING,
+                    keepRunningLabel,
+                  ),
+                  SelectOption(QuitMode.QUIT_MODE_STOP, stopAgentsLabel),
+                ],
+                onChanged: (chosen) => run(
+                  () => backend.updateSettings(
+                    UpdateSettings(whenAppQuits: chosen),
+                  ),
+                ),
+              ),
+              const SizedBox(height: Space.xs),
+              Text(
+                quitModeNote(mode),
+                style: type.caption.copyWith(color: palette.textFaint),
+              ),
+            ],
+          ),
+        ),
+        if (here)
+          SettingRow(
+            label: 'Claktory on this Mac',
+            top: true,
+            child: _Switch(
+              label: service.stopping ? 'Stopping…' : 'Running',
+              note:
+                  'Turn it off to stop your agents now. They carry on where '
+                  'they left off when you turn it on again.',
+              value: !service.stopping,
+              onChanged: service.stopping
+                  ? null
+                  : (on) {
+                      if (!on) unawaited(_turnOff());
+                    },
+            ),
+          ),
+        failureLine(palette),
+      ],
+    );
+  }
+}
+
+/// The choices for what quitting the Mac app does (friend bug #27), in
+/// Settings and the first launch's question.
+const keepRunningLabel = 'Keep agents running';
+const stopAgentsLabel = 'Stop agents';
+
+/// What [mode] means, under its choice.
+String quitModeNote(QuitMode mode) => mode == QuitMode.QUIT_MODE_STOP
+    ? 'Quitting stops your agents, and opening Claktory starts them again '
+          'where they left off. Nothing runs while it’s closed, even after '
+          'you log in.'
+    : 'Your agents keep working after you quit, and Claktory starts by '
+          'itself when you log in.';
+
+/// What turning Claktory off means, before it's done.
+const stopEngineMessage =
+    'Your agents stop where they are and carry on when you turn Claktory '
+    'on again. Until then, nothing runs on this Mac.';
 
 /// Keeping the Mac Claktory runs on awake while agents work
 /// (Workspace.keep_awake): off unless the person says yes. On a laptop the

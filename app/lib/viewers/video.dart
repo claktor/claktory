@@ -12,6 +12,7 @@ import '../backend.dart';
 import '../controls.dart';
 import '../identity.dart';
 import '../mobile/metrics.dart';
+import '../mobile/viewer_chrome.dart';
 import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
@@ -212,6 +213,10 @@ class _VideoViewerState extends State<VideoViewer>
   /// deleted with the pane.
   ({String sha256, File copy, bool preview})? _partial;
 
+  /// The version [_copy] holds, and whether it's the preview's: what a
+  /// show of the same file plays on with.
+  ({String sha256, bool preview})? _playing;
+
   /// A preview was due, but this Claktory can't make one (#379).
   var _noPreview = false;
 
@@ -269,6 +274,7 @@ class _VideoViewerState extends State<VideoViewer>
     _playback = null;
     final copy = _copy;
     _copy = null;
+    _playing = null;
     if (copy != null) unawaited(copy.delete().catchError((_) => copy));
   }
 
@@ -311,6 +317,34 @@ class _VideoViewerState extends State<VideoViewer>
   Future<void> reload() async {
     final generation = ++_generation;
     final backend = AppScope.of(context);
+    // A player that failed goes, so the read shows how far it's got rather
+    // than the failure until it's all here again (Abbacchio's 30132).
+    if (_playback?.state.value.error != null) _close();
+    // Shown again (an agent's show, or Reload) while it plays: when the file
+    // is still the version playing, it plays on from its copy, and only a
+    // changed file is read again (Abbacchio's row 1117).
+    final playing = _playing;
+    if (playing != null &&
+        _playback != null &&
+        _copy != null &&
+        !(playing.preview && wantOriginal)) {
+      try {
+        final now = await backend.readFile(path, maxBytes: 1);
+        if (!mounted || generation != _generation) return;
+        if (now.error.isEmpty && now.sha256 == playing.sha256) {
+          setState(() {
+            _problem = null;
+            failure = null;
+          });
+          return;
+        }
+      } on RequestFailure catch (error) {
+        if (mounted && generation == _generation) {
+          setState(() => failure = error.message);
+        }
+        return;
+      }
+    }
     setState(() {
       _problem = null;
       _received = 0;
@@ -408,12 +442,17 @@ class _VideoViewerState extends State<VideoViewer>
       final version = first.sha256.isEmpty
           ? '${DateTime.now().microsecondsSinceEpoch}'
           : first.sha256.substring(0, first.sha256.length.clamp(0, 16));
-      final copy = head != null
+      var copy = head != null
           ? partial!.copy
           : File(
               '${Directory.systemTemp.path}/claktory-$version'
               '${preview != null ? '-preview' : ''}-$name',
             );
+      // Never the copy the player has open: written over and then deleted
+      // with the player it replaces, the new player had nothing to open.
+      if (copy.path == _copy?.path) {
+        copy = File('${copy.parent.path}/again-${copy.uri.pathSegments.last}');
+      }
       if (first.sha256.isNotEmpty) {
         _partial = (sha256: first.sha256, copy: copy, preview: preview != null);
       }
@@ -473,9 +512,16 @@ class _VideoViewerState extends State<VideoViewer>
       }
       _partial = null;
       final playback = newVideoPlayback();
-      final was = _playback?.state.value.position;
+      // Where it was, when it's the same version (the original in place
+      // of its preview); a new version starts at its beginning.
+      final was = _playing?.sha256 == first.sha256
+          ? _playback?.state.value.position
+          : null;
       _close();
       _copy = copy;
+      _playing = first.sha256.isEmpty
+          ? null
+          : (sha256: first.sha256, preview: preview != null);
       _playback = playback;
       setState(() {
         // As the first piece said it, a preview or not.
@@ -495,7 +541,7 @@ class _VideoViewerState extends State<VideoViewer>
         comments.show(kind: 'video', text: '', version: first.sha256);
       }
     } on RequestFailure catch (error) {
-      if (_replacing) return _originalFailed();
+      if (_replacing) return _originalFailed(error);
       if (mounted) setState(() => failure = error.message);
     } on FileSystemException catch (error) {
       _fail("Couldn't load the video: ${error.message}");
@@ -511,11 +557,9 @@ class _VideoViewerState extends State<VideoViewer>
   bool get _replacing =>
       originalLoad is OriginalLoading && _playback != null && mounted;
 
-  /// It couldn't: the preview plays on, and the badge says so.
-  void _originalFailed() {
-    wantOriginal = false;
-    setState(() => originalLoad = const OriginalFailed());
-  }
+  /// It couldn't: the preview plays on, and the badge says so; lost with
+  /// the connection, it carries on once that's back ([originalFailed]).
+  void _originalFailed([RequestFailure? error]) => originalFailed(error);
 
   /// The original in place of the preview, read as a video is: the
   /// preview plays meanwhile, and the original carries on from where it
@@ -623,6 +667,7 @@ class _VideoViewerState extends State<VideoViewer>
     final palette = Palette.of(context);
     final file = this.file;
     final state = _state;
+    final phone = isPhoneLayout(context);
     // Answering a review, nothing but the answer: no comments meanwhile.
     final comments =
         file != null &&
@@ -674,6 +719,27 @@ class _VideoViewerState extends State<VideoViewer>
             ? "Full size: this Claktory can't make a smaller copy."
             : null,
       );
+    } else if (phone) {
+      // Edge to edge, its controls over its foot (mobile/viewer_chrome):
+      // they fade while it plays, and stay while a comment is placed.
+      body = HoldViewerChrome(
+        when: _marking,
+        child: FadeViewerChrome(
+          when: state.playing && !_marking,
+          child: Stack(
+            children: [
+              Positioned.fill(child: _frame(palette, state, comments)),
+              if (!_marking)
+                Center(
+                  child: _CenterPlay(
+                    playing: state.playing,
+                    onTap: _togglePlaying,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
     } else {
       body = Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -689,6 +755,38 @@ class _VideoViewerState extends State<VideoViewer>
                     right: Space.m,
                     bottom: Space.m,
                     child: Align(alignment: Alignment.bottomLeft, child: badge),
+                  ),
+                // Comment at the pane's corner, not the frame's: a tall
+                // video in a short pane is a sliver its words can't fit in
+                // (row 375). A phone has it in the bar under the video.
+                if (comments != null)
+                  Positioned(
+                    top: Space.m,
+                    right: Space.m,
+                    left: Space.m,
+                    child: Align(
+                      alignment: Alignment.topRight,
+                      child: CommentPick(
+                        picking: _marking,
+                        visible: _hovered || _touch,
+                        hint:
+                            '${_touch ? 'Tap' : 'Click'} the timeline for a '
+                            'moment, drag along it for a stretch, or '
+                            '${_touch ? 'tap' : 'click'} the frame for a spot.',
+                        onToggle: _toggleMarking,
+                      ),
+                    ),
+                  ),
+                // Whether the pointer is over the video, the button
+                // included, for Comment; it takes no clicks.
+                if (comments != null)
+                  Positioned.fill(
+                    child: MouseRegion(
+                      opaque: false,
+                      hitTestBehavior: HitTestBehavior.translucent,
+                      onEnter: (_) => setState(() => _hovered = true),
+                      onExit: (_) => setState(() => _hovered = false),
+                    ),
                   ),
               ],
             ),
@@ -711,13 +809,48 @@ class _VideoViewerState extends State<VideoViewer>
       onPointerDown: (_) => _focus.requestFocus(),
       child: body,
     );
+    final ready = problem == null && state.ready;
     return PaneScaffold(
       share: sharePath,
       details: details,
       controls: controls,
       comments: comments == null ? null : CommentsButton(controller: comments),
       actions: [PaneAction('Reload', reload)],
-      toolbar: comments == null
+      phoneKind: PhoneViewerKind.video,
+      // One row over its foot, as the system's player has it; a preview
+      // says so above it.
+      phoneOverlay: !phone || !ready
+          ? null
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (previewBadge() case final badge?)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      Space.m,
+                      Space.s,
+                      Space.m,
+                      0,
+                    ),
+                    child: Align(alignment: Alignment.centerLeft, child: badge),
+                  ),
+                _Controls(
+                  timelineKey: _timeline,
+                  state: state,
+                  comments: comments,
+                  marking: _marking,
+                  onPlay: _togglePlaying,
+                  onSeek: (seconds) => _playback?.seek(seconds),
+                  onMark: _markTime,
+                  onComment: comments != null && !_marking
+                      ? _toggleMarking
+                      : null,
+                ),
+              ],
+            ),
+      // Placing a comment: how, Cancel and Comment, under the controls.
+      toolbar: comments == null || (phone && !_marking)
           ? null
           : ValueListenableBuilder(
               valueListenable: comments.selection,
@@ -747,7 +880,8 @@ class _VideoViewerState extends State<VideoViewer>
           focusNode: _focus,
           child: ClipRect(
             child: ColoredBox(
-              color: palette.canvas,
+              // On a phone, the page's black shows round it.
+              color: phone ? const Color(0x00000000) : palette.canvas,
               child: comments == null
                   ? player
                   : Commented(controller: comments, child: player),
@@ -767,8 +901,11 @@ class _VideoViewerState extends State<VideoViewer>
     CommentsController? comments,
   ) {
     final size = state.size == Size.zero ? const Size(16, 9) : state.size;
+    // On a phone, edge to edge, and a tap shows or hides its controls (as
+    // the system's player): Play is among them, and in the middle.
+    final phone = isPhoneLayout(context);
     return Padding(
-      padding: const EdgeInsets.all(Space.l),
+      padding: phone ? EdgeInsets.zero : const EdgeInsets.all(Space.l),
       child: Center(
         child: AspectRatio(
           aspectRatio: size.width / size.height,
@@ -783,7 +920,7 @@ class _VideoViewerState extends State<VideoViewer>
                 fit: StackFit.expand,
                 children: [
                   GestureDetector(
-                    onTap: _marking
+                    onTap: _marking || phone
                         ? null
                         : () {
                             comments?.letGo();
@@ -839,36 +976,6 @@ class _VideoViewerState extends State<VideoViewer>
                         },
                       ),
                     ),
-                  // A phone has the bar under the video instead.
-                  if (comments != null && !isPhoneLayout(context))
-                    Positioned(
-                      top: Space.s,
-                      right: Space.s,
-                      left: Space.s,
-                      child: Align(
-                        alignment: Alignment.topRight,
-                        child: CommentPick(
-                          picking: _marking,
-                          visible: _hovered || _touch,
-                          hint:
-                              '${_touch ? 'Tap' : 'Click'} the timeline for a '
-                              'moment, drag along it for a stretch, or '
-                              '${_touch ? 'tap' : 'click'} the frame for a spot.',
-                          onToggle: _toggleMarking,
-                        ),
-                      ),
-                    ),
-                  // Whether the pointer is over the frame, for the Comment
-                  // button; it takes no clicks.
-                  if (comments != null)
-                    Positioned.fill(
-                      child: MouseRegion(
-                        opaque: false,
-                        hitTestBehavior: HitTestBehavior.translucent,
-                        onEnter: (_) => setState(() => _hovered = true),
-                        onExit: (_) => setState(() => _hovered = false),
-                      ),
-                    ),
                 ],
               );
             },
@@ -884,6 +991,49 @@ Color _agentColor(Backend backend, String agentId) {
     if (agent.id == agentId) return agentColor(agent.color);
   }
   return agentColor('');
+}
+
+/// Play or Pause in the middle of a phone's video, with its controls:
+/// they fade together (mobile/viewer_chrome).
+class _CenterPlay extends StatelessWidget {
+  const _CenterPlay({required this.playing, required this.onTap});
+
+  final bool playing;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final shown = ViewerChrome.maybeOf(context)?.shown ?? true;
+    return IgnorePointer(
+      ignoring: !shown,
+      child: ExcludeSemantics(
+        // Play is in the row of controls too: once is enough to hear.
+        child: AnimatedOpacity(
+          duration: Motion.base,
+          opacity: shown ? 1 : 0,
+          child: Pressable(
+            onTap: onTap,
+            builder: (context, pressed) => Container(
+              width: 64,
+              height: 64,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: palette.sidebar.withValues(alpha: pressed ? 0.7 : 0.92),
+              ),
+              alignment: Alignment.center,
+              child: ExtensionGlyph(
+                icon: playing ? 'pause' : 'play',
+                name: playing ? 'Pause' : 'Play',
+                color: palette.text,
+                size: 28,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// The video couldn't be read: why, and Try again.
@@ -923,7 +1073,11 @@ class _Controls extends StatelessWidget {
     required this.onPlay,
     required this.onSeek,
     required this.onMark,
+    this.onComment,
   });
+
+  /// On a phone, Comment at the row's end: picking what to comment on.
+  final VoidCallback? onComment;
 
   final GlobalKey timelineKey;
   final PlaybackState state;
@@ -939,63 +1093,143 @@ class _Controls extends StatelessWidget {
       color: palette.textMuted,
       fontFeatures: const [FontFeature.tabularFigures()],
     );
-    // As iOS's player has them: the timeline across, the time at its ends
-    // under it, and Play between, clear of the screen's edge (Back's
-    // swipe).
-    return Unselectable(
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: _edge),
-        decoration: BoxDecoration(
-          border: Border(top: BorderSide(color: palette.hairline)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Timeline(
-              key: timelineKey,
-              state: state,
-              comments: comments,
-              marking: marking,
-              onSeek: onSeek,
-              onMark: onMark,
-            ),
-            Row(
-              children: [
-                Expanded(
-                  child: ExcludeSemantics(
-                    child: Text(formatTime(state.position), style: time),
+    final onComment = this.onComment;
+    // One row over the video's foot, as the system's player has it: Play,
+    // where it is, the timeline, how long, and Comment. Its words grow
+    // only so far (as the Preview badge's), so the timeline keeps its
+    // room on a small iPhone at the largest text.
+    final play = GlyphButton(
+      label: state.playing ? 'Pause' : 'Play',
+      active: false,
+      onTap: onPlay,
+      glyph: (color) => ExtensionGlyph(
+        icon: state.playing ? 'pause' : 'play',
+        name: state.playing ? 'Pause' : 'Play',
+        color: color,
+      ),
+    );
+    final timeline = Timeline(
+      key: timelineKey,
+      state: state,
+      comments: comments,
+      marking: marking,
+      onSeek: onSeek,
+      onMark: onMark,
+    );
+    final position = ExcludeSemantics(
+      child: Text(formatTime(state.position), style: time),
+    );
+    final duration = ExcludeSemantics(
+      child: Text(formatTime(state.duration), style: time),
+    );
+    final comment = onComment == null
+        ? null
+        : Button(label: 'Comment', onPressed: onComment);
+    // One row over the video's foot: Play, where it is, the timeline, how
+    // long, and Comment. Its words grow only so far (as the Preview
+    // badge's); where even so the timeline would get less than a thumb's
+    // room (a small iPhone at the largest text), the times go under it,
+    // as the system's player has them.
+    return MediaQuery.withClampedTextScaling(
+      maxScaleFactor: maxPreviewBadgeTextScale,
+      child: Builder(
+        builder: (context) {
+          final scaler = MediaQuery.textScalerOf(context);
+          double width(String text, TextStyle style) {
+            final painter = TextPainter(
+              text: TextSpan(text: text, style: style),
+              textScaler: scaler,
+              textDirection: TextDirection.ltr,
+              maxLines: 1,
+            )..layout();
+            final width = painter.width;
+            painter.dispose();
+            return width;
+          }
+
+          return LayoutBuilder(
+            builder: (context, constraints) {
+              final times =
+                  width(formatTime(state.position), time) +
+                  width(formatTime(state.duration), time) +
+                  2 * Space.s;
+              final rest =
+                  Metrics.of(context).target +
+                  2 * Space.xs +
+                  Space.s +
+                  (comment == null
+                      ? 0
+                      : Space.xs +
+                            width('Comment', PhoneType.label) +
+                            2 * Touch.gutter);
+              final tight = constraints.maxWidth - rest - times < 120;
+              if (tight) {
+                // The timeline across the whole width (clear of the edge
+                // a swipe back starts from), the times under its ends,
+                // and Play and Comment in a row below.
+                return Unselectable(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Space.xl,
+                        ),
+                        child: timeline,
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Space.xl,
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [position, duration],
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Space.xs,
+                        ),
+                        child: Row(
+                          children: [
+                            play,
+                            const Spacer(),
+                            ?comment,
+                            const SizedBox(width: Space.s),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }
+              return Unselectable(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: Space.xs),
+                  child: Row(
+                    children: [
+                      play,
+                      position,
+                      const SizedBox(width: Space.s),
+                      Expanded(child: timeline),
+                      const SizedBox(width: Space.s),
+                      duration,
+                      if (comment != null) ...[
+                        const SizedBox(width: Space.xs),
+                        comment,
+                      ],
+                      const SizedBox(width: Space.s),
+                    ],
                   ),
                 ),
-                GlyphButton(
-                  label: state.playing ? 'Pause' : 'Play',
-                  active: false,
-                  onTap: onPlay,
-                  glyph: (color) => ExtensionGlyph(
-                    icon: state.playing ? 'pause' : 'play',
-                    name: state.playing ? 'Pause' : 'Play',
-                    color: color,
-                  ),
-                ),
-                Expanded(
-                  child: ExcludeSemantics(
-                    child: Text(
-                      formatTime(state.duration),
-                      textAlign: TextAlign.end,
-                      style: time,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
+              );
+            },
+          );
+        },
       ),
     );
   }
-
-  /// Back's swipe starts within 20pt of the screen's leading edge: the
-  /// timeline starts past it.
-  static const _edge = Touch.gutter + Space.s;
 
   @override
   Widget build(BuildContext context) {

@@ -83,6 +83,10 @@ backend_fingerprint() {
     if [[ -f scripts/build-rg.sh ]]; then
       echo "ripgrep: $(sed -n 's/^RG_VERSION=//p; s/^RG_CRATE_SHA256=//p' scripts/build-rg.sh | tr '\n' ' ')"
     fi
+    # And jq (tools/jq, scripts/build-jq.sh's pin), the same way.
+    if [[ -f scripts/build-jq.sh ]]; then
+      echo "jq: $(sed -n 's/^JQ_VERSION=//p; s/^JQ_TARBALL_SHA256=//p' scripts/build-jq.sh | tr '\n' ' ')"
+    fi
     # Built from nothing an earlier build left, with the checked toolchain
     # (release_inputs): a backend from before that is never reused.
     if [[ -f scripts/check-toolchain.sh ]]; then
@@ -293,13 +297,16 @@ add_helpers() {
   if [[ -f "$release/claktory-apps" ]]; then cp "$release/claktory-apps" "$helpers/claktory-apps"; fi
   if [[ -f "$release/claktory-speech" ]]; then cp "$release/claktory-speech" "$helpers/claktory-speech"; fi
   if [[ -f "$release/claktory-video-preview" ]]; then cp "$release/claktory-video-preview" "$helpers/claktory-video-preview"; fi
-  # Agents' tools (ripgrep): the program in Helpers/tools, signed there by
-  # scripts/sign-release.sh; its licenses in Resources/tools, since codesign
-  # refuses anything unsigned in Helpers.
+  # Agents' tools (ripgrep, jq): the programs in Helpers/tools, signed there
+  # by scripts/sign-release.sh; their licenses in Resources/tools, since
+  # codesign refuses anything unsigned in Helpers.
   rm -rf "$app/Contents/Resources/tools"
-  if [[ -f "$release/tools/rg" ]]; then
+  if [[ -d "$release/tools" ]]; then
+    local tool
     mkdir -p "$helpers/tools"
-    cp "$release/tools/rg" "$helpers/tools/rg"
+    for tool in rg jq; do
+      if [[ -f "$release/tools/$tool" ]]; then cp "$release/tools/$tool" "$helpers/tools/$tool"; fi
+    done
     mkdir -p "$app/Contents/Resources/tools"
     cp -R "$release/tools/LICENSES" "$app/Contents/Resources/tools/LICENSES"
   fi

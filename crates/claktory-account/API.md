@@ -653,27 +653,37 @@ row a flat object with exactly these eleven columns (schema version 1):
 | `schema_version` | `1`. A reader refuses any other. |
 | `generated_at_ms` | When the export ran (the service's clock). |
 | `published_at_ms` | When the row's numbers were taken: the export's time for daily rows, the publication's for a month's. |
-| `bucket_start_ms`, `bucket_end_ms` | The UTC day or calendar month it counts, end exclusive. |
-| `window` | `day`, `today`, `rolling30`, `snapshot` or `month`. All but `month` are global only. |
+| `bucket_start_ms`, `bucket_end_ms` | The UTC hour, day or calendar month it counts, end exclusive. |
+| `window` | `hour`, `day`, `today`, `rolling30`, `snapshot` or `month`. `hour`, `day` and `today` are global only. |
 | `metric` | One of the metrics below. |
-| `dimension` | `none`, or a month's breakdown: `provider`, `model`, `backend_version`, `backend_platform`, `country`, `device_platform`, `device_kind`, `app_version`. |
-| `label` | `All` with `none`; else a fixed label of the dimension's, `Other` or `Unknown`. |
-| `value` | A count, never negative; null when suppressed. |
-| `status` | `ok`, `partial` (`today`'s) or `suppressed`. |
+| `dimension` | `none`; `claktory_count` (`snapshot`'s users by their Claktories); `country` (the latest `rolling30`'s, and a month's); or a month's breakdown: `provider`, `model`, `backend_version`, `backend_platform`, `device_platform`, `device_kind`, `app_version`. |
+| `label` | `All` with `none`; `1`, `2`, `3-5` and `6+` with `claktory_count`; else a label of the dimension's, `Other` or `Unknown`. |
+| `value` | A count, never negative; null when suppressed (only in months published before the exact counts, below). |
+| `status` | `ok`, `partial` (`today`'s, and the two latest hours') or `suppressed` (as `value`). |
 
 Completed UTC days, the last 90, ending yesterday, as `day`; and today so
 far, as `today` (Fugo, for the 5-minute refresh): the same global metrics as
 a day's but `rolling30`, `status` `partial`, bucketed by today's UTC day,
 never a completed day. A reader replaces them at each export and keeps no
 series of them: the differences between two exports minutes apart would be
-an activity log. Every row is a total over all Claktories: no identifier,
-email, address, place, name, model, version or record of any one Claktory,
-account or device. The metrics:
+an activity log. Every row is a count over Claktories or users: no
+identifier, email, address, place finer than a country, name or record of
+any one Claktory, account or device. Counts are exact, small ones included
+(Matt's decision, #411: the export is read only by whoever runs the
+service, in their own dashboard), so a count of one can be one person's.
+The metrics:
 
 - `contact_claktories`, `day`: Claktories in touch with the service that day
   (a check-in, a sign-in, an unlock: contact, not people or work).
   `rolling30`: those in touch in the 30 days ending that day, each counted
   once. Never add up days for it.
+- `contact_users`, `day` and `rolling30`: the same for users, each account
+  once however many of its Claktories were in touch. A deleted account's
+  past days count once per Claktory it had (they're kept under a stand-in
+  each, unlinked from the account).
+- `registered_users`, `day`: accounts at the day's end; `new_users`, `day`:
+  accounts made that day. A deleted account is gone from both, on every
+  day, so past days undercount the users there were then.
 - `registered_claktories`, `day`: registered at the day's end and not
   removed by then (Claktories deleted since aren't counted; not installs).
 - `requests`, `input_tokens`, `output_tokens`, `cache_read_tokens`,
@@ -686,6 +696,35 @@ account or device. The metrics:
   Claktories registered by yesterday's end and not removed, how many have
   connected a model, and run an agent, as of the export (setup steps have no
   date of their own). The bucket is yesterday.
+- `users_with_claktories`, `snapshot`: of the same Claktories, the users
+  with at least one; `claktories_per_user_x100`, their average per user,
+  times 100 and rounded (`150` is 1.5). By `claktory_count`, how many
+  users have 1, 2, 3 to 5, or 6 or more.
+- `contact_users` and `contact_claktories` by `country`, `rolling30`, for
+  the latest completed day only (bucket yesterday): those in touch in the
+  30 days ending yesterday, a Claktory in its country, a user once, in the
+  country of their Claktory last in touch (a registered one first), as at
+  the export.
+
+Each UTC hour of the last 28 days, the current one last, as `hour`: when
+Claktories run, for day and night and weekday patterns. Global only, and
+never by any dimension:
+
+- `online_claktories`: Claktories whose check-in reached the service in the
+  hour. A running Claktory checks in about hourly (55 to 65 minutes apart),
+  so now and then one skips an hour: a slight undercount of those running.
+  Asleep or offline, it doesn't check in.
+- `working_claktories`, `working_users`: Claktories whose agents worked in
+  the hour, and the users they belong to.
+- `agents_working_avg_x100`: agents working at once, on average over the
+  hour, over all Claktories (agent minutes over 60, times 100); deleted
+  accounts' work counts in it.
+
+The service sees no device or person per hour: these are Claktories that
+ran, not people at their screens, and there's no measure of anyone using
+the app at a given moment. An hour's work reaches the service at the check-in after it, so the
+current and the previous hour are `partial`; a reader replaces them at each
+export, like `today`.
 
 Check-ins come late at times, so a recent day's numbers can still grow at
 the next export: a reader replaces what it had, rather than adding to it.
@@ -697,7 +736,7 @@ written once (a second publication of a month is refused and logged, and the
 table refuses any change or deletion), and in every export after, the latest
 six, as they were published. A month the service was down for entirely isn't
 published later. Each has the month's global totals (`dimension` `none`:
-`contact_claktories`, distinct over the month; `requests` and the token
+`contact_claktories` and `contact_users`, distinct over the month; `requests` and the token
 kinds; `rolled_back`, `crashes`; `backend_claktories`; `reported_devices`),
 and these breakdowns, one dimension at a time, never crossed:
 
@@ -705,6 +744,9 @@ and these breakdowns, one dimension at a time, never crossed:
 - `rolled_back`, `crashes` by `backend_version`;
 - `backend_claktories` (Claktories registered by the month's end and not
   removed) by `backend_version`, `backend_platform` and `country`;
+- `contact_users` by `country`: each user in touch in the month once, in
+  the country of their Claktory last in touch (a registered one first), as
+  at publication;
 - `reported_devices` (devices as the Claktories last reported them) by
   `device_platform`, `device_kind` and `app_version`.
 
@@ -712,22 +754,18 @@ What Claktories last reported (versions, platforms, countries, devices) is
 counted when the month is published, `published_at_ms`: it isn't
 reconstructed as of the month's end. A raw value becomes a label before
 anything is counted: one of a fixed, reviewed list per dimension (providers,
-models, backend platforms, device systems and kinds, countries in English),
-for versions `v` and three numbers, `Unknown` when there's none, else
-`Other`; no other text is ever published. Then (Fugo's rules): at most 12
-labels, the rest folded into `Other`; every label with fewer than 5 distinct
-Claktories behind it folded into `Other` too; while `Other` has fewer than
-5, the next smallest label is folded into it. Claktories are counted once,
-however many labels they're behind; anonymous totals (deleted accounts')
-count in the amounts and toward no label's 5. When even the whole breakdown
-has fewer than 5, it's one `Other` row per metric, `suppressed`, with no
-value, and only the global total stands.
+models, backend platforms, device systems and kinds), for versions `v` and
+three numbers, for countries the GeoIP file's English name when it's a
+name in form (letters, spaces and `.,'()-`, 60 characters at most),
+`Unknown` when there's none, else `Other`; no other text is ever published.
 
-Global totals (`dimension` `none`, daily and monthly) are never suppressed:
-in a quiet month or day one can be a single Claktory's number (its crashes,
-say). That's accepted for totals over everyone, for whoever runs the service
-(Fugo). The five-Claktory rule covers only breakdowns: never add a dimension
-to a total, or a breakdown of it, without the rule.
+Every label has its exact count, one included, the largest first: every
+country its own, and any other breakdown at most 12 labels, the smallest
+past them added up as `Other`, last. October 2026 and the months before
+it were published under the earlier rule and stay as they were: a label
+with fewer than 5 distinct Claktories behind it folded into `Other`, and a
+breakdown with fewer than 5 in all one `Other` row per metric,
+`suppressed`, with no value.
 
 ## Error codes
 

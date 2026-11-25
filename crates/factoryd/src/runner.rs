@@ -1106,6 +1106,8 @@ impl Factory {
         }
         let mut tools = factory_agent::coding_tools(&places.folder, &places.extra_dirs, Some(self.background(id)));
         factory_agent::tools::read_only(&mut tools, &places.read_only);
+        // ripgrep and jq are named only when the agent's commands will find them.
+        factory_agent::tools::installed(&mut tools, &crate::update::agents_path(&self.home));
         // Ink and its staging are the person's until they send it (#209 §7).
         factory_agent::tools::denied(&mut tools, &crate::ink::private(&self.home));
         // Only agents given a secret see bash's `secrets`.

@@ -554,11 +554,24 @@ fn run(db: &rusqlite::Connection, target: &Target, text: &str, params: &str) -> 
 /// table, whatever the statement looks like. The private tables stay
 /// refused, as everything unlisted is.
 fn limit(db: &mut rusqlite::Connection, allowed: &'static [(&'static str, &'static [&'static str])]) -> rusqlite::Result<()> {
-    db.authorizer(Some(move |context: AuthContext<'_>| allows(allowed, &context.action)))
+    let own: Vec<String> = db.prepare("SELECT name FROM sqlite_schema")?.query_map([], |row| row.get(0))?.collect::<Result<_, _>>()?;
+    db.authorizer(Some(move |context: AuthContext<'_>| allows(allowed, &own, &context.action)))
 }
 
-fn allows(allowed: &[(&str, &[&str])], action: &AuthAction<'_>) -> Authorization {
+/// Whether `table`, in a read of no column, is a WITH clause's or a
+/// subquery's result rather than one of the database's own tables (`own`):
+/// SQLite asks so when it takes no value from it, as `NOT EXISTS (SELECT 1
+/// FROM c)` does from a grouped WITH used twice (Carne 30029). What it holds
+/// came from reads already checked, so counting its rows shows nothing more.
+/// sqlite_ and pragma_ names are never one.
+pub(super) fn derived(table: &str, own: &[impl AsRef<str>]) -> bool {
+    let lower = table.to_ascii_lowercase();
+    !lower.starts_with("sqlite_") && !lower.starts_with("pragma_") && !own.iter().any(|name| name.as_ref().eq_ignore_ascii_case(table))
+}
+
+fn allows(allowed: &[(&str, &[&str])], own: &[String], action: &AuthAction<'_>) -> Authorization {
     match action {
+        AuthAction::Read { table_name, column_name: "" } if derived(table_name, own) => Authorization::Allow,
         AuthAction::Select | AuthAction::Recursive => Authorization::Allow,
         AuthAction::Function { function_name } if !function_name.eq_ignore_ascii_case("load_extension") => Authorization::Allow,
         AuthAction::Read { table_name, column_name } => {
@@ -712,6 +725,11 @@ mod tests {
         assert_eq!(rows("SELECT count(*) FROM messages"), json!([[2]]));
         assert_eq!(rows("SELECT r.agent FROM runs r JOIN messages m ON m.agent = r.agent WHERE m.id = 1"), json!([["lea"]]));
         assert_eq!(rows("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n LIMIT 3) SELECT sum(i) FROM n"), json!([[6]]));
+        // A grouped WITH used twice is materialised, and NOT EXISTS reads it
+        // with no column (Carne 30029).
+        let twice = "WITH c AS (SELECT agent, count(*) AS n FROM messages GROUP BY agent) \
+                     SELECT agent, n FROM c UNION ALL SELECT 'none', 0 WHERE NOT EXISTS (SELECT 1 FROM c)";
+        assert_eq!(rows(twice), json!([["lea", 2]]));
         for sql in [
             "SELECT text FROM messages",
             "SELECT * FROM messages",
@@ -725,6 +743,12 @@ mod tests {
             "SELECT body FROM memory_notes",
             "SELECT name FROM sqlite_master",
             "SELECT * FROM pragma_table_info('messages')",
+            "SELECT count(*) FROM memory_notes",
+            "SELECT count(*) FROM said",
+            "SELECT count(*) FROM sqlite_schema",
+            "SELECT count(*) FROM pragma_table_info('memory_notes')",
+            "WITH c AS (SELECT 1 FROM memory_notes) SELECT count(*) FROM c",
+            "WITH c AS (SELECT text FROM messages GROUP BY text) SELECT 1 FROM c UNION ALL SELECT 2 WHERE NOT EXISTS (SELECT 1 FROM c)",
         ] {
             let (error, message) = run(&db, &target, sql, "").unwrap_err();
             assert_eq!(error, DataError::Invalid, "{sql}");

@@ -29,9 +29,9 @@ pub const MAX_HEIGHT: u32 = 13;
 pub const FORMAT: u32 = 1;
 
 /// How a panel can show its answer.
-pub const KINDS: [&str; 7] = ["stat", "timeseries", "bars", "stackedBars", "pie", "scatter", "table"];
+pub const KINDS: [&str; 9] = ["stat", "timeseries", "bars", "stackedBars", "pie", "scatter", "heatmap", "map", "table"];
 /// The Chart component's kinds, of those.
-pub const CHART_KINDS: [&str; 5] = ["timeseries", "bars", "stackedBars", "pie", "scatter"];
+pub const CHART_KINDS: [&str; 6] = ["timeseries", "bars", "stackedBars", "pie", "scatter", "heatmap"];
 const COLORS: [&str; 4] = ["palette", "agent", "signal", "muted"];
 const FORMATS: [&str; 3] = ["text", "number", "time"];
 
@@ -214,6 +214,15 @@ pub struct Viz {
     /// A stat's spark line: area, or none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<String>,
+    /// A map's column of countries (ISO codes); unset, its first text
+    /// column. Its value is y's one column, else its last numeric one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// A map's dots' radius in px, by value (1–40; 2 and 15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_max: Option<f64>,
 }
 
 /// One step of a stat's thresholds.
@@ -313,6 +322,20 @@ impl Viz {
         }
         if self.graph.as_deref().is_some_and(|graph| !GRAPHS.contains(&graph)) {
             problems.push(("graph", format!("one of {}", GRAPHS.join(", "))));
+        }
+        if within(self.size_min, 1.0, 40.0) {
+            problems.push(("size_min", "1 to 40".into()));
+        }
+        if within(self.size_max, 1.0, 40.0) {
+            problems.push(("size_max", "1 to 40".into()));
+        }
+        if let (Some(low), Some(high)) = (self.size_min, self.size_max)
+            && low > high
+        {
+            problems.push(("size_min", "at most size_max".into()));
+        }
+        if self.location.as_deref().is_some_and(|location| location.is_empty() || location.chars().count() > 64) {
+            problems.push(("location", "a column's name".into()));
         }
         problems
     }
@@ -427,9 +450,11 @@ impl Dashboard {
             if !KINDS.contains(&viz.kind.as_str()) {
                 say(&format!("{at}.viz.kind"), format!("one of {}", KINDS.join(", ")));
             }
-            let stat_color = |color: &str| viz.kind == "stat" && COLOR_NAMES.contains(&color);
+            // A stat or a map takes one fixed color by name.
+            let named = viz.kind == "stat" || viz.kind == "map";
+            let stat_color = |color: &str| named && COLOR_NAMES.contains(&color);
             if viz.color.as_deref().is_some_and(|color| !COLORS.contains(&color) && !stat_color(color)) {
-                let stat = if viz.kind == "stat" { format!(", or for a stat {}", COLOR_NAMES.join(", ")) } else { String::new() };
+                let stat = if named { format!(", or for a {} {}", viz.kind, COLOR_NAMES.join(", ")) } else { String::new() };
                 say(&format!("{at}.viz.color"), format!("one of {}{stat}", COLORS.join(", ")));
             }
             if viz.unit.chars().count() > 20 || viz.unit.chars().any(char::is_control) {

@@ -26,6 +26,7 @@ import 'pairing.dart' show PairingDigits;
 import 'pipe_groups.dart' show groupOf, moveToGroup, removeFromGroup;
 import 'pipe_start.dart' show PipeInviteQr, copyInviteCode, pipeInviteCheck;
 import 'scan_code.dart';
+import 'pipe_shares.dart' show PipeSharesField, PipeSharesStrip;
 import 'pipe_reports.dart'
     show ForwardReportsField, PipeReportsStrip, forwardApprovalLine;
 import 'pipe_timeline.dart';
@@ -392,6 +393,8 @@ class PipeView extends StatelessWidget {
           PipeIdentityNotice(pipe: pipe),
           // Its lead past its spending limit, with the limit to raise.
           PipeSpendNotice(pipe: pipe),
+          // Websites its other side shares with this one, to open.
+          PipeSharesStrip(pipe: pipe),
           // Its reports: where they go, and what was forwarded.
           PipeReportsStrip(pipe: pipe),
           Expanded(child: body),
@@ -3289,6 +3292,8 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
         ),
         // Sent as it's chosen, apart from Save.
         ForwardReportsField(pipe: pipe),
+        // So are its shared websites' Stop, Hide and Share a website….
+        PipeSharesField(pipe: pipe),
         _ReviewIncomingField(
           value: _reviewIncoming,
           onChanged: (on) => setState(() => _reviewIncoming = on),

@@ -123,15 +123,26 @@ pub(crate) fn check_link(raw: &str) -> Result<(String, String), VaultError> {
 }
 
 /// Characters that never show in an agent's line of steps: controls, and
-/// those that hide or reorder text.
-fn hidden(c: char) -> bool {
-    c.is_control()
-        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+/// those that hide or reorder text (`text::hidden`), but for a variation
+/// selector right after a visible character, an emoji's own (❤️).
+fn hidden(c: char, after_visible: bool) -> bool {
+    let selector = ('\u{FE00}'..='\u{FE0F}').contains(&c);
+    !(selector && after_visible) && (c.is_control() || factory_agent::text::hidden(c))
 }
 
 /// An agent's steps as one plain line of at most 200 characters.
 pub(crate) fn clean_steps(raw: &str) -> String {
-    let spaced: String = raw.chars().map(|c| if c.is_whitespace() { ' ' } else { c }).filter(|c| !hidden(*c)).collect();
+    let mut after_visible = false;
+    let spaced: String = raw
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|&c| {
+            let hidden = hidden(c, after_visible);
+            // A selector takes the character before it: a second one is stray.
+            after_visible = !hidden && !c.is_whitespace() && !('\u{FE00}'..='\u{FE0F}').contains(&c);
+            !hidden
+        })
+        .collect();
     spaced.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_STEPS).collect()
 }
 
@@ -240,6 +251,16 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
         replied: row.get(15)?,
         ..v1::SecretRequest::default()
     })
+}
+
+/// Reads one request without changing its state or applying an ownership check.
+fn request(db: &Connection, id: &str) -> rusqlite::Result<v1::SecretRequest> {
+    db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)
+}
+
+/// Reads one request only when it belongs to `agent`.
+fn agent_request(db: &Connection, id: &str, agent: &str) -> rusqlite::Result<v1::SecretRequest> {
+    db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1 AND agent = ?2"), [id, agent], row)
 }
 
 /// The files a request imports, as its card shows them; with what's wrong
@@ -505,7 +526,7 @@ pub(crate) struct Change {
 impl Vault {
     /// Reads the changed request before invalidating the cached vault view.
     fn changed_request(inner: &mut super::Inner, id: &str) -> Result<v1::SecretRequest, VaultError> {
-        let request = Self::db(inner)?.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?;
+        let request = request(Self::db(inner)?, id)?;
         inner.state = None;
         Ok(request)
     }
@@ -593,9 +614,7 @@ impl Vault {
     /// `agent`'s request `id`, if it's still waiting.
     pub(crate) fn pending_request(&self, agent: &str, id: &str) -> Result<v1::SecretRequest, VaultError> {
         let inner = self.lock();
-        let found = Self::db(&inner)?
-            .query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1 AND agent = ?2"), [id, agent], row)
-            .optional()?;
+        let found = agent_request(Self::db(&inner)?, id, agent).optional()?;
         match found {
             None => Err(VaultError::NoRequest(id.to_owned())),
             Some(request) if request.state() == SecretRequestState::Expired => Err(VaultError::Invalid("This request expired.".to_owned())),
@@ -646,7 +665,7 @@ impl Vault {
     /// with the admin agent; or why it can't be worked on.
     pub(crate) fn approved_request(&self, id: &str) -> Result<v1::SecretRequest, VaultError> {
         let inner = self.lock();
-        let found = Self::db(&inner)?.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id.trim()], row).optional()?;
+        let found = request(Self::db(&inner)?, id.trim()).optional()?;
         match found {
             None => Err(VaultError::Invalid(format!("There's no request {}.", id.trim()))),
             Some(request) if request.state() == SecretRequestState::Pending => {
@@ -664,7 +683,7 @@ impl Vault {
     pub(crate) fn find_request(&self, id: &str) -> Result<Option<v1::SecretRequest>, VaultError> {
         let inner = self.lock();
         let db = Self::db(&inner)?;
-        Ok(db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id.trim()], row).optional()?)
+        Ok(request(db, id.trim()).optional()?)
     }
 
     /// Hands back the open requests `admin` held (it's being deleted):
@@ -684,7 +703,7 @@ impl Vault {
         db.execute("UPDATE requests SET admin = '', collecting = 0 WHERE admin = ?1 AND state IN ('pending', 'approved')", [admin])?;
         let mut requests = Vec::new();
         for id in &ids {
-            requests.push(db.query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1"), [id], row)?);
+            requests.push(request(db, id)?);
         }
         inner.state = None;
         Ok(requests)
@@ -783,6 +802,7 @@ impl Vault {
 
     /// Changes `agent`'s waiting request `id`; returns it as it is now.
     pub(crate) fn update_request(&self, agent: &str, id: &str, change: Change) -> Result<v1::SecretRequest, VaultError> {
+        let id = id.trim();
         let current = self.own_waiting(agent, id)?;
         let kept = self.wanted(&current.id)?;
         let mut wanted: Wanted = Wanted {
@@ -848,6 +868,7 @@ impl Vault {
     /// Withdraws `agent`'s waiting request `id`, with its reason (may be
     /// empty); returns it as it is now.
     pub(crate) fn withdraw_request(&self, agent: &str, id: &str, reason: &str) -> Result<v1::SecretRequest, VaultError> {
+        let id = id.trim();
         self.own_waiting(agent, id)?;
         let reason = check_description(reason)?;
         let mut inner = self.lock();
@@ -895,9 +916,7 @@ impl Vault {
     pub(crate) fn mark_done(&self, agent: &str, id: &str) -> Result<Option<v1::SecretRequest>, VaultError> {
         let request = {
             let inner = self.lock();
-            Self::db(&inner)?
-                .query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1 AND agent = ?2"), [id.trim(), agent], row)
-                .optional()?
+            agent_request(Self::db(&inner)?, id.trim(), agent).optional()?
         };
         let Some(request) = request else { return Err(VaultError::NoRequest(id.to_owned())) };
         let made = matches!(request.state(), SecretRequestState::Generated | SecretRequestState::Granted);
@@ -914,9 +933,7 @@ impl Vault {
     /// and with the admin agent); or why not, for the agent.
     fn own_waiting(&self, agent: &str, id: &str) -> Result<v1::SecretRequest, VaultError> {
         let inner = self.lock();
-        let found = Self::db(&inner)?
-            .query_row(&format!("SELECT {COLUMNS} FROM requests WHERE id = ?1 AND agent = ?2"), [id.trim(), agent], row)
-            .optional()?;
+        let found = agent_request(Self::db(&inner)?, id.trim(), agent).optional()?;
         match found {
             None => Err(VaultError::Invalid(format!("You have no request {}. secrets_requests lists yours.", id.trim()))),
             Some(request) if !matches!(request.state(), SecretRequestState::Pending | SecretRequestState::Approved) => {
@@ -947,5 +964,23 @@ impl Vault {
         let inner = self.lock();
         let Some(db) = &inner.db else { return Ok(Vec::new()) };
         Ok(crate::store::query(db, &format!("SELECT {COLUMNS} FROM requests WHERE agent = ?1 ORDER BY created"), [agent], row)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_steps;
+
+    #[test]
+    fn steps_lose_every_hidden_character() {
+        assert_eq!(
+            clean_steps("Open\u{E0065} the\u{61C} Tokens\u{3164} page,\u{202E}\u{200B}\n then\tCreate."),
+            "Open the Tokens page, then Create."
+        );
+        // An emoji keeps its own selector; a stray or second one goes.
+        assert_eq!(
+            clean_steps("\u{FE0F}Click \u{2764}\u{FE0F}\u{FE0F}, 1\u{FE0F}\u{20E3} or \u{200B}\u{FE0F}x \u{FE0E}."),
+            "Click \u{2764}\u{FE0F}, 1\u{FE0F}\u{20E3} or x ."
+        );
     }
 }

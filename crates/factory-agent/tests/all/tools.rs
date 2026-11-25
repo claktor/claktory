@@ -118,8 +118,9 @@ fn tool_specs_serialize_like_the_typescript_agents() {
     );
     assert_eq!(
         tool(&tools, "bash").spec.description,
-        "Run bash. Every command starts in your working folder, so don't cd there first; a cd lasts only for that command. Unhandled failures stop the script (errexit and pipefail); use if or || for expected failures. Piping to head can cause SIGPIPE; use a draining filter such as sed -n instead. command is the shell script itself, not a bash -c/bash -lc invocation — put the script text directly in command. Use rg for search, run tests, and inspect git diff. timeout is seconds (default 120, maximum 600). A command still running at its timeout moves to the background and keeps running, and you get an event when it ends (one that starts with sleep is stopped instead). Set run_in_background up front for servers, watchers and anything you know is long: it returns at once with a task id and a log file, and the command is stopped after 30 minutes unless timeout says otherwise (up to 7200). Never wait with sleep: background tasks and messages wake you by themselves. Output up to 30,000 characters comes back whole; past that you get its start, its end and the path of the whole output. Every result ends with the exit status and how long the command took; tool updates contain output as it arrives. Files written by commands inherit the environment's resource limits."
+        "Run bash. Every command starts in your working folder, so don't cd there first; a cd lasts only for that command. Unhandled failures stop the script (errexit and pipefail); use if or || for expected failures. Piping to head can cause SIGPIPE; use a draining filter such as sed -n instead. command is the shell script itself, not a bash -c/bash -lc invocation — put the script text directly in command. Run tests and inspect git diff. timeout is seconds (default 120, maximum 600). A command still running at its timeout moves to the background and keeps running, and you get an event when it ends (one that starts with sleep is stopped instead). Set run_in_background up front for servers, watchers and anything you know is long: it returns at once with a task id and a log file, and the command is stopped after 30 minutes unless timeout says otherwise (up to 7200). Never wait with sleep: background tasks and messages wake you by themselves. Output up to 30,000 characters comes back whole; past that you get its start, its end and the path of the whole output. Every result ends with the exit status and how long the command took; tool updates contain output as it arrives. Files written by commands inherit the environment's resource limits."
     );
+    assert!(!tool(&tools, "bash").spec.description.contains("rg"), "no ripgrep unless it's there");
     assert_eq!(bounded("abc"), "abc");
     let long = "x".repeat(24_001);
     assert_eq!(bounded(&long), format!("{}\n[Output truncated. Request a smaller range.]", "x".repeat(24_000)));
@@ -391,4 +392,57 @@ async fn replace_all_rewrites_every_exact_occurrence() {
     assert!(text(&replaced).starts_with("Index: src/lib.rs\n"));
     let expected = ROUTES.replace("log(total)", "emit(total)").replace("alpha", "first").replace("beta", "second").replace('\n', "\r\n");
     tools.assert_lib(|| &expected);
+}
+
+/// Bruno 29528, 29755: bash's description names ripgrep and jq, each only
+/// when it resolves on the PATH the agent's commands run with: telling
+/// agents to use a program they then can't run taught them to stop trying it.
+#[test]
+fn bash_names_ripgrep_and_jq_only_when_they_are_on_the_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let rg_hint = "ripgrep (rg) is installed: prefer it to grep -r and find for searching code and files.";
+    let jq_hint = "jq is installed: use it to read and filter JSON.";
+    let bash = |tools: &[Tool]| tool(tools, "bash").spec.description.to_string();
+    let program = |dir: &Path, name: &str, mode: u32| {
+        std::fs::write(dir.join(name), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let (empty, only_rg, only_jq, plain) =
+        (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    program(only_rg.path(), "rg", 0o755);
+    program(only_jq.path(), "jq", 0o755);
+    // A file that isn't a program doesn't count.
+    program(plain.path(), "rg", 0o644);
+    program(plain.path(), "jq", 0o644);
+    let path = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap().to_string_lossy().into_owned();
+    let fresh = || coding_tools(Path::new("/tmp/w"), &[], None);
+
+    let mut tools = fresh();
+    let before = bash(&tools);
+    factory_agent::tools::installed(&mut tools, &path(&[empty.path(), plain.path()]));
+    assert_eq!(bash(&tools), before, "not there: not named");
+
+    // Each on its own.
+    let mut tools = fresh();
+    factory_agent::tools::installed(&mut tools, &path(&[only_rg.path()]));
+    let described = bash(&tools);
+    assert!(described.contains(&format!("directly in command. {rg_hint} Run tests")) && !described.contains("jq"), "{described}");
+    let mut tools = fresh();
+    factory_agent::tools::installed(&mut tools, &path(&[only_jq.path()]));
+    let described = bash(&tools);
+    assert!(described.contains(&format!("directly in command. {jq_hint} Run tests")) && !described.contains("rg"), "{described}");
+
+    // Both, once each however often it's called.
+    let mut tools = fresh();
+    factory_agent::tools::installed(&mut tools, &path(&[empty.path(), only_rg.path(), only_jq.path()]));
+    factory_agent::tools::installed(&mut tools, &path(&[only_rg.path(), only_jq.path()]));
+    let described = bash(&tools);
+    assert_eq!((described.matches("ripgrep").count(), described.matches("jq is").count()), (1, 1), "once: {described}");
+    assert!(
+        described.contains(&format!(
+            "put the script text directly in command. {rg_hint} {jq_hint} Run tests and inspect git diff. timeout is seconds"
+        )),
+        "{described}"
+    );
+    assert_eq!(tool(&tools, "read_file").spec.description, tool(&fresh(), "read_file").spec.description);
 }

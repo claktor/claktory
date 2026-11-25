@@ -81,7 +81,7 @@ pub(crate) const SET_TOOL: &str = "apps_set_access";
 
 pub(crate) const LIST_DESCRIPTION: &str = "The person's installed apps (such as Charts), or one (app, its id): what each can read (sources, each on or off, and whether it's private), whether it reaches the internet, its scopes and the tools they give, its events, and what each agent has of it. Look here before apps_set_access, and tell the person first when what they want needs their approval on a card.";
 
-pub(crate) const SET_DESCRIPTION: &str = "Set up one of the person's installed apps for what they asked (\"have Ingrid keep a chart of her bugs by severity\"): app, its id; sources, each source id turned on (true) or off (false), those left out staying as they are (activity has no message text: prefer it; an app that reads files takes a CSV or TSV as file:<place>:<path>, such as file:web-site:reports/bugs.csv); agents, each {agent, its id or name; scopes, the scopes it has from now on, [] to take the app away; hears, the app's events it hears, each needing its scope, left out to keep those it hears now}; reason, why, in a sentence for the person. Only what you name changes. Taking anything away is applied at once. Giving is applied at once too when it's not private data, to an app that reaches no site, for agents and by you that haven't read a web page; otherwise it goes on a card in your conversation for the person to approve, and the answer says why. Every change shows in the person's History, where they can undo it. Use this, never config.json, to change what apps read and who uses them.";
+pub(crate) const SET_DESCRIPTION: &str = "Set up one of the person's installed apps for what they asked (\"have Ingrid keep a chart of her bugs by severity\"): app, its id; sources, each source id turned on (true) or off (false), those left out staying as they are (activity has no message text: prefer it; an app that reads files takes a CSV or TSV as file:<place>:<path>, such as file:web-site:reports/bugs.csv); agents, each {agent, its id or name; scopes, the scopes it has from now on, [] to take the app away; hears, the app's events it hears, each needing its scope, left out to keep those it hears now}; reason, why, in a sentence for the person. Only what you name changes. Taking anything away is applied at once. Giving is applied at once too when it's not private data, to an app that reaches no site, for agents and by you that haven't read a web page; otherwise it goes on a card in your conversation for the person to approve, and the answer says why. Every change shows in the person's History, where they can undo it. Use this, never config.json, to change what apps read and who uses them. proposal: the id of an approved proposal whose grants name it, once you've reviewed it: then it's made without a card when it's within one of them; otherwise the card opens as usual and the answer says why.";
 
 /// The longest reason a card shows, and the most it may name.
 const MAX_REASON: usize = 500;
@@ -231,6 +231,10 @@ pub(crate) struct SetArgs {
     #[serde(default)]
     agents: Vec<SetAgent>,
     reason: String,
+    /// An approved proposal that names what it gives
+    /// (`crate::proposal_grants`): no card then, when it's covered.
+    #[serde(default)]
+    proposal: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -277,16 +281,175 @@ pub(crate) async fn set_access(factory: &Arc<Factory>, rivet: &str, args: SetArg
     if args.sources.is_empty() && args.agents.is_empty() {
         return Err(format!("Name the sources to turn on or off, the agents to give or take it from, or both. {nothing}"));
     }
-    // What it would be: each source on or off, each agent's scopes and
-    // events, checked against what the app has.
-    let offered = super::data::proposable(factory, &manifest);
+    let to = wanted(factory, &app, &manifest, &args.sources, &args.agents, nothing)?;
+    let before = changes::now(&app, &to);
+    if before == to {
+        return Ok(ToolResult::text(format!("Nothing to change: {} already has that.", manifest.name), json!({})));
+    }
+    let (narrow, widen) = split(&manifest, &before, &to);
+    let rules = if widen.is_empty() { Vec::new() } else { card_rules(factory, rivet, &manifest, &widen) };
+    let names = changes::agent_names(factory);
+    let how = How { by: rivet, via: Via::Rivet, reference: "", reason: &reason, rules: &[] };
+    if rules.is_empty() {
+        let id = changes::apply(factory, &app.id, &to, how).await.map_err(|error| format!("{error} {nothing}"))?;
+        let done = id.and_then(|id| changes::find(factory, id));
+        let text = match &done {
+            Some(change) => format!(
+                "Done: {}. It shows in {person}'s History and in {} settings, where they can undo it.",
+                yours(change, &names),
+                changes::possessive(&manifest.name)
+            ),
+            None => format!("Nothing to change: {} already has that.", manifest.name),
+        };
+        return Ok(ToolResult::text(text, json!({"app_change": id.map(|id| id.to_string())})));
+    }
+    // An approved proposal that names it: made now, with no card.
+    let mut text = String::new();
+    if let Some(proposal) = args.proposal.as_deref().map(str::trim).filter(|proposal| !proposal.is_empty()) {
+        let fits = |grant: &crate::proposal_grants::Grant| crate::proposal_grants::fits_app(factory, grant, &app, &widen);
+        match crate::proposal_grants::claim(factory, rivet, proposal, fits) {
+            Ok(claimed) => {
+                let reference = format!("proposal:{}", claimed.reference());
+                let how = How { by: rivet, via: Via::Rivet, reference: &reference, reason: &reason, rules: &[] };
+                let id = match changes::apply(factory, &app.id, &to, how).await {
+                    Ok(id) => id,
+                    Err(error) => {
+                        crate::proposal_grants::unclaim(factory, &claimed);
+                        return Err(format!("{error} {nothing}"));
+                    }
+                };
+                crate::proposals::refresh(factory, claimed.proposal);
+                let done = id.and_then(|id| changes::find(factory, id));
+                let text = match &done {
+                    Some(change) => format!(
+                        "Done: {}. {} They can undo it there and in {} settings.",
+                        yours(change, &names),
+                        claimed.said(&person),
+                        changes::possessive(&manifest.name)
+                    ),
+                    None => format!("Nothing to change: {} already has that.", manifest.name),
+                };
+                return Ok(ToolResult::text(
+                    text,
+                    json!({"app_change": id.map(|id| id.to_string()), "proposal_grant": claimed.reference()}),
+                ));
+            }
+            Err(why) => text.push_str(&format!("Proposal {proposal} doesn't cover it: {why}. ")),
+        }
+    }
+    // What it takes away goes now; what it gives waits for the person.
+    let mut details = json!({});
+    if !narrow.is_empty() {
+        let id = changes::apply(factory, &app.id, &narrow, how).await.map_err(|error| format!("{error} {nothing}"))?;
+        if let Some(change) = id.and_then(|id| changes::find(factory, id)) {
+            text.push_str(&format!("Done: {}. ", yours(&change, &names)));
+            details["app_change"] = json!(change.id.to_string());
+        }
+    }
+    let app = factory.lock().config.apps.iter().find(|installed| installed.id == app.id).cloned().unwrap_or(app);
+    let card = file(factory, rivet, &app, &manifest, &widen, &reason, &rules)?;
+    text.push_str(&format!(
+        "What it gives needs {person}'s approval, so it's on a card in your conversation: {} You'll be told what they decide.",
+        rules.join(" ")
+    ));
+    details["app_access"] = json!(STANDARD.encode(card.encode_to_vec()));
+    Ok(ToolResult::text(text, details))
+}
+
+/// apps_set_access as a proposal's grant (`crate::proposal_grants`): what
+/// it gives, checked as the tool would, for Rivet (`rivet`); taking away
+/// needs no approval, so a grant only gives.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantArgs {
+    app: String,
+    #[serde(default)]
+    sources: std::collections::BTreeMap<String, bool>,
+    #[serde(default)]
+    agents: Vec<SetAgent>,
+}
+
+pub(crate) fn resolve_grant(
+    factory: &Arc<Factory>,
+    rivet: &str,
+    args: serde_json::Value,
+) -> Result<crate::proposal_grants::Resolved, String> {
+    let args: GrantArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
+    let nothing = "Nothing was proposed.";
+    let (app, manifest) = installed(factory, &args.app, nothing)?;
+    if args.sources.values().any(|on| !on) || args.agents.iter().any(|agent| agent.scopes.is_empty()) {
+        return Err(format!("A grant only gives: taking away needs no approval, so leave it out. {nothing}"));
+    }
+    if args.sources.is_empty() && args.agents.is_empty() {
+        return Err(format!("Name the sources it reads, the agents that use it, or both. {nothing}"));
+    }
+    if args.sources.len() > MAX_SOURCES || args.agents.len() > MAX_AGENTS {
+        return Err(format!("Name {MAX_SOURCES} sources and {MAX_AGENTS} agents at most. {nothing}"));
+    }
+    let to = wanted(factory, &app, &manifest, &args.sources, &args.agents, nothing)?;
+    let before = changes::now(&app, &to);
+    let (_, widen) = split(&manifest, &before, &to);
+    if widen.is_empty() {
+        return Err(format!("{} already has that, so there's nothing to give. {nothing}", manifest.name));
+    }
+    let mut incarnations = std::collections::BTreeMap::new();
+    for agent in widen.agents.keys() {
+        let incarnation = crate::user_apps::incarnation(&factory.home, agent).map_err(|error| error.to_string())?;
+        incarnations.insert(agent.clone(), incarnation);
+    }
+    let labels = {
+        let inner = factory.lock();
+        changes::Labels::of(&inner.config, &manifest, &app)
+    };
+    // History's sentence, as something to do.
+    let change = changes::Change {
+        id: 0,
+        app: app.id.clone(),
+        by: rivet.to_owned(),
+        via: Via::Rivet,
+        reference: String::new(),
+        reason: String::new(),
+        before: changes::now(&app, &widen),
+        after: widen.clone(),
+        labels,
+        at: 0,
+        undone_by: None,
+    };
+    let summary = change.asked(&changes::agent_names(factory));
+    let warnings = card_rules(factory, rivet, &manifest, &widen);
+    Ok(crate::proposal_grants::Resolved {
+        grant: crate::proposal_grants::Grant::App {
+            app: app.id.clone(),
+            version: app.version.clone(),
+            key: app.key.clone(),
+            access: widen,
+            incarnations,
+        },
+        summary,
+        warnings,
+    })
+}
+
+/// What a call asks the app to be: each source on or off, each agent's
+/// scopes and events, checked against what the app has; or why not, ending
+/// with `nothing`.
+fn wanted(
+    factory: &Arc<Factory>,
+    app: &super::AppConfig,
+    manifest: &super::bundle::Manifest,
+    sources: &std::collections::BTreeMap<String, bool>,
+    agents: &[SetAgent],
+    nothing: &str,
+) -> Result<Access, String> {
+    let person = factory.lock().config.person().to_owned();
+    let offered = super::data::proposable(factory, manifest);
     let mut to = Access::default();
-    for (id, on) in &args.sources {
+    for (id, on) in sources {
         let id = id.trim();
         let had = app.sources.iter().any(|source| source == id);
         // A file: one an app may read now, or why not.
         if *on && !had && super::files::is_file(id) {
-            super::data::file_offer(factory, &manifest, id).map_err(|why| format!("{why} {nothing}"))?;
+            super::data::file_offer(factory, manifest, id).map_err(|why| format!("{why} {nothing}"))?;
         } else if *on && !had && !offered.iter().any(|source| source.id == id) {
             if id == super::data::FACTORY_SOURCE {
                 return Err(format!(
@@ -305,7 +468,7 @@ pub(crate) async fn set_access(factory: &Arc<Factory>, rivet: &str, args: SetArg
         }
         to.sources.insert(id.to_owned(), *on);
     }
-    for asked in &args.agents {
+    for asked in agents {
         let (id, name) = named(factory, &asked.agent).map_err(|why| format!("{why} {nothing}"))?;
         if to.agents.contains_key(&id) {
             return Err(format!("{name} is there twice: name each agent once, with all its scopes. {nothing}"));
@@ -347,7 +510,7 @@ pub(crate) async fn set_access(factory: &Arc<Factory>, rivet: &str, args: SetArg
                 }
                 kept
             }
-            None => changes::held(&app, &id)
+            None => changes::held(app, &id)
                 .hears
                 .into_iter()
                 .filter(|kind| manifest.event(kind).is_some_and(|event| scopes.contains(&event.scope)))
@@ -357,11 +520,11 @@ pub(crate) async fn set_access(factory: &Arc<Factory>, rivet: &str, args: SetArg
         hears.sort();
         to.agents.insert(id, Held { scopes, hears });
     }
-    let before = changes::now(&app, &to);
-    if before == to {
-        return Ok(ToolResult::text(format!("Nothing to change: {} already has that.", manifest.name), json!({})));
-    }
-    // What it takes away, and what it gives.
+    Ok(to)
+}
+
+/// What going from `before` to `to` takes away, and what it gives.
+fn split(manifest: &super::bundle::Manifest, before: &Access, to: &Access) -> (Access, Access) {
     let mut narrow = Access::default();
     let mut widen = Access::default();
     for (id, on) in &to.sources {
@@ -392,40 +555,7 @@ pub(crate) async fn set_access(factory: &Arc<Factory>, rivet: &str, args: SetArg
             widen.agents.insert(agent.clone(), wanted.clone());
         }
     }
-    let rules = if widen.is_empty() { Vec::new() } else { card_rules(factory, rivet, &manifest, &widen) };
-    let names = changes::agent_names(factory);
-    let how = How { by: rivet, via: Via::Rivet, reference: "", reason: &reason, rules: &[] };
-    if rules.is_empty() {
-        let id = changes::apply(factory, &app.id, &to, how).await.map_err(|error| format!("{error} {nothing}"))?;
-        let done = id.and_then(|id| changes::find(factory, id));
-        let text = match &done {
-            Some(change) => format!(
-                "Done: {}. It shows in {person}'s History and in {} settings, where they can undo it.",
-                yours(change, &names),
-                changes::possessive(&manifest.name)
-            ),
-            None => format!("Nothing to change: {} already has that.", manifest.name),
-        };
-        return Ok(ToolResult::text(text, json!({"app_change": id.map(|id| id.to_string())})));
-    }
-    // What it takes away goes now; what it gives waits for the person.
-    let mut text = String::new();
-    let mut details = json!({});
-    if !narrow.is_empty() {
-        let id = changes::apply(factory, &app.id, &narrow, how).await.map_err(|error| format!("{error} {nothing}"))?;
-        if let Some(change) = id.and_then(|id| changes::find(factory, id)) {
-            text.push_str(&format!("Done: {}. ", yours(&change, &names)));
-            details["app_change"] = json!(change.id.to_string());
-        }
-    }
-    let app = factory.lock().config.apps.iter().find(|installed| installed.id == app.id).cloned().unwrap_or(app);
-    let card = file(factory, rivet, &app, &manifest, &widen, &reason, &rules)?;
-    text.push_str(&format!(
-        "What it gives needs {person}'s approval, so it's on a card in your conversation: {} You'll be told what they decide.",
-        rules.join(" ")
-    ));
-    details["app_access"] = json!(STANDARD.encode(card.encode_to_vec()));
-    Ok(ToolResult::text(text, details))
+    (narrow, widen)
 }
 
 /// A change's sentence as told to Rivet, who made it: "you gave Ingrid…".
@@ -854,7 +984,7 @@ fn tell(factory: &Arc<Factory>, row: &Row) {
 }
 
 fn agent_name(factory: &Factory, id: &str) -> String {
-    factory.lock().config.agent(id).map_or_else(|| id.to_owned(), |agent| agent.name.clone())
+    factory.agent_name(id)
 }
 
 /// One decision at a time.

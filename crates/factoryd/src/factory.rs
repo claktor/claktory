@@ -414,6 +414,9 @@ pub struct Factory {
     pub(crate) dm_wakes: crate::user_apps::dms::Wakes,
     /// The apps installed, as they run (`crate::apps`).
     pub(crate) apps: crate::apps::Apps,
+    /// Websites pipes' peers share, as this side listens for them
+    /// (`pipes::share_listener`).
+    pub(crate) share_listeners: crate::pipes::share_listener::Listeners,
     /// Hides the vault's values in what agents and the app are shown.
     pub(crate) redaction: factory_agent::Redaction,
     /// This Claktory's color until the person picks one (`remote::key_color`).
@@ -430,6 +433,9 @@ pub struct Factory {
     pub(crate) moving: crate::move_run::Moving,
     /// Pipes to other Claktories (`crate::pipes`).
     pub(crate) pipes: crate::pipes::Pipes,
+    /// Websites shared over pipes: the streams this side serves, and their
+    /// rates (`crate::pipes::shares`).
+    pub(crate) pipe_shares: crate::pipes::shares::State,
     /// Transcribes voice messages (`crate::speech::voice`).
     pub(crate) voices: crate::speech::voice::Voices,
     /// The person's chats (`crate::chats`).
@@ -819,7 +825,8 @@ impl Factory {
         let vault = crate::vault::Vault::open_or_make(home.root().join("vault"));
         let account = crate::account::State::new(&home, inner.config.account.enabled);
         let home_for_speech = home.clone();
-        let onboarding = crate::onboarding::State::load(&store, created, &inner.models)?;
+        let onboarding = crate::onboarding::State::load(&store, created, &inner.models, crate::service::runs_here(&home))?;
+        let service = crate::service::Service::load(&store);
         let old_segments = Arc::new(std::sync::atomic::AtomicBool::new(crate::update::on_trial(&home)));
         let factory = Arc::new(Factory {
             old_segments,
@@ -862,18 +869,20 @@ impl Factory {
             dm_leaf: crate::user_apps::dms::leaf::State::default(),
             dm_wakes: crate::user_apps::dms::Wakes::default(),
             apps: crate::apps::Apps::default(),
+            share_listeners: crate::pipes::share_listener::Listeners::default(),
             account,
             onboarding,
             speech: crate::speech::model::Model::new(&home_for_speech),
             moving: crate::move_run::Moving::new(&home_for_speech),
             pipes: crate::pipes::Pipes::default(),
+            pipe_shares: crate::pipes::shares::State::default(),
             voices: crate::speech::voice::Voices::new(),
             chats,
             usage_switches,
             resumes: Arc::default(),
             transcript_log: crate::transcript::resume::Log::default(),
             keep_awake,
-            service: crate::service::Service::default(),
+            service,
             catalog,
             notify: crate::notify::State::default(),
             browser: crate::browser::Browser::default(),
@@ -1000,6 +1009,11 @@ impl Factory {
     /// The person's sentence-start name, copied while the settings are locked.
     pub(crate) fn person_capitalized(&self) -> String {
         self.lock().config.person_capitalized().to_owned()
+    }
+
+    /// The agent's current name, or its unchanged id if gone, copied under one settings lock.
+    pub(crate) fn agent_name(&self, id: &str) -> String {
+        self.lock().config.agent(id).map_or_else(|| id.to_owned(), |agent| agent.name.clone())
     }
 
     /// Subscribes to events and returns the state they apply on top of.
@@ -1362,6 +1376,7 @@ impl Factory {
             notifications,
             checklist,
             notification_change,
+            when_app_quits,
         } = request;
         // The sidebar's sections, folded or open: the workspace's UI state
         // (#249), not settings, so a fold alone leaves config.json alone.
@@ -1388,7 +1403,11 @@ impl Factory {
         {
             self.broadcast_workspace(&self.lock());
         }
-        let only_folds = (folds || max_open_panes.is_some() || notified || checklist.is_some())
+        // And what happens when the Mac app quits (friend bug #27).
+        if let Some(mode) = when_app_quits {
+            crate::service::set_when_app_quits(self, v1::QuitMode::try_from(mode).unwrap_or_default()).await?;
+        }
+        let only_folds = (folds || max_open_panes.is_some() || notified || checklist.is_some() || when_app_quits.is_some())
             && model.is_none()
             && effort.is_none()
             && compact_at.is_none()
@@ -2671,6 +2690,7 @@ impl Factory {
             pinned_apps: crate::apps::pins::view(self, config),
             bundled_apps: crate::apps::bundled::view(self, config),
             pipe_groups: crate::pipes::groups::view(self, inner),
+            pipe_shares: crate::pipes::shares::view(self),
             browser_sessions: self.browser.view(),
             dm_sends: crate::user_apps::dms::sends::waiting(self),
             pipes,
@@ -2780,6 +2800,7 @@ impl Factory {
                 max_open_panes: config::open_panes(inner.state.max_open_panes),
                 notifications: Some(crate::notify::settings(self).to_proto()),
                 checklist: Some(crate::extensions::checklist::Times::read(&self.store).proto()),
+                when_app_quits: self.service.when_app_quits().into(),
             }),
         }
     }

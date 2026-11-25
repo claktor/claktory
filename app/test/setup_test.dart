@@ -83,6 +83,17 @@ class FakeSetupChannel implements SetupChannel {
 
   @override
   Future<void> setAppOnly(bool appOnly) async => appOnlyMark = appOnly;
+
+  /// What macOS says of the LaunchAgent.
+  BackgroundStatus background = BackgroundStatus.enabled;
+
+  @override
+  Future<BackgroundStatus> backgroundStatus() async => background;
+
+  var loginItemsOpened = 0;
+
+  @override
+  Future<void> openLoginItems() async => loginItemsOpened++;
 }
 
 void main() {
@@ -93,6 +104,8 @@ void main() {
     MacSetup setupWith(
       FakeSetupChannel channel, {
       Duration startWithin = const Duration(seconds: 30),
+      Duration lostFor = const Duration(seconds: 5),
+      Duration lookEvery = const Duration(seconds: 2),
     }) {
       connected = ValueNotifier(false);
       reconnects = 0;
@@ -101,8 +114,254 @@ void main() {
         connected: connected,
         reconnect: () => reconnects++,
         startWithin: startWithin,
+        lostFor: lostFor,
+        lookEvery: lookEvery,
       );
     }
+
+    group('stopped and started (friend bug #27)', () {
+      test('stopped by the app quitting: opening it starts it', () async {
+        final channel = FakeSetupChannel(
+          results: {
+            'install --check': const InstallResult(result: 'stopped'),
+            'install --start': const InstallResult(result: 'started'),
+          },
+        );
+        final setup = setupWith(channel);
+        addTearDown(setup.dispose);
+        await setup.start();
+        await pumpEventQueue();
+        expect(channel.runs, ['install --check', 'install --start']);
+        expect(setup.stage, SetupStage.done);
+        expect(reconnects, 1);
+      });
+
+      test('turned off by the person: it waits for Start', () async {
+        final channel = FakeSetupChannel(
+          results: {
+            'install --check': const InstallResult(
+              result: 'stopped',
+              held: true,
+            ),
+            'install --start': const InstallResult(result: 'started'),
+          },
+        );
+        final setup = setupWith(channel);
+        addTearDown(setup.dispose);
+        await setup.start();
+        await pumpEventQueue();
+        expect(channel.runs, ['install --check']);
+        expect(setup.stage, SetupStage.stopped);
+        expect(setup.showing, isTrue);
+
+        final starting = setup.startEngine();
+        expect(setup.stage, SetupStage.starting);
+        await starting;
+        expect(channel.runs.last, 'install --start');
+        expect(setup.stage, SetupStage.done);
+        expect(reconnects, 1);
+      });
+
+      test('turned off while the app is open: once out of reach a moment, '
+          'it says so; out of reach otherwise, it waits', () async {
+        final channel = FakeSetupChannel(
+          results: {
+            'install --check': const InstallResult(
+              result: 'already_installed',
+              running: true,
+            ),
+          },
+        );
+        final setup = setupWith(
+          channel,
+          lostFor: const Duration(milliseconds: 20),
+        );
+        addTearDown(setup.dispose);
+        connected.value = true;
+        await setup.start();
+
+        // Restarting (an update, say): --check says not running; it waits.
+        channel.results['install --check'] = const InstallResult(
+          result: 'not_running',
+        );
+        connected.value = false;
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(setup.stage, SetupStage.done);
+        connected.value = true;
+
+        channel.results['install --check'] = const InstallResult(
+          result: 'stopped',
+          held: true,
+        );
+        connected.value = false;
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(setup.stage, SetupStage.stopped);
+      });
+
+      test('asked to stop: once gone, turned off at once, not after a '
+          'while', () async {
+        final channel = FakeSetupChannel(
+          results: {
+            'install --check': const InstallResult(
+              result: 'already_installed',
+              running: true,
+            ),
+          },
+        );
+        final setup = setupWith(channel);
+        addTearDown(setup.dispose);
+        connected.value = true;
+        await setup.start();
+        setup.expectStop();
+        // launchd still stopping it: not yet, then stopped.
+        channel.results['install --check'] = const InstallResult(
+          result: 'not_running',
+        );
+        connected.value = false;
+        await pumpEventQueue();
+        expect(setup.stage, SetupStage.done);
+        channel.results['install --check'] = const InstallResult(
+          result: 'stopped',
+          held: true,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 600));
+        expect(setup.stage, SetupStage.stopped);
+      });
+
+      test("the result's held is read", () {
+        final held = InstallResult.parse(
+          4,
+          '{"result":"stopped","reason":"","detail":"","version":"v","held":true}',
+          '',
+        );
+        expect(held.result, 'stopped');
+        expect(held.held, isTrue);
+        expect(
+          InstallResult.parse(
+            0,
+            '{"result":"stopped","reason":"","detail":"","version":"v"}',
+            '',
+          ).held,
+          isFalse,
+        );
+      });
+    });
+
+    group('macOS blocking it in the background (friend bug #28)', () {
+      test('installed and blocked: it says so at once, not Repair, and '
+          'starts once allowed', () async {
+        final channel = FakeSetupChannel(
+          results: {
+            'install --check': const InstallResult(result: 'already_installed'),
+            'install --start': const InstallResult(result: 'started'),
+          },
+        )..background = BackgroundStatus.requiresApproval;
+        final setup = setupWith(
+          channel,
+          lookEvery: const Duration(milliseconds: 20),
+        );
+        addTearDown(setup.dispose);
+        await setup.start();
+        await pumpEventQueue();
+        expect(setup.stage, SetupStage.blocked);
+        expect(setup.showing, isTrue);
+        expect(channel.runs, ['install --check']);
+
+        await setup.openLoginItems();
+        expect(channel.loginItemsOpened, 1);
+        // Still off: it waits.
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        expect(setup.stage, SetupStage.blocked);
+        expect(channel.runs, ['install --check']);
+
+        channel.background = BackgroundStatus.enabled;
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        expect(channel.runs.last, 'install --start');
+        expect(setup.stage, SetupStage.done);
+        expect(reconnects, 1);
+      });
+
+      test('a start launchd refuses while macOS blocks it: blocked', () async {
+        final channel = FakeSetupChannel(
+          results: {
+            'install --check': const InstallResult(result: 'stopped'),
+            'install --start': const InstallResult(
+              result: 'failed',
+              detail: 'Bootstrap failed: 5: Input/output error',
+            ),
+          },
+        )..background = BackgroundStatus.requiresApproval;
+        final setup = setupWith(channel);
+        addTearDown(setup.dispose);
+        await setup.start();
+        await pumpEventQueue();
+        expect(channel.runs, ['install --check', 'install --start']);
+        expect(setup.stage, SetupStage.blocked);
+      });
+
+      test('not running and blocked: blocked, not Repair', () async {
+        final channel = FakeSetupChannel(
+          results: {
+            'install --check': const InstallResult(result: 'not_running'),
+          },
+        )..background = BackgroundStatus.requiresApproval;
+        final setup = setupWith(channel);
+        addTearDown(setup.dispose);
+        await setup.start();
+        await pumpEventQueue();
+        expect(setup.stage, SetupStage.blocked);
+      });
+
+      test('not running and allowed: Repair, as before', () async {
+        final channel = FakeSetupChannel(
+          results: {
+            'install --check': const InstallResult(result: 'not_running'),
+          },
+        );
+        final setup = setupWith(channel);
+        addTearDown(setup.dispose);
+        await setup.start();
+        await pumpEventQueue();
+        expect(setup.stage, SetupStage.notRunning);
+      });
+
+      test('turned off while it ran: once it has been out of reach a '
+          'moment, it says so; back, it goes', () async {
+        final channel = FakeSetupChannel(
+          results: {
+            'install --check': const InstallResult(
+              result: 'already_installed',
+              running: true,
+            ),
+          },
+        );
+        final setup = setupWith(
+          channel,
+          lostFor: const Duration(milliseconds: 20),
+          lookEvery: const Duration(seconds: 10),
+        );
+        addTearDown(setup.dispose);
+        connected.value = true;
+        await setup.start();
+        expect(setup.stage, SetupStage.done);
+
+        // A moment's drop with macOS allowing it: nothing.
+        connected.value = false;
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(setup.stage, SetupStage.done);
+        connected.value = true;
+
+        channel.background = BackgroundStatus.requiresApproval;
+        connected.value = false;
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(setup.stage, SetupStage.blocked);
+        expect(setup.showing, isTrue);
+
+        connected.value = true;
+        expect(setup.stage, SetupStage.done);
+        expect(setup.showing, isFalse);
+      });
+    });
 
     test('a Mac without Claktory gets it installed, then connects', () async {
       final channel = FakeSetupChannel(
@@ -410,6 +669,46 @@ void main() {
       await tester.pump();
       expect(find.text("Claktory couldn't finish setting up"), findsNothing);
       expect(channel.runs.last, 'install');
+    });
+
+    testWidgets('blocked by macOS: what to do, and Open System Settings', (
+      tester,
+    ) async {
+      final channel = FakeSetupChannel(
+        results: {
+          'install --check': const InstallResult(result: 'not_running'),
+        },
+      )..background = BackgroundStatus.requiresApproval;
+      await show(tester, channel);
+      await tester.pump();
+      expect(
+        find.text('macOS is blocking Claktory from running in the background'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Allow in the Background'), findsOneWidget);
+      expect(find.text('Repair'), findsNothing);
+      expect(find.text('Not now'), findsNothing);
+      await tester.tap(find.text('Open System Settings'));
+      await tester.pump();
+      expect(channel.loginItemsOpened, 1);
+    });
+
+    testWidgets('turned off: says so, and Start Claktory starts it', (
+      tester,
+    ) async {
+      final channel = FakeSetupChannel(
+        results: {
+          'install --check': const InstallResult(result: 'stopped', held: true),
+          'install --start': const InstallResult(result: 'started'),
+        },
+      );
+      await show(tester, channel);
+      await tester.pump();
+      expect(find.text('Claktory is turned off'), findsOneWidget);
+      await tester.tap(find.text('Start Claktory'));
+      await tester.pump();
+      await tester.pump();
+      expect(channel.runs.last, 'install --start');
     });
 
     testWidgets('Move to Applications, or Not now', (tester) async {

@@ -703,6 +703,7 @@ void main() {
           received: 0,
           linkReceived: 0,
           dialTimeoutMs: 0,
+          reach: TunnelReach.none,
         );
         app.backends[long]!.connected.value = false;
         app.backends[long]!.refused.value = 'unknown device';

@@ -842,6 +842,10 @@ class RecordingBackend extends Backend {
   );
 
   @override
+  Future<void> stopEngine({required bool quitting}) =>
+      _record(ClientMessage(stopEngine: StopEngine(quitting: quitting)));
+
+  @override
   Future<void> signOut(String providerId, {String accountId = ''}) => _record(
     ClientMessage(
       signOut: SignOut(providerId: providerId, accountId: accountId),
@@ -1860,6 +1864,49 @@ class RecordingBackend extends Backend {
   );
 
   @override
+  Future<void> sharePipeWebsite(SharePipeWebsite share) =>
+      _record(ClientMessage(sharePipeWebsite: share));
+
+  @override
+  Future<void> stopPipeShare(String shareId) =>
+      _record(ClientMessage(stopPipeShare: StopPipeShare(shareId: shareId)));
+
+  /// What [openPipeShare] answers: a share's one-time addresses.
+  PipeShareOpened Function(String shareId) pipeShareOpened = (id) =>
+      PipeShareOpened(
+        shareId: id,
+        url: 'http://s-abc.localhost:3000/__claktory_open?k=once',
+        fallbackUrl: 'http://127.0.0.1:3000/__claktory_open?k=once',
+      );
+
+  @override
+  Future<PipeShareOpened> openPipeShare(String shareId) async {
+    await _record(
+      ClientMessage(openPipeShare: OpenPipeShare(shareId: shareId)),
+    );
+    return pipeShareOpened(shareId);
+  }
+
+  @override
+  Future<void> hidePipeShare(String shareId, bool hidden) => _record(
+    ClientMessage(
+      hidePipeShare: HidePipeShare(shareId: shareId, hidden: hidden),
+    ),
+  );
+
+  /// What [checkPipeSharePort] answers about a port.
+  PipeSharePort Function(int port) pipeSharePort = (port) =>
+      PipeSharePort(port: port, listening: true);
+
+  @override
+  Future<PipeSharePort> checkPipeSharePort(int port) async {
+    await _record(
+      ClientMessage(checkPipeSharePort: CheckPipeSharePort(port: port)),
+    );
+    return pipeSharePort(port);
+  }
+
+  @override
   Future<void> setPipeGroupCollapsed(String groupId, bool collapsed) =>
       _record(
         ClientMessage(
@@ -1983,6 +2030,8 @@ class RecordingBackend extends Backend {
     String text = '',
     bool dismiss = false,
     bool reply = false,
+    bool resolve = false,
+    AskAnsweredFrom from = AskAnsweredFrom.ASK_ANSWERED_FROM_UNSPECIFIED,
     List<Attachment> attachments = const [],
     int? step,
     int? revision,
@@ -1994,6 +2043,8 @@ class RecordingBackend extends Backend {
         text: text,
         dismiss: dismiss || reply,
         reply: reply,
+        resolve: resolve,
+        from: from,
         attachments: attachments,
         step: step,
         revision: revision == null || revision <= 0 ? null : revision,

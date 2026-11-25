@@ -41,6 +41,11 @@ const defaultPushRelay = 'https://push.claktory.com';
 const _devPushRelay = String.fromEnvironment('FACTORY_PUSH_RELAY');
 const _dev = bool.fromEnvironment('FACTORY_DEV');
 
+/// `--dart-define=PUSH_ASK=false`: the system never asks on its own
+/// ([PushRegistrar.askInContext]), only from Settings: the claktory.com
+/// film's phone camera, where no one can answer the system's alert.
+const _askInContext = bool.fromEnvironment('PUSH_ASK', defaultValue: true);
+
 /// A dev build may reach a relay on this computer over plain http (a local
 /// claktory-push for tests); every other relay is https, since the token
 /// goes to it.
@@ -459,7 +464,7 @@ class PushRegistrar {
   /// time, the system asks whether Claktory may notify them. Once asked,
   /// never again.
   Future<void> askInContext() async {
-    if (_asked) return;
+    if (_asked || !_askInContext) return;
     _asked = true;
     final state = _state ?? await _safely(device.state);
     if (state == null || state.permission != 'not_determined') return;

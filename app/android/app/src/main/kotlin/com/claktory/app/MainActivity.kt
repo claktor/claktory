@@ -24,6 +24,17 @@ class MainActivity : FlutterActivity() {
         super.cleanUpFlutterEngine(flutterEngine)
     }
 
+    /**
+     * Back at the app's root leaves it as Home does: the task goes behind,
+     * the screen only stops, and a recording pauses and waits with Send and
+     * Cancel, as for a call. Flutter's own answer is finish(), which tore the
+     * engine down and threw the recording away. Android 12+ already treats
+     * Back on a launcher's root this way, which finish() went around; this
+     * makes it so on every version. Not the task's root (never so today),
+     * Flutter finishes as before.
+     */
+    override fun popSystemNavigator(): Boolean = isTaskRoot && moveTaskToBack(false)
+
     override fun onResume() {
         super.onResume()
         adapters?.onResume()

@@ -892,32 +892,17 @@ fn inspect_tool(factory: &Arc<Factory>, asker: &str) -> Tool {
 }
 
 fn stop_tool(factory: &Arc<Factory>, admin: &str) -> Tool {
-    let parameters = json!({
-        "type": "object",
-        "required": ["agent"],
-        "properties": {"agent": {"type": "string", "minLength": 1}},
-        "additionalProperties": false,
-    });
+    let parameters = super::agent_parameters();
     super::tool("agents_stop", "Stop an agent", STOP, parameters, super::typed_handler(factory, admin, stop))
 }
 
 fn compact_tool(factory: &Arc<Factory>, admin: &str) -> Tool {
-    let parameters = json!({
-        "type": "object",
-        "required": ["agent"],
-        "properties": {"agent": {"type": "string", "minLength": 1}},
-        "additionalProperties": false,
-    });
+    let parameters = super::agent_parameters();
     super::async_tool(factory, admin, "agents_compact", "Compact a conversation", COMPACT, parameters, compact)
 }
 
 fn clear_tool(factory: &Arc<Factory>, admin: &str) -> Tool {
-    let parameters = json!({
-        "type": "object",
-        "required": ["agent"],
-        "properties": {"agent": {"type": "string", "minLength": 1}},
-        "additionalProperties": false,
-    });
+    let parameters = super::agent_parameters();
     super::tool(
         crate::extensions::ask::CLEAR_TOOL,
         "Ask to clear a conversation",

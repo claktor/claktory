@@ -72,6 +72,7 @@ class InstallResult {
     this.detail = '',
     this.version = '',
     this.running = false,
+    this.held = false,
     this.dataBytes = 0,
     this.dataComplete = true,
     this.answered = true,
@@ -89,6 +90,7 @@ class InstallResult {
           detail: json['detail'] as String? ?? '',
           version: json['version'] as String? ?? '',
           running: json['running'] as bool? ?? false,
+          held: json['held'] as bool? ?? false,
           // What a dry run of uninstall would delete, the backend itself
           // aside (it goes either way).
           dataBytes: [
@@ -117,7 +119,7 @@ class InstallResult {
   }
 
   /// not_installed, installed, already_installed, incomplete, not_running,
-  /// damaged or failed.
+  /// stopped, started, damaged or failed.
   final String result;
 
   /// A sentence to show as it is.
@@ -131,6 +133,11 @@ class InstallResult {
 
   /// For already_installed: whether the backend answered then.
   final bool running;
+
+  /// For stopped: the person turned it off (Stop Claktory), so it stays
+  /// off until they start it; else the app quitting stopped it, and
+  /// opening the app starts it (friend bug #27).
+  final bool held;
 
   /// For a dry run of uninstall: how much data it would delete (0 when
   /// not said), and whether that's all of it (else at least that much).
@@ -216,6 +223,33 @@ class SetupChannel {
     }
   }
 
+  /// Whether macOS lets this Mac's Claktory run in the background: its
+  /// switch under System Settings → General → Login Items → Allow in the
+  /// Background (friend bug #28). [BackgroundStatus.unavailable] where the
+  /// app can't say.
+  Future<BackgroundStatus> backgroundStatus() async {
+    try {
+      return BackgroundStatus.parse(
+        await _channel.invokeMethod<String>('backgroundStatus'),
+      );
+    } on PlatformException {
+      return BackgroundStatus.unavailable;
+    } on MissingPluginException {
+      return BackgroundStatus.unavailable;
+    }
+  }
+
+  /// Opens System Settings → General → Login Items.
+  Future<void> openLoginItems() async {
+    try {
+      await _channel.invokeMethod<void>('openLoginItems');
+    } on PlatformException {
+      // Nothing more to do: the step says where it is.
+    } on MissingPluginException {
+      // The same.
+    }
+  }
+
   /// Moves the app to Applications and quits; the error's words when it
   /// can't.
   Future<String?> moveToApplications() =>
@@ -228,6 +262,59 @@ class SetupChannel {
     return home.isNotEmpty && File('$home/.factory/bin/factoryd').existsSync();
   }
 }
+
+/// What macOS says of the LaunchAgent that runs this Mac's Claktory
+/// (Setup.swift's backgroundStatus, from SMAppService).
+enum BackgroundStatus {
+  /// Allowed to run.
+  enabled,
+
+  /// Its switch under Allow in the Background is off: launchd won't start
+  /// it.
+  requiresApproval,
+
+  /// macOS knows no such job.
+  notRegistered,
+  notFound,
+
+  /// Before macOS 13, or off the Mac: it can't say.
+  unavailable;
+
+  static BackgroundStatus parse(String? name) => switch (name) {
+    'enabled' => enabled,
+    'requiresApproval' => requiresApproval,
+    'notRegistered' => notRegistered,
+    'notFound' => notFound,
+    _ => unavailable,
+  };
+
+  /// macOS keeps it from running.
+  bool get blocked => this == requiresApproval;
+}
+
+/// Whether this Mac's own Claktory can run, as setting it up last found
+/// it: its connection says so while it doesn't answer (connection.dart).
+enum LocalEngine {
+  /// Running, or nothing known against it.
+  running,
+
+  /// The person turned it off: it waits for Start Claktory.
+  off,
+
+  /// macOS keeps it from running in the background.
+  blocked,
+}
+
+/// Where Claktory may show under Allow in the Background: a Mac that set
+/// it up before the release that names it there keeps its developer's
+/// name for good (Pericolo's VM tests, friend bug #28). No person's name
+/// in the app's words (Bruno 30973).
+const backgroundItemNote =
+    'If you had Claktory before this version, it may be listed under its '
+    "developer's name instead.";
+
+/// This Mac's own Claktory's [LocalEngine], kept by [MacSetup].
+final localEngine = ValueNotifier(LocalEngine.running);
 
 /// Where setting up is.
 enum SetupStage {
@@ -246,11 +333,21 @@ enum SetupStage {
   /// `factoryd install` (or --repair) is running.
   settingUp,
 
+  /// `factoryd install --start` is starting it.
+  starting,
+
+  /// The person turned it off (Stop Claktory): it waits for Start.
+  stopped,
+
   /// It couldn't, or did only part of it.
   failed,
 
   /// Installed, but the backend doesn't answer.
   notRunning,
+
+  /// macOS keeps it from running in the background: its switch under
+  /// Login Items is off (friend bug #28).
+  blocked,
 
   /// The app carries no backend and none is installed.
   missing,
@@ -267,6 +364,9 @@ class MacSetup extends ChangeNotifier {
     required this.connected,
     required this.reconnect,
     this.startWithin = const Duration(seconds: 30),
+    this.lostFor = const Duration(seconds: 5),
+    this.lookEvery = const Duration(seconds: 2),
+    this.stopCheckEvery = const Duration(milliseconds: 500),
     this.elsewhere,
     this.ask = true,
   }) {
@@ -284,6 +384,19 @@ class MacSetup extends ChangeNotifier {
   /// How long an installed backend may take to answer before Repair is
   /// offered.
   final Duration startWithin;
+
+  /// How long this Mac's Claktory may be out of reach, after it answered,
+  /// before the app asks macOS whether it's keeping it from running.
+  final Duration lostFor;
+
+  /// How often the app looks again while macOS keeps it from running, so
+  /// it starts as soon as it's allowed.
+  final Duration lookEvery;
+
+  /// How often, once it was asked to stop (Turn Off, Stop Claktory) and
+  /// went, the app asks whether it has stopped, so it says so at once
+  /// rather than Reconnecting….
+  final Duration stopCheckEvery;
 
   /// The person chose a Claktory on another computer instead: this Mac
   /// gets none. Null where that isn't offered.
@@ -312,6 +425,13 @@ class MacSetup extends ChangeNotifier {
   String? moveError;
 
   Timer? _waitForStart;
+  Timer? _lost;
+  Timer? _look;
+
+  /// It took a stop the person asked for (BackendService.stopping): gone,
+  /// it's looked at at once.
+  var _stopExpected = false;
+  var _looking = false;
   var _disposed = false;
 
   /// Whether it puts a step over the window now. Once this Mac's Claktory
@@ -319,8 +439,11 @@ class MacSetup extends ChangeNotifier {
   bool get showing => switch (_stage) {
     SetupStage.offerMove || SetupStage.moving || SetupStage.choosing => true,
     SetupStage.settingUp ||
+    SetupStage.starting ||
+    SetupStage.stopped ||
     SetupStage.failed ||
     SetupStage.notRunning ||
+    SetupStage.blocked ||
     SetupStage.missing => !connected.value,
     SetupStage.checking || SetupStage.done => false,
   };
@@ -328,15 +451,34 @@ class MacSetup extends ChangeNotifier {
   void _set(SetupStage stage) {
     if (_disposed) return;
     _stage = stage;
+    localEngine.value = switch (stage) {
+      SetupStage.stopped => LocalEngine.off,
+      SetupStage.blocked => LocalEngine.blocked,
+      _ => LocalEngine.running,
+    };
     notifyListeners();
   }
 
   void _connectedChanged() {
-    if (!connected.value) return notifyListeners();
+    if (!connected.value) {
+      if (_stopExpected) {
+        _stopExpected = false;
+        unawaited(_untilStopped());
+      } else {
+        _watchLost();
+      }
+      return notifyListeners();
+    }
+    _stopExpected = false;
     _waitForStart?.cancel();
+    _lost?.cancel();
+    _look?.cancel();
     // Connected after all: nothing left to fix.
     if (_stage == SetupStage.failed ||
         _stage == SetupStage.notRunning ||
+        _stage == SetupStage.blocked ||
+        _stage == SetupStage.stopped ||
+        _stage == SetupStage.starting ||
         _stage == SetupStage.missing) {
       _set(SetupStage.done);
     } else {
@@ -402,9 +544,24 @@ class MacSetup extends ChangeNotifier {
   }
 
   Future<void> _run(List<String> arguments) async {
-    _set(SetupStage.settingUp);
-    _settled(await channel.install(arguments));
+    _set(
+      arguments.contains('--start')
+          ? SetupStage.starting
+          : SetupStage.settingUp,
+    );
+    final result = await channel.install(arguments);
+    // Not started because macOS keeps it from running: that, not why
+    // launchd refused.
+    if ((result.result == 'failed' || result.result == 'not_running') &&
+        await _blocked()) {
+      return _block();
+    }
+    _settled(result);
   }
+
+  /// Starts this Mac's Claktory: at launch when the app quitting stopped
+  /// it, with Start when the person did, and once macOS allows it again.
+  Future<void> startEngine() => _run(const ['install', '--start']);
 
   /// Sets Claktory up on this Mac, as chosen.
   Future<void> setUpHere() => _run(const ['install']);
@@ -434,13 +591,24 @@ class MacSetup extends ChangeNotifier {
         reconnect();
       case 'already_installed':
         _set(SetupStage.done);
-        if (!result.running) _waitToStart();
+        if (!result.running) unawaited(_startingOrBlocked());
+      case 'started':
+        _set(SetupStage.done);
+        reconnect();
+      // Stopped: by the app quitting, so opening it starts it again; or
+      // by the person, so it waits for them.
+      case 'stopped':
+        if (result.held) {
+          _set(SetupStage.stopped);
+        } else {
+          unawaited(startEngine());
+        }
       case 'incomplete':
         repairable = true;
         _set(SetupStage.failed);
       case 'not_running':
         repairable = true;
-        _set(SetupStage.notRunning);
+        unawaited(_notAnswering());
       case 'damaged':
         download = true;
         _set(SetupStage.failed);
@@ -459,14 +627,106 @@ class MacSetup extends ChangeNotifier {
       reason = '';
       detail = '';
       repairable = true;
-      _set(SetupStage.notRunning);
+      unawaited(_notAnswering());
     });
   }
+
+  /// Installed and not answering yet: macOS may be keeping it from
+  /// running, which waiting won't change; else launchd may still be
+  /// starting it.
+  Future<void> _startingOrBlocked() async {
+    if (await _blocked()) return _block();
+    _waitToStart();
+  }
+
+  /// It doesn't answer: macOS keeps it from running, or else Repair.
+  Future<void> _notAnswering() async {
+    if (await _blocked()) return _block();
+    if (_disposed || connected.value) return;
+    _set(SetupStage.notRunning);
+  }
+
+  Future<bool> _blocked() async => (await channel.backgroundStatus()).blocked;
+
+  /// macOS keeps it from running: says so, and looks again until it's
+  /// allowed, then starts it.
+  void _block() {
+    if (_disposed || connected.value) return;
+    _waitForStart?.cancel();
+    _set(SetupStage.blocked);
+    _look?.cancel();
+    _look = Timer.periodic(lookEvery, (_) => unawaited(_lookAgain()));
+  }
+
+  Future<void> _lookAgain() async {
+    if (_looking) return;
+    if (_disposed || _stage != SetupStage.blocked) return _look?.cancel();
+    _looking = true;
+    try {
+      if (await _blocked()) return;
+    } finally {
+      _looking = false;
+    }
+    _look?.cancel();
+    if (_disposed || _stage != SetupStage.blocked || connected.value) return;
+    // Allowed now: started.
+    await startEngine();
+  }
+
+  /// Out of reach after it answered: once it's been a moment, macOS may
+  /// have stopped it (its switch turned off while it ran), or the person
+  /// turned it off.
+  void _watchLost() {
+    if (_stage != SetupStage.done) return;
+    _lost?.cancel();
+    _lost = Timer(lostFor, () async {
+      if (connected.value || _stage != SetupStage.done) return;
+      if (await _blocked()) {
+        if (_stage == SetupStage.done && !connected.value) _block();
+        return;
+      }
+      // Turned off (Stop Claktory, here or from another device's app on
+      // this Mac): it says so, with Start. Anything else (restarting for
+      // an update, say) it waits out.
+      final check = await channel.install(const ['install', '--check']);
+      if (_disposed || connected.value || _stage != SetupStage.done) return;
+      if (check.result == 'stopped' && check.held) {
+        _set(SetupStage.stopped);
+      }
+    });
+  }
+
+  /// It took a stop the person asked for: once it goes, the app says it's
+  /// turned off as soon as it is.
+  void expectStop() {
+    if (connected.value) _stopExpected = true;
+  }
+
+  /// Asks until it says it's stopped (a moment, while launchd stops it),
+  /// for a few seconds at most; then as for any lost connection.
+  Future<void> _untilStopped() async {
+    for (var tries = 0; tries < 20; tries++) {
+      if (_disposed || connected.value || _stage != SetupStage.done) return;
+      final check = await channel.install(const ['install', '--check']);
+      if (_disposed || connected.value || _stage != SetupStage.done) return;
+      if (check.result == 'stopped' && check.held) {
+        return _set(SetupStage.stopped);
+      }
+      await Future<void>.delayed(stopCheckEvery);
+    }
+    _watchLost();
+  }
+
+  /// Opens System Settings at Login Items, where its switch is.
+  Future<void> openLoginItems() => channel.openLoginItems();
 
   @override
   void dispose() {
     _disposed = true;
+    localEngine.value = LocalEngine.running;
     _waitForStart?.cancel();
+    _lost?.cancel();
+    _look?.cancel();
     connected.removeListener(_connectedChanged);
     super.dispose();
   }
@@ -578,6 +838,32 @@ class _SetupStepState extends State<SetupStep> {
         const SizedBox(height: Space.s),
         Text('This takes a few seconds.', style: body),
       ],
+      SetupStage.starting => [
+        Row(
+          children: [
+            const LiveDot(),
+            const SizedBox(width: Space.s),
+            Expanded(child: title('Starting Claktory…')),
+          ],
+        ),
+      ],
+      SetupStage.stopped => [
+        title('Claktory is turned off'),
+        const SizedBox(height: Space.s),
+        Text(
+          "Your agents aren't running on this Mac. Start Claktory and they "
+          'carry on where they left off.',
+          style: body,
+        ),
+        const SizedBox(height: Space.xl),
+        buttons([
+          Button(
+            label: 'Start Claktory',
+            primary: true,
+            onPressed: () => unawaited(setup.startEngine()),
+          ),
+        ]),
+      ],
       SetupStage.failed => [
         title("Claktory couldn't finish setting up"),
         const SizedBox(height: Space.s),
@@ -612,6 +898,26 @@ class _SetupStepState extends State<SetupStep> {
         buttons([
           Button(label: 'Not now', onPressed: setup.putOff),
           Button(label: 'Repair', primary: true, onPressed: setup.repair),
+        ]),
+      ],
+      SetupStage.blocked => [
+        title('macOS is blocking Claktory from running in the background'),
+        const SizedBox(height: Space.s),
+        Text(
+          'Claktory runs your agents as a background service, and macOS '
+          'has turned that off. To let it run, open System Settings and '
+          'turn on Claktory under Allow in the Background. '
+          '$backgroundItemNote Claktory starts as soon as you do.',
+          style: body,
+        ),
+        const SizedBox(height: Space.xl),
+        // No Not now: nothing here runs until it's allowed.
+        buttons([
+          Button(
+            label: 'Open System Settings',
+            primary: true,
+            onPressed: () => unawaited(setup.openLoginItems()),
+          ),
         ]),
       ],
       SetupStage.missing => [

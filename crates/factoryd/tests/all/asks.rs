@@ -191,7 +191,9 @@ async fn a_reply_is_told_as_the_persons_words_never_as_a_yes() {
     assert_eq!((decided.state(), decided.replied, decided.answer.as_str()), (AskPersonState::Answered, true, "No, staging first."));
     let text = told(&mut client, &mut view, 1).await;
     assert!(
-        text.starts_with("The person replied to your question \"Deploy to production?\":\n\nNo, staging first.\n\nYou asked:"),
+        text.starts_with(
+            "The person replied to your question \"Deploy to production?\":\n\nNo, staging first.\n\nIf what they wrote needs an answer from you, reply on the card with ask_reply (id 1) so it reaches them where they are, rather than in your chat.\n\nYou asked:"
+        ),
         "{text}"
     );
     assert!(!text.contains("yes, go ahead") && !text.contains("dismissed"), "{text}");
@@ -482,7 +484,7 @@ async fn a_procedure_goes_one_step_at_a_time_and_counts_once() {
     let said = told(&mut client, &mut view, 1).await;
     assert!(
         said.starts_with(
-            "The person did step 1 of 3 of \"Set up signing\": Open Settings → Signing.\n\nTheir comment:\n\nIt's under General.\n\nThey see step 2 next: Click **Add key**."
+            "The person did step 1 of 3 of \"Set up signing\": Open Settings → Signing.\n\nTheir comment:\n\nIt's under General.\n\nIf what they wrote needs an answer from you, reply on the card with ask_reply (id 1) so it reaches them where they are, rather than in your chat.\n\nThey see step 2 next: Click **Add key**."
         ),
         "{said}"
     );

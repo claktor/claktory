@@ -36,6 +36,9 @@ const AHEAD_MOST: f64 = 10.0 * 60.0;
 /// The most memory ffmpeg may map, on Linux.
 #[cfg(target_os = "linux")]
 const FFMPEG_MEMORY: libc::rlim_t = 2 << 30;
+/// ffmpeg's threads for a person's preview: measured on a 40 s 720p clip,
+/// 6.3 s with one, 3.0 s with 4, on a busy Mac.
+const PERSON_THREADS: &str = "4";
 /// The helper, beside factoryd.
 const HELPER: &str = crate::update::VIDEO_PREVIEW;
 
@@ -323,15 +326,18 @@ fn make(data: &Path, path: &Path, sha: &str, size: u64, screen: Screen, maker: &
             let scale = format!(
                 "scale=w='min(iw,if(lte(iw,ih),{short},{long}))':h='min(ih,if(lte(iw,ih),{long},{short}))':force_original_aspect_ratio=decrease:force_divisible_by=2"
             );
+            // One thread made ahead; a few for a person waiting for it,
+            // which makes it several times sooner (Sale, 28789).
+            let threads = if asker == Asker::Person { PERSON_THREADS } else { "1" };
             // Only the file it's given, read as what it was sniffed as
             // (Fugo, 24362): no other file or URL a movie could point at.
             command
                 .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-protocol_whitelist", "file", "-enable_drefs", "0"])
-                .args(["-threads", "1", "-f", "mov", "-i"])
+                .args(["-threads", threads, "-f", "mov", "-i"])
                 .arg(path)
                 .args([
                     "-threads",
-                    "1",
+                    threads,
                     "-vf",
                     &scale,
                     "-fpsmax",
@@ -716,6 +722,34 @@ mod tests {
         assert_eq!(opening.join().unwrap(), v1::FilePreview::Made);
         let runs = std::fs::read_to_string(dir.join("started")).unwrap();
         assert_eq!(runs.lines().filter(|line| line.starts_with("slow-d.mp4")).count(), 1, "{runs}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Sale, 28789: ffmpeg makes a person's preview with a few threads, and
+    /// one made ahead with one.
+    #[test]
+    fn ffmpeg_gives_a_persons_preview_more_threads() {
+        let dir = std::env::temp_dir().join(format!("claktory-video-threads-{}", std::process::id()));
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(dir.join("made.mp4"), mp4(10, 900_000, 720, 1280)).unwrap();
+        let script = dir.join("ffmpeg");
+        let body = format!("#!/bin/sh\necho \"$*\" >> '{0}/args'\nfor last; do :; done\ncp '{0}/made.mp4' \"$last\"\n", dir.display());
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let maker = Maker::Ffmpeg(script);
+        let (opened, shown) = (dir.join("opened.mp4"), dir.join("shown.mp4"));
+        std::fs::write(&opened, mp4(10, 3_000_000, 1080, 1920)).unwrap();
+        std::fs::write(&shown, mp4(10, 3_000_001, 1080, 1920)).unwrap();
+        let (request, start) = ask(&opened, 0, 0);
+        assert_eq!(read_with(&data, &request, &start, PHONE, || Some(maker.clone())).preview(), v1::FilePreview::Made);
+        let (_, start) = ask(&shown, 0, 0);
+        ahead_with(&data, &shown, &start.sha256, start.size, &[PHONE], || Some(maker));
+        let args = std::fs::read_to_string(dir.join("args")).unwrap();
+        let lines: Vec<&str> = args.lines().collect();
+        assert_eq!(lines.len(), 2, "{args}");
+        assert!(lines[0].contains("-threads 4 -f mov -i") && lines[0].contains("opened.mp4 -threads 4 -vf"), "{args}");
+        assert!(lines[1].contains("-threads 1 -f mov -i") && lines[1].contains("shown.mp4 -threads 1 -vf"), "{args}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

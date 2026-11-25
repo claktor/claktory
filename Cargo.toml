@@ -62,3 +62,9 @@ opt-level = 3
 # route's (#392). Only this workspace sees it; app/rust keeps crates.io's.
 [patch.crates-io]
 noq-udp = { path = "vendor/noq-udp" }
+# iroh, Claktory's copy of 1.5.0 (vendor/README.md), shared with app/rust:
+# its net report reuses the relay's address-check connection instead of a
+# new TLS handshake every ~22 s (n0-computer/iroh#4523), and a relay's health
+# ping gets at least 3 s. Drop it for the first iroh release with #4523's
+# fix, keeping the ping floor (or iroh-relay's own) if it still has 0.5 s.
+iroh = { path = "vendor/iroh" }

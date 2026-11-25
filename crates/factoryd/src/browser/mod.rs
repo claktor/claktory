@@ -36,12 +36,13 @@ pub(crate) mod schema;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use factory_protocol::v1::{self, server_message::Body};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::locking::lock as guard;
 use crate::factory::{Factory, RequestError};
 use crate::transcript::now_ms;
 
@@ -244,10 +245,6 @@ struct InFlight {
     /// "click", "fill" or "navigate" for an action; "" otherwise.
     action: &'static str,
     waiter: oneshot::Sender<Result<String, String>>,
-}
-
-fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn refused(why: impl Into<String>) -> RequestError {

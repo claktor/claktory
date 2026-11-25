@@ -13,6 +13,7 @@
 
 use std::sync::OnceLock;
 
+use factory_agent::text::hidden;
 use factory_protocol::v1;
 use serde_json::{Map, Value, json};
 use unicode_normalization::UnicodeNormalization;
@@ -610,16 +611,6 @@ pub(crate) fn cleaned(text: &str, one_line: bool) -> String {
         }
     }
     kept.trim().to_owned()
-}
-
-/// Characters that show nothing, or change how what's around them shows.
-fn hidden(character: char) -> bool {
-    matches!(
-        u32::from(character),
-        0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
-            | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
-            | 0xFEFF | 0xFFA0 | 0xFFF0..=0xFFFB | 0x1D173..=0x1D17A | 0xE0000..=0xE0FFF
-    )
 }
 
 /// A type's fields as a tool's parameters: typed, and `extra`. Only types:

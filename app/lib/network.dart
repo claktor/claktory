@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// The device's network as the system sees it (NWPathMonitor, in the
@@ -128,6 +129,10 @@ Stream<NetworkPath> networkMoves(
   return moves.stream;
 }
 
+/// The device's network as last told, while [deviceNetworkMoves] is
+/// listened to; null before (and under `flutter test`). Settable for tests.
+final deviceNetwork = ValueNotifier<NetworkPath?>(null);
+
 /// This device's network moves, for every connection at once; settable for
 /// tests. None under `flutter test`, which has no runner to ask.
 Stream<NetworkPath> deviceNetworkMoves =
@@ -136,5 +141,6 @@ Stream<NetworkPath> deviceNetworkMoves =
     : networkMoves(
         const EventChannel('factory/network')
             .receiveBroadcastStream()
-            .map(NetworkPath.fromEvent),
+            .map(NetworkPath.fromEvent)
+            .map((path) => deviceNetwork.value = path),
       );

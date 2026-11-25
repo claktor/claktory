@@ -88,7 +88,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 97] = [
+const MIGRATIONS: [&str; 102] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -254,6 +254,11 @@ CREATE INDEX tasks_running ON tasks (agent, task) WHERE ended IS NULL;
     crate::proposals::UPDATED,
     crate::extensions::ask::ACTION,
     crate::extensions::ask::ACTION_WORDS,
+    crate::extensions::ask::THREAD,
+    crate::proposal_grants::SCHEMA,
+    crate::service::SCHEMA,
+    crate::pipes::shares::SCHEMA,
+    crate::pipes::share_listener::SCHEMA,
 ];
 
 /// A background task as recorded.

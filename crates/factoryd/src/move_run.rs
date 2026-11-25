@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use factory_protocol::v1;
@@ -27,6 +27,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::locking::lock as locked;
 use crate::factory::{Factory, RequestError};
 use crate::home::Home;
 use crate::move_export::{self, Moved, Options, Place, Service};
@@ -161,10 +162,6 @@ pub(crate) struct Moving {
     /// The person confirmed the digits here (ConfirmMove), for an agent
     /// that started it to pass on to the other computer.
     confirmed_here: AtomicBool,
-}
-
-fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl Moving {

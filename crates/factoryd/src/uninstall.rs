@@ -238,12 +238,12 @@ pub(crate) fn uninstall(setup: &Setup, delete_data: bool) -> Report {
     stop_leftovers(&setup.home);
     let mut failed = Vec::new();
     if let Some(plist) = &plan.plist
-        && let Err(error) = std::fs::remove_file(plist)
+        && let Err(error) = already_gone(std::fs::remove_file(plist))
     {
         failed.push(format!("{}: {error}", plist.display()));
     }
     for program in plan.bin.iter().chain(&plan.tools) {
-        if let Err(error) = std::fs::remove_dir_all(program) {
+        if let Err(error) = already_gone(std::fs::remove_dir_all(program)) {
             failed.push(format!("{}: {error}", program.display()));
         }
     }
@@ -347,6 +347,16 @@ pub(crate) fn stop_leftovers_but(home: &crate::home::Home, spare: &dyn Fn(&str, 
     }
 }
 
+/// A removal of something already gone succeeded: the plan is made before
+/// the backend stops, and a stopping backend removes some of its own files
+/// (`backend-running`, say).
+fn already_gone(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
 /// Removes the data that goes: moved aside at once (a rename, on the same
 /// volume), then deleted by a process of its own, since agents' checkouts
 /// can take minutes and the app quits meanwhile.
@@ -355,8 +365,11 @@ fn delete(root: &Path, plan: &Plan) -> Result<(), String> {
     // Nothing of theirs stays: the whole folder goes.
     let (aside, moves): (PathBuf, Vec<&PathBuf>) = if plan.keeps.is_empty() {
         let aside = root.with_file_name(format!(".factory-removed-{stamp}"));
-        std::fs::rename(root, &aside).map_err(|error| format!("{}: {error}", root.display()))?;
-        (aside, Vec::new())
+        match std::fs::rename(root, &aside) {
+            Ok(()) => (aside, Vec::new()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("{}: {error}", root.display())),
+        }
     } else {
         let aside = root.join(format!(".removing-{stamp}"));
         std::fs::create_dir_all(&aside).map_err(|error| format!("{}: {error}", aside.display()))?;
@@ -365,7 +378,7 @@ fn delete(root: &Path, plan: &Plan) -> Result<(), String> {
     let mut failed = Vec::new();
     for path in moves {
         let Some(name) = path.file_name() else { continue };
-        if let Err(error) = std::fs::rename(path, aside.join(name)) {
+        if let Err(error) = already_gone(std::fs::rename(path, aside.join(name))) {
             failed.push(format!("{}: {error}", path.display()));
         }
     }
@@ -435,10 +448,17 @@ mod tests {
     /// A launchctl that logs its calls; the job counts as loaded until it's
     /// booted out (a file says so).
     fn fake_launchctl(dir: &Path, stays: bool) -> PathBuf {
+        fake_launchctl_removing(dir, stays, &[])
+    }
+
+    /// As `fake_launchctl`, its bootout also removing `gone`, as a stopping
+    /// backend removes its own files.
+    fn fake_launchctl_removing(dir: &Path, stays: bool, gone: &[PathBuf]) -> PathBuf {
         let path = dir.join("launchctl");
         let loaded = dir.join("loaded");
         write(&loaded, "");
-        let bootout = if stays { "exit 5".to_owned() } else { format!("rm -f \"{}\"", loaded.display()) };
+        let gone: String = gone.iter().map(|path| format!(" \"{}\"", path.display())).collect();
+        let bootout = if stays { "exit 5".to_owned() } else { format!("rm -rf \"{}\"{gone}", loaded.display()) };
         let script = format!(
             "#!/bin/sh\necho \"$@\" >> \"{calls}\"\ncase \"$1\" in\n  print) [ -e \"{loaded}\" ] ;;\n  bootout) {bootout} ;;\nesac\n",
             calls = dir.join("calls").display(),
@@ -479,6 +499,7 @@ mod tests {
             launchctl: fake_launchctl(dir, false),
             domain: "gui/501".to_owned(),
             codesign: "/usr/bin/true".into(),
+            lsregister: "/usr/bin/true".into(),
             port: 0,
             answer_within: Duration::from_millis(100),
             path: None,
@@ -574,6 +595,36 @@ mod tests {
     }
 
     #[test]
+    fn what_the_stopping_backend_removed_itself_counts_as_removed() {
+        for keep_work in [true, false] {
+            let dir = temp();
+            let mut setup = installed(&dir);
+            let root = setup.home.root().to_owned();
+            if !keep_work {
+                std::fs::remove_dir_all(root.join("workspace")).expect("rm");
+                std::fs::remove_dir_all(root.join("projects")).expect("rm");
+            }
+            write(&root.join("backend-running"), "");
+            write(&root.join("factoryd.log"), "a log");
+            // Planned before the backend stops; gone once it has.
+            let gone = [root.join("backend-running"), root.join("factoryd.log"), root.join("bin"), setup.plist.clone()];
+            setup.launchctl = fake_launchctl_removing(&dir, false, &gone);
+            assert!(dry_run(&setup, true).removes.contains(&root.join("backend-running").display().to_string()));
+            let report = uninstall(&setup, true);
+            assert_eq!(
+                (report.result, report.reason.as_str(), report.detail.as_str()),
+                (Outcome::Removed, "Claktory and its data were removed from this Mac.", ""),
+                "{report:?}"
+            );
+            if keep_work {
+                assert_eq!(names(&root), ["projects", "workspace"]);
+            } else {
+                assert!(!root.exists());
+            }
+        }
+    }
+
+    #[test]
     fn a_job_launchd_wont_stop_changes_nothing() {
         let dir = temp();
         let mut setup = installed(&dir);
@@ -613,6 +664,7 @@ mod tests {
             launchctl: "/bin/launchctl".into(),
             domain: domain.clone(),
             codesign: "/usr/bin/true".into(),
+            lsregister: "/usr/bin/true".into(),
             port,
             answer_within: Duration::from_secs(60),
             path: None,

@@ -4,6 +4,7 @@
 // sharpness; and a Mac on a normal link gets the original as before.
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/mobile/metrics.dart' show Touch;
+import 'package:factory_app/viewers/image.dart' show decodeWithin;
 import 'package:factory_app/viewers/preview_badge.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
@@ -294,5 +295,30 @@ void main() {
     await _decoding(tester);
     expect(find.text('Show original · 36.4 MB'), findsOneWidget);
     expect(find.textContaining('too big'), findsNothing);
+  });
+
+  test('an image taller than the GPU allows is decoded within it in '
+      'proportion, never squashed', () {
+    // The iPhone's decoder capped only its height: 2880 × 15308 as
+    // 2880 × 8192.
+    expect(
+      decodeWithin(const Size(2880, 15308), const Size(2880, 8192)),
+      const Size(1541, 8192),
+    );
+    // And a too-wide one.
+    expect(
+      decodeWithin(const Size(20000, 1000), const Size(8192, 1000)),
+      const Size(8192, 410),
+    );
+    // Whole, or scaled evenly: as it came.
+    expect(
+      decodeWithin(const Size(2880, 15308), const Size(2880, 15308)),
+      isNull,
+    );
+    expect(
+      decodeWithin(const Size(2880, 15308), const Size(1440, 7654)),
+      isNull,
+    );
+    expect(decodeWithin(const Size(1001, 333), const Size(500, 166)), isNull);
   });
 }

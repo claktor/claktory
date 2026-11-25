@@ -422,3 +422,137 @@ async fn the_servers_fallback_block_marks_the_handoff_and_bills_the_serving_mode
     let expected = (1000.0 * 5.0 + 100.0 * 25.0) / 1_000_000.0;
     assert!((message.usage.cost.total - expected).abs() < 1e-9, "{:?}", message.usage.cost);
 }
+
+/// A response that thought before it answered, as Anthropic streams it.
+fn thought_chunks(id: &str) -> Vec<String> {
+    sse(&[
+        json!({"type": "message_start", "message": {"id": id, "model": "claude-fable-5", "usage": {"input_tokens": 3, "output_tokens": 1}}}),
+        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": format!("thought in {id}")}}),
+        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": format!("sig-{id}")}}),
+        json!({"type": "content_block_stop", "index": 0}),
+        json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}),
+        json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "done"}}),
+        json!({"type": "content_block_stop", "index": 1}),
+        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 9}}),
+        json!({"type": "message_stop"}),
+    ])
+}
+
+/// The signatures of the thinking blocks a request sent back.
+fn sent_thinking(body: &Value) -> Vec<String> {
+    let messages = body["messages"].as_array().expect("messages");
+    messages
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .flat_map(|message| message["content"].as_array().cloned().unwrap_or_default())
+        .filter(|block| block["type"] == "thinking")
+        .map(|block| block["signature"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn thinking_made_under_another_system_prompt_is_left_out_and_the_rest_kept() {
+    // Kakyoin's repro (Bruno 29608): Fable 5.2 refuses thinking made before
+    // the agent's prompt changed. It's left out once the system prompt or
+    // tools change, and kept while they don't.
+    use factory_agent::types::{Message, UserMessage};
+    let server = serve((1..=4).map(|n| served(thought_chunks(&format!("msg_{n}")), false, false)).collect()).await;
+    let mut model = models("anthropic").into_iter().find(|model| model.id == "claude-fable-5").expect("fable");
+    model.base_url = server.base_url.clone();
+    let options = || StreamOptions { api_key: Some("test-key".into()), reasoning: Some(ThinkingLevel::High), ..Default::default() };
+    let mut context = hello_context();
+    let ask = |context: &mut factory_agent::stream::LlmContext, text: &str| {
+        context.messages.push(Message::User(UserMessage::text(text, 1)));
+    };
+    for (n, system) in [
+        (1, "You are a coding agent."),
+        (2, "You are a coding agent."),
+        (3, "You are Mia, a coding agent."),
+        (4, "You are Mia, a coding agent."),
+    ] {
+        context.system_prompt = Some(system.into());
+        let message = stream_simple(&model, context.clone(), options()).expect("stream").result().await.expect("message");
+        assert_eq!(message.stop_reason, StopReason::Stop, "{n}: {:?}", message.error_message);
+        context.messages.push(Message::Assistant(message));
+        ask(&mut context, "next");
+    }
+    let requests = server.requests.lock().clone();
+    let sent: Vec<Vec<String>> = requests.iter().map(|request| sent_thinking(&request.body)).collect();
+    assert_eq!(sent[1], ["sig-msg_1"], "the same system prompt: kept");
+    assert!(sent[2].is_empty(), "the prompt changed: left out, {:?}", sent[2]);
+    assert_eq!(sent[3], ["sig-msg_3"], "made since: kept, the older still out");
+    // The rest of what came before is still sent: the answers, without their thinking.
+    let messages = requests[2].body["messages"].as_array().expect("messages").clone();
+    assert_eq!(messages.len(), 5);
+    assert_eq!(messages[1]["content"], json!([{"type": "text", "text": "done"}]));
+
+    // A change of tools counts too.
+    context.tools = vec![ToolSpec {
+        name: "read".into(),
+        label: "Read".into(),
+        description: "Read a file.".into(),
+        parameters: json!({"type": "object", "properties": {}}),
+        constrained_sampling: Value::Null,
+    }];
+    let server = serve(vec![served(thought_chunks("msg_5"), false, false)]).await;
+    model.base_url = server.base_url.clone();
+    stream_simple(&model, context.clone(), options()).expect("stream").result().await.expect("message");
+    assert!(sent_thinking(&server.requests.lock()[0].body).is_empty());
+}
+
+#[tokio::test]
+async fn a_request_refused_for_bound_thinking_is_sent_again_once_without_any_and_it_stays_out() {
+    // A conversation from before responses noted what they were made under:
+    // Anthropic's refusal is the only sign, and the turn isn't lost to it.
+    use factory_agent::types::{Message, UserMessage};
+    let refusal = json!({"type": "error", "error": {"type": "invalid_request_error",
+        "message": "messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to \"drop_block\"."}});
+    let server = serve(vec![
+        crate::support::server::served_json(400, refusal.clone()),
+        served(thought_chunks("msg_2"), false, false),
+        served(thought_chunks("msg_3"), false, false),
+        crate::support::server::served_json(400, refusal.clone()),
+        crate::support::server::served_json(400, refusal),
+    ])
+    .await;
+    let mut model = models("anthropic").into_iter().find(|model| model.id == "claude-fable-5").expect("fable");
+    model.base_url = server.base_url.clone();
+    let options = || StreamOptions { api_key: Some("test-key".into()), reasoning: Some(ThinkingLevel::High), ..Default::default() };
+    let old = factory_agent::types::AssistantMessage {
+        content: vec![
+            AssistantPart::Thinking { thinking: "old".into(), thinking_signature: Some("sig-old".into()), redacted: None },
+            AssistantPart::Text { text: "hi".into(), text_signature: None },
+        ],
+        api: model.api.clone(),
+        provider: model.provider.clone(),
+        model: model.id.clone(),
+        usage: Default::default(),
+        stop_reason: StopReason::Stop,
+        error_message: None,
+        timestamp: 1,
+        extra: Default::default(),
+    };
+    let mut context = hello_context();
+    context.messages.push(Message::Assistant(old));
+    context.messages.push(Message::User(UserMessage::text("next", 2)));
+    let message = stream_simple(&model, context.clone(), options()).expect("stream").result().await.expect("message");
+    assert_eq!(message.stop_reason, StopReason::Stop, "{:?}", message.error_message);
+    {
+        let requests = server.requests.lock();
+        assert_eq!(requests.len(), 2, "sent again once");
+        assert_eq!(sent_thinking(&requests[0].body), ["sig-old"]);
+        assert!(sent_thinking(&requests[1].body).is_empty());
+    }
+    // What the retry left out stays out; its own thinking goes back.
+    context.messages.push(Message::Assistant(message));
+    context.messages.push(Message::User(UserMessage::text("more", 3)));
+    stream_simple(&model, context.clone(), options()).expect("stream").result().await.expect("message");
+    assert_eq!(sent_thinking(&server.requests.lock()[2].body), ["sig-msg_2"]);
+
+    // Refused again, the turn fails with Anthropic's words, after one retry.
+    let failed = stream_simple(&model, context, options()).expect("stream").result().await.expect("message");
+    assert_eq!(failed.stop_reason, StopReason::Error);
+    assert!(failed.error_message.as_deref().is_some_and(|text| text.contains("bound to a different conversation")), "{failed:?}");
+    assert_eq!(server.requests.lock().len(), 5);
+}

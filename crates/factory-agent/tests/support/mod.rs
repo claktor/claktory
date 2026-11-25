@@ -285,7 +285,12 @@ pub mod fixtures {
             StreamEvent::Done { message, .. } | StreamEvent::Error { error: message, .. } => message,
             other => panic!("{name}: {other:?}"),
         };
-        let actual = message_json(message);
+        let mut actual = message_json(message);
+        // Factory notes what an Anthropic response's thinking is bound to
+        // (not Pi): its system prompt and tools.
+        if let Some(object) = actual.as_object_mut() {
+            object.remove("anthropicBinding");
+        }
         let mut expected = case["message"].clone();
         // Factory marks a key out of credit (not Pi): its account is skipped for a while.
         let body = case["http"]["chunks"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<String>();

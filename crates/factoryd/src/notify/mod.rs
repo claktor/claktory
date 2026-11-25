@@ -397,6 +397,15 @@ impl State {
         lock(&self.data)
     }
 
+    /// Entry `seq` of `agent`, which already waits for the person, notifies
+    /// at the next Workspace as if it newly waited: its agent answered them
+    /// on a card that still waits (#430, ask_reply on a procedure).
+    pub(crate) fn waits_again(&self, agent: &str, seq: u64) {
+        if let Some(seen) = self.data().agents.get_mut(agent) {
+            seen.waiting.remove(&seq);
+        }
+    }
+
     /// The presence of a connection of `device` (its id; "local" for this
     /// computer's app), inactive until it says otherwise (SetActive); it
     /// goes when the connection closes.

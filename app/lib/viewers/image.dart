@@ -13,6 +13,7 @@ import '../identity.dart';
 import '../ink_preview.dart';
 import '../ipad/pencil_hint.dart';
 import '../mobile/metrics.dart';
+import '../mobile/viewer_chrome.dart';
 import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
@@ -28,6 +29,25 @@ import 'registry.dart';
 /// scroll to move. Comments are on regions of it: the header's Comment,
 /// then a drag across it, marks one; each comment's region is outlined in
 /// its agent's color, and a click on one picks it.
+/// The size to decode an image of [real] size at when the decoder gave
+/// [decoded] instead with its shape changed: each side capped on its own
+/// at the GPU's largest texture (the iPhone's), as 2880 × 15308 comes as
+/// 2880 × 8192. The largest size of [real]'s shape within [decoded]; null
+/// when [decoded] kept the shape (the whole image, or one scaled evenly).
+@visibleForTesting
+Size? decodeWithin(Size real, Size decoded) {
+  if (real.isEmpty || decoded.isEmpty) return null;
+  final across = decoded.width / real.width,
+      down = decoded.height / real.height;
+  final scale = across < down ? across : down;
+  // The same shape but for rounding: kept.
+  if ((across - down).abs() < 0.01 * scale) return null;
+  return Size(
+    (real.width * scale).roundToDouble().clamp(1, decoded.width),
+    (real.height * scale).roundToDouble().clamp(1, decoded.height),
+  );
+}
+
 class ImageViewer extends StatefulWidget {
   const ImageViewer({super.key, required this.path});
 
@@ -38,7 +58,7 @@ class ImageViewer extends StatefulWidget {
 }
 
 class _ImageViewerState extends State<ImageViewer>
-    with FileLoading<ImageViewer> {
+    with FileLoading<ImageViewer>, SingleTickerProviderStateMixin {
   @override
   String get path => widget.path;
 
@@ -272,9 +292,11 @@ class _ImageViewerState extends State<ImageViewer>
   }
 
   /// A click on a comment's region picks it; anywhere else lets go.
-  void _tapped(TapUpDetails details) {
+  /// A tap on the image: a comment's pin or region picks it; elsewhere
+  /// the picked one is let go. Whether it picked one.
+  bool _tapped(TapUpDetails details) {
     final comments = this.comments;
-    if (comments == null || _image == null) return;
+    if (comments == null || _image == null) return false;
     final at = _fraction(details.localPosition);
     String? hit;
     // A pin first: a spot has nothing else to click. A fingertip's
@@ -299,6 +321,7 @@ class _ImageViewerState extends State<ImageViewer>
         hit = thread.id;
       }
     }
+    final picked = comments.focused != null;
     if (hit != null) {
       comments.focus(hit);
     } else {
@@ -307,13 +330,99 @@ class _ImageViewerState extends State<ImageViewer>
     if (comments.selection.value is Region && comments.composing == null) {
       comments.selection.value = null;
     }
+    // Letting one go is what the tap did too.
+    return hit != null || picked;
   }
+
+  /// On a phone, fitted, a pinch: the zoom as it began, and where.
+  Matrix4? _fittedFrom;
+  var _fittedAt = Offset.zero;
+
+  void _fittedPinchStart(ScaleStartDetails details) {
+    if (details.pointerCount < 2) {
+      _fittedFrom = null;
+      return;
+    }
+    _settle.stop();
+    _fitted = false;
+    _fittedFrom = _zoom.value.clone();
+    _fittedAt = details.localFocalPoint;
+  }
+
+  void _fittedPinchUpdate(ScaleUpdateDetails details) {
+    final from = _fittedFrom;
+    if (from == null) return;
+    final was = from.getMaxScaleOnAxis();
+    final factor = (was * details.scale).clamp(_minScale, 8.0) / was;
+    final at = details.localFocalPoint;
+    _zoom.value = Matrix4.identity()
+      ..translateByDouble(at.dx, at.dy, 0, 1)
+      ..scaleByDouble(factor, factor, factor, 1)
+      ..translateByDouble(-_fittedAt.dx, -_fittedAt.dy, 0, 1)
+      ..multiply(from);
+  }
+
+  void _fittedPinchEnd(ScaleEndDetails details) {
+    _fittedFrom = null;
+    _settleIfSmaller();
+  }
+
+  /// The image fitted and centered in the pane.
+  Matrix4 _fittedMatrix(Size box) {
+    final width = box.width * _fit;
+    final height = box.height * _fit;
+    return Matrix4.identity()
+      ..translateByDouble(
+        (_pane.width - width) / 2,
+        (_pane.height - height) / 2,
+        0,
+        1,
+      )
+      ..scaleByDouble(_fit, _fit, _fit, 1);
+  }
+
+  /// Pinched smaller than fitting, let go: back to fitted, as Photos.
+  late final _settle = AnimationController(vsync: this, duration: Motion.base);
+
+  void _settleIfSmaller() {
+    final box = _box;
+    if (!isPhoneLayout(context) || box == null || _scale >= _fit * 0.99) {
+      return;
+    }
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _fitNow();
+      return;
+    }
+    final tween = Matrix4Tween(
+      begin: _zoom.value.clone(),
+      end: _fittedMatrix(box),
+    );
+    final curve = CurvedAnimation(parent: _settle, curve: Curves.easeOut);
+    void step() => _zoom.value = tween.evaluate(curve);
+    _settle
+      ..stop()
+      ..value = 0;
+    _settle.addListener(step);
+    _settle.forward().whenCompleteOrCancel(() {
+      _settle.removeListener(step);
+      curve.dispose();
+      if (mounted && _scale < _fit * 1.01) _fitNow();
+    });
+  }
+
+  /// Zoomed in past fitting: on a phone, one finger pans it, and a pull
+  /// down doesn't close the page.
+  bool get _zoomedIn => _scale > _fit * 1.01;
+  var _wasZoomedIn = false;
 
   void _zoomChanged() {
     final phase = SchedulerBinding.instance.schedulerPhase;
     // The margin's cards follow the regions too.
     void follow() {
       _shownScale.value = _scale;
+      if (_zoomedIn != _wasZoomedIn && mounted) {
+        setState(() => _wasZoomedIn = _zoomedIn);
+      }
       comments?.relayout();
       _sharpEnough();
     }
@@ -369,10 +478,35 @@ class _ImageViewerState extends State<ImageViewer>
 
   Future<void> _decode(FileContent file, Uint8List bytes) async {
     try {
-      final codec = await ui.instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
-      if (!mounted) return;
-      final image = frame.image;
+      final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+      final descriptor = await ui.ImageDescriptor.encoded(buffer);
+      final real = Size(
+        descriptor.width.toDouble(),
+        descriptor.height.toDouble(),
+      );
+      var image =
+          (await (await descriptor.instantiateCodec()).getNextFrame()).image;
+      // Past the GPU's largest texture, the iPhone's decoder caps each
+      // side on its own (2880 × 15308 came as 2880 × 8192, squashed):
+      // decoded again within both caps, in proportion.
+      final within = decodeWithin(
+        real,
+        Size(image.width.toDouble(), image.height.toDouble()),
+      );
+      if (within != null) {
+        image.dispose();
+        final codec = await descriptor.instantiateCodec(
+          targetWidth: within.width.round(),
+          targetHeight: within.height.round(),
+        );
+        image = (await codec.getNextFrame()).image;
+      }
+      descriptor.dispose();
+      buffer.dispose();
+      if (!mounted) {
+        image.dispose();
+        return;
+      }
       setState(() {
         _image?.dispose();
         _image = image;
@@ -384,7 +518,7 @@ class _ImageViewerState extends State<ImageViewer>
                 file.originalPixelWidth.toDouble(),
                 file.originalPixelHeight.toDouble(),
               )
-            : Size(image.width.toDouble(), image.height.toDouble());
+            : real;
         // The same version again (its original, say): as it was shown.
         if (file.sha256.isEmpty || file.sha256 != _decoded) _fitted = true;
         _decoded = file.sha256;
@@ -420,6 +554,7 @@ class _ImageViewerState extends State<ImageViewer>
   void dispose() {
     _focus.dispose();
     _shownScale.dispose();
+    _settle.dispose();
     _zoom.dispose();
     _image?.dispose();
     super.dispose();
@@ -554,26 +689,17 @@ class _ImageViewerState extends State<ImageViewer>
         key: _paneKey,
         builder: (context, constraints) {
           _pane = constraints.biggest;
+          // Edge to edge on a phone, as in Photos.
+          final margin = phone ? 0.0 : 2 * Space.l;
           final fit = [
             1.0,
-            (_pane.width - 2 * Space.l) / box.width,
-            (_pane.height - 2 * Space.l) / box.height,
+            (_pane.width - margin) / box.width,
+            (_pane.height - margin) / box.height,
           ].reduce((a, b) => a < b ? a : b).clamp(0.01, 1.0);
           _fit = fit;
           // Scaled on every axis, as InteractiveViewer scales: its zoom
           // limits read the largest.
-          if (_fitted) {
-            final width = box.width * fit;
-            final height = box.height * fit;
-            _zoom.value = Matrix4.identity()
-              ..translateByDouble(
-                (_pane.width - width) / 2,
-                (_pane.height - height) / 2,
-                0,
-                1,
-              )
-              ..scaleByDouble(fit, fit, fit, 1);
-          }
+          if (_fitted) _zoom.value = _fittedMatrix(box);
           // The Comment button over the image takes its own clicks at
           // once, outside the image's double click.
           return Stack(
@@ -605,8 +731,20 @@ class _ImageViewerState extends State<ImageViewer>
                     focusNode: _focus,
                     child: GestureDetector(
                       // While picking, a click is the spot at once: no
-                      // waiting to see if it's a double click.
-                      onTapUp: comments == null || _marking ? null : _tapped,
+                      // waiting to see if it's a double click. On a
+                      // phone, a tap that picks no comment shows or hides
+                      // the page's chrome (mobile/viewer_chrome).
+                      onTapUp: _marking
+                          ? null
+                          : comments == null
+                          ? (phone
+                                ? (_) => ViewerChrome.maybeOf(context)?.toggle()
+                                : null)
+                          : (details) {
+                              if (!_tapped(details) && phone) {
+                                ViewerChrome.maybeOf(context)?.toggle();
+                              }
+                            },
                       onDoubleTapDown: _marking
                           ? null
                           : (details) => _doubleTapAt = details.localPosition,
@@ -628,41 +766,74 @@ class _ImageViewerState extends State<ImageViewer>
                         },
                         child: Stack(
                           children: [
-                            InteractiveViewer(
-                              transformationController: _zoom,
-                              constrained: false,
-                              minScale: _minScale,
-                              maxScale: 8,
-                              boundaryMargin: const EdgeInsets.all(
-                                double.infinity,
-                              ),
-                              onInteractionStart: (_) => _fitted = false,
-                              child: SizedBox(
-                                width: box.width,
-                                height: box.height,
-                                child: Stack(
-                                  fit: StackFit.expand,
-                                  children: [
-                                    CustomPaint(
-                                      painter: _Checkerboard(
-                                        palette.hairline,
-                                        zoom: _zoom,
-                                      ),
-                                      child: RawImage(
-                                        image: image,
-                                        width: box.width,
-                                        height: box.height,
-                                        fit: BoxFit.fill,
-                                        filterQuality: _pixelScale > 2
-                                            ? FilterQuality.none
-                                            : FilterQuality.medium,
-                                      ),
+                            // On a phone, fitted, one finger pulls the
+                            // page down to close it (SwipeToClose), so the
+                            // viewer's own pan, which would win that drag,
+                            // takes no touches until zoomed in; two fingers
+                            // zoom meanwhile.
+                            RawGestureDetector(
+                              // Hit where the viewer under it isn't, so
+                              // taps reach the page's.
+                              behavior: HitTestBehavior.opaque,
+                              gestures: {
+                                if (phone)
+                                  _PinchOnly:
+                                      GestureRecognizerFactoryWithHandlers<
+                                        _PinchOnly
+                                      >(_PinchOnly.new, (pinch) {
+                                        pinch
+                                          ..onStart = _fittedPinchStart
+                                          ..onUpdate = _fittedPinchUpdate
+                                          ..onEnd = _fittedPinchEnd;
+                                      }),
+                              },
+                              child: IgnorePointer(
+                                ignoring: phone && !_wasZoomedIn,
+                                child: InteractiveViewer(
+                                  transformationController: _zoom,
+                                  // On a phone, fitted, one finger pulls it
+                                  // down to close: it pans once zoomed in.
+                                  panEnabled: !phone || _wasZoomedIn,
+                                  constrained: false,
+                                  minScale: _minScale,
+                                  maxScale: 8,
+                                  boundaryMargin: const EdgeInsets.all(
+                                    double.infinity,
+                                  ),
+                                  onInteractionStart: (_) {
+                                    _settle.stop();
+                                    _fitted = false;
+                                  },
+                                  onInteractionEnd: (_) => _settleIfSmaller(),
+                                  child: SizedBox(
+                                    width: box.width,
+                                    height: box.height,
+                                    child: Stack(
+                                      fit: StackFit.expand,
+                                      children: [
+                                        CustomPaint(
+                                          painter: _Checkerboard(
+                                            palette.hairline,
+                                            zoom: _zoom,
+                                            base: phone ? palette.canvas : null,
+                                          ),
+                                          child: RawImage(
+                                            image: image,
+                                            width: box.width,
+                                            height: box.height,
+                                            fit: BoxFit.fill,
+                                            filterQuality: _pixelScale > 2
+                                                ? FilterQuality.none
+                                                : FilterQuality.medium,
+                                          ),
+                                        ),
+                                        // In the image's own box, so it zooms
+                                        // with it; it takes no touches.
+                                        if (inked.isNotEmpty)
+                                          InkPreview(path: path, sha256: inked),
+                                      ],
                                     ),
-                                    // In the image's own box, so it zooms
-                                    // with it; it takes no touches.
-                                    if (inked.isNotEmpty)
-                                      InkPreview(path: path, sha256: inked),
-                                  ],
+                                  ),
                                 ),
                               ),
                             ),
@@ -765,14 +936,16 @@ class _ImageViewerState extends State<ImageViewer>
                   ),
                 ),
               // A preview says so, in the corner clear of the header's
-              // buttons, Comment's and the bar under the image (#379).
-              if (previewBadge() case final badge?)
-                Positioned(
-                  left: Space.m,
-                  right: Space.m,
-                  bottom: Space.m,
-                  child: Align(alignment: Alignment.bottomLeft, child: badge),
-                ),
+              // buttons, Comment's and the bar under the image (#379); on
+              // a phone, over its foot with the chrome.
+              if (!phone)
+                if (previewBadge() case final badge?)
+                  Positioned(
+                    left: Space.m,
+                    right: Space.m,
+                    bottom: Space.m,
+                    child: Align(alignment: Alignment.bottomLeft, child: badge),
+                  ),
             ],
           );
         },
@@ -792,11 +965,46 @@ class _ImageViewerState extends State<ImageViewer>
                       'Comment, then drag across it.',
             child: body,
           );
+    final badge = phone ? previewBadge() : null;
+    // On a phone, Comment at rest is in the row over the image's foot,
+    // with a preview's badge; picking, the bar says how.
+    final commentAtRest =
+        phone && comments != null && !_marking && draw == null && image != null;
     return PaneScaffold(
       share: sharePath,
       details: details,
       controls: controls,
       comments: comments == null ? null : CommentsButton(controller: comments),
+      phoneKind: PhoneViewerKind.media,
+      phoneOverlay: badge == null && !commentAtRest
+          ? null
+          : Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: Space.m,
+                vertical: Space.xs,
+              ),
+              // The badge at the start, Comment at the end; where both
+              // don't fit (a small iPhone, large text), Comment goes under.
+              child: Wrap(
+                alignment: badge == null
+                    ? WrapAlignment.end
+                    : WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: Space.s,
+                runSpacing: Space.xs,
+                children: [
+                  ?badge,
+                  if (commentAtRest)
+                    MediaQuery.withClampedTextScaling(
+                      maxScaleFactor: maxPreviewBadgeTextScale,
+                      child: Button(
+                        label: 'Comment',
+                        onPressed: _toggleMarking,
+                      ),
+                    ),
+                ],
+              ),
+            ),
       actions: [
         if (draw != null) PaneAction('Draw', draw),
         if (image != null) ...[
@@ -813,7 +1021,7 @@ class _ImageViewerState extends State<ImageViewer>
               onDraw: draw,
               onComment: comments == null ? null : _toggleMarking,
             )
-          : comments == null
+          : comments == null || commentAtRest
           ? null
           : CommentModeBar(
               marking: _marking,
@@ -822,12 +1030,21 @@ class _ImageViewerState extends State<ImageViewer>
               action: 'Whole image',
               onAction: _markWhole,
             ),
-      body: ClipRect(
-        child: ColoredBox(
-          color: palette.canvas,
-          child: comments == null
-              ? pencil(body)
-              : Commented(controller: comments, child: pencil(body)),
+      body: HoldViewerChrome(
+        when: _marking,
+        child: HoldViewerChrome(
+          when: _wasZoomedIn,
+          chrome: false,
+          child: ClipRect(
+            child: ColoredBox(
+              // On a phone, what's behind it (the canvas, or black once
+              // its chrome is hidden) shows round it.
+              color: phone ? const Color(0x00000000) : palette.canvas,
+              child: comments == null
+                  ? pencil(body)
+                  : Commented(controller: comments, child: pencil(body)),
+            ),
+          ),
         ),
       ),
     );
@@ -932,13 +1149,20 @@ class _Regions extends CustomPainter {
 /// Faint squares under an image, so where it's transparent shows: 8
 /// points on screen each, whatever the [zoom].
 class _Checkerboard extends CustomPainter {
-  _Checkerboard(this.color, {required this.zoom}) : super(repaint: zoom);
+  _Checkerboard(this.color, {required this.zoom, this.base})
+    : super(repaint: zoom);
 
   final Color color;
   final TransformationController zoom;
 
+  /// Under the squares (a phone's, whose page may be black round it).
+  final Color? base;
+
   @override
   void paint(Canvas canvas, Size size) {
+    if (base case final base?) {
+      canvas.drawRect(Offset.zero & size, Paint()..color = base);
+    }
     final cell = 8 / zoom.value.getMaxScaleOnAxis().clamp(0.01, 8.0);
     final paint = Paint()..color = color;
     for (var row = 0; row * cell < size.height; row++) {
@@ -958,5 +1182,45 @@ class _Checkerboard extends CustomPainter {
 
   @override
   bool shouldRepaint(_Checkerboard old) =>
-      old.color != color || old.zoom != zoom;
+      old.color != color || old.zoom != zoom || old.base != base;
+}
+
+/// A pinch of two fingers or more, never one finger's drag: on a phone a
+/// fitted picture's one-finger drag is the page's pull to close.
+class _PinchOnly extends ScaleGestureRecognizer {
+  _PinchOnly()
+    : super(
+        supportedDevices: {PointerDeviceKind.touch, PointerDeviceKind.stylus},
+      );
+
+  final _down = <int>{};
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    _down.add(event.pointer);
+    super.addAllowedPointer(event);
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event is PointerUpEvent || event is PointerCancelEvent) {
+      _down.remove(event.pointer);
+    }
+    super.handleEvent(event);
+  }
+
+  @override
+  void resolve(GestureDisposition disposition) {
+    // One finger: it waits, for a second or for another to take the drag.
+    if (disposition == GestureDisposition.accepted && _down.length < 2) {
+      return;
+    }
+    super.resolve(disposition);
+  }
+
+  @override
+  void didStopTrackingLastPointer(int pointer) {
+    _down.clear();
+    super.didStopTrackingLastPointer(pointer);
+  }
 }

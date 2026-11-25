@@ -125,7 +125,7 @@ async fn going_back_sets_the_rest_aside_and_the_agent_hears_what_still_stands() 
     assert_eq!(given.len(), 1, "{given:?}");
     let (note, quiet) = &given[0];
     assert!(quiet);
-    assert!(note.starts_with("the person took your conversation back to "), "{note}");
+    assert!(note.starts_with("The person took your conversation back to "), "{note}");
     assert!(note.contains("is kept as another version the person can switch back to. You remember only what's above."), "{note}");
     assert!(note.contains("\n- Messages you sent: none. Pipe messages: none."), "{note}");
     assert!(note.contains("\n- Files you wrote or edited: notes.md. Commands run: none."), "{note}");
@@ -143,7 +143,7 @@ async fn going_back_sets_the_rest_aside_and_the_agent_hears_what_still_stands() 
     assert!(!folder.join("branches").join(&version.id).exists(), "the version is the conversation again");
     say(&mut client, &mut view, "five").await;
     let note = notes(&view).pop().expect("a note").0;
-    assert!(note.starts_with("the person switched you to another version of your conversation"), "{note}");
+    assert!(note.starts_with("The person switched you to another version of your conversation"), "{note}");
 
     // Deleted, it's gone; a name that isn't a version's is refused.
     let other = branches[0].id.clone();
@@ -259,6 +259,57 @@ async fn the_person_goes_back_lists_switches_and_deletes_versions() {
     let unknown = v1::ListBranches { agent_id: "nobody".into() };
     let refused = apply_request(&mut client, &mut view, client_message::Body::ListBranches(unknown)).await;
     assert!(matches!(&refused, Body::Error(error) if error.code() == v1::ErrorCode::NotFound), "{refused:?}");
+}
+
+/// Changed again before the agent read its note (Zucchero's row 388): it
+/// gets one note, about the conversation it remembers and the one it's in
+/// now, never one about a conversation it's no longer in.
+#[tokio::test]
+async fn a_second_change_before_the_note_is_read_says_both_in_one() {
+    let dir = temp_dir();
+    let (factory, mut client, mut view) = setup(&dir).await;
+    say(&mut client, &mut view, "one").await;
+    say(&mut client, &mut view, "two").await;
+    let (two, at) = entry(&view, "two");
+    fork::fork_for_test(&factory, "builder", two, at).await.expect("forked");
+    view.follow(&mut client, |view| !shown(view).contains(&"two".to_owned())).await;
+    let older = fork::branches_for_test(&factory, "builder")[0].id.clone();
+    say(&mut client, &mut view, "three").await;
+    assert_eq!(notes(&view).len(), 1);
+
+    // Back to where the older version parts (its note waits), then switched
+    // to that version, which sets nothing aside: the note says the switch,
+    // from where the two part, and nothing of going back.
+    let (reply, at) = entry(&view, "echo: one");
+    fork::fork_for_test(&factory, "builder", reply, at).await.expect("forked");
+    view.follow(&mut client, |view| !shown(view).contains(&"three".to_owned())).await;
+    fork::switch_for_test(&factory, "builder", &older).await.expect("switched");
+    view.follow(&mut client, |view| shown(view).contains(&"two".to_owned())).await;
+    say(&mut client, &mut view, "four").await;
+    let given = notes(&view);
+    assert_eq!(given.len(), 1, "only the new note: {given:?}");
+    let note = &given[0].0;
+    assert!(note.starts_with("The person switched you to another version of your conversation"), "{note}");
+    // The note before, "three" and its reply.
+    assert!(note.contains(", 3 messages) is kept as another version"), "{note}");
+    assert_eq!(shown(&view), ["one", "echo: one", "two", "echo: two", "four", "echo: four"]);
+
+    // Back twice: one note, from the earlier point, with all it forgot.
+    say(&mut client, &mut view, "five").await;
+    let (five, at_five) = entry(&view, "five");
+    fork::fork_for_test(&factory, "builder", five, at_five).await.expect("forked");
+    view.follow(&mut client, |view| !shown(view).contains(&"five".to_owned())).await;
+    let (four, at_four) = entry(&view, "four");
+    fork::fork_for_test(&factory, "builder", four, at_four).await.expect("forked");
+    view.follow(&mut client, |view| !shown(view).contains(&"four".to_owned())).await;
+    say(&mut client, &mut view, "six").await;
+    let given = notes(&view);
+    assert_eq!(given.len(), 2, "the switch's and one more: {given:?}");
+    let note = &given[1].0;
+    assert!(note.starts_with("The person took your conversation back to "), "{note}");
+    // four, five and their replies.
+    assert!(note.contains(", 4 messages) is kept as another version"), "{note}");
+    assert_eq!(&shown(&view)[4..], ["six", "echo: six"]);
 }
 
 /// `agent`, selected, calls `tool` with `args`; returns what it said, and

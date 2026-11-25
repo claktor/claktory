@@ -287,8 +287,12 @@ fn trigger(factory: &Arc<Factory>, monitor: &mut Monitor, trigger: Trigger, now:
     monitor.cursor.last_after_carry = false;
     save(&factory.store, monitor, now, &trigger.by, Some(("fired", &trigger.cause)), true)?;
     if last {
-        let reason = if monitor.max_fires.is_some_and(|max| monitor.fires >= max) { "it fired max_fires times" } else { "it fired" };
-        end(factory, monitor, Status::Done, reason, now)?;
+        let reason = match monitor.max_fires {
+            Some(1) => "it fired once, as it was set to".to_owned(),
+            Some(max) if monitor.fires >= max => format!("it fired {max} times, as it was set to"),
+            _ => "it fired".to_owned(),
+        };
+        end(factory, monitor, Status::Done, &reason, now)?;
     }
     Ok(())
 }
@@ -586,31 +590,13 @@ struct SecretFiles(PathBuf);
 impl SecretFiles {
     /// The secrets' variables, file ones as their files' paths.
     fn environment(&self, variables: &[SecretVariable]) -> std::io::Result<Vec<(String, Zeroizing<String>)>> {
-        use std::io::Write as _;
-        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         self.remove();
-        let mut environment = Vec::with_capacity(variables.len());
-        let mut made = false;
-        for (index, variable) in variables.iter().enumerate() {
-            if !variable.file {
-                environment.push((variable.variable.clone(), variable.value.clone()));
-                continue;
+        factory_agent::secrets::command_environment(variables, &self.0, || {
+            if let Some(parent) = self.0.parent() {
+                std::fs::create_dir_all(parent)?;
             }
-            if !made {
-                if let Some(parent) = self.0.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::DirBuilder::new().mode(0o700).create(&self.0)?;
-                made = true;
-            }
-            let safe = !variable.variable.is_empty() && variable.variable.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
-            let name = if safe { variable.variable.clone() } else { format!("secret-{index}") };
-            let path = self.0.join(name);
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
-            file.write_all(&variable.bytes())?;
-            environment.push((variable.variable.clone(), Zeroizing::new(path.display().to_string())));
-        }
-        Ok(environment)
+            Ok(())
+        })
     }
 
     fn remove(&self) {

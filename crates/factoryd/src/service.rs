@@ -14,35 +14,120 @@
 //! holds the port); and this backend stops as SIGTERM stops it, finishing
 //! what it's writing.
 //!
+//! Stopping and starting it from the Mac app (friend bug #27) uses
+//! launchd's own enabled flag: a stopped Claktory's job is disabled and
+//! booted out, so KeepAlive can't bring it back and launchd doesn't load it
+//! at login, until the app's `factoryd install --start` enables and loads it
+//! again. StopEngine disables it, and a helper in a session of its own
+//! boots it out: launchd stops the supervisor, which stops this backend as
+//! SIGTERM does. A disabled job that's loaded keeps running (KeepAlive
+//! too), so in stop mode (Settings.when_app_quits) the job stays disabled
+//! while it runs: nothing starts it at login, even after a crash or a power
+//! cut with the app open. `stopped.json` in the home says what stopped it
+//! (the app quitting, or the person's switch, which holds it off when the
+//! app opens). Never while an update goes in or is on trial: a stop then
+//! would read as a failed update and roll it back.
+//!
 //! Only for this user's real Claktory on a Mac: the dev Claktory and those
 //! tests or QA run elsewhere (`FACTORY_HOME`) say nothing, unless
 //! `FACTORY_SERVICE_LABEL` names a job of their own for QA to try this with
 //! (`~/Library/LaunchAgents/<label>.plist`), never Claktory's.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use factory_protocol::v1::{self, BackendServiceState as State};
+use factory_protocol::v1::{self, BackendServiceState as State, QuitMode};
+use rusqlite::OptionalExtension;
 
+use crate::locking::lock as guard;
 use crate::factory::{Factory, RequestError};
 use crate::home::Home;
 use crate::launch_agent::{self, Job};
+use crate::store::Store;
 
-/// What the Workspace shows of it.
+pub(crate) const SCHEMA: &str = "
+-- What happens to Claktory on its Mac when the Mac app quits (friend bug
+-- #27): 'keep' (it keeps running) or 'stop'. No row: keep.
+CREATE TABLE engine (id INTEGER PRIMARY KEY CHECK (id = 1), when_app_quits TEXT NOT NULL);
+";
+
+/// What the Workspace shows of it, and what's under way.
 #[derive(Default)]
 pub(crate) struct Service {
     view: Mutex<v1::BackendService>,
+    /// Settings.when_app_quits: true for stop.
+    stop_on_quit: Mutex<bool>,
+    phase: Mutex<Phase>,
+}
+
+/// An update going in and a stop shut each other out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Phase {
+    #[default]
+    Running,
+    Updating,
+    Stopping,
 }
 
 impl Service {
+    /// With the setting factory.db has.
+    pub(crate) fn load(store: &Store) -> Service {
+        let mode: Option<String> =
+            store.db().query_row("SELECT when_app_quits FROM engine WHERE id = 1", [], |row| row.get(0)).optional().unwrap_or_else(
+                |error| {
+                    tracing::error!(%error, "could not read what happens when the app quits");
+                    None
+                },
+            );
+        Service { stop_on_quit: Mutex::new(mode.as_deref() == Some("stop")), ..Service::default() }
+    }
+
     pub(crate) fn view(&self) -> v1::BackendService {
-        self.view.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        guard(&self.view).clone()
     }
 
     fn set(&self, view: v1::BackendService) {
-        *self.view.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = view;
+        *guard(&self.view) = view;
     }
+
+    /// Settings.when_app_quits.
+    pub(crate) fn when_app_quits(&self) -> QuitMode {
+        if *guard(&self.stop_on_quit) { QuitMode::Stop } else { QuitMode::KeepRunning }
+    }
+
+    /// An update starts going in; refused while Claktory is stopping.
+    pub(crate) fn begin_update(&self) -> Result<(), RequestError> {
+        let mut phase = guard(&self.phase);
+        if *phase == Phase::Stopping {
+            return Err(RequestError::Usage("Claktory is stopping, so it can't update now.".to_owned()));
+        }
+        *phase = Phase::Updating;
+        Ok(())
+    }
+
+    /// The update didn't go in: Claktory carries on as it was.
+    pub(crate) fn update_failed(&self) {
+        let mut phase = guard(&self.phase);
+        if *phase == Phase::Updating {
+            *phase = Phase::Running;
+        }
+    }
+}
+
+/// What stopped Claktory, for `factoryd install --check`: `{"by": "quit" |
+/// "switch", "time": ms}`. Gone once it starts again.
+pub(crate) fn stopped_marker(home: &Home) -> PathBuf {
+    home.root().join("stopped.json")
+}
+
+/// Whether the person's switch stopped it (`stopped.json` says "switch"),
+/// so opening the app leaves it stopped.
+pub(crate) fn held(home: &Home) -> bool {
+    std::fs::read(stopped_marker(home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|marker| marker["by"] == "switch")
 }
 
 /// How long the backend has to stop before the service is loaded anyway
@@ -56,6 +141,9 @@ const RESTORE: &str = r#"
 lc="$1" domain="$2" label="$3" plist="$4" pid="$5" tries="$6"
 i=0
 while kill -0 "$pid" 2>/dev/null && [ $i -lt "$tries" ]; do sleep 0.1; i=$((i + 1)); done
+# A stopped Claktory's job is disabled (friend bug #27), and launchd won't
+# load a disabled job; in stop mode the backend disables it again as it starts.
+"$lc" enable "$domain/$label"
 if "$lc" print "$domain/$label" >/dev/null 2>&1; then
   "$lc" kickstart -k "$domain/$label" && echo "restarted $label, which runs Claktory again" && exit 0
 else
@@ -104,7 +192,7 @@ fn loaded(job: &Job, label: &str) -> bool {
 /// the job at `job`.
 pub(crate) fn examine(home: &Home, job: &Job, label: &str, supervised: bool) -> v1::BackendService {
     if supervised {
-        return v1::BackendService { state: State::Running.into(), ..Default::default() };
+        return v1::BackendService { state: State::Running.into(), can_stop: true, ..Default::default() };
     }
     let can_restore = set_up(home, job, label);
     let reason = if !can_restore {
@@ -114,7 +202,7 @@ pub(crate) fn examine(home: &Home, job: &Job, label: &str, supervised: bool) -> 
     } else {
         "Claktory was started by hand, and its background service isn't running, so Claktory won't start again by itself if it stops or this Mac restarts, and it can't move to another computer. Restore puts the service back in charge: Claktory restarts once, and your agents carry on."
     };
-    v1::BackendService { state: State::ByHand.into(), reason: reason.to_owned(), can_restore, restoring: false }
+    v1::BackendService { state: State::ByHand.into(), reason: reason.to_owned(), can_restore, ..Default::default() }
 }
 
 /// This Mac's real Claktory: its job and label, if it's one to say
@@ -134,13 +222,32 @@ fn job_here(home: &Home) -> Option<(Job, String)> {
     }
 }
 
-/// At start: how this backend runs, for the Workspace.
+/// Whether this backend runs under this Mac's background service, which
+/// the Mac app can stop and start (BackendService.can_stop).
+pub(crate) fn runs_here(home: &Home) -> bool {
+    std::env::var_os(crate::update::SUPERVISED).is_some() && job_here(home).is_some()
+}
+
+/// At start: how this backend runs, for the Workspace; and in stop mode,
+/// the job disabled, so nothing starts it at login.
 pub(crate) fn check(factory: &Arc<Factory>) {
     let factory = factory.clone();
     tokio::spawn(async move {
         let home = factory.home.clone();
         let supervised = std::env::var_os(crate::update::SUPERVISED).is_some();
-        let view = tokio::task::spawn_blocking(move || job_here(&home).map(|(job, label)| examine(&home, &job, &label, supervised))).await;
+        let stop = factory.service.when_app_quits() == QuitMode::Stop;
+        let view = tokio::task::spawn_blocking(move || {
+            job_here(&home).map(|(job, label)| {
+                let view = examine(&home, &job, &label, supervised);
+                // Running, so started: whatever stopped it is over.
+                let _ = std::fs::remove_file(stopped_marker(&home));
+                if view.can_stop {
+                    set_enabled(&job, &label, !stop);
+                }
+                view
+            })
+        })
+        .await;
         if let Ok(Some(view)) = view {
             if view.state == State::ByHand as i32 {
                 tracing::warn!(can_restore = view.can_restore, "Claktory wasn't started by its background service");
@@ -149,6 +256,143 @@ pub(crate) fn check(factory: &Arc<Factory>) {
             factory.broadcast_workspace(&factory.lock());
         }
     });
+}
+
+/// `launchctl enable` or `disable`: whether launchd loads the job at login
+/// and lets it be bootstrapped. A loaded job keeps running either way.
+fn set_enabled(job: &Job, label: &str, enabled: bool) {
+    let verb = if enabled { "enable" } else { "disable" };
+    let done = std::process::Command::new(&job.launchctl)
+        .arg(verb)
+        .arg(format!("{}/{label}", job.domain))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output();
+    match done {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => tracing::error!(verb, error = %String::from_utf8_lossy(&output.stderr).trim(), "launchctl refused"),
+        Err(error) => tracing::error!(verb, %error, "could not run launchctl"),
+    }
+}
+
+/// UpdateSettings.when_app_quits: kept, and the job enabled for keep or
+/// disabled for stop. Answers Onboarding.when_app_quits too.
+pub(crate) async fn set_when_app_quits(factory: &Factory, mode: QuitMode) -> Result<(), RequestError> {
+    let stop = match mode {
+        QuitMode::Stop => true,
+        QuitMode::KeepRunning => false,
+        QuitMode::Unspecified => return Err(RequestError::Usage("when_app_quits must be KEEP_RUNNING or STOP".to_owned())),
+    };
+    factory
+        .store
+        .db()
+        .execute("INSERT OR REPLACE INTO engine (id, when_app_quits) VALUES (1, ?1)", [if stop { "stop" } else { "keep" }])?;
+    *guard(&factory.service.stop_on_quit) = stop;
+    crate::onboarding::when_app_quits_answered(factory)?;
+    if factory.service.view().can_stop && !factory.service.view().stopping {
+        let home = factory.home.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Some((job, label)) = job_here(&home) {
+                set_enabled(&job, &label, !stop);
+            }
+        })
+        .await
+        .map_err(|error| RequestError::Usage(error.to_string()))?;
+    }
+    factory.broadcast_workspace(&factory.lock());
+    Ok(())
+}
+
+/// Disables the job, then boots it out: launchd stops the supervisor and,
+/// through it, this backend. In a session of its own, as RESTORE.
+const STOP: &str = r#"
+lc="$1" domain="$2" label="$3"
+sleep 1
+"$lc" disable "$domain/$label" || echo "couldn't disable $label"
+if "$lc" bootout "$domain/$label"; then
+  echo "stopped $label, which stays stopped until Claktory's app starts it"
+else
+  echo "couldn't stop $label"
+fi
+"#;
+
+/// How long this backend waits to be stopped before it takes it that the
+/// stop failed and carries on.
+const STOPPED_WITHIN: Duration = Duration::from_secs(45);
+
+/// Why StopEngine can't stop Claktory now, if it can't.
+fn stop_refused(local: bool, view: &v1::BackendService, on_trial: bool, phase: Phase) -> Option<&'static str> {
+    if !local {
+        Some("Stop Claktory from the Mac it runs on.")
+    } else if !view.can_stop {
+        Some("Only Claktory on a Mac, run by its background service, can be stopped from its app.")
+    } else if on_trial || phase == Phase::Updating {
+        Some("Claktory is finishing an update. Try again in a minute.")
+    } else {
+        None
+    }
+}
+
+/// StopEngine: from the app on this Mac (`local`), when it quits in stop
+/// mode (`quitting`) or by the person's switch.
+pub(crate) async fn stop(factory: &Arc<Factory>, local: bool, quitting: bool) -> Result<(), RequestError> {
+    if local && quitting && factory.service.when_app_quits() != QuitMode::Stop {
+        return Ok(());
+    }
+    let view = factory.service.view();
+    {
+        let mut phase = guard(&factory.service.phase);
+        if let Some(why) = stop_refused(local, &view, crate::update::on_trial(&factory.home), *phase) {
+            return Err(RequestError::Usage(why.to_owned()));
+        }
+        if *phase == Phase::Stopping {
+            return Ok(());
+        }
+        *phase = Phase::Stopping;
+    }
+    let home = factory.home.clone();
+    let by = if quitting { "quit" } else { "switch" };
+    let started = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let Some((job, label)) = job_here(&home) else {
+            return Err(std::io::Error::other("Claktory's background service isn't on this Mac"));
+        };
+        let marker = serde_json::json!({"by": by, "time": crate::transcript::now_ms()});
+        std::fs::write(stopped_marker(&home), marker.to_string())?;
+        let mut command = launch_agent::helper(&home, STOP)?;
+        command.arg(&job.launchctl).arg(&job.domain).arg(&label);
+        command.spawn().map(drop)
+    })
+    .await
+    .map_err(|error| RequestError::Usage(error.to_string()))
+    .and_then(|started| started.map_err(RequestError::Io));
+    if let Err(error) = started {
+        *guard(&factory.service.phase) = Phase::Running;
+        let _ = std::fs::remove_file(stopped_marker(&factory.home));
+        return Err(error);
+    }
+    tracing::info!(by, "stopping Claktory: its background service won't start it again until the app does");
+    factory.service.set(v1::BackendService { stopping: true, ..view.clone() });
+    factory.broadcast_workspace(&factory.lock());
+    // Still here long after: the stop failed. Claktory carries on as it
+    // was, and the job is enabled again unless stop mode keeps it disabled.
+    let factory = factory.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(STOPPED_WITHIN).await;
+        tracing::error!("Claktory's background service didn't stop it; carrying on (see bin/launch-agent.log)");
+        let _ = std::fs::remove_file(stopped_marker(&factory.home));
+        let stop = factory.service.when_app_quits() == QuitMode::Stop;
+        let home = factory.home.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some((job, label)) = job_here(&home) {
+                set_enabled(&job, &label, !stop);
+            }
+        })
+        .await;
+        *guard(&factory.service.phase) = Phase::Running;
+        factory.service.set(view);
+        factory.broadcast_workspace(&factory.lock());
+    });
+    Ok(())
 }
 
 /// RestoreBackendService: the helper waits for this backend to stop and
@@ -301,5 +545,52 @@ mod tests {
         let said = helper_done(&home);
         assert!(said.contains("restarted dev.factory.factoryd"), "{said}");
         assert!(asked(&dir).contains("kickstart -k gui/501/dev.factory.factoryd"), "{}", asked(&dir));
+        assert!(asked(&dir).contains("enable gui/501/dev.factory.factoryd\nprint"), "enabled first: {}", asked(&dir));
+    }
+
+    /// Friend bug #27, Fugo's requirements: only this Mac's own app, only
+    /// where its service runs it, and never while an update goes in or is
+    /// on trial.
+    #[test]
+    fn a_stop_is_refused_from_elsewhere_where_no_service_runs_it_and_during_an_update() {
+        let (home, job) = setup(&temp(), false);
+        let running = examine(&home, &job, LABEL, true);
+        assert!(running.can_stop);
+        assert!(!examine(&home, &job, LABEL, false).can_stop, "started by hand");
+        assert_eq!(stop_refused(true, &running, false, Phase::Running), None);
+        assert_eq!(stop_refused(false, &running, false, Phase::Running), Some("Stop Claktory from the Mac it runs on."));
+        let updating = Some("Claktory is finishing an update. Try again in a minute.");
+        assert_eq!(stop_refused(true, &running, true, Phase::Running), updating, "on trial");
+        assert_eq!(stop_refused(true, &running, false, Phase::Updating), updating, "going in");
+        let nowhere = v1::BackendService::default();
+        assert!(stop_refused(true, &nowhere, false, Phase::Running).is_some_and(|why| why.starts_with("Only Claktory on a Mac")));
+
+        // And an update isn't started while it stops.
+        let service = Service::default();
+        *guard(&service.phase) = Phase::Stopping;
+        assert!(service.begin_update().is_err());
+        *guard(&service.phase) = Phase::Running;
+        service.begin_update().expect("an update");
+        service.update_failed();
+        assert_eq!(*guard(&service.phase), Phase::Running);
+    }
+
+    #[test]
+    fn stopping_disables_the_job_then_boots_it_out_from_a_helper() {
+        let dir = temp();
+        let (home, job) = setup(&dir, true);
+        let mut command = launch_agent::helper(&home, STOP).expect("helper");
+        command.arg(&job.launchctl).arg(&job.domain).arg(LABEL);
+        command.spawn().expect("spawn").wait().expect("helper");
+        let log = std::fs::read_to_string(home.root().join("bin/launch-agent.log")).expect("log");
+        assert!(log.contains("stopped dev.factory.factoryd"), "{log}");
+        assert_eq!(asked(&dir), "disable gui/501/dev.factory.factoryd\nbootout gui/501/dev.factory.factoryd\n");
+
+        // What stopped it, for `install --check`.
+        assert!(!held(&home));
+        std::fs::write(stopped_marker(&home), r#"{"by":"switch","time":1}"#).expect("marker");
+        assert!(held(&home));
+        std::fs::write(stopped_marker(&home), r#"{"by":"quit","time":1}"#).expect("marker");
+        assert!(!held(&home));
     }
 }

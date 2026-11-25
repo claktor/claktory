@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
@@ -194,59 +195,100 @@ class _MonitorsOverviewState extends State<MonitorsOverview> {
       for (final agent in workspace.agents)
         if (_project.isEmpty || agent.projectId == _project) agent,
     ];
+    // Each filter as wide as its words need at the text size (its widest
+    // choice, with the field's padding and chevron), up to the page's width,
+    // so "Paused or failed" stays on one line on a phone at any size short
+    // of that (Zucchero's rows 390 and 409).
+    final scaler = MediaQuery.textScalerOf(context);
+    final phone = touchFirst(context);
+    final style = type.body;
+    final direction = Directionality.of(context);
+    double words(Iterable<String> labels) {
+      var widest = 0.0;
+      for (final label in labels) {
+        final painter = TextPainter(
+          text: TextSpan(text: label, style: style),
+          textScaler: scaler,
+          textDirection: direction,
+          maxLines: 1,
+        )..layout();
+        widest = math.max(widest, painter.width);
+        painter.dispose();
+      }
+      // Select's padding each side, the gap and chevron, and its border.
+      return widest.ceilToDouble() +
+          2 * (phone ? Space.m : Space.s + 2) +
+          Space.s +
+          10 +
+          2;
+    }
+
     final filters = Unselectable(
-      child: Wrap(
-        spacing: Space.s,
-        runSpacing: Space.s,
-        children: [
-          SizedBox(
-            width: 180,
-            child: Select<String>(
-              title: 'Agent',
-              value: agents.any((a) => a.id == _agent) ? _agent : '',
-              options: [
-                const SelectOption('', 'All agents'),
-                for (final agent in agents) SelectOption(agent.id, agent.name),
-              ],
-              onChanged: (id) => _filter(() => _agent = id),
-            ),
-          ),
-          if (workspace.projects.isNotEmpty)
-            SizedBox(
-              width: 180,
-              child: Select<String>(
-                title: 'Project',
-                value: workspace.projects.any((p) => p.id == _project)
-                    ? _project
-                    : '',
-                options: [
-                  const SelectOption('', 'All projects'),
-                  for (final project in workspace.projects)
-                    SelectOption(project.id, project.name),
-                ],
-                onChanged: (id) => _filter(() {
-                  _project = id;
-                  // An agent of another project would match nothing.
-                  final agent = store.agent(_agent);
-                  if (agent != null && id.isNotEmpty && agent.projectId != id) {
-                    _agent = '';
-                  }
-                }),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          double wide(double base, Iterable<String> labels) => math.min(
+            math.max(scaler.scale(base), words(labels)),
+            constraints.maxWidth,
+          );
+          return Wrap(
+            spacing: Space.s,
+            runSpacing: Space.s,
+            children: [
+              SizedBox(
+                width: wide(180, const ['All agents']),
+                child: Select<String>(
+                  title: 'Agent',
+                  value: agents.any((a) => a.id == _agent) ? _agent : '',
+                  options: [
+                    const SelectOption('', 'All agents'),
+                    for (final agent in agents)
+                      SelectOption(agent.id, agent.name),
+                  ],
+                  onChanged: (id) => _filter(() => _agent = id),
+                ),
               ),
-            ),
-          SizedBox(
-            width: 160,
-            child: Select<MonitorsShown>(
-              title: 'State',
-              value: _shown,
-              options: [
-                for (final shown in MonitorsShown.values)
-                  SelectOption(shown, shown.label),
-              ],
-              onChanged: (shown) => _filter(() => _shown = shown),
-            ),
-          ),
-        ],
+              if (workspace.projects.isNotEmpty)
+                SizedBox(
+                  width: wide(180, const ['All projects']),
+                  child: Select<String>(
+                    title: 'Project',
+                    value: workspace.projects.any((p) => p.id == _project)
+                        ? _project
+                        : '',
+                    options: [
+                      const SelectOption('', 'All projects'),
+                      for (final project in workspace.projects)
+                        SelectOption(project.id, project.name),
+                    ],
+                    onChanged: (id) => _filter(() {
+                      _project = id;
+                      // An agent of another project would match nothing.
+                      final agent = store.agent(_agent);
+                      if (agent != null &&
+                          id.isNotEmpty &&
+                          agent.projectId != id) {
+                        _agent = '';
+                      }
+                    }),
+                  ),
+                ),
+              SizedBox(
+                width: wide(160, [
+                  for (final shown in MonitorsShown.values) shown.label,
+                ]),
+                child: Select<MonitorsShown>(
+                  title: 'State',
+                  value: _shown,
+                  options: [
+                    for (final shown in MonitorsShown.values)
+                      SelectOption(shown, shown.label),
+                  ],
+                  onChanged: (shown) => _filter(() => _shown = shown),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
     final filtered =
@@ -513,6 +555,11 @@ class _MonitorHistoryViewState extends State<MonitorHistoryView> {
               (event.actor.isNotEmpty &&
                   event.kind != MonitorEventKind.MONITOR_EVENT_KIND_CREATED)
           ? ''
+          // The person's doing comes as its detail ("by Matt"), read as an
+          // agent's is: "Paused by Matt", as "Paused by Rivet" (Giorno,
+          // Zucchero's row 408).
+          : event.actor.isEmpty && event.detail.startsWith('by ')
+          ? ' ${event.detail}'
           : ': ${event.detail}';
       return '$when  ${monitorEventLabel(event.kind)}$actor$detail';
     }

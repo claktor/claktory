@@ -20,6 +20,9 @@
 //! proposals); everything else it did stands (files, messages, tasks,
 //! monitors, the checklist), and the agent is told what in a quiet note
 //! from Claktory (`note`), which it reads with whatever wakes it next.
+//! Changed again before it read that note, the note is replaced by one about
+//! the conversation it remembers (the first version set aside since it
+//! last ran) and the one it's in now (`forgotten`).
 
 pub(crate) mod history;
 mod note;
@@ -106,13 +109,16 @@ pub(crate) async fn fork(factory: &Arc<Factory>, id: &str, seq: u64, timestamp_m
     let made_by = by.agent.to_owned();
     held(factory, id, async {
         halt(factory, id).await?;
-        let set_aside = blocking(move || {
+        let unread = unread(factory, id);
+        let known = unread.first().cloned();
+        let (set_aside, told) = blocking(move || {
             let set_aside = set_aside(&dir, point, &made_by, now_ms())?;
             cut(&dir, point)?;
-            Ok(set_aside)
+            let told = forgotten(&dir, known.as_ref().or(set_aside.as_ref()))?;
+            Ok((set_aside, told))
         })
         .await?;
-        settle(factory, id, set_aside, by, note::Change::Back).await
+        settle(factory, id, set_aside, told, &unread, by, note::Change::Back).await
     })
     .await
 }
@@ -124,31 +130,26 @@ pub(crate) async fn switch(factory: &Arc<Factory>, id: &str, branch: &str, by: B
     factory.known_agent(id)?;
     let dir = factory.home.agent_dir(id);
     let chosen = branch_dir(&dir, branch)?;
-    let stale = read_branch(&chosen).ok_or_else(|| RequestError::NoBranch(branch.to_owned()))?.note;
+    read_branch(&chosen).ok_or_else(|| RequestError::NoBranch(branch.to_owned()))?;
     factory.ensure_loaded(id).await?;
     let writes = factory.lock().agents.entry(id.to_owned()).or_default().writes.clone();
     let _writing = writes.lock().await;
     let made_by = by.agent.to_owned();
     held(factory, id, async {
         halt(factory, id).await?;
-        let set_aside = blocking(move || {
+        let unread = unread(factory, id);
+        let known = unread.first().cloned();
+        let (set_aside, told) = blocking(move || {
             let point = parting(&dir, &chosen)?;
             let set_aside = set_aside(&dir, point, &made_by, now_ms())?;
             bring_back(&dir, &chosen)?;
-            Ok(set_aside)
+            // Switched back to what it remembers, it's told nothing: that
+            // version's folder is gone.
+            let told = forgotten(&dir, known.as_ref().or(set_aside.as_ref()))?;
+            Ok((set_aside, told))
         })
         .await?;
-        // The note of when it was set aside, if it waits still, would say what
-        // the agent now remembers is gone.
-        if let Some(stale) = stale {
-            let mut inner = factory.lock();
-            let runtime = inner.agents.entry(id.to_owned()).or_default();
-            if let Some(at) = runtime.queue.iter().position(|queued| queued.id == stale) {
-                let dropped = runtime.queue.remove(at);
-                factory.settle(std::slice::from_ref(&dropped), crate::store::Outcome::Dropped);
-            }
-        }
-        settle(factory, id, set_aside, by, note::Change::Switched).await
+        settle(factory, id, set_aside, told, &unread, by, note::Change::Switched).await
     })
     .await
 }
@@ -339,24 +340,37 @@ fn same(queued: &Queued, user: &UserMessage) -> bool {
 
 /// After the files changed: cards from the part set aside close, the
 /// conversation is read again and shown on every device, and the agent
-/// gets its note. Whether anything was set aside.
+/// gets its note, about what it was `told` it forgot, in place of the notes
+/// of `unread` versions it hadn't read yet. Whether anything was set aside.
 async fn settle(
     factory: &Arc<Factory>,
     id: &str,
-    set_aside: Option<(Branch, Vec<Message>)>,
+    set_aside: Option<Branch>,
+    told: Option<Forgotten>,
+    unread: &[Branch],
     by: By<'_>,
     change: note::Change,
 ) -> Result<bool, RequestError> {
     let kept = set_aside.is_some();
     let closed = match &set_aside {
-        Some((branch, _)) => close_cards(factory, id, branch.fork.ms),
+        Some(branch) => close_cards(factory, id, branch.fork.ms),
         None => 0,
     };
     factory.lock().agents.entry(id.to_owned()).or_default().transcript = None;
     factory.ensure_loaded(id).await?;
-    let branch = set_aside.as_ref().map(|(branch, _)| branch.id.clone());
-    let note = set_aside.map(|(branch, after)| note::write(factory, id, &branch, &after, closed, by, change));
+    let branch = told.as_ref().map(|told| told.version.id.clone());
+    let note = told.map(|told| note::write(factory, id, &told.version, &told.after, closed, by, change, told.change));
     let mut inner = factory.lock();
+    // The notes it hadn't read say how the conversation changed from what it
+    // remembers to what it was then: this one says it to what it is now.
+    if let Some(runtime) = inner.agents.get_mut(id) {
+        let stale: Vec<i64> = unread.iter().filter_map(|branch| branch.note).collect();
+        let (dropped, queue): (Vec<Queued>, _) = std::mem::take(&mut runtime.queue).into_iter().partition(|queued| stale.contains(&queued.id));
+        runtime.queue = queue;
+        if !dropped.is_empty() {
+            factory.settle(&dropped, crate::store::Outcome::Dropped);
+        }
+    }
     let mut noted = None;
     if let Some((text, summary)) = note {
         let mut event = crate::factory::host_event(summary);
@@ -430,6 +444,53 @@ fn close_cards(factory: &Factory, id: &str, since: i64) -> usize {
     questions
 }
 
+/// The versions set aside whose notes the agent hasn't read yet, the first
+/// set aside first: it hasn't run since, so that one is the conversation it
+/// remembers. The caller has halted it, so a note handed to it and not
+/// saved is queued again.
+fn unread(factory: &Factory, id: &str) -> Vec<Branch> {
+    let queued: Vec<i64> = factory.lock().agents.get(id).map(|runtime| runtime.queue.iter().map(|queued| queued.id).collect()).unwrap_or_default();
+    let mut unread: Vec<Branch> =
+        branches(factory, id).into_iter().filter(|branch| branch.note.is_some_and(|note| queued.contains(&note))).collect();
+    unread.reverse();
+    unread
+}
+
+/// What the agent remembers that its conversation no longer holds, for its
+/// note: the part of the version `known` (the conversation as it remembers
+/// it) from where it parts from the conversation now, and whether that
+/// went back (it ends there) or was switched to another version.
+struct Forgotten {
+    /// `known`, from where the two part.
+    version: Branch,
+    after: Vec<Message>,
+    change: note::Change,
+}
+
+/// What the agent forgot of `known` (see `Forgotten`); None when the
+/// conversation in `dir` holds all of it, or is it again (switched back to
+/// it, its folder is gone).
+fn forgotten(dir: &Path, known: Option<&Branch>) -> std::io::Result<Option<Forgotten>> {
+    let Some(known) = known else { return Ok(None) };
+    let folder = dir.join(BRANCHES).join(&known.id);
+    if read_branch(&folder).is_none() {
+        return Ok(None);
+    }
+    let point = parting(&folder, dir)?;
+    let forgot = after(&folder, point)?;
+    if forgot.is_empty() {
+        return Ok(None);
+    }
+    let change = if after(dir, point)?.is_empty() { note::Change::Back } else { note::Change::Switched };
+    let version = Branch { fork: point, messages: counted(&forgot), ..known.clone() };
+    Ok(Some(Forgotten { version, after: forgot, change }))
+}
+
+/// How many messages `after` has: the agent's replies and what it was given.
+fn counted(after: &[Message]) -> u32 {
+    u32::try_from(after.iter().filter(|message| matches!(message, Message::User(_) | Message::Assistant(_))).count()).unwrap_or(u32::MAX)
+}
+
 /// Runs file work off the async threads.
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> std::io::Result<T> + Send + 'static) -> Result<T, RequestError> {
     match tokio::task::spawn_blocking(work).await {
@@ -496,7 +557,7 @@ fn after(dir: &Path, point: Point) -> std::io::Result<Vec<Message>> {
 /// Sets the conversation in `dir` aside as another version, from `point`
 /// on: links its files into a new folder of `branches/` with its
 /// `branch.json`. None when nothing comes after `point`.
-fn set_aside(dir: &Path, point: Point, made_by: &str, now: i64) -> std::io::Result<Option<(Branch, Vec<Message>)>> {
+fn set_aside(dir: &Path, point: Point, made_by: &str, now: i64) -> std::io::Result<Option<Branch>> {
     let after = after(dir, point)?;
     if after.is_empty() {
         return Ok(None);
@@ -525,14 +586,13 @@ fn set_aside(dir: &Path, point: Point, made_by: &str, now: i64) -> std::io::Resu
         label: label(&after, point.ms),
         set_aside_ms: now,
         fork: point,
-        messages: u32::try_from(after.iter().filter(|message| matches!(message, Message::User(_) | Message::Assistant(_))).count())
-            .unwrap_or(u32::MAX),
+        messages: counted(&after),
         made_by: made_by.to_owned(),
         note: None,
     };
     replace(&folder.join(BRANCH_FILE), &serde_json::to_vec_pretty(&branch).map_err(std::io::Error::other)?)?;
     std::fs::rename(&folder, dir.join(BRANCHES).join(&branch.id))?;
-    Ok(Some((branch, after)))
+    Ok(Some(branch))
 }
 
 /// A version's label: the first words of the first message the person wrote
@@ -704,7 +764,7 @@ mod tests {
             let point = Point { segment: 1, index: 1, ms: 2 };
             assert_eq!(after(&dir, point).expect("after"), [two.clone(), three.clone(), four.clone()]);
 
-            let (branch, _) = set_aside(&dir, point, "", 10).expect("set aside").expect("a version");
+            let branch = set_aside(&dir, point, "", 10).expect("set aside").expect("a version");
             assert_eq!((branch.id.as_str(), branch.label.as_str(), branch.messages), ("10", "two", 3));
             cut(&dir, point).expect("cut");
             assert_eq!(segments(&dir).expect("segments").keys().copied().collect::<Vec<_>>(), [1]);

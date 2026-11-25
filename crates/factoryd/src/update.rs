@@ -623,6 +623,18 @@ impl Factory {
     }
 
     pub async fn install_update(self: &Arc<Self>, app_path: &str) -> Result<(), RequestError> {
+        // Never while Claktory stops (friend bug #27), and no stop while it
+        // goes in: the backend's going away would read as a failed update.
+        self.service.begin_update()?;
+        let installed = self.put_update_in(app_path).await;
+        if !matches!(installed, Ok(true)) {
+            self.service.update_failed();
+        }
+        installed.map(drop)
+    }
+
+    /// Installs the update; Ok(true) when this backend stops for the new one.
+    async fn put_update_in(self: &Arc<Self>, app_path: &str) -> Result<bool, RequestError> {
         let latest = self.lock().latest_release.clone();
         if latest.version.is_empty() {
             return Err(RequestError::NoRelease);
@@ -653,7 +665,7 @@ impl Factory {
         }
         // An app-only release leaves the backend, and the agents it's running, alone.
         if latest.backend == VERSION {
-            return Ok(());
+            return Ok(false);
         }
         let backend = self.home.backend();
         let new_backend = tokio::fs::read(release.join("factoryd")).await?;
@@ -705,7 +717,7 @@ impl Factory {
             crate::account::analytics::backend_started(&factory);
             tracing::error!(%error, backend = %backend.display(), "couldn't start the update");
         });
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -817,7 +829,7 @@ fn previous_helper(home: &Home, name: &str) -> std::path::PathBuf {
 /// The programs a release carries for every agent, in its `tools/`, which
 /// updates put in `<home>/tools` (first on agents' PATH, `tools_dir`) and
 /// roll back with the backend, as they do the helpers.
-pub const TOOLS: [&str; 1] = ["rg"];
+pub const TOOLS: [&str; 2] = ["rg", "jq"];
 
 /// `<home>/tools`: the programs Claktory gives every agent (`TOOLS`),
 /// first on their PATH. Only these: the backend and its helpers stay in
@@ -910,7 +922,7 @@ fn put_executable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Before an update's backend goes in: each helper and tool the release
 /// carries (`claktory-apps`, `claktory-speech`, `claktory-video-preview`;
-/// `tools/rg`) replaces the installed one, which is kept (`bin/<name>.previous`,
+/// `tools/rg`, `tools/jq`) replaces the installed one, which is kept (`bin/<name>.previous`,
 /// `tools/.previous/<name>`) for a roll-back. A release without one leaves
 /// what's there alone, and forgets an older previous copy so a roll-back
 /// doesn't put back one from before.
@@ -985,7 +997,10 @@ fn heal(home: &Home, release: &Path) -> Vec<&'static str> {
             Err(error) => tracing::error!(%error, helper = name, "could not put in a helper the update left out"),
         }
     }
-    if !tools_dir(home).join("LICENSES").exists()
+    // With a tool put in (jq, after an update from a backend that knew
+    // only rg), its license comes too.
+    let tool_healed = healed.iter().any(|name| TOOLS.contains(name));
+    if (tool_healed || !tools_dir(home).join("LICENSES").exists())
         && let Err(error) = put_tool_licenses(&release.join("tools/LICENSES"), home)
     {
         tracing::warn!(%error, "could not put in the tools' licenses");
@@ -1216,7 +1231,7 @@ mod helpers_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ripgrep, for every agent: an update puts the release's tools/rg in
+    /// ripgrep and jq, for every agent: an update puts the release's tools in
     /// `<home>/tools` (made if need be), keeping the one it replaced off the
     /// agents' PATH; a roll-back puts that back; a start after an update
     /// from a backend that knew no tools heals it in.
@@ -1228,23 +1243,52 @@ mod helpers_tests {
         std::fs::write(home.previous_backend(), "backend 1").expect("previous");
         std::fs::create_dir_all(dir.join("release/tools")).expect("release tools");
         std::fs::write(dir.join("release/tools/rg"), "rg 15").expect("release rg");
+        std::fs::write(dir.join("release/tools/jq"), "jq 1.8.1").expect("release jq");
         std::fs::create_dir_all(dir.join("release/tools/LICENSES/ripgrep")).expect("licenses");
         std::fs::write(dir.join("release/tools/LICENSES/ripgrep/LICENSE-MIT"), "MIT").expect("license");
-        assert_eq!(heal(&home, &dir.join("release")), ["rg"], "a start after v0.1.20's update");
+        assert_eq!(heal(&home, &dir.join("release")), ["rg", "jq"], "a start after v0.1.20's update");
         assert_eq!(read(&tools_dir(&home).join("LICENSES/ripgrep/LICENSE-MIT")).as_deref(), Some("MIT"), "its license beside it");
         assert_eq!(read(&rg).as_deref(), Some("rg 15"));
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&rg).expect("meta").permissions().mode() & 0o777, 0o755);
 
         std::fs::write(dir.join("release/tools/rg"), "rg 16").expect("newer rg");
+        std::fs::write(dir.join("release/tools/jq"), "jq 1.8.2").expect("newer jq");
         stage_helpers(&home, &dir.join("release")).expect("staged");
         assert_eq!(read(&rg).as_deref(), Some("rg 16"));
         let kept: Vec<String> =
             std::fs::read_dir(tools_dir(&home)).expect("tools").filter_map(|entry| entry.ok()?.file_name().into_string().ok()).collect();
-        let programs: Vec<&String> = kept.iter().filter(|name| !name.starts_with('.') && *name != "LICENSES").collect();
-        assert_eq!(programs, ["rg"], "only rg is on the PATH: {kept:?}");
+        let mut programs: Vec<&String> = kept.iter().filter(|name| !name.starts_with('.') && *name != "LICENSES").collect();
+        programs.sort();
+        assert_eq!(programs, ["jq", "rg"], "only the tools are on the PATH: {kept:?}");
         roll_back(&home, "It stopped.").expect("rolled back");
         assert_eq!(read(&rg).as_deref(), Some("rg 15"), "the rg that went with the backend");
+        assert_eq!(read(&tools_dir(&home).join("jq")).as_deref(), Some("jq 1.8.1"), "and its jq");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// jq after rg (Pericolo 29760): a release without tools/jq (v0.1.21, or
+    /// an older one) is passed over, nothing failing; one with it, started
+    /// after an update by a backend that knew only rg, heals jq in with its
+    /// license beside ripgrep's.
+    #[test]
+    fn a_tool_a_release_lacks_is_passed_over_and_a_new_one_comes_with_its_license() {
+        let (home, dir) = home("jq");
+        let release = dir.join("release");
+        std::fs::create_dir_all(release.join("tools/LICENSES/ripgrep")).expect("release tools");
+        std::fs::write(release.join("tools/rg"), "rg 15").expect("release rg");
+        std::fs::write(release.join("tools/LICENSES/ripgrep/UNLICENSE"), "ripgrep's").expect("license");
+        assert_eq!(heal(&home, &release), ["rg"], "no jq in v0.1.21: passed over");
+        stage_helpers(&home, &release).expect("an update without jq stages");
+        assert!(!tools_dir(&home).join("jq").exists());
+
+        std::fs::create_dir_all(release.join("tools/LICENSES/jq")).expect("jq licenses");
+        std::fs::write(release.join("tools/jq"), "jq 1.8.2").expect("release jq");
+        std::fs::write(release.join("tools/LICENSES/jq/COPYING"), "jq's").expect("license");
+        assert_eq!(heal(&home, &release), ["jq"]);
+        assert_eq!(read(&tools_dir(&home).join("jq")).as_deref(), Some("jq 1.8.2"));
+        assert_eq!(read(&tools_dir(&home).join("LICENSES/jq/COPYING")).as_deref(), Some("jq's"), "its license");
+        assert_eq!(read(&tools_dir(&home).join("LICENSES/ripgrep/UNLICENSE")).as_deref(), Some("ripgrep's"), "ripgrep's kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

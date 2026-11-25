@@ -19,7 +19,7 @@ use crate::common::{
 /// The scripted provider Rivet runs on, plus Anthropic (one of its two
 /// subscriptions at its limit), OpenRouter (its only key out of credit) and
 /// OpenAI, not signed in.
-struct Catalog(Scripted);
+struct Catalog(Scripted, std::sync::Mutex<Vec<String>>);
 
 const HOUR: i64 = 3_600_000;
 
@@ -58,32 +58,39 @@ impl Models for Catalog {
                     id: "anthropic".into(),
                     name: "Anthropic".into(),
                     signed_in_with: "Anthropic (Claude Pro/Max)".into(),
-                    accounts: vec![
-                        v1::Account { exhausted_until: now + 2 * HOUR, ..account("1", "ada@example.test") },
-                        // A subscription whose limits were read.
-                        v1::Account {
-                            plan: "Claude Max 20x".into(),
-                            usage: Some(v1::ProviderUsage {
-                                windows: vec![
-                                    v1::UsageWindow {
-                                        id: "five_hour".into(),
-                                        label: "5-hour".into(),
-                                        used_percent: 82.4,
-                                        resets_at: now + 2 * HOUR,
-                                    },
-                                    v1::UsageWindow {
-                                        id: "weekly".into(),
-                                        label: "Weekly".into(),
-                                        used_percent: 40.0,
-                                        resets_at: now + 50 * HOUR,
-                                    },
-                                ],
-                                updated: now,
-                                ..Default::default()
-                            }),
-                            ..account("2", "bo@example.test")
-                        },
-                    ],
+                    accounts: {
+                        let mut accounts = vec![
+                            v1::Account { exhausted_until: now + 2 * HOUR, can_sign_out: true, ..account("1", "ada@example.test") },
+                            // A subscription whose limits were read.
+                            v1::Account {
+                                plan: "Claude Max 20x".into(),
+                                usage: Some(v1::ProviderUsage {
+                                    windows: vec![
+                                        v1::UsageWindow {
+                                            id: "five_hour".into(),
+                                            label: "5-hour".into(),
+                                            used_percent: 82.4,
+                                            resets_at: now + 2 * HOUR,
+                                        },
+                                        v1::UsageWindow {
+                                            id: "weekly".into(),
+                                            label: "Weekly".into(),
+                                            used_percent: 40.0,
+                                            resets_at: now + 50 * HOUR,
+                                        },
+                                    ],
+                                    updated: now,
+                                    ..Default::default()
+                                }),
+                                can_sign_out: true,
+                                ..account("2", "bo@example.test")
+                            },
+                            v1::Account { can_sign_out: true, ..account("3", "julie@example.test") },
+                        ];
+                        let order = self.1.lock().expect("order");
+                        accounts.sort_by_key(|account| order.iter().position(|id| *id == account.id));
+                        accounts
+                    },
                     ..Default::default()
                 },
                 v1::Provider {
@@ -120,6 +127,16 @@ impl Models for Catalog {
     fn logout<'a>(&'a self, provider: &'a str, account: &'a str) -> BoxFuture<'a, Result<(), Error>> {
         self.0.logout(provider, account)
     }
+
+    fn move_account<'a>(&'a self, provider: &'a str, account: &'a str, position: usize) -> BoxFuture<'a, Result<(), Error>> {
+        assert_eq!(provider, "anthropic");
+        let mut order = self.1.lock().expect("order");
+        let from = order.iter().position(|id| id == account).expect("an account");
+        let moving = order.remove(from);
+        let at = position.min(order.len());
+        order.insert(at, moving);
+        Box::pin(async { Ok(()) })
+    }
 }
 
 fn idle(view: &View, agent: &str) -> bool {
@@ -137,7 +154,8 @@ async fn setup(dir: &std::path::Path) -> (Arc<factoryd::Factory>, Client, View) 
 async fn setup_seen(dir: &std::path::Path) -> (Arc<factoryd::Factory>, Client, View, Arc<std::sync::Mutex<Vec<Seen>>>) {
     let scripted = Scripted::signed_in();
     let requests = scripted.requests.clone();
-    let (addr, factory) = start_with_models(dir, Arc::new(Catalog(scripted))).await;
+    let (addr, factory) =
+        start_with_models(dir, Arc::new(Catalog(scripted, std::sync::Mutex::new(["1", "2", "3"].map(str::to_owned).to_vec())))).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
     let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
@@ -431,4 +449,65 @@ async fn any_agent_can_read_the_limits_without_changing_models() {
     assert!(found.contains("\n- Usage hidden: you've read a page on https://example.com.\n"), "{found}");
     assert!(found.contains("can take requests now (an account is at its usage limit until "), "{found}");
     assert!(!found.contains("Usage of") && !found.contains("@example.test") && !found.contains("Max 20x"), "{found}");
+}
+
+/// Bruno 30083: Rivet puts one of a provider's accounts last (or anywhere)
+/// when the person asks, as dragging it in Settings → Providers does;
+/// models_list shows the order.
+#[tokio::test]
+async fn rivet_puts_an_account_last_in_the_order_requests_use() {
+    let dir = temp_dir();
+    let (_factory, mut client, mut view) = setup(&dir).await;
+    let listed = call(&mut client, &mut view, "models_list", serde_json::json!({"provider": "anthropic", "query": "opus"})).await;
+    assert!(
+        listed.contains("\n- Accounts, in the order requests use them: 1. ada@example.test, 2. bo@example.test, 3. julie@example.test.\n"),
+        "{listed}"
+    );
+
+    let moved = call(
+        &mut client,
+        &mut view,
+        "models_account_order",
+        serde_json::json!({"provider": "Anthropic", "account": "ada", "position": "last"}),
+    )
+    .await;
+    assert!(moved.starts_with("Moved ada@example.test among Anthropic's accounts. Accounts, in the order requests use them: 1. bo@example.test, 2. julie@example.test, 3. ada@example.test. Each request goes to the first with room"), "{moved}");
+    let anthropic = view.workspace.providers.iter().find(|provider| provider.id == "anthropic").expect("anthropic");
+    let order: Vec<&str> = anthropic.accounts.iter().map(|account| account.id.as_str()).collect();
+    assert_eq!(order, ["2", "3", "1"], "the app shows it");
+
+    let moved = call(
+        &mut client,
+        &mut view,
+        "models_account_order",
+        serde_json::json!({"provider": "anthropic", "account": "ada@example.test", "position": 1}),
+    )
+    .await;
+    assert!(moved.contains("1. ada@example.test, 2. bo@example.test, 3. julie@example.test."), "{moved}");
+    assert!(moved.ends_with(" The person sees the order in Settings → Providers."), "{moved}");
+    // A place given as text is the number it says.
+    let moved = call(
+        &mut client,
+        &mut view,
+        "models_account_order",
+        serde_json::json!({"provider": "anthropic", "account": "julie", "position": "2"}),
+    )
+    .await;
+    assert!(moved.contains("1. ada@example.test, 2. julie@example.test, 3. bo@example.test."), "{moved}");
+    let wrong = call(
+        &mut client,
+        &mut view,
+        "models_account_order",
+        serde_json::json!({"provider": "anthropic", "account": "example", "position": 2}),
+    )
+    .await;
+    assert!(wrong.contains("Several of Anthropic's accounts match \"example\": ada@example.test, julie@example.test, bo@example.test. Name one. Nothing was changed."), "{wrong}");
+    let missing = call(
+        &mut client,
+        &mut view,
+        "models_account_order",
+        serde_json::json!({"provider": "anthropic", "account": "zoe", "position": "first"}),
+    )
+    .await;
+    assert!(missing.contains("Anthropic has no account \"zoe\""), "{missing}");
 }

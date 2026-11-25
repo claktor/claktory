@@ -324,10 +324,6 @@ fn attribute(value: &str) -> String {
     value.replace('&', "&amp;").replace('"', "'").replace(['\n', '\r'], " ").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// The tags Claktory wraps a message in, which text inside one must not
-/// open or close.
-const TAGS: [&str; 3] = ["event", "sent", "attachment"];
-
 /// Text from outside, as it goes inside an `<event>` tag: every `<` that
 /// would open or close one of Claktory's tags (`</event>`, `<sent from=…>`,
 /// `< /Event >` and the like) becomes `&lt;`, so a message, a task's output
@@ -335,15 +331,7 @@ const TAGS: [&str; 3] = ["event", "sent", "attachment"];
 /// the person or as another event. Text without one is returned as it is,
 /// byte for byte, so conversations keep their prompt cache.
 fn defuse(text: &str) -> std::borrow::Cow<'_, str> {
-    let opens_tag = |at: usize| {
-        let rest = text[at + 1..].trim_start();
-        let rest = rest.strip_prefix('/').unwrap_or(rest).trim_start();
-        TAGS.iter().any(|tag| {
-            rest.get(..tag.len()).is_some_and(|name| name.eq_ignore_ascii_case(tag))
-                && !rest[tag.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_' || c == ':')
-        })
-    };
-    let dangerous: Vec<usize> = text.match_indices('<').map(|(at, _)| at).filter(|&at| opens_tag(at)).collect();
+    let dangerous: Vec<usize> = text.match_indices('<').map(|(at, _)| at).filter(|&at| crate::text::message_tag_at(text, at)).collect();
     if dangerous.is_empty() {
         return std::borrow::Cow::Borrowed(text);
     }

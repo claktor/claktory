@@ -897,6 +897,37 @@ class MonitorState extends $pb.ProtobufEnum {
   const MonitorState._(super.value, super.name);
 }
 
+/// What happens to Claktory on its Mac when the Mac app quits (friend bug
+/// #27).
+class QuitMode extends $pb.ProtobufEnum {
+  static const QuitMode QUIT_MODE_UNSPECIFIED =
+      QuitMode._(0, _omitEnumNames ? '' : 'QUIT_MODE_UNSPECIFIED');
+
+  /// Agents keep working with the app closed, and Claktory starts by itself
+  /// when the person logs in.
+  static const QuitMode QUIT_MODE_KEEP_RUNNING =
+      QuitMode._(1, _omitEnumNames ? '' : 'QUIT_MODE_KEEP_RUNNING');
+
+  /// Claktory runs only while the app is open: quitting the app stops it
+  /// (StopEngine quitting), and nothing starts it at login; opening the app
+  /// starts it (`factoryd install --start`).
+  static const QuitMode QUIT_MODE_STOP =
+      QuitMode._(2, _omitEnumNames ? '' : 'QUIT_MODE_STOP');
+
+  static const $core.List<QuitMode> values = <QuitMode>[
+    QUIT_MODE_UNSPECIFIED,
+    QUIT_MODE_KEEP_RUNNING,
+    QUIT_MODE_STOP,
+  ];
+
+  static final $core.List<QuitMode?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static QuitMode? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const QuitMode._(super.value, super.name);
+}
+
 class OnboardingStep extends $pb.ProtobufEnum {
   static const OnboardingStep ONBOARDING_STEP_UNSPECIFIED =
       OnboardingStep._(0, _omitEnumNames ? '' : 'ONBOARDING_STEP_UNSPECIFIED');
@@ -2243,6 +2274,37 @@ class SecretApprovalState extends $pb.ProtobufEnum {
   const SecretApprovalState._(super.value, super.name);
 }
 
+/// Where the person answered a card from (AnswerAsk.from, #430): the agent
+/// is told, so it answers them there.
+class AskAnsweredFrom extends $pb.ProtobufEnum {
+  /// An app before #430: the agent isn't told where.
+  static const AskAnsweredFrom ASK_ANSWERED_FROM_UNSPECIFIED =
+      AskAnsweredFrom._(
+          0, _omitEnumNames ? '' : 'ASK_ANSWERED_FROM_UNSPECIFIED');
+
+  /// The agent's conversation.
+  static const AskAnsweredFrom ASK_ANSWERED_FROM_CONVERSATION =
+      AskAnsweredFrom._(
+          1, _omitEnumNames ? '' : 'ASK_ANSWERED_FROM_CONVERSATION');
+
+  /// Needs you.
+  static const AskAnsweredFrom ASK_ANSWERED_FROM_NEEDS_YOU =
+      AskAnsweredFrom._(2, _omitEnumNames ? '' : 'ASK_ANSWERED_FROM_NEEDS_YOU');
+
+  static const $core.List<AskAnsweredFrom> values = <AskAnsweredFrom>[
+    ASK_ANSWERED_FROM_UNSPECIFIED,
+    ASK_ANSWERED_FROM_CONVERSATION,
+    ASK_ANSWERED_FROM_NEEDS_YOU,
+  ];
+
+  static final $core.List<AskAnsweredFrom?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static AskAnsweredFrom? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const AskAnsweredFrom._(super.value, super.name);
+}
+
 class AskStepState extends $pb.ProtobufEnum {
   /// Read as PENDING.
   static const AskStepState ASK_STEP_STATE_UNSPECIFIED =
@@ -2612,6 +2674,17 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
       NeedsYouRecordKind._(
           16, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_PIPE_MEMBER');
 
+  /// An admin agent (Rivet) made a change with no card of its own because
+  /// the person approved it in an agent's proposal (ProposalGrant): a pipe's
+  /// settings, an app uninstalled with its data kept, or Continue
+  /// automatically. Outcome CHANGED, agent_id who made it, title Claktory's
+  /// sentence (the grant's summary), proposal_id and proposal_agent_id the
+  /// proposal. A change to an app's access made so is APP_ACCESS, with
+  /// proposal_id set.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_PROPOSAL_GRANT =
+      NeedsYouRecordKind._(
+          17, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_PROPOSAL_GRANT');
+
   static const $core.List<NeedsYouRecordKind> values = <NeedsYouRecordKind>[
     NEEDS_YOU_RECORD_KIND_UNSPECIFIED,
     NEEDS_YOU_RECORD_KIND_QUESTION,
@@ -2630,10 +2703,11 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
     NEEDS_YOU_RECORD_KIND_MODEL,
     NEEDS_YOU_RECORD_KIND_CONVERSATION,
     NEEDS_YOU_RECORD_KIND_PIPE_MEMBER,
+    NEEDS_YOU_RECORD_KIND_PROPOSAL_GRANT,
   ];
 
   static final $core.List<NeedsYouRecordKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 16);
+      $pb.ProtobufEnum.$_initByValueList(values, 17);
   static NeedsYouRecordKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -2673,6 +2747,11 @@ class NeedsYouOutcome extends $pb.ProtobufEnum {
   static const NeedsYouOutcome NEEDS_YOU_OUTCOME_WITHDRAWN =
       NeedsYouOutcome._(8, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_WITHDRAWN');
 
+  /// An agent's question talked through on its card and ended with Resolve
+  /// (#430), without a decision.
+  static const NeedsYouOutcome NEEDS_YOU_OUTCOME_RESOLVED =
+      NeedsYouOutcome._(9, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_RESOLVED');
+
   static const $core.List<NeedsYouOutcome> values = <NeedsYouOutcome>[
     NEEDS_YOU_OUTCOME_UNSPECIFIED,
     NEEDS_YOU_OUTCOME_ANSWERED,
@@ -2683,10 +2762,11 @@ class NeedsYouOutcome extends $pb.ProtobufEnum {
     NEEDS_YOU_OUTCOME_CHANGED,
     NEEDS_YOU_OUTCOME_REPLIED,
     NEEDS_YOU_OUTCOME_WITHDRAWN,
+    NEEDS_YOU_OUTCOME_RESOLVED,
   ];
 
   static final $core.List<NeedsYouOutcome?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 8);
+      $pb.ProtobufEnum.$_initByValueList(values, 9);
   static NeedsYouOutcome? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 

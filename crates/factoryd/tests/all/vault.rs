@@ -769,8 +769,9 @@ async fn agents_list_change_and_withdraw_their_own_requests() {
     let again = call(&mut client, &mut view, "builder", "secrets_request", need).await;
     assert!(again.contains(&format!("({})", asked.id)) && again.contains("secrets_request_update"), "{again}");
 
-    // Changed in place: the same card, its new variables and reason.
-    let change = format!(r#"{{"id":"{}","variables":[{{"name":"CLOUDFLARE_API_TOKEN"}}],"reason":"To deploy claktory.com."}}"#, asked.id);
+    // Changed in place: the same card, its new variables and reason. An id
+    // with spaces around it names the same request.
+    let change = format!(r#"{{"id":" {} ","variables":[{{"name":"CLOUDFLARE_API_TOKEN"}}],"reason":"To deploy claktory.com."}}"#, asked.id);
     let said = call(&mut client, &mut view, "builder", "secrets_request_update", &change).await;
     assert!(said.starts_with(&format!("Changed your request {}", asked.id)), "{said}");
     let changed = waiting(&view).into_iter().find(|request| request.id == asked.id).expect("still waiting");
@@ -784,7 +785,7 @@ async fn agents_list_change_and_withdraw_their_own_requests() {
     assert!(listed.starts_with(&format!("{} Cloudflare (waiting), variables CLOUDFLARE_API_TOKEN: DNS edit.", asked.id)), "{listed}");
 
     // Withdrawn: shown so, and the person can't answer it any more.
-    let cancel = format!(r#"{{"id":"{}","reason":"Not needed after all."}}"#, asked.id);
+    let cancel = format!(r#"{{"id":" {} ","reason":"Not needed after all."}}"#, asked.id);
     let said = call(&mut client, &mut view, "builder", "secrets_request_cancel", &cancel).await;
     assert_eq!(said, format!("Withdrew your request {} for Cloudflare.", asked.id));
     assert_eq!(requests(&view), [format!("secret request {} (Withdrawn): To deploy claktory.com.", asked.id)]);

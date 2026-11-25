@@ -152,6 +152,12 @@ class MainFlutterWindow: NSWindow {
         } catch {
           result(FlutterError(code: "credentials_reset_failed", message: "\(error)", details: nil))
         }
+      case "defaultBrowser":
+        // The bundle id of the app that opens web pages (lib/pipe_shares.dart:
+        // Safari can't open a shared website's *.localhost address).
+        let page = URL(string: "http://localhost/")!
+        let app = NSWorkspace.shared.urlForApplication(toOpen: page)
+        result(app.flatMap { Bundle(url: $0)?.bundleIdentifier } ?? "")
       case "qrCode":
         result(Self.qrCode(call.arguments as? String ?? ""))
       case "webAuth":

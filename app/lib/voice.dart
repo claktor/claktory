@@ -256,8 +256,11 @@ class VoiceNoteChip extends StatelessWidget {
     final type = TypeScale.of(context);
     // On a phone, a finger's size, its × too, as a file's chip.
     final phone = isPhoneLayout(context);
+    // At least a finger's height, taller when the text is (the largest
+    // accessibility sizes); in a narrow box its name gives way, so its
+    // length and its × always stay whole.
     return Container(
-      height: phone ? Touch.target : 28,
+      constraints: BoxConstraints(minHeight: phone ? Touch.target : 28),
       decoration: BoxDecoration(
         color: palette.canvas,
         borderRadius: BorderRadius.circular(Radii.control),
@@ -267,36 +270,41 @@ class VoiceNoteChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Semantics(
-            container: true,
-            label: '$label, ${voiceDuration(duration)}',
-            excludeSemantics: true,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ExtensionGlyph(
-                  icon: 'mic',
-                  name: label,
-                  color: palette.textMuted,
-                  size: 14,
-                ),
-                const SizedBox(width: Space.xs + 2),
-                Text(
-                  label,
-                  maxLines: 1,
-                  style: (phone ? type.secondary : TextStyles.label).copyWith(
-                    color: palette.text,
+          Flexible(
+            child: Semantics(
+              container: true,
+              label: '$label, ${voiceDuration(duration)}',
+              excludeSemantics: true,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ExtensionGlyph(
+                    icon: 'mic',
+                    name: label,
+                    color: palette.textMuted,
+                    size: 14,
                   ),
-                ),
-                const SizedBox(width: Space.xs + 2),
-                Text(
-                  voiceDuration(duration),
-                  style: type.caption.copyWith(
-                    color: palette.textFaint,
-                    fontFeatures: const [FontFeature.tabularFigures()],
+                  const SizedBox(width: Space.xs + 2),
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: (phone ? type.secondary : TextStyles.label)
+                          .copyWith(color: palette.text),
+                    ),
                   ),
-                ),
-              ],
+                  const SizedBox(width: Space.xs + 2),
+                  Text(
+                    voiceDuration(duration),
+                    maxLines: 1,
+                    style: type.caption.copyWith(
+                      color: palette.textFaint,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
           Pressable(

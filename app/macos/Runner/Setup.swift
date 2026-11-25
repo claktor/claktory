@@ -1,5 +1,6 @@
 import Cocoa
 import FlutterMacOS
+import ServiceManagement
 
 /// Setting Claktory up on this Mac from the app itself (app/lib/setup.dart):
 /// the app downloaded as a disk image carries the backend in
@@ -30,6 +31,16 @@ enum Setup {
         removeApp(forget: call.arguments as? Bool ?? false, result)
       case "moveToApplications":
         moveToApplications(result)
+      case "backgroundStatus":
+        result(backgroundStatus())
+      case "openLoginItems":
+        if #available(macOS 13.0, *) {
+          SMAppService.openSystemSettingsLoginItems()
+        } else {
+          NSWorkspace.shared.open(
+            URL(fileURLWithPath: "/System/Library/PreferencePanes/Accounts.prefPane"))
+        }
+        result(nil)
       case "appOnly":
         result(UserDefaults.standard.bool(forKey: appOnlyKey))
       case "setAppOnly":
@@ -45,9 +56,33 @@ enum Setup {
     }
     // Kept for as long as the app runs.
     channels.append(channel)
+    Engine.register(with: messenger)
   }
 
   private static var channels: [FlutterMethodChannel] = []
+
+  /// The LaunchAgent that runs this Mac's Claktory (launch_agent.rs's
+  /// LABEL), which macOS lists under Login Items → Allow in the Background.
+  static var launchAgent: URL {
+    FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/LaunchAgents/dev.factory.factoryd.plist")
+  }
+
+  /// Whether macOS lets the LaunchAgent run (friend bug #28): "enabled";
+  /// "requiresApproval" when its switch under Allow in the Background is
+  /// off, so launchd won't start it; "notRegistered" or "notFound" when
+  /// macOS knows no such job (not set up, or its plist is gone); and
+  /// "unavailable" before macOS 13, which can't say.
+  static func backgroundStatus() -> String {
+    guard #available(macOS 13.0, *) else { return "unavailable" }
+    switch SMAppService.statusForLegacyPlist(at: launchAgent) {
+    case .enabled: return "enabled"
+    case .requiresApproval: return "requiresApproval"
+    case .notRegistered: return "notRegistered"
+    case .notFound: return "notFound"
+    @unknown default: return "unavailable"
+    }
+  }
 
   /// This Mac has no Claktory of its own: the app shows Claktories on
   /// other computers only. `install.sh --app-only` writes it
@@ -299,6 +334,94 @@ enum Setup {
           NSLocalizedDescriptionKey: String(decoding: message, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         ])
+    }
+  }
+}
+
+/// This Mac's Claktory, stopped and started from the app (friend bug #27).
+/// factory/engine:
+/// - the app asks the window's Dart "quitting" before it quits (⌘Q, or the
+///   last window closed), and quits once it's answered, or after a few
+///   seconds: Dart stops the engine first when the person chose that;
+/// - Dart sets the app menu's Stop Claktory or Start Claktory item with
+///   "menu" {title, enabled}, or hides it with nil; choosing it sends
+///   "menuChosen", answered with why it was refused, if it was.
+enum Engine {
+  private static var channel: FlutterMethodChannel?
+  private static var item: NSMenuItem?
+  private static let target = MenuTarget()
+  private static var quitting = false
+
+  /// How long the app waits for Dart before it quits anyway.
+  static let quitWithin: TimeInterval = 5
+
+  static func register(with messenger: FlutterBinaryMessenger) {
+    let channel = FlutterMethodChannel(name: "factory/engine", binaryMessenger: messenger)
+    channel.setMethodCallHandler { call, result in
+      switch call.method {
+      case "menu":
+        setItem(call.arguments as? [String: Any])
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    self.channel = channel
+  }
+
+  /// AppDelegate's applicationShouldTerminate.
+  static func shouldTerminate(_ app: NSApplication) -> NSApplication.TerminateReply {
+    guard let channel, !quitting else { return .terminateNow }
+    quitting = true
+    var replied = false
+    let reply = {
+      guard !replied else { return }
+      replied = true
+      app.reply(toApplicationShouldTerminate: true)
+    }
+    channel.invokeMethod("quitting", arguments: nil) { _ in
+      DispatchQueue.main.async(execute: reply)
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + quitWithin, execute: reply)
+    return .terminateLater
+  }
+
+  /// The item, in the app menu under About: made the first time it's set.
+  private static func setItem(_ settings: [String: Any]?) {
+    guard let title = settings?["title"] as? String else {
+      item?.isHidden = true
+      return
+    }
+    if item == nil, let menu = NSApp.mainMenu?.items.first?.submenu {
+      let made = NSMenuItem(title: title, action: #selector(MenuTarget.chosen(_:)), keyEquivalent: "")
+      made.target = target
+      // After About and its separator, with one of its own.
+      let at = min(2, menu.items.count)
+      menu.insertItem(made, at: at)
+      menu.insertItem(.separator(), at: at + 1)
+      item = made
+    }
+    item?.title = title
+    item?.isHidden = false
+    item?.isEnabled = settings?["enabled"] as? Bool ?? true
+  }
+
+  final class MenuTarget: NSObject, NSMenuItemValidation {
+    @objc func chosen(_ sender: Any?) {
+      // Refused (finishing an update, say): its words, in an alert.
+      Engine.channel?.invokeMethod("menuChosen", arguments: nil) { answer in
+        guard let words = answer as? String, !words.isEmpty else { return }
+        DispatchQueue.main.async {
+          let alert = NSAlert()
+          alert.messageText = "Claktory couldn't stop"
+          alert.informativeText = words
+          alert.runModal()
+        }
+      }
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+      Engine.item?.isEnabled ?? true
     }
   }
 }

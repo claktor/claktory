@@ -1237,7 +1237,7 @@ fn allowance(factory: &Factory, agent: &str, names: &[String], command: &str) ->
         let mut statement = db.prepare(
             "SELECT id, secrets FROM pipe_secret_approvals WHERE agent = ?1 AND command = ?2 AND state = 'allowed' AND used = 0",
         )?;
-        let rows = statement.query_map(params![agent, command], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows = statement.query_map(params![agent, command], crate::store::row2)?;
         rows.collect()
     };
     for (id, secrets) in read().unwrap_or_default() {
@@ -1401,9 +1401,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideSecretApp
     let row: Option<(String, String, i64)> = factory
         .store
         .db()
-        .query_row("SELECT state, secrets, created FROM pipe_secret_approvals WHERE id = ?1 AND agent = ?2", params![id, agent], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
+        .query_row("SELECT state, secrets, created FROM pipe_secret_approvals WHERE id = ?1 AND agent = ?2", params![id, agent], crate::store::row3)
         .optional()?;
     let Some((state, secrets, created)) = row else { return Err(RequestError::Pipe("No such request.".to_owned())) };
     if state != "pending" {

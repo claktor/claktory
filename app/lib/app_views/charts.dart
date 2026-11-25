@@ -1,12 +1,20 @@
+import 'dart:convert' show base64Decode;
 import 'dart:math' as math;
+import 'dart:typed_data' show Int16List;
 
 import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
 import '../identity.dart';
 import '../mobile/metrics.dart';
 import '../scope.dart';
+import '../visible_codes.dart';
+
+part 'heatmap.dart';
+part 'map.dart';
+part 'world.g.dart';
 
 /// The chart components of catalog v1: Chart (a time series, bars, stacked
 /// bars, a pie or a scatter), Stat (one number, with a spark line) and
@@ -54,9 +62,9 @@ class AppTable {
     final names = <String>[
       for (final column in columns)
         if (column is String)
-          column
+          visibleCodes(column)
         else if (column is Map && column['name'] is String)
-          column['name']! as String,
+          visibleCodes(column['name']! as String),
     ];
     if (names.length != columns.length) return null;
     final out = <List<Object?>>[];
@@ -101,10 +109,12 @@ DateTime? cellTime(Object? cell) {
   return null;
 }
 
-/// A cell as text: as it is, numbers written out short of float noise.
+/// A cell as text: as it is, numbers written out short of float noise,
+/// and characters that would reorder or hide words shown by their codes
+/// (a CSV's label can't pass itself off as something else).
 String cellText(Object? cell) => switch (cell) {
   null => '',
-  final String s => s,
+  final String s => visibleCodes(s),
   final num n => fullNumber(n.toDouble()),
   _ => '$cell',
 };
@@ -649,8 +659,8 @@ TextStyle panelTitle(BuildContext context) => TypeScale.of(context).caption
       color: chartText(context),
     );
 
-/// A Chart component: [kind] timeseries, bars, stackedBars, pie or
-/// scatter, of [table]'s columns, in Grafana's default look. Over it its
+/// A Chart component: [kind] timeseries, bars, stackedBars, pie, scatter
+/// or heatmap ([AppHeatmap]), of [table]'s columns, in Grafana's default look. Over it its
 /// [label]; under it a legend and what was left out. A time series shows
 /// what the pointer (or a finger) is on in a tooltip; the other kinds read
 /// it out in place of the label.
@@ -812,6 +822,19 @@ class _AppChartState extends State<AppChart> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.kind == 'heatmap') {
+      return AppHeatmap(
+        table: widget.table,
+        x: widget.x,
+        y: widget.y,
+        seriesBy: widget.seriesBy,
+        label: widget.label,
+        unit: widget.unit,
+        decimals: widget.decimals,
+        legend: widget.legend,
+        height: widget.height,
+      );
+    }
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     final caption = type.caption.copyWith(color: palette.textFaint);
@@ -1190,6 +1213,14 @@ class _AppChartState extends State<AppChart> {
           return off < interval * 0.01 || off > interval * 0.99;
         }
 
+        // A time on a step to the second: the axis's own ends (fl_chart
+        // labels them too) are hours off one at a 90-day range, which a
+        // share of the step would let through beside the step's own.
+        bool onTimeStep(double value) {
+          final off = (value + local) % every;
+          return off < 1000 || off > every - 1000;
+        }
+
         return Stack(
           clipBehavior: Clip.none,
           children: [
@@ -1249,7 +1280,7 @@ class _AppChartState extends State<AppChart> {
                         final x = (value - first) / (last - first) * plotWidth;
                         final shift = half - (plotWidth - x);
                         final between = every / (last - first) * plotWidth;
-                        if (!onStep(value, -local, every) ||
+                        if (!onTimeStep(value) ||
                             (shift > 0 && between - shift < half * 2 + 2) ||
                             x + valueRoom < half) {
                           return const SizedBox.shrink();
@@ -1555,6 +1586,20 @@ class _AppChartState extends State<AppChart> {
         ? color
         : color.withValues(alpha: 0.45);
     const radius = BorderRadius.vertical(top: Radius.circular(1.5));
+    // Times on the axis as the time axis writes them ("10/27", "14:00"),
+    // apart by the least gap between two bars.
+    final times = [for (final name in categories) _categoryTime(name)];
+    final timed = times.every((time) => time != null);
+    var span = Duration.zero;
+    Duration? gap;
+    if (timed) {
+      final sorted = [for (final time in times) time!]..sort();
+      span = sorted.last.difference(sorted.first);
+      for (var k = 1; k < sorted.length; k++) {
+        final apart = sorted[k].difference(sorted[k - 1]);
+        if (apart > Duration.zero && (gap == null || apart < gap)) gap = apart;
+      }
+    }
     return _Drawn(
       LayoutBuilder(
         builder: (context, constraints) {
@@ -1592,7 +1637,13 @@ class _AppChartState extends State<AppChart> {
                         child: ConstrainedBox(
                           constraints: BoxConstraints(maxWidth: room * every),
                           child: Text(
-                            _category(categories[i]),
+                            timed
+                                ? axisTime(
+                                    times[i]!,
+                                    span,
+                                    (gap ?? const Duration(days: 1)) * every,
+                                  )
+                                : _category(categories[i]),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: _axis(context),
@@ -1685,17 +1736,22 @@ class _AppChartState extends State<AppChart> {
   /// A category's words: a time when it reads as one ("22 Nov", "20 Nov
   /// 12:00"): an ISO date, or a number big enough to be milliseconds since
   /// 1970, as the time axis reads them.
-  String _category(String name) {
+  String _category(String name) => switch (_categoryTime(name)) {
+    final time? => readoutTime(time),
+    null => name,
+  };
+
+  /// The time a category names, if it reads as one.
+  static DateTime? _categoryTime(String name) {
     if (name.length >= 10 && RegExp(r'^\d{4}-\d{2}-\d{2}').hasMatch(name)) {
-      final time = DateTime.tryParse(name);
-      if (time != null) return readoutTime(time);
+      if (DateTime.tryParse(name) case final time?) return time;
     }
     // As cellText writes a number: grouped ("1,795,132,800,000").
     final number = double.tryParse(name.replaceAll(',', ''));
     if (number != null && number.abs() >= 1e11 && number.abs() < 1e14) {
-      return readoutTime(DateTime.fromMillisecondsSinceEpoch(number.round()));
+      return DateTime.fromMillisecondsSinceEpoch(number.round());
     }
-    return name;
+    return null;
   }
 
   List<BarChartRodStackItem> _stack(
@@ -2983,18 +3039,115 @@ class AppTableView extends StatelessWidget {
       return width;
     }
 
-    final widths = <int, TableColumnWidth>{
+    final heads = [
       for (var c = 0; c < shown.length; c++)
-        c: FixedColumnWidth(
+        (c == 0 ? 0 : Space.m) +
+            [
+              for (final word in shown[c].title.split(RegExp(r'\s+')))
+                measured(word, headStyle),
+            ].fold(0.0, math.max).ceilToDouble(),
+    ];
+    final natural = [
+      for (var c = 0; c < shown.length; c++)
+        math.max(
+          heads[c],
           (c == 0 ? 0 : Space.m) +
               [
-                for (final word in shown[c].title.split(RegExp(r'\s+')))
-                  measured(word, headStyle),
                 for (final row in cells)
                   measured(row[c], bodyStyle(shown[c].format)),
               ].fold(0.0, math.max).ceilToDouble(),
         ),
-    };
+    ];
+    // Where the table is wider than its place, its text columns give way,
+    // the widest first, down to a few words (and their heading's longest
+    // word), and their long cells end in "…", as Grafana's do; numbers
+    // and times keep their width. Past that it scrolls sideways.
+    final least = scaler.scale(_leastTextColumn);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final widths = _fitColumns(natural, [
+          for (var c = 0; c < shown.length; c++)
+            shown[c].format == 'text'
+                // Never wider than the place: a cut cell shows its "…".
+                ? [
+                    natural[c],
+                    math.max(heads[c], (c == 0 ? 0 : Space.m) + least),
+                    constraints.maxWidth,
+                  ].reduce(math.min)
+                : null,
+        ], constraints.maxWidth);
+        return _table(
+          context,
+          shown: shown,
+          cells: cells,
+          rows: rows,
+          left: left,
+          more: table.more,
+          widths: widths,
+          natural: natural,
+          padded: padded,
+          headStyle: headStyle,
+          bodyStyle: bodyStyle,
+          caption: caption,
+        );
+      },
+    );
+  }
+
+  /// The least a text column gives way to, at the normal text size.
+  static const _leastTextColumn = 96.0;
+
+  /// Each column's width on a line [room] wide: [natural], or where they
+  /// don't fit, the ones with a [floor] (text) cut to one level, never
+  /// below their floor.
+  static List<double> _fitColumns(
+    List<double> natural,
+    List<double?> floor,
+    double room,
+  ) {
+    final total = natural.fold(0.0, (sum, w) => sum + w);
+    if (!room.isFinite || total <= room) return natural;
+    double at(double level) => [
+      for (var c = 0; c < natural.length; c++)
+        switch (floor[c]) {
+          final least? => math.min(natural[c], math.max(least, level)),
+          null => natural[c],
+        },
+    ].fold(0.0, (sum, w) => sum + w);
+    var low = 0.0;
+    var high = natural.fold(0.0, math.max);
+    for (var k = 0; k < 40; k++) {
+      final mid = (low + high) / 2;
+      if (at(mid) > room) {
+        high = mid;
+      } else {
+        low = mid;
+      }
+    }
+    return [
+      for (var c = 0; c < natural.length; c++)
+        switch (floor[c]) {
+          final least? => math.min(natural[c], math.max(least, low)),
+          null => natural[c],
+        },
+    ];
+  }
+
+  Widget _table(
+    BuildContext context, {
+    required List<AppTableColumn> shown,
+    required List<List<String>> cells,
+    required List<List<Object?>> rows,
+    required int left,
+    required bool more,
+    required List<double> widths,
+    required List<double> natural,
+    required Widget Function(Widget, int, {bool end}) padded,
+    required TextStyle headStyle,
+    required TextStyle Function(String) bodyStyle,
+    required TextStyle caption,
+  }) {
+    final palette = Palette.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -3003,7 +3156,10 @@ class AppTableView extends StatelessWidget {
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Table(
-            columnWidths: widths,
+            columnWidths: {
+              for (final (c, width) in widths.indexed)
+                c: FixedColumnWidth(width),
+            },
             defaultVerticalAlignment: TableCellVerticalAlignment.middle,
             border: TableBorder(
               horizontalInside: BorderSide(color: palette.hairline),
@@ -3033,7 +3189,14 @@ class AppTableView extends StatelessWidget {
                   children: [
                     for (var c = 0; c < shown.length; c++)
                       padded(
-                        Text(row[c], style: bodyStyle(shown[c].format)),
+                        Text(
+                          row[c],
+                          style: bodyStyle(shown[c].format),
+                          maxLines: widths[c] < natural[c] ? 1 : null,
+                          overflow: widths[c] < natural[c]
+                              ? TextOverflow.ellipsis
+                              : null,
+                        ),
                         c,
                         end: shown[c].format == 'number',
                       ),
@@ -3043,10 +3206,10 @@ class AppTableView extends StatelessWidget {
           ),
         ),
         if (rows.isEmpty) Text('Nothing to show.', style: caption),
-        if (left > 0 || table.more)
+        if (left > 0 || more)
           Text(
             left > 0
-                ? 'and ${fullNumber(left.toDouble())}${table.more ? '+' : ''} more'
+                ? 'and ${fullNumber(left.toDouble())}${more ? '+' : ''} more'
                 : 'and more',
             style: caption,
           ),

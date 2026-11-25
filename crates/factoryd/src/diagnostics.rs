@@ -22,6 +22,7 @@ use factory_protocol::v1;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use tokio::sync::mpsc;
 
+use crate::locking::lock;
 use crate::factory::{Factory, RequestError};
 use crate::transcript::now_ms;
 
@@ -324,10 +325,6 @@ impl Default for Recorder {
     fn default() -> Recorder {
         Recorder { sender: OnceLock::new(), turned: Mutex::default(), window: Mutex::new(TURNED_WINDOW) }
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The backend records an event of its own in `area`, kept while

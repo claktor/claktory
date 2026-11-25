@@ -34,7 +34,7 @@ static MANIFEST: Manifest = Manifest {
     options: &[],
 };
 
-const UNINSTALL: &str = "Ask the person to uninstall an app installed in this Claktory, when they ask: app, its id, as apps_list gives it; keep_data: true to keep what it stored, for a later install; reason: why, in a sentence they read on the card. A card opens in your conversation (and their Needs you), and only their approval uninstalls it; you're told which in an event. To stop an app for a while instead, use apps_set_running.";
+const UNINSTALL: &str = "Ask the person to uninstall an app installed in this Claktory, when they ask: app, its id, as apps_list gives it; keep_data: true to keep what it stored, for a later install; reason: why, in a sentence they read on the card. A card opens in your conversation (and their Needs you), and only their approval uninstalls it; you're told which in an event. To stop an app for a while instead, use apps_set_running. proposal: the id of an approved proposal whose grants name it (keep_data true), once you've reviewed it: then it's made without a card when it's within one of them; otherwise the card opens as usual and the answer says why.";
 const RUNNING: &str = "Start or stop an app installed in this Claktory, as the person's switch in Marketplace → Apps does, when they ask (or to start again one Claktory paused after it crashed). app: its id, as apps_list gives it. running: true to start it, false to stop it. Stopped, it stays installed and set up, and its agents can't use it until it starts again.";
 
 const PROPOSE: &str = "Propose giving an agent access to an app at the person's account, when they ask for it: agent, its id or name; app, \"dms\" (direct messages); scopes, what it may do there (dm.read, dm.draft, dm.send, dm.subscribe); resources, what it reaches ([{\"kind\": \"conversation\", \"id\": …}], at least one); days, how long it lasts (left out: until the person takes it back); reason, why, for the person. It opens a card in your conversation where the person approves or declines it, and you're told which. Ask only for what the work needs. Approved, it replaces what that agent had in the app.";
@@ -90,6 +90,7 @@ impl Extension for AppGrants {
             "properties": {
                 "app": {"type": "string", "minLength": 1},
                 "sources": {"type": "object", "additionalProperties": {"type": "boolean"}},
+                "proposal": {"type": "string"},
                 "agents": {
                     "type": "array",
                     "items": {
@@ -120,19 +121,14 @@ impl Extension for AppGrants {
                 "app": {"type": "string", "minLength": 1},
                 "keep_data": {"type": "boolean"},
                 "reason": {"type": "string", "minLength": 1, "maxLength": MAX_REASON},
+                "proposal": {"type": "string"},
             },
             "additionalProperties": false,
         });
         vec![
             super::tool(user_apps::TOOL, "Propose app access", PROPOSE, parameters, super::typed_handler(factory, agent, propose)),
             super::async_tool(factory, agent, RUNNING_TOOL, "Start or stop an app", RUNNING, running, set_running),
-            super::tool(
-                crate::card_actions::UNINSTALL_TOOL,
-                "Uninstall an app",
-                UNINSTALL,
-                uninstall,
-                super::typed_handler(factory, agent, uninstall_app),
-            ),
+            super::async_tool(factory, agent, crate::card_actions::UNINSTALL_TOOL, "Uninstall an app", UNINSTALL, uninstall, uninstall_app),
             super::tool(
                 crate::apps::access::LIST_TOOL,
                 "Apps",
@@ -356,11 +352,15 @@ struct UninstallArgs {
     #[serde(default)]
     keep_data: bool,
     reason: String,
+    /// An approved proposal that names it (`crate::proposal_grants`).
+    #[serde(default)]
+    proposal: Option<String>,
 }
 
 /// apps_uninstall (#423): asks the person, on a card, to uninstall an app;
 /// only their approval does.
-fn uninstall_app(factory: &Arc<Factory>, agent: &str, args: UninstallArgs) -> Result<ToolResult, String> {
+async fn uninstall_app(factory: Arc<Factory>, agent: String, args: UninstallArgs) -> Result<ToolResult, String> {
+    let (factory, agent) = (&factory, agent.as_str());
     only_rivet_sets(factory, agent)?;
     let wanted = args.app.trim().to_owned();
     let reason = args.reason.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -381,7 +381,16 @@ fn uninstall_app(factory: &Arc<Factory>, agent: &str, args: UninstallArgs) -> Re
         "{me} asks to uninstall {name}: it stops, and it's removed with its setup (what it reads and which agents use it); {data}. Its secrets stay in your vault."
     );
     let action = crate::card_actions::Action::UninstallApp { app: wanted, keep_data: args.keep_data };
-    crate::card_actions::ask(factory, agent, &format!("Uninstall {name}"), &description, &reason, &action)
+    crate::card_actions::ask_or_proposed(
+        factory,
+        agent,
+        &format!("Uninstall {name}"),
+        &description,
+        &reason,
+        &action,
+        args.proposal.as_deref(),
+    )
+    .await
 }
 
 /// Only Rivet sets apps up: the settings' admin agent, whoever calls.

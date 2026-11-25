@@ -13,6 +13,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'app_test.dart' show builder, workspace;
 import 'harness.dart';
+import 'phone_sizes_test.dart' show loadGeist;
 import 'monitors_test.dart' show monitor;
 
 Workspace _workspace() => workspace(
@@ -77,6 +78,9 @@ Future<void> _choose<T>(WidgetTester tester, String title, T value) async {
 }
 
 void main() {
+  // The real type, so words take the room they take in the app.
+  setUpAll(loadGeist);
+
   testWidgets('the sidebar opens it; every agent\'s monitors by agent, the '
       'same number twice told apart', (tester) async {
     final harness = _harness();
@@ -237,6 +241,34 @@ void main() {
     expect(find.text('Show older'), findsNothing);
   });
 
+  testWidgets("the person's doing reads as an agent's: Paused by Matt "
+      "(Giorno, Zucchero's row 408)", (tester) async {
+    final harness = _harness();
+    final base = DateTime(2026, 11, 23, 9).millisecondsSinceEpoch;
+    MonitorEvent event(int seq, MonitorEventKind kind, String detail) =>
+        MonitorEvent(
+          seq: Int64(seq),
+          timeMs: Int64(base + seq * 60000),
+          kind: kind,
+          detail: detail,
+        );
+    harness.backend.monitorHistories['a1/1'] = [
+      event(4, MonitorEventKind.MONITOR_EVENT_KIND_RESUMED, 'resumed by a2')
+        ..actor = 'a2',
+      event(3, MonitorEventKind.MONITOR_EVENT_KIND_PAUSED, 'by Matt'),
+      event(2, MonitorEventKind.MONITOR_EVENT_KIND_FIRED, 'on schedule'),
+      event(1, MonitorEventKind.MONITOR_EVENT_KIND_CREATED, 'every 1h'),
+    ];
+    await _open(tester, harness);
+    await tester.tap(find.text('Nightly build'));
+    await pumpFrames(tester);
+    expect(find.textContaining('Paused by Matt'), findsOneWidget);
+    expect(find.textContaining('Paused: by Matt'), findsNothing);
+    expect(find.textContaining('Resumed by Writer'), findsOneWidget);
+    // Any other detail still follows a colon.
+    expect(find.textContaining('Fired: on schedule'), findsOneWidget);
+  });
+
   testWidgets('none yet, and a refusal says why', (tester) async {
     final harness = Harness(_workspace());
     await _open(tester, harness);
@@ -254,4 +286,27 @@ void main() {
     expect(find.text('Nightly build'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  // iOS's Large (the default) to its largest before the accessibility
+  // sizes, on an SE.
+  for (final scale in const [1.0, 1.12, 1.24, 1.35]) {
+    testWidgets('at text size ×$scale on a small phone, the State filter '
+        "keeps its choice on one line (Zucchero's rows 390 and 409)", (
+      tester,
+    ) async {
+      tester.platformDispatcher.textScaleFactorTestValue = scale;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final harness = _harness();
+      await _open(tester, harness, size: const Size(320, 568));
+      await _choose(tester, 'State', MonitorsShown.paused);
+      final chosen = find.text('Paused or failed');
+      final one = find.text('All agents');
+      expect(chosen, findsWidgets);
+      expect(
+        tester.getSize(chosen.first).height,
+        tester.getSize(one.first).height,
+      );
+      expect(tester.takeException(), isNull);
+    });
+  }
 }

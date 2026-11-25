@@ -55,6 +55,10 @@ void main() {
       'welcomed',
       // #388: why the relay can't be reached, a word from RelayTrouble.
       'err',
+      // Polpo's efficiency study §4: what a direct path crosses, a word
+      // from PathReach (never the address), and a count of bytes.
+      'reach',
+      'bytes',
     ]);
     expect(ConnectionKind.values.map((kind) => kind.name), [
       'lifecycle',
@@ -65,6 +69,7 @@ void main() {
       'relay',
       'path',
       'reconnect',
+      'ready',
     ]);
     // The notifications area's (setting up pushes on an iPhone).
     expect(NotificationsKey.values.map((key) => key.wire), [

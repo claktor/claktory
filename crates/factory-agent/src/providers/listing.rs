@@ -52,18 +52,25 @@ pub fn valid_id(provider: &str, id: &str) -> bool {
 }
 
 /// Reads the provider's model list with `auth` from `base_url`, as it came.
-pub async fn fetch(provider: &str, base_url: &str, auth: &RequestAuth) -> Result<Vec<u8>, String> {
+/// An answer that refuses the credentials (401) is `Error::Models` with the
+/// `UNAUTHORIZED` code, for a sign-in to refresh and ask again; anything
+/// else fails with a sentence.
+pub async fn fetch(provider: &str, base_url: &str, auth: &RequestAuth) -> Result<Vec<u8>, crate::Error> {
     let base = base_url.trim_end_matches('/');
     let url = match provider {
-        "openrouter" => return catalog::fetch_openrouter().await,
+        "openrouter" => return catalog::fetch_openrouter().await.map_err(crate::Error::Other),
         "anthropic" => format!("{base}/v1/models?limit=1000"),
         "openai" => format!("{base}/models"),
         "openai-codex" => format!("{base}/codex/models?client_version={CODEX_CLIENT_VERSION}"),
-        other => return Err(format!("{other}'s models can't be read")),
+        other => return Err(crate::Error::Other(format!("{other}'s models can't be read"))),
     };
-    let (status, body) = get(provider, &url, auth).await?;
+    let (status, body) = get(provider, &url, auth).await.map_err(crate::Error::Other)?;
     if !(200..300).contains(&status) {
-        return Err(answered(provider, status, &body, auth));
+        let said = answered(provider, status, &body, auth);
+        if crate::accounts::refused_error(status, &String::from_utf8_lossy(&body)) {
+            return Err(crate::Error::Models { code: crate::errors::UNAUTHORIZED, message: said });
+        }
+        return Err(crate::Error::Other(said));
     }
     Ok(body)
 }
@@ -153,7 +160,7 @@ pub async fn check(provider: &str, base_url: &str, auth: &RequestAuth, id: &str)
             new_model(provider, id, &entry, &bundled).ok_or_else(|| format!("Claktory can't tell how to run {who}'s “{id}” yet."))
         }
         "openai-codex" => {
-            let body = fetch(provider, base_url, auth).await?;
+            let body = fetch(provider, base_url, auth).await.map_err(|error| error.to_string())?;
             let listing: Value = serde_json::from_slice(&body).map_err(|_| format!("{who}'s answer couldn't be read."))?;
             let entries = listing.get("models").and_then(Value::as_array).ok_or_else(|| format!("{who}'s answer couldn't be read."))?;
             // A hidden model is still one the sign-in can use.

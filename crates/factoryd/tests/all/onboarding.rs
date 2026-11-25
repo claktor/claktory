@@ -33,7 +33,7 @@ async fn a_new_claktory_asks_for_a_model_and_rivet_greets_once_one_is_connected(
     assert_eq!(step(&view), OnboardingStep::Needed);
 
     // Skipped, it stays skipped on every device, until a model is connected.
-    let skip = Request::SetOnboarding(v1::SetOnboarding { skip_model: true });
+    let skip = Request::SetOnboarding(v1::SetOnboarding { skip_model: true, ..Default::default() });
     apply_request(&mut client, &mut view, skip.clone()).await;
     assert_eq!(step(&view), OnboardingStep::Skipped);
     let (_other, workspace, _) = Client::connect(addr).await;

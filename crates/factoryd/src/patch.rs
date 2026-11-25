@@ -4,6 +4,19 @@
 //! and its Workspace (every agent's prompt, the changelog, the map) is far
 //! bigger than the change, which matters most over the tunnel.
 //!
+//! A device on another machine (the iPhone, over the tunnel) gets them at
+//! most once a second (Polpo's iphone-efficiency.md, fix 2): the first change
+//! goes at once, and those in the second after it go together, as one patch,
+//! when it ends. A busy team changes the Workspace several times a second,
+//! each its own packet and a wake for the phone. What the person waits on
+//! isn't held: a request's answer comes after what it changed (`release`),
+//! and a change in what waits on them (a question, say) goes at once
+//! (`waiting_changed`).
+//!
+//! What a model writes (EntryDelta, ChatEntryDelta) goes to such a device
+//! the same way, at most every 0.1 s: the first piece at once, the pieces
+//! after it within the while as one (`Deltas`).
+//!
 //! It works on the encoded bytes, field by field, so a field added to
 //! Workspace needs nothing here: prost always encodes the same state to the
 //! same bytes (maps are BTreeMaps for that).
@@ -19,8 +32,22 @@ use prost::Message as _;
 const WORKSPACE: u32 = 5;
 /// Workspace.agents.
 const AGENTS: u32 = 2;
+/// Workspace.pipes and dm_sends: they hold what waits on the person (a pipe
+/// message to review, a direct message to approve).
+const WAITING_WORKSPACE: [u32; 2] = [26, 37];
 /// Agent.id.
 const AGENT_ID: u32 = 1;
+/// Agent.waiting_seqs and waiting_items: its questions for the person.
+const WAITING_AGENT: [u32; 2] = [32, 42];
+
+/// How often a device on another machine gets the Workspace at most.
+pub(crate) const REMOTE_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+/// How often it gets what a model writes at most: as it shows reading, not
+/// per piece (fix 3). A model sends 19–47 pieces a second (measured on
+/// Sonnet 4.6, Haiku 4.5 and Haiku 5.5), each a frame of its own.
+pub(crate) const REMOTE_TEXT_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+/// ServerMessage.delta and chat_delta: what a model writes, piece by piece.
+const DELTAS: [u32; 2] = [8, 47];
 const LENGTH_DELIMITED: u8 = 2;
 
 /// ServerMessage.workspace_revision and workspace_base_revision (#378).
@@ -28,6 +55,12 @@ const REVISION: u32 = 75;
 const BASE_REVISION: u32 = 76;
 /// How many Workspaces a device's resume can start from, its latest.
 const RESUMES_KEPT: usize = 4;
+/// How long one already replaced stays kept too: an app iOS suspends stops
+/// reading, but its connection takes writes until the tunnel finds it gone
+/// (about 30 s), so the one it holds may be many back (Zucchero row 423).
+const RESUME_STALL: std::time::Duration = std::time::Duration::from_secs(120);
+/// The most a device keeps however fast its Workspace changes.
+const RESUMES_MOST: usize = 256;
 /// How long a device's Workspaces are kept for it to resume from.
 const RESUME_FOR: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
 
@@ -61,13 +94,23 @@ impl Resumes {
     }
 
     /// Keeps `workspace` as sent to `device`: its new revision.
-    fn keep(&self, device: &str, workspace: Arc<Parsed>) -> String {
+    fn keep(&self, device: &str, workspace: &Parsed) -> String {
+        self.keep_at(device, workspace, std::time::Instant::now())
+    }
+
+    /// Keeps the latest few, and those replaced less than `RESUME_STALL`
+    /// ago, at most `RESUMES_MOST`. Each shares what didn't change with the
+    /// one before it, so keeping many costs only what changed.
+    fn keep_at(&self, device: &str, workspace: &Parsed, now: std::time::Instant) -> String {
         let revision = format!("{:016x}-{}", self.nonce, self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         let mut held = self.held();
-        held.retain(|_, kept| kept.back().is_some_and(|last| last.at.elapsed() < RESUME_FOR));
+        held.retain(|_, kept| kept.back().is_some_and(|last| now.saturating_duration_since(last.at) < RESUME_FOR));
         let kept = held.entry(device.to_owned()).or_default();
-        kept.push_back(Held { revision: revision.clone(), workspace, at: std::time::Instant::now() });
-        while kept.len() > RESUMES_KEPT {
+        let workspace = Arc::new(workspace.sharing(kept.back().map(|last| &*last.workspace)));
+        kept.push_back(Held { revision: revision.clone(), workspace, at: now });
+        while kept.len() > RESUMES_KEPT
+            && (kept.len() > RESUMES_MOST || now.saturating_duration_since(kept[1].at) >= RESUME_STALL)
+        {
             kept.pop_front();
         }
         revision
@@ -96,11 +139,88 @@ pub(crate) struct Workspaces {
     /// The next Workspace goes out even if unchanged: the first after
     /// Welcome, as a patch.
     send_even_unchanged: bool,
+    /// At most one a while, for a device on another machine.
+    pace: Option<Pace>,
+    /// What a model writes, the same way.
+    deltas: Deltas,
+    /// What went out, by kind.
+    pub(crate) tally: Tally,
+}
+
+/// Workspaces held to go together.
+struct Pace {
+    every: std::time::Duration,
+    /// When the last one went.
+    sent_at: Option<std::time::Instant>,
+    /// The latest since, to go when the while is up.
+    held: Option<Bytes>,
 }
 
 impl Workspaces {
     pub(crate) fn new(patches: bool) -> Self {
-        Self { patches, last: None, revision: String::new(), resumes: None, resume: None, send_even_unchanged: false }
+        Self {
+            patches,
+            last: None,
+            revision: String::new(),
+            resumes: None,
+            resume: None,
+            send_even_unchanged: false,
+            pace: None,
+            deltas: Deltas::default(),
+            tally: Tally::default(),
+        }
+    }
+
+    /// Sends a Workspace at most once `every`, and what a model writes at
+    /// most once `text_every`, the rest held to go together.
+    pub(crate) fn paced(mut self, every: std::time::Duration, text_every: std::time::Duration) -> Self {
+        self.pace = Some(Pace { every, sent_at: None, held: None });
+        self.deltas.every = Some(text_every);
+        self
+    }
+
+    /// What goes now for `event`, an encoded ServerMessage, in order: the
+    /// model's writing held first when `event` can't wait behind it.
+    pub(crate) fn frames(&mut self, event: Bytes) -> Vec<Bytes> {
+        let now = std::time::Instant::now();
+        let [held, event] = self.deltas.offer(event, now);
+        let event = event.and_then(|event| self.outgoing_at(event, now));
+        held.into_iter().chain(event).collect()
+    }
+
+    /// When what's held goes, if anything is.
+    pub(crate) fn due(&self) -> Option<std::time::Instant> {
+        [self.workspace_due(), self.deltas.due()].into_iter().flatten().min()
+    }
+
+    fn workspace_due(&self) -> Option<std::time::Instant> {
+        let pace = self.pace.as_ref()?;
+        pace.held.as_ref()?;
+        Some(pace.sent_at? + pace.every)
+    }
+
+    /// Everything held, to go now: the model's writing, and the Workspace as
+    /// what changed since the last one sent, one patch.
+    pub(crate) fn release(&mut self) -> Vec<Bytes> {
+        let now = std::time::Instant::now();
+        let held = self.deltas.take(now);
+        held.into_iter().chain(self.release_at(now)).collect()
+    }
+
+    /// What's held and due now.
+    pub(crate) fn release_due(&mut self) -> Vec<Bytes> {
+        let now = std::time::Instant::now();
+        let due = |at: Option<std::time::Instant>| at.is_some_and(|at| at <= now);
+        let held = if due(self.deltas.due()) { self.deltas.take(now) } else { None };
+        let workspace = if due(self.workspace_due()) { self.release_at(now) } else { None };
+        held.into_iter().chain(workspace).collect()
+    }
+
+    fn release_at(&mut self, now: std::time::Instant) -> Option<Bytes> {
+        let frame = self.pace.as_mut()?.held.take()?;
+        let workspace = workspace_in(&frame)?;
+        let next = Parsed::new(&workspace).map(Arc::new);
+        self.send_now(frame, next, now)
     }
 
     /// Workspaces for `device`'s app, with revisions, resuming from the
@@ -122,6 +242,13 @@ impl Workspaces {
     /// Starts over: the next Workspace goes whole (after a resync), or, the
     /// first time, as a patch against what the app holds.
     pub(crate) fn reset(&mut self) {
+        // What follows is the whole state, at once, the conversation too.
+        if let Some(pace) = &mut self.pace {
+            pace.held = None;
+            pace.sent_at = None;
+        }
+        self.deltas.held = None;
+        self.deltas.sent_at = None;
         match self.resume.take() {
             Some((workspace, revision)) => {
                 self.last = Some(workspace);
@@ -137,15 +264,45 @@ impl Workspaces {
 
     /// What to send for `frame`, an encoded ServerMessage: itself, a patch
     /// in its place, or nothing when it's a Workspace the app already has.
-    pub(crate) fn outgoing(&mut self, frame: Bytes) -> Option<Bytes> {
+    /// Held instead when paced and one went less than a while ago, unless
+    /// what waits on the person changed.
+    #[cfg(test)]
+    fn outgoing(&mut self, frame: Bytes) -> Option<Bytes> {
+        self.outgoing_at(frame, std::time::Instant::now())
+    }
+
+    fn outgoing_at(&mut self, frame: Bytes, now: std::time::Instant) -> Option<Bytes> {
         let Some(workspace) = workspace_in(&frame) else { return Some(frame) };
-        let Some(next) = Parsed::new(&workspace) else {
+        let next = Parsed::new(&workspace).map(Arc::new);
+        if let Some(pace) = &mut self.pace {
+            let recent = pace.sent_at.is_some_and(|at| now.duration_since(at) < pace.every);
+            if recent && !waiting_changed(self.last.as_deref(), next.as_deref()) {
+                pace.held = Some(frame);
+                return None;
+            }
+            pace.held = None;
+        }
+        self.send_now(frame, next, now)
+    }
+
+    /// What to send for the Workspace `frame` (`next`, parsed) now.
+    fn send_now(&mut self, frame: Bytes, next: Option<Arc<Parsed>>, now: std::time::Instant) -> Option<Bytes> {
+        let Some(next) = next else {
             // Not something this can compare; whole is always right.
             self.last = None;
             self.revision.clear();
             return Some(frame);
         };
-        let next = Arc::new(next);
+        let sent = self.compared(frame, next);
+        if sent.is_some()
+            && let Some(pace) = &mut self.pace
+        {
+            pace.sent_at = Some(now);
+        }
+        sent
+    }
+
+    fn compared(&mut self, frame: Bytes, next: Arc<Parsed>) -> Option<Bytes> {
         let unchanged_is_news = std::mem::take(&mut self.send_even_unchanged);
         let base = std::mem::take(&mut self.revision);
         let Some(last) = self.last.replace(next.clone()) else { return Some(self.revised(frame, &next, "")) };
@@ -166,7 +323,7 @@ impl Workspaces {
     /// one it applies to), when this connection keeps revisions.
     fn revised(&mut self, message: Bytes, workspace: &Arc<Parsed>, base: &str) -> Bytes {
         let Some((resumes, device)) = &self.resumes else { return message };
-        let revision = resumes.keep(device, workspace.clone());
+        let revision = resumes.keep(device, workspace);
         let mut message = message.to_vec();
         append_string(&mut message, REVISION, &revision);
         if !base.is_empty() {
@@ -174,6 +331,141 @@ impl Workspaces {
         }
         self.revision = revision;
         message.into()
+    }
+}
+
+/// What a model writes, to a device on another machine: the first piece at
+/// once, those after it within the while held as one.
+#[derive(Default)]
+struct Deltas {
+    /// None: each goes as it comes.
+    every: Option<std::time::Duration>,
+    sent_at: Option<std::time::Instant>,
+    held: Option<ServerMessage>,
+}
+
+impl Deltas {
+    /// What goes now for `frame`: the piece held, when `frame` can't follow
+    /// it otherwise (anything but a Workspace, which goes its own way, or
+    /// another entry's piece), then `frame` unless it's held.
+    fn offer(&mut self, frame: Bytes, now: std::time::Instant) -> [Option<Bytes>; 2] {
+        let Some(every) = self.every else { return [None, Some(frame)] };
+        let body = body_number(&frame);
+        if body == Some(WORKSPACE) {
+            return [None, Some(frame)];
+        }
+        let next = body.filter(|body| DELTAS.contains(body)).and_then(|_| ServerMessage::decode(frame.clone()).ok());
+        let Some(next) = next else { return [self.take(now), Some(frame)] };
+        if let Some(held) = &mut self.held
+            && merged(held, &next)
+        {
+            return [None, None];
+        }
+        let held = self.take(now);
+        if held.is_none() && self.sent_at.is_none_or(|at| now.duration_since(at) >= every) {
+            self.sent_at = Some(now);
+            return [None, Some(frame)];
+        }
+        self.held = Some(next);
+        [held, None]
+    }
+
+    fn due(&self) -> Option<std::time::Instant> {
+        self.held.as_ref()?;
+        Some(self.sent_at? + self.every?)
+    }
+
+    /// The piece held, to go now.
+    fn take(&mut self, now: std::time::Instant) -> Option<Bytes> {
+        let held = self.held.take()?;
+        self.sent_at = Some(now);
+        Some(held.encode_to_vec().into())
+    }
+}
+
+/// Appends `next`'s text to `held`'s when it's more of the same entry, with
+/// the conversation's revision it brings.
+fn merged(held: &mut ServerMessage, next: &ServerMessage) -> bool {
+    match (&mut held.body, &next.body) {
+        (Some(Body::Delta(held)), Some(Body::Delta(next))) if held.agent_id == next.agent_id && held.seq == next.seq => {
+            held.text.push_str(&next.text);
+        }
+        (Some(Body::ChatDelta(held)), Some(Body::ChatDelta(next))) if held.chat_id == next.chat_id && held.seq == next.seq => {
+            held.text.push_str(&next.text);
+        }
+        _ => return false,
+    }
+    held.transcript_revision.clone_from(&next.transcript_revision);
+    true
+}
+
+/// The body an encoded ServerMessage carries: its field's number.
+fn body_number(frame: &[u8]) -> Option<u32> {
+    Field::all(frame)?.into_iter().map(|field| field.number).find(|number| (2..REVISION).contains(number))
+}
+
+/// Whether what waits on the person changed from `last` to `next`: an
+/// agent's questions, the pipes (their messages held for review) or direct
+/// messages to approve. Unknown counts as yes.
+fn waiting_changed(last: Option<&Parsed>, next: Option<&Parsed>) -> bool {
+    let (Some(last), Some(next)) = (last, next) else { return true };
+    if WAITING_WORKSPACE.iter().any(|number| last.fields.get(number) != next.fields.get(number)) {
+        return true;
+    }
+    let before: HashMap<&str, &Bytes> = last.agents.iter().map(|(id, agent)| (id.as_str(), agent)).collect();
+    let waiting = |agent: &Bytes| {
+        let fields = fields_of(agent).unwrap_or_default();
+        WAITING_AGENT.map(|number| fields.get(&number).cloned())
+    };
+    next.agents.iter().any(|(id, agent)| match before.get(id.as_str()) {
+        Some(&old) if old == agent => false,
+        Some(&old) => waiting(old) != waiting(agent),
+        None => waiting(agent).iter().any(Option::is_some),
+    })
+}
+
+/// What a connection sent, by kind: frames and bytes (before compression),
+/// for its `disconnected` diagnostics event (Polpo's iphone-efficiency.md
+/// §4), to measure what pacing saves.
+#[derive(Default)]
+pub(crate) struct Tally {
+    counts: [(u64, u64); KINDS.len()],
+}
+
+/// The kinds counted, and the ServerMessage bodies each is.
+const KINDS: [(&str, &[u32]); 7] = [
+    ("workspace", &[WORKSPACE]),
+    ("patch", &[27]),
+    ("entry", &[7, 46]),
+    ("delta", &[8, 47]),
+    ("transcript", &[6, 26, 45, 48]),
+    ("file", &[14, 16, 59, 70]),
+    ("other", &[]),
+];
+
+impl Tally {
+    /// Counts `frame`, an encoded ServerMessage.
+    pub(crate) fn count(&mut self, frame: &[u8]) {
+        let body = body_number(frame);
+        let kind = KINDS.iter().position(|(_, bodies)| body.is_some_and(|body| bodies.contains(&body))).unwrap_or(KINDS.len() - 1);
+        let (frames, bytes) = &mut self.counts[kind];
+        *frames += 1;
+        *bytes += frame.len() as u64;
+    }
+
+    /// "frames=patch:120,delta:900 bytes=patch:4100,delta:90000", the
+    /// kinds sent only.
+    pub(crate) fn words(&self) -> String {
+        let list = |pick: fn(&(u64, u64)) -> u64| {
+            let parts: Vec<String> = KINDS
+                .iter()
+                .zip(&self.counts)
+                .filter(|(_, count)| count.0 > 0)
+                .map(|((kind, _), count)| format!("{kind}:{}", pick(count)))
+                .collect();
+            if parts.is_empty() { "0".to_owned() } else { parts.join(",") }
+        };
+        format!("frames={} bytes={}", list(|count| count.0), list(|count| count.1))
     }
 }
 
@@ -221,6 +513,29 @@ impl Parsed {
             }
         }
         Some(Self { fields, agents })
+    }
+
+    /// The same Workspace with each piece `before` has unchanged taken from
+    /// it, and the rest copied out of the frame it was read from, so that
+    /// frame isn't held for it.
+    fn sharing(&self, before: Option<&Parsed>) -> Parsed {
+        let same = |was: Option<&Bytes>, now: &Bytes| match was {
+            Some(was) if was == now => was.clone(),
+            _ => Bytes::copy_from_slice(now),
+        };
+        let fields = self
+            .fields
+            .iter()
+            .map(|(number, occurrences)| {
+                let was = before.and_then(|before| before.fields.get(number));
+                let occurrences = occurrences.iter().enumerate().map(|(at, now)| same(was.and_then(|was| was.get(at)), now)).collect();
+                (*number, occurrences)
+            })
+            .collect();
+        let was: HashMap<&str, &Bytes> =
+            before.map(|before| before.agents.iter().map(|(id, agent)| (id.as_str(), agent)).collect()).unwrap_or_default();
+        let agents = self.agents.iter().map(|(id, agent)| (id.clone(), same(was.get(id.as_str()).copied(), agent))).collect();
+        Parsed { fields, agents }
     }
 }
 
@@ -535,14 +850,194 @@ mod tests {
     }
 
     #[test]
-    fn a_device_keeps_its_latest_few() {
+    fn a_device_keeps_its_latest_few_and_those_replaced_a_little_while_ago() {
         let resumes = Resumes::default();
-        let parsed = Arc::new(Parsed::new(&workspace_in(&frame(&workspace())).unwrap()).unwrap());
-        let revisions: Vec<String> = (0..RESUMES_KEPT + 2).map(|_| resumes.keep("phone", parsed.clone())).collect();
-        assert!(resumes.find("phone", &revisions[0]).is_none());
-        assert!(resumes.find("phone", &revisions[2]).is_some());
-        assert!(resumes.find("phone", revisions.last().unwrap()).is_some());
+        let parsed = Parsed::new(&workspace_in(&frame(&workspace())).unwrap()).unwrap();
+        let start = std::time::Instant::now();
+        let at = |secs: u64| start + std::time::Duration::from_secs(secs);
+        // A suspended app's connection takes a patch a second until the
+        // tunnel finds it gone: the one it holds is still there (row 423).
+        let revisions: Vec<String> = (0..40).map(|n| resumes.keep_at("phone", &parsed, at(n))).collect();
+        assert!(revisions.iter().all(|revision| resumes.find("phone", revision).is_some()));
         assert!(resumes.find("mac", revisions.last().unwrap()).is_none());
+        // Replaced longer ago than that, gone; the latest few always stay.
+        let later = resumes.keep_at("phone", &parsed, at(40 + RESUME_STALL.as_secs() + 1));
+        assert!(revisions[..revisions.len() - (RESUMES_KEPT - 1)].iter().all(|revision| resumes.find("phone", revision).is_none()));
+        assert!(revisions[revisions.len() - (RESUMES_KEPT - 1)..].iter().all(|revision| resumes.find("phone", revision).is_some()));
+        assert!(resumes.find("phone", &later).is_some());
+        // However fast it changes, at most so many.
+        let burst: Vec<String> = (0..RESUMES_MOST + 10).map(|_| resumes.keep_at("phone", &parsed, at(1000))).collect();
+        assert!(resumes.find("phone", &burst[9]).is_none());
+        assert!(resumes.find("phone", &burst[10]).is_some());
+        assert_eq!(resumes.held()["phone"].len(), RESUMES_MOST);
+    }
+
+    #[test]
+    fn a_kept_workspace_shares_what_did_not_change_with_the_one_before() {
+        let resumes = Resumes::default();
+        let first = workspace();
+        let mut second = first.clone();
+        second.agents[0].prompt = "plans the week".into();
+        let one = Parsed::new(&workspace_in(&frame(&first)).unwrap()).unwrap();
+        let two = Parsed::new(&workspace_in(&frame(&second)).unwrap()).unwrap();
+        let (a, b) = (resumes.keep("phone", &one), resumes.keep("phone", &two));
+        let (a, b) = (resumes.find("phone", &a).unwrap(), resumes.find("phone", &b).unwrap());
+        assert!(*a == one && *b == two, "the same Workspaces");
+        let pointer = |bytes: &Bytes| bytes.as_ptr();
+        assert_ne!(pointer(&a.agents[0].1), pointer(&b.agents[0].1), "the agent that changed");
+        assert_eq!(pointer(&a.agents[1].1), pointer(&b.agents[1].1), "one that didn't");
+        for (number, occurrences) in &b.fields {
+            for (at, field) in occurrences.iter().enumerate() {
+                assert_eq!(pointer(field), pointer(&a.fields[number][at]), "field {number}");
+                assert_ne!(pointer(field), pointer(&two.fields[number][at]), "not the frame's");
+            }
+        }
+    }
+
+    #[test]
+    fn paced_the_first_goes_at_once_and_a_burst_after_it_as_one_patch() {
+        let every = std::time::Duration::from_secs(1);
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let mut sent = Workspaces::new(true).paced(every, every);
+        let first = workspace();
+        assert!(matches!(decode(sent.outgoing_at(frame(&first), at(0)).unwrap()), Body::Workspace(_)));
+        assert_eq!(sent.due(), None);
+
+        // A change goes at once a while after the last.
+        let mut second = first.clone();
+        second.agents[0].prompt = "plans the week".into();
+        let Body::WorkspacePatch(patch) = decode(sent.outgoing_at(frame(&second), at(1500)).unwrap()) else { panic!("not a patch") };
+        assert_eq!(apply(&first, patch), second);
+
+        // Within the while: held, the latest kept, and due when it's up.
+        let mut latest = second.clone();
+        for n in 0..5 {
+            latest.agents[1].prompt = format!("builds {n}");
+            assert!(sent.outgoing_at(frame(&latest), at(1600 + n * 100)).is_none());
+        }
+        assert_eq!(sent.due(), Some(at(2500)));
+        let Body::WorkspacePatch(patch) = decode(sent.release_at(at(2500)).unwrap()) else { panic!("not a patch") };
+        assert_eq!(apply(&second, patch), latest, "every change in the one patch");
+        assert_eq!(sent.due(), None);
+        assert!(sent.release_at(at(2600)).is_none(), "nothing more held");
+
+        // Held, then nothing new after all: nothing goes.
+        let mut back = latest.clone();
+        back.config_error = "bad".into();
+        assert!(sent.outgoing_at(frame(&back), at(2700)).is_none());
+        assert!(sent.outgoing_at(frame(&latest), at(2800)).is_none());
+        assert!(sent.release_at(at(3500)).is_none());
+
+        // After a resync, the whole state goes at once.
+        assert!(sent.outgoing_at(frame(&back), at(3600)).is_some());
+        assert!(sent.outgoing_at(frame(&latest), at(3700)).is_none());
+        sent.reset();
+        assert_eq!(sent.due(), None);
+        assert!(matches!(decode(sent.outgoing_at(frame(&latest), at(3800)).unwrap()), Body::Workspace(_)));
+    }
+
+    #[test]
+    fn paced_a_change_in_what_waits_on_the_person_goes_at_once() {
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let mut sent = Workspaces::new(true).paced(std::time::Duration::from_secs(1), std::time::Duration::from_secs(1));
+        let first = workspace();
+        sent.outgoing_at(frame(&first), at(0));
+        let mut busy = first.clone();
+        busy.agents[0].status = v1::AgentStatus::Working.into();
+        assert!(sent.outgoing_at(frame(&busy), at(100)).is_none(), "a status: held");
+
+        // A question of an agent's, with what was held.
+        let mut asks = busy.clone();
+        asks.agents[2].waiting_seqs = vec![12];
+        let Body::WorkspacePatch(patch) = decode(sent.outgoing_at(frame(&asks), at(200)).unwrap()) else { panic!("not a patch") };
+        assert_eq!(apply(&first, patch), asks);
+        assert_eq!(sent.due(), None, "nothing left held");
+        // Answered (on another device, say): its card goes at once too.
+        let mut answered = asks.clone();
+        answered.agents[2].waiting_seqs.clear();
+        assert!(sent.outgoing_at(frame(&answered), at(300)).is_some());
+
+        // A new agent already asking, an item it names, a pipe, a direct message.
+        let changes: [fn(&mut v1::Workspace); 4] = [
+            |workspace| workspace.agents.push(v1::Agent { id: "omar".into(), waiting_seqs: vec![3], ..Default::default() }),
+            |workspace| workspace.agents[1].waiting_items = vec![v1::WaitingItem::default()],
+            |workspace| workspace.pipes = vec![v1::Pipe { id: "p".into(), ..Default::default() }],
+            |workspace| workspace.dm_sends = vec![v1::DmSendWaiting::default()],
+        ];
+        let mut now = answered;
+        for (n, change) in changes.iter().enumerate() {
+            change(&mut now);
+            assert!(sent.outgoing_at(frame(&now), at(400 + n as u64 * 10)).is_some(), "change {n}");
+        }
+    }
+
+    fn delta(agent: &str, seq: u64, text: &str, revision: &str) -> Bytes {
+        let delta = v1::EntryDelta { agent_id: agent.into(), seq, text: text.into() };
+        ServerMessage { body: Some(Body::Delta(delta)), transcript_revision: revision.into(), ..Default::default() }.encode_to_vec().into()
+    }
+
+    /// A frame's delta: its entry, text and revision.
+    fn text(frame: &Bytes) -> (u64, String, String) {
+        let message = ServerMessage::decode(frame.clone()).unwrap();
+        let Some(Body::Delta(delta)) = message.body else { panic!("not a delta: {message:?}") };
+        (delta.seq, delta.text, message.transcript_revision)
+    }
+
+    #[test]
+    fn paced_what_a_model_writes_goes_a_while_at_a_time_in_order() {
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let mut deltas = Deltas { every: Some(std::time::Duration::from_millis(100)), ..Deltas::default() };
+        // The first piece at once; the next within the while, held as one.
+        let [held, now] = deltas.offer(delta("sam", 4, "Hel", "r1"), at(0));
+        assert_eq!((held, now.map(|frame| text(&frame))), (None, Some((4, "Hel".into(), "r1".into()))));
+        for (n, piece) in ["lo", " wor", "ld"].iter().enumerate() {
+            assert_eq!(deltas.offer(delta("sam", 4, piece, &format!("r{}", n + 2)), at(10 + n as u64 * 10)), [None, None]);
+        }
+        assert_eq!(deltas.due(), Some(at(100)));
+        assert_eq!(text(&deltas.take(at(100)).unwrap()), (4, "lo world".into(), "r4".into()), "appended, the last revision");
+        assert_eq!(deltas.due(), None);
+
+        // Another entry's piece: what's held goes first.
+        deltas.offer(delta("sam", 4, "!", "r5"), at(150));
+        let [held, now] = deltas.offer(delta("sam", 6, "Next", "r6"), at(160));
+        assert_eq!((text(&held.unwrap()), now), ((4, "!".into(), "r5".into()), None));
+        // Anything else too, but a Workspace goes its own way.
+        assert_eq!(deltas.offer(frame(&workspace()), at(170)), [None, Some(frame(&workspace()))]);
+        let entry: Bytes =
+            ServerMessage { body: Some(Body::Entry(v1::EntryUpdate::default())), ..Default::default() }.encode_to_vec().into();
+        let [held, now] = deltas.offer(entry.clone(), at(180));
+        assert_eq!((text(&held.unwrap()), now), ((6, "Next".into(), "r6".into()), Some(entry)));
+        // A while after the last: at once again.
+        let [held, now] = deltas.offer(delta("sam", 8, "Done", "r7"), at(400));
+        assert!(held.is_none() && now.is_some());
+
+        // Unpaced (this computer's app): each as it comes.
+        let mut each = Deltas::default();
+        for n in 0..3 {
+            assert!(matches!(each.offer(delta("sam", 4, "x", ""), at(n)), [None, Some(_)]));
+        }
+    }
+
+    #[test]
+    fn a_tally_counts_by_kind() {
+        let mut tally = Tally::default();
+        assert_eq!(tally.words(), "frames=0 bytes=0");
+        let whole = frame(&workspace());
+        tally.count(&whole);
+        let delta =
+            ServerMessage { body: Some(Body::Delta(v1::EntryDelta { text: "hi".into(), ..Default::default() })), ..Default::default() };
+        let delta = delta.encode_to_vec();
+        tally.count(&delta);
+        tally.count(&delta);
+        let ack = ServerMessage { reply_to: 3, body: Some(Body::Ack(v1::Ack::default())), ..Default::default() }.encode_to_vec();
+        tally.count(&ack);
+        assert_eq!(
+            tally.words(),
+            format!("frames=workspace:1,delta:2,other:1 bytes=workspace:{},delta:{},other:{}", whole.len(), 2 * delta.len(), ack.len())
+        );
     }
 
     #[test]

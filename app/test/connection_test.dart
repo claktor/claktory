@@ -3,6 +3,7 @@ import 'package:factory_app/connections.dart';
 import 'package:factory_app/controls.dart' show LiveDot, Pressable;
 import 'package:factory_app/mobile/platform_policy.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/setup.dart' show LocalEngine, localEngine;
 import 'package:factory_app/sidebar.dart';
 import 'package:factory_app/tunnel/api/tunnel.dart';
 import 'package:flutter/foundation.dart';
@@ -47,6 +48,37 @@ void main() {
       Connection(backend, machine: 'Mac Studio').line,
       'Connected to Mac Studio',
     );
+  });
+
+  test("this Mac's own, turned off or blocked by macOS, says so while it "
+      "doesn't answer; another machine's never does", () {
+    addTearDown(() => localEngine.value = LocalEngine.running);
+    final harness = Harness(Workspace());
+    final backend = harness.backend..connected.value = false;
+    localEngine.value = LocalEngine.off;
+    var connection = Connection(backend);
+    expect(connection.link, Link.off);
+    expect(connection.line, 'Turned off on this Mac');
+    expect(connection.short, 'Turned off');
+    expect(connection.problem, isFalse);
+    expect(connection.details, contains("agents aren't running"));
+    expect(reconnectFirst(connection.link), isFalse);
+
+    localEngine.value = LocalEngine.blocked;
+    connection = Connection(backend);
+    expect(connection.link, Link.blocked);
+    expect(connection.line, 'Blocked by macOS');
+    expect(connection.problem, isTrue);
+    expect(connection.details, contains('Allow in the Background'));
+
+    // Answering after all: live, whatever was last found.
+    backend.connected.value = true;
+    expect(Connection(backend).link, Link.live);
+
+    backend
+      ..connectTo(parsePairingCode(_code))
+      ..connected.value = false;
+    expect(Connection(backend).link, Link.connecting);
   });
 
   test('connecting, reconnecting, failing and turned away', () {

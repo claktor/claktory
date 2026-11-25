@@ -8,6 +8,7 @@ import 'mobile/header.dart';
 import 'mobile/metrics.dart';
 import 'mobile/page_find.dart' show phonePageSearch;
 import 'mobile/presentation.dart';
+import 'mobile/viewer_chrome.dart';
 import 'share_files.dart';
 
 /// Where a pane's header is, filled by what the pane shows: its details
@@ -91,7 +92,17 @@ class PaneScaffold extends StatelessWidget {
     this.actions = const [],
     this.toolbar,
     this.share,
+    this.phoneKind = PhoneViewerKind.document,
+    this.phoneOverlay,
   });
+
+  /// On a phone: a picture or video fills the screen, its chrome over it;
+  /// a document keeps its header above it ([PhoneViewerScaffold]).
+  final PhoneViewerKind phoneKind;
+
+  /// On a phone, over a picture or video's foot, above [toolbar]: a
+  /// video's controls.
+  final Widget? phoneOverlay;
 
   /// The file it shows, which Share… fetches and sends with the system's
   /// share sheet (#418): in More on a phone, in the header elsewhere.
@@ -117,21 +128,25 @@ class PaneScaffold extends StatelessWidget {
     final chrome = PaneChrome.of(context);
     final share = canShareFiles ? this.share : null;
     if (chrome?.phone case final phone?) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          PhonePaneHeader(
-            pane: phone,
-            details: details,
-            comments: comments,
-            actions: actions,
-            share: share == null
-                ? null
-                : () => unawaited(shareFiles(context, [share])),
-          ),
-          Expanded(child: body),
-          ?toolbar,
-        ],
+      return PhoneViewerScaffold(
+        kind: phoneKind,
+        onClose: phone.onBack,
+        header: PhonePaneHeader(
+          pane: phone,
+          details: details,
+          comments: comments,
+          actions: actions,
+          share: share == null
+              ? null
+              : () => unawaited(shareFiles(context, [share])),
+          // Over a picture or video, its bar draws its own fill.
+          background: phoneKind == PhoneViewerKind.document
+              ? null
+              : const Color(0x00000000),
+        ),
+        overlay: phoneOverlay,
+        toolbar: toolbar,
+        body: body,
       );
     }
     final header = chrome?.header;
@@ -177,12 +192,16 @@ class PhonePaneHeader extends StatelessWidget {
     this.comments,
     this.actions = const [],
     this.share,
+    this.background,
   });
 
   final PhonePane pane;
   final String details;
   final Widget? comments;
   final List<PaneAction> actions;
+
+  /// Its fill, the sidebar's unless given ([PhoneHeader.background]).
+  final Color? background;
 
   /// Shares the file shown (#418): Save Video, Save to Files, AirDrop…
   final VoidCallback? share;
@@ -261,6 +280,7 @@ class PhonePaneHeader extends StatelessWidget {
         phonePageSearch(context) != null;
     final share = this.share;
     return PhoneHeader(
+      background: background,
       leading: HeaderButton.back(onTap: pane.onBack),
       title: Column(
         mainAxisSize: MainAxisSize.min,

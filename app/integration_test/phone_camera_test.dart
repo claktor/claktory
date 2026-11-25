@@ -17,6 +17,22 @@
 //                level (0 to 1) a line per 50 ms, then Send
 //   hold         nothing: the screen stays as it is
 //   back         Back, or the drawer closed
+//   inbox        Needs you: the conversation header's button, or the
+//                drawer's row
+//   open TITLE   in Needs you, the card whose title has TITLE in it,
+//                opened full screen
+//   scroll TEXT  scrolls the conversation shown to the first (oldest)
+//                message with TEXT in it, loading back to it, and puts it
+//                near the top, as the Mac camera does: logs "scrolled:"
+//                with the message's words around TEXT, or "not found:"
+//   tap TEXT     taps the last widget whose text has TEXT in it, scrolled
+//                into view first: logs "tapped:" or "not found:"
+//   swipe N [X Y]  drags up N points (down, negative) from screen point
+//                X Y (the centre if left out), as a thumb scrolls, held
+//                still before it lifts so nothing flings
+//   pinch FACTOR [X Y]  two fingers about X Y (the centre if left out)
+//                spread apart (or together) to scale by FACTOR, held still
+//                before they lift
 //   quit         ends it
 // Each command done is logged in MARKS_DIR/log with the wall-clock time.
 //
@@ -28,7 +44,11 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:factory_app/backend.dart' show RequestFailure;
+import 'package:factory_app/inbox.dart' show InboxView;
 import 'package:factory_app/main.dart' as app;
+import 'package:factory_app/mobile/needs_you_button.dart'
+    show PhoneNeedsYouButton;
 import 'package:factory_app/mobile/composer.dart' show SendButton;
 import 'package:factory_app/mobile/voice_input.dart' show PhoneMicButton;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -174,6 +194,15 @@ void main() {
       );
       await hold(1200);
       await tester.tap(find.text('Connect').last);
+      // Then "Connect to this Claktory?", its code to check: Connect again.
+      for (var i = 0; i < 50; i++) {
+        if (shows(find.text('Connect to this Claktory?'))) break;
+        await hold(200);
+      }
+      if (shows(find.text('Connect to this Claktory?'))) {
+        await hold(1200);
+        await tester.tap(find.text('Connect').last);
+      }
       say('pairing: allow this device on the Claktory');
     }
     final began = DateTime.now();
@@ -209,6 +238,43 @@ void main() {
       await tester.ensureVisible(row.first);
       await hold(300);
       await tester.tap(row.first);
+      await hold(900);
+    }
+
+    /// A point given as "X Y" in screen points, or the screen's centre.
+    Offset? pointOf(Iterable<String> words) {
+      final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
+      if (words.isEmpty) return Offset(screen.width / 2, screen.height / 2);
+      final xy = words.map(double.tryParse).toList();
+      if (xy.length != 2 || xy.contains(null)) return null;
+      return Offset(xy[0]!, xy[1]!);
+    }
+
+    /// Fingers down at [from], moved together to [to] over [ms] in small
+    /// steps, eased out, then held still before they lift, so nothing
+    /// flings.
+    Future<void> moveFingers(List<Offset> from, List<Offset> to, int ms) async {
+      final fingers = [
+        for (final (i, point) in from.indexed)
+          await tester.startGesture(point, pointer: 900 + i),
+      ];
+      final steps = (ms / 32).ceil().clamp(6, 60);
+      var was = from;
+      for (var step = 1; step <= steps; step++) {
+        final t = 1 - (1 - step / steps) * (1 - step / steps);
+        final now = [
+          for (final (i, point) in from.indexed) Offset.lerp(point, to[i], t)!,
+        ];
+        for (final (i, finger) in fingers.indexed) {
+          await finger.moveBy(now[i] - was[i]);
+        }
+        was = now;
+        await hold(32);
+      }
+      await hold(400);
+      for (final finger in fingers) {
+        await finger.up();
+      }
       await hold(900);
     }
 
@@ -324,6 +390,111 @@ void main() {
             await tester.tap(send.last);
             await hold(300);
             say('voice sent');
+          case 'inbox':
+            final header = find.byType(PhoneNeedsYouButton);
+            final row = find.byKey(const ValueKey('needs-you'));
+            if (shows(header) && !shows(drawer)) {
+              await tester.tap(header.first);
+            } else {
+              await openDrawer();
+              if (!shows(row)) {
+                say('no Needs you: nothing needs you');
+                break;
+              }
+              await tester.tap(row.first);
+            }
+            await hold(1200);
+          case 'open':
+            final card = find.descendant(
+              of: find.byType(InboxView),
+              matching: find.textContaining(arg),
+            );
+            if (!shows(card)) {
+              say('not found: $arg');
+              break;
+            }
+            await tester.ensureVisible(card.first);
+            await hold(300);
+            await tester.tap(card.first);
+            await hold(1200);
+          case 'tap':
+            final target = find.textContaining(arg, findRichText: true);
+            if (!shows(target)) {
+              say('not found: $arg');
+              break;
+            }
+            await tester.ensureVisible(target.last);
+            await hold(600);
+            await tester.tap(target.last);
+            await hold(1200);
+            say('tapped: $arg');
+          case 'swipe':
+            final words = arg.split(RegExp(r'\s+'));
+            final points = double.tryParse(words.first);
+            final at = pointOf(words.skip(1));
+            if (points == null || at == null) {
+              say('swipe: not N [X Y]: $arg');
+              break;
+            }
+            await moveFingers(
+              [at],
+              [at - Offset(0, points)],
+              (points.abs() * 2).clamp(200, 1200).round(),
+            );
+          case 'pinch':
+            final words = arg.split(RegExp(r'\s+'));
+            final factor = double.tryParse(words.first);
+            final at = pointOf(words.skip(1));
+            if (factor == null || factor <= 0 || at == null) {
+              say('pinch: not FACTOR [X Y]: $arg');
+              break;
+            }
+            // Two fingers 120 points apart, across, moved apart (or
+            // together) to FACTOR times that.
+            const half = Offset(60, 0);
+            await moveFingers(
+              [at - half, at + half],
+              [at - half * factor, at + half * factor],
+              (factor - 1).abs().clamp(0.25, 2) * 600 ~/ 1,
+            );
+          case 'scroll':
+            // Claktory's own search of the whole conversation, newest
+            // first, a page at a time: the last match is the oldest.
+            final backend = AppScope.of(
+              tester.element(find.byType(Shell).first),
+            );
+            final agentId = workspace().selectedAgentId;
+            ({int seq, String snippet})? first;
+            int? before;
+            try {
+              while (true) {
+                final found = await backend.searchConversation(
+                  agentId: agentId,
+                  query: arg,
+                  beforeSeq: before,
+                );
+                if (found.matches.isEmpty) break;
+                final last = found.matches.last;
+                first = (seq: last.seq.toInt(), snippet: last.snippet);
+                if (!found.more) break;
+                before = first.seq;
+              }
+            } on RequestFailure catch (error) {
+              say('not found: $arg (${error.message})');
+              break;
+            }
+            if (first == null) {
+              say('not found: $arg');
+              break;
+            }
+            backend.reveal.reachSeq(agentId, first.seq);
+            // Until the conversation has gone there (loading back to it
+            // first), and laid out there.
+            for (var i = 0; i < 200 && backend.reveal.value != null; i++) {
+              await hold(50);
+            }
+            await hold(400);
+            say('scrolled: ${first.snippet}');
           case 'back':
             final back = find.bySemanticsLabel('Back');
             if (shows(drawer)) {

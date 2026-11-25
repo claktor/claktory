@@ -7,6 +7,7 @@ import 'tunnel/api/tunnel.dart'
         TunnelFailure,
         TunnelPath,
         TunnelPhase,
+        TunnelReach,
         TunnelRelayTrouble,
         TunnelStatus;
 
@@ -20,6 +21,7 @@ export 'tunnel/api/tunnel.dart'
         TunnelFailure,
         TunnelPath,
         TunnelPhase,
+        TunnelReach,
         TunnelRelayTrouble,
         TunnelStatus;
 
@@ -238,6 +240,7 @@ const idleTunnel = TunnelStatus(
   relayTrouble: TunnelRelayTrouble.none,
   received: 0,
   linkReceived: 0,
+  reach: TunnelReach.none,
   dialTimeoutMs: 0,
 );
 

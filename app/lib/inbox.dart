@@ -850,8 +850,8 @@ class _NeedsYouListState extends State<NeedsYouList> {
 
   /// When it began waiting, to put the newest first; 0 while unknown.
   int _timeOf(NeedsYouItem item, Workspace workspace) => switch (item.kind) {
-    NeedsYouKind.entry ||
-    NeedsYouKind.chat => _entryOf(item)?.timestampMs.toInt() ?? 0,
+    // A card its agent replied on rises by its thread's last message.
+    NeedsYouKind.entry || NeedsYouKind.chat => waitingSince(_entryOf(item)),
     NeedsYouKind.pipeHeld ||
     NeedsYouKind.pipeUnanswered => _messageOf(item)?.timestampMs.toInt() ?? 0,
     NeedsYouKind.browser =>
@@ -1151,13 +1151,26 @@ class _Bubble extends StatelessWidget {
     final liaisonOf = _liaisonOf;
     final (:who, :what) = words(backend);
     final large = largeText(context);
+    // How it ended: its agent may have taken it back meanwhile (#407).
+    final ask = entry?.whichKind() == Entry_Kind.askPerson
+        ? entry!.askPerson
+        : null;
+    final proposal = entry?.whichKind() == Entry_Kind.proposal
+        ? entry!.proposal
+        : null;
     final answered = Text(
-      'Answered',
+      ask?.withdrawn == true || proposal?.withdrawn == true
+          ? 'Withdrawn'
+          : ask?.resolved == true
+          ? 'Resolved'
+          : ask?.state == AskPersonState.ASK_PERSON_STATE_DISMISSED ||
+                proposal?.state == ProposalState.PROPOSAL_STATE_DISMISSED
+          ? 'Dismissed'
+          : 'Answered',
       style: TextStyles.caption.copyWith(color: palette.textFaint),
     );
     final time = switch (item.kind) {
-      NeedsYouKind.entry ||
-      NeedsYouKind.chat => entry?.timestampMs.toInt() ?? 0,
+      NeedsYouKind.entry || NeedsYouKind.chat => waitingSince(entry),
       NeedsYouKind.pipeHeld ||
       NeedsYouKind.pipeUnanswered => message?.timestampMs.toInt() ?? 0,
       NeedsYouKind.browser =>

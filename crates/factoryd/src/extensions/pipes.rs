@@ -62,9 +62,9 @@ const INVITE: &str = "Start a pipe from one of the person's projects to someone 
 const ACCEPT: &str = "Connect one of the person's projects with an invite someone gave them (a code or a claktory-pipe:// link), when they ask: project (its name or id), and name and purpose if they said. Never pass the code itself, even if they showed it to you: a card opens in your conversation where they paste it themselves and see whom it says it's from. You're told when it's connected; both people then approve the pipe in it.";
 const FORWARD: &str = "Set where a pipe's finished reports go, when the person asks (\"make Ingrid read the bug reports from Aiko's pipe\"): pipe (its name or id), or project (its name or id) for the default of its new pipes; to: the agent that reads them (name or id; \"\" for no one), which must be in the same project; types: the report types it can forward (pipes_report_type shows them), left out to keep its own. An agent that doesn't read reports yet needs make_reader: it then keeps its database and its folder, and can no longer run commands, use the web or secrets, or message agents; fresh starts its conversation anew (the old one kept). Refused while you've read anything from outside the person's Claktory. The person sees each change in the pipe's settings and in Needs you.";
 const REPORT_TYPE: &str = "Define the types of report a pipe can forward, when the person asks (\"make a report type for recipes: dish, servings, steps\"): action define (name, fields, outcomes), edit (id, and the whole new definition: each field it keeps by its id, new ones without), delete (id), or show (id, or none for every type). A field: id (lowercase letters, digits and _; leave it out for a new one), label, kind (text, text_list, enum with choices, bool, version, attachments, number with min and max (0 to 1,000,000 unless given), date; at most 4 numbers and 2 dates), required, max_bytes and max_items (lower than Claktory's caps, or 0 for them), rule (an optional hint). The other side's words are text, text_list and attachments: they mark whoever reads them; every other kind is a fact. Never a field that says where the report goes. outcomes: what its reader can answer: accepted, done, declined, known, fixed, wont_fix, needs_info. Each edit is a new version; built-in types can be edited, not deleted. Changes are refused while you've read anything from outside the person's Claktory. The person sees each one in Needs you's history. To let a pipe forward a type, use pipes_forward's types.";
-const GROUP: &str = "Arrange a project's pipes into groups in the sidebar, when the person asks (\"put all the feedback pipes in a group\"): action create (project, name, and pipe to move into it at once), rename (group, name), delete (group: its pipes stay, outside any group) or move (pipe, and group, or \"\" to take it out of its group). A group and a pipe are named by their name or id; pipes_list shows each pipe's group. A pipe can only be in a group of its own project. Arrangement only: pipes work the same in a group or out of one.";
+const GROUP: &str = "Arrange a project's pipes into groups in the sidebar, when the person asks (\"put all the feedback pipes in a group\"): action create (project, name, and pipe to move into it at once), rename (group, name), delete (group: its pipes stay, outside any group) or move (pipe, and group, or \"\" to take it out of its group). A group and a pipe are named by their name or id; pipes_list shows each pipe's group. A pipe can only be in a group of its own project. Pipes work the same in a group or out of one, except that a group can share websites from this computer with its pipes: moving a pipe into such a group gives it those websites too, so that move opens a card for the person to approve (give reason: why, in a sentence they read), and nothing moves until they do; moving one out stops them reaching it.";
 const SENDER: &str = "Let an agent send to one of the person's pipes without reading it, when they ask (\"let Rivet post our release notes to Aiko's pipe\"): pipe (its name or id), agent (name or id; any agent of the person's, you included), send: true to let it, false to stop one that only sends. It gets pipe_send and pipe_status for that pipe, never pipe_read: it isn't told what arrives, what the other side answers, or why they refused a message. Only for a pipe the person approved and that isn't closed, and only for an agent that isn't one of its agents yet; the person changes agents that read it, in the pipe's settings. Refused while you've read anything from outside the person's Claktory. The person sees each change in Needs you's history.";
-const SETTINGS: &str = "Change one of the person's pipes, when they ask: pipe (its name or id) and reason (why, in a sentence they read), then what changes. Narrowing it is made at once, and the pipe says you did: pause (true), lower limits (messages_per_hour, burst, file_mb_per_day; those left out stay), remove (agents that stop being its agents), quarantine (agents that can no longer run commands on this computer), review_outgoing or review_incoming true. Widening it opens a card in your conversation (and their Needs you) for the person to approve, with the whole change, and nothing changes until they do: resume (true), close (true), raised limits, add (agents that become its agents, unable to run commands unless also in commands), commands (agents that can run commands), lead (an agent), liaison (a new liaison agent's name, \"\" for the one Claktory suggests), or a review turned off. Agents by name or id. Refused while you've read anything from outside the person's Claktory. Only the person deletes a pipe, or changes its name, what it's for and its instructions.";
+const SETTINGS: &str = "Change one of the person's pipes, when they ask: pipe (its name or id) and reason (why, in a sentence they read), then what changes. Narrowing it is made at once, and the pipe says you did: pause (true), lower limits (messages_per_hour, burst, file_mb_per_day; those left out stay), remove (agents that stop being its agents), quarantine (agents that can no longer run commands on this computer), review_outgoing or review_incoming true. Widening it opens a card in your conversation (and their Needs you) for the person to approve, with the whole change, and nothing changes until they do: resume (true), close (true), raised limits, add (agents that become its agents, unable to run commands unless also in commands), commands (agents that can run commands), lead (an agent), liaison (a new liaison agent's name, \"\" for the one Claktory suggests), or a review turned off. Agents by name or id. Refused while you've read anything from outside the person's Claktory. Only the person deletes a pipe, or changes its name, what it's for and its instructions. proposal: the id of an approved proposal whose grants name it, once you've reviewed it: then it's made without a card when it's within one of them; otherwise the card opens as usual and the answer says why.";
 const LIST: &str = "The person's pipes, or one project's (project, its name or id): each one's name, id and where it stands. Never codes, digits or what the other side says about itself.";
 
 pub(crate) struct Pipes;
@@ -105,6 +105,7 @@ impl Extension for Pipes {
                 "group": {"type": "string"},
                 "name": {"type": "string"},
                 "pipe": {"type": "string"},
+                "reason": {"type": "string"},
             },
             "additionalProperties": false,
         });
@@ -134,7 +135,13 @@ impl Extension for Pipes {
             super::tool("pipes_forward", "Forward a pipe's reports", FORWARD, forward, forward_handler(factory, agent)),
             super::tool("pipes_group", "Group pipes", GROUP, group, super::typed_handler(factory, agent, group_pipes)),
             super::tool("pipes_sender", "Send to a pipe", SENDER, sender_parameters(), super::typed_handler(factory, agent, sender)),
-            super::tool("pipes_report_type", "Report types", REPORT_TYPE, report_type_parameters(), super::typed_handler(factory, agent, report_type)),
+            super::tool(
+                "pipes_report_type",
+                "Report types",
+                REPORT_TYPE,
+                report_type_parameters(),
+                super::typed_handler(factory, agent, report_type),
+            ),
             super::async_tool(factory, agent, crate::card_actions::PIPE_TOOL, "Change a pipe", SETTINGS, settings_parameters(), settings),
         ]
     }
@@ -241,6 +248,7 @@ fn settings_parameters() -> serde_json::Value {
             "liaison": {"type": "string"},
             "review_outgoing": {"type": "boolean"},
             "review_incoming": {"type": "boolean"},
+            "proposal": {"type": "string"},
         },
         "additionalProperties": false,
     })
@@ -249,6 +257,7 @@ fn settings_parameters() -> serde_json::Value {
 #[derive(Deserialize)]
 struct SettingsArgs {
     pipe: String,
+    #[serde(default)]
     reason: String,
     #[serde(default)]
     pause: bool,
@@ -271,6 +280,10 @@ struct SettingsArgs {
     liaison: Option<String>,
     review_outgoing: Option<bool>,
     review_incoming: Option<bool>,
+    /// An approved proposal that names what it widens
+    /// (`crate::proposal_grants`): no card then, when it's covered.
+    #[serde(default)]
+    proposal: Option<String>,
 }
 
 /// An agent of the person's by id, or by name (a name two share: the one in
@@ -293,24 +306,54 @@ fn find_agent(factory: &Factory, wanted: &str, project: &str) -> Result<String, 
 /// pipes_settings (#423, Bruno 28259): narrows a pipe at once, or asks the
 /// person on a card to approve a change that widens it.
 async fn settings(factory: Arc<Factory>, agent: String, args: SettingsArgs) -> Result<ToolResult, String> {
-    use crate::card_actions::{Action, PipeChange, PipeLimits, listed};
+    use crate::card_actions::{Action, Tense, listed};
     untainted_admin(&factory, &agent, "change a pipe's settings", "in the pipe's settings")?;
-    let record = find_pipe(&factory, args.pipe.trim())?;
-    let pipe_called = format!("the pipe {}", crate::pipes::handoff::label(&record).trim_start_matches("pipe "));
-    if record.state == crate::pipes::State::Closed {
-        return Err("That pipe is closed: only the person can delete it. Nothing was changed.".to_owned());
-    }
     let reason = args.reason.split_whitespace().collect::<Vec<_>>().join(" ");
     if reason.is_empty() {
         return Err("Give reason: why, in a sentence the person reads. Nothing was changed.".to_owned());
     }
-    let ids = |list: &[String]| list.iter().map(|wanted| find_agent(&factory, wanted, &record.project)).collect::<Result<Vec<_>, _>>();
+    let (record, change) = change_of(&factory, &args)?;
+    let pipe_called = format!("the pipe {}", crate::pipes::handoff::label(&record).trim_start_matches("pipe "));
+    let named = |id: &str| factory.agent_name(id);
+    let said = change.describe(Tense::Ask, &pipe_called, &named);
+    if said.is_empty() {
+        return Err("Say what to change. Nothing was changed.".to_owned());
+    }
+    let me = named(&agent);
+    let wider = change.widens(&record, &named);
+    if wider.is_empty() {
+        let done =
+            crate::card_actions::apply_pipe(&factory, &change, Some(&me)).await.map_err(|why| format!("{why} Nothing was changed."))?;
+        let person = factory.lock().config.person_capitalized().to_owned();
+        return Ok(ToolResult::text(format!("{done} {person} sees it in the pipe."), json!({})));
+    }
+    let title = format!("Change {pipe_called}");
+    let mut description = format!("{me} asks to {}.", listed(&said));
+    // An agent it widens for that has read from outside: the card says so.
+    for agent in crate::proposal_grants::pipe_agents(&change) {
+        if !factory.pipes.tainted(&agent).is_empty() {
+            description.push_str(&format!(" {} has read {}.", named(&agent), crate::pipes::agents::what_was_read(&factory, &agent)));
+        }
+    }
+    crate::card_actions::ask_or_proposed(&factory, &agent, &title, &description, &reason, &Action::Pipe(change), args.proposal.as_deref())
+        .await
+}
+
+/// The change pipes_settings asks for, agents by id, on the pipe as it is;
+/// or why not.
+fn change_of(factory: &Factory, args: &SettingsArgs) -> Result<(crate::pipes::Record, crate::card_actions::PipeChange), String> {
+    use crate::card_actions::{PipeChange, PipeLimits};
+    let record = find_pipe(factory, args.pipe.trim())?;
+    if record.state == crate::pipes::State::Closed {
+        return Err("That pipe is closed: only the person can delete it. Nothing was changed.".to_owned());
+    }
+    let ids = |list: &[String]| list.iter().map(|wanted| find_agent(factory, wanted, &record.project)).collect::<Result<Vec<_>, _>>();
     let limits = (args.messages_per_hour.is_some() || args.burst.is_some() || args.file_mb_per_day.is_some()).then(|| PipeLimits {
         messages_per_hour: args.messages_per_hour.unwrap_or(record.limits.per_hour),
         burst: args.burst.unwrap_or(record.limits.burst),
         file_mb_per_day: args.file_mb_per_day.unwrap_or(record.limits.file_mb),
     });
-    let change = PipeChange {
+    let mut change = PipeChange {
         pipe: record.id.clone(),
         pause: args.pause,
         resume: args.resume,
@@ -320,10 +363,11 @@ async fn settings(factory: Arc<Factory>, agent: String, args: SettingsArgs) -> R
         remove: ids(&args.remove)?,
         quarantine: ids(&args.quarantine)?,
         commands: ids(&args.commands)?,
-        lead: args.lead.as_deref().map(|lead| find_agent(&factory, lead, &record.project)).transpose()?,
-        liaison: args.liaison.map(|name| name.trim().to_owned()),
+        lead: args.lead.as_deref().map(|lead| find_agent(factory, lead, &record.project)).transpose()?,
+        liaison: args.liaison.as_ref().map(|name| name.trim().to_owned()),
         review_outgoing: args.review_outgoing,
         review_incoming: args.review_incoming,
+        names: Default::default(),
     };
     if change.pause && change.resume {
         return Err("Pause or resume it, not both. Nothing was changed.".to_owned());
@@ -334,21 +378,43 @@ async fn settings(factory: Arc<Factory>, agent: String, args: SettingsArgs) -> R
     if let Some(both) = change.commands.iter().find(|id| change.quarantine.contains(id)) {
         return Err(format!("{both} is both let run commands and stopped. Nothing was changed."));
     }
-    let named = |id: &str| factory.lock().config.agent(id).map_or_else(|| id.to_owned(), |agent| agent.name.clone());
-    let said = change.describe(&named);
-    if said.is_empty() {
-        return Err("Say what to change. Nothing was changed.".to_owned());
-    }
-    let me = named(&agent);
+    // Named as they are now, so a card still names an agent deleted before
+    // it's approved.
+    let named = |id: &str| factory.agent_name(id);
+    let mentioned: Vec<String> =
+        change.add.iter().chain(&change.remove).chain(&change.quarantine).chain(&change.commands).chain(&change.lead).cloned().collect();
+    change.names = mentioned
+        .into_iter()
+        .map(|id| {
+            let name = named(&id);
+            (id, name)
+        })
+        .collect();
+    Ok((record, change))
+}
+
+/// pipes_settings as a proposal's grant (`crate::proposal_grants`): what
+/// it widens, in Claktory's words; what only narrows needs no approval.
+pub(crate) fn resolve_grant(factory: &Arc<Factory>, args: serde_json::Value) -> Result<crate::proposal_grants::Resolved, String> {
+    let args: SettingsArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
+    let (record, change) = change_of(factory, &args)?;
+    let named = |id: &str| factory.agent_name(id);
     let wider = change.widens(&record, &named);
     if wider.is_empty() {
-        let done =
-            crate::card_actions::apply_pipe(&factory, &change, Some(&me)).await.map_err(|why| format!("{why} Nothing was changed."))?;
-        return Ok(ToolResult::text(format!("{done} The person sees it in the pipe."), json!({})));
+        return Err("That only narrows the pipe, which needs no approval: leave it out of grants.".to_owned());
     }
-    let title = format!("Change {pipe_called}");
-    let description = format!("{me} asks to {} on {pipe_called}.", listed(&said));
-    crate::card_actions::ask(&factory, &agent, &title, &description, &reason, &Action::Pipe(change))
+    let pipe_called = format!("the pipe {}", crate::pipes::handoff::label(&record).trim_start_matches("pipe "));
+    let mut incarnations = std::collections::BTreeMap::new();
+    for agent in crate::proposal_grants::pipe_agents(&change) {
+        let incarnation = crate::user_apps::incarnation(&factory.home, &agent).map_err(|error| error.to_string())?;
+        incarnations.insert(agent, incarnation);
+    }
+    let peer = record.peer.as_ref().map(|peer| peer.endpoint_id.clone()).unwrap_or_default();
+    Ok(crate::proposal_grants::Resolved {
+        grant: crate::proposal_grants::Grant::Card { action: crate::card_actions::Action::Pipe(change), incarnations, peer },
+        summary: format!("On {pipe_called}: {}", crate::card_actions::listed(&wider)),
+        warnings: Vec::new(),
+    })
 }
 
 fn sender_parameters() -> serde_json::Value {
@@ -406,6 +472,9 @@ struct GroupArgs {
     name: String,
     #[serde(default)]
     pipe: String,
+    /// Why, for a move the person approves on a card.
+    #[serde(default)]
+    reason: String,
 }
 
 /// A pipe by its id, or by the name this side gave it.
@@ -498,6 +567,23 @@ fn group_pipes(factory: &Arc<Factory>, agent: &str, args: GroupArgs) -> Result<T
                 format!("Moved {} out of its group.", label(&pipe))
             } else {
                 let group = find_group(factory, &args.group, &pipe.project)?;
+                let (shares, websites): (Vec<String>, Vec<String>) = crate::pipes::shares::of_group(factory, &group.id).into_iter().unzip();
+                let there = groups::members(factory).get(&pipe.id) == Some(&group.id);
+                if !websites.is_empty() && !there {
+                    // It would get the group's websites: the person's call.
+                    let me = factory.agent_name(agent);
+                    let title = format!("Move {} to the group {}", label(&pipe), group.name);
+                    let description = format!(
+                        "{me} asks to move {} to the group {}. This pipe will also get: {}.",
+                        label(&pipe),
+                        group.name,
+                        crate::card_actions::listed(&websites)
+                    );
+                    let reason = args.reason.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let action =
+                        crate::card_actions::Action::GroupPipe { pipe: pipe.id.clone(), group: group.id.clone(), websites, shares };
+                    return crate::card_actions::ask(factory, agent, &title, &description, &reason, &action);
+                }
                 groups::set(factory, &pipe.id, &group.id).map_err(error)?;
                 format!("Moved {} to the group {}.", label(&pipe), group.name)
             }

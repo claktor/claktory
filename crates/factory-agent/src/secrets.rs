@@ -49,6 +49,37 @@ impl SecretVariable {
     }
 }
 
+/// A command's secret variables, writing file values in a private folder.
+/// `prepare` runs only before the first file, before creating its 0700 folder.
+pub fn command_environment(
+    variables: &[SecretVariable],
+    dir: &std::path::Path,
+    mut prepare: impl FnMut() -> std::io::Result<()>,
+) -> std::io::Result<Vec<(String, Zeroizing<String>)>> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let mut environment = Vec::with_capacity(variables.len());
+    let mut made = false;
+    for (index, variable) in variables.iter().enumerate() {
+        if !variable.file {
+            environment.push((variable.variable.clone(), variable.value.clone()));
+            continue;
+        }
+        if !made {
+            prepare()?;
+            std::fs::DirBuilder::new().mode(0o700).create(dir)?;
+            made = true;
+        }
+        let safe = !variable.variable.is_empty() && variable.variable.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        let name = if safe { variable.variable.clone() } else { format!("secret-{index}") };
+        let path = dir.join(name);
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+        file.write_all(&variable.bytes())?;
+        environment.push((variable.variable.clone(), Zeroizing::new(path.display().to_string())));
+    }
+    Ok(environment)
+}
+
 /// `value`'s bytes: itself, or for a binary one its base64 decoded (empty
 /// if it isn't base64, which the vault never stores).
 fn value_bytes(value: &str, binary: bool) -> Zeroizing<Vec<u8>> {

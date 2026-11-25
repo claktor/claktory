@@ -708,7 +708,10 @@ class CommentsController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Lets go of the comment being written. A region picked for it goes
+  /// too, so it isn't left outlined; text stays selected.
   void cancel() {
+    if (selection.value is Region) selection.value = null;
     composing = null;
     suggesting = false;
     replyingTo = null;
@@ -997,7 +1000,8 @@ class _CommentedState extends State<Commented> {
     final phone = isPhoneLayout(context);
     return LayoutBuilder(
       builder: (context, constraints) {
-        final wide = constraints.maxWidth >= Commented.wideFrom;
+        // A phone has its sheet and markers whichever way it's held.
+        final wide = !phone && constraints.maxWidth >= Commented.wideFrom;
         if (controller.narrow.value == wide) {
           // Told after the frame: the header is built already.
           WidgetsBinding.instance.addPostFrameCallback((_) {

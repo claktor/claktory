@@ -74,3 +74,7 @@ iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "
 # workspace sees it; factoryd keeps crates.io's.
 [patch.crates-io]
 n0-dns-resolver = { path = "vendor/n0-dns-resolver" }
+# iroh, Claktory's copy of 1.5.0, the backend's own (../../vendor/README.md):
+# no relay TLS handshake every ~22 s (n0-computer/iroh#4523) and a relay
+# health ping of at least 3 s. Drop it with the root Cargo.toml's.
+iroh = { path = "../../vendor/iroh" }

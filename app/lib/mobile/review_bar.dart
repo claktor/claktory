@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/services.dart' show TextInputAction;
 import 'package:flutter/widgets.dart';
@@ -162,7 +163,11 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
           // the bar either way. The same tree with or without a question,
           // so the viewer keeps its place.
           child: MediaQuery(
-            data: asking ? media.removeViewInsets(removeBottom: true) : media,
+            data: asking
+                ? media
+                      .removeViewInsets(removeBottom: true)
+                      .removePadding(removeBottom: true)
+                : media,
             // Meanwhile nothing else is added to the file: no comments
             // on media.
             child: ReviewAnswering(answering: asking, child: widget.child),
@@ -222,8 +227,16 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
     // so far, so the file keeps its room at the largest sizes. A viewer's
     // page ends at the home indicator, not the keyboard: the bar rises by
     // the keyboard itself.
+    // A page that runs edge to edge (a picture, a video) leaves the safe
+    // areas to the bar: it keeps clear of the home indicator and, turned,
+    // of the notch.
+    final safe = MediaQuery.paddingOf(context);
     return Padding(
-      padding: EdgeInsets.only(bottom: keyboard),
+      padding: EdgeInsets.only(
+        left: safe.left,
+        right: safe.right,
+        bottom: math.max(keyboard, safe.bottom),
+      ),
       child: MediaQuery.withClampedTextScaling(
         maxScaleFactor: 2,
         child: Semantics(

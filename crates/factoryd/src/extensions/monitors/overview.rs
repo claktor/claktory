@@ -116,7 +116,7 @@ pub(crate) fn signal(factory: &Factory) {
     let read = || -> rusqlite::Result<Vec<(String, i64, i64)>> {
         let db = factory.store.db();
         let mut statement = db.prepare("SELECT agent, COUNT(*), MAX(updated) FROM monitors GROUP BY agent ORDER BY agent")?;
-        statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect()
+        statement.query_map([], crate::store::row3)?.collect()
     };
     let rows = match read() {
         Ok(rows) => rows,

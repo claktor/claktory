@@ -123,3 +123,31 @@ async fn rivet_reads_the_factory_manual_and_other_agents_get_the_core() {
     }
     assert!(!view.agent("rivet").extensions.iter().any(|extension| extension.id == "memory:factory" && extension.enabled));
 }
+
+/// Bruno 29528, 29755: bash's description names ripgrep and jq when
+/// they're in Claktory's tools, on the agent's PATH (and only when each
+/// resolves there: see factory-agent's tools tests).
+#[tokio::test]
+async fn bash_names_the_tools_claktory_carries() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_dir();
+    let tools_dir = dir.join("home/tools");
+    std::fs::create_dir_all(&tools_dir).expect("tools");
+    for name in ["rg", "jq"] {
+        std::fs::write(tools_dir.join(name), "#!/bin/sh\n").expect("program");
+        std::fs::set_permissions(tools_dir.join(name), std::fs::Permissions::from_mode(0o755)).expect("mode");
+    }
+    let models = Scripted::signed_in();
+    let tools = models.tools.clone();
+    let (addr, _factory) = start_with(&dir, models).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(rivet)).await;
+    call(&mut client, &mut view, "rivet", "agents_status", "{}").await;
+    let tools: serde_json::Value = serde_json::from_str(&tools.lock().expect("lock")).expect("tools");
+    let bash = tools.as_array().expect("list").iter().find(|tool| tool["name"] == "bash").expect("bash").clone();
+    let description = bash["description"].as_str().expect("description");
+    assert!(description.contains("ripgrep (rg) is installed: prefer it to grep -r and find"), "{description}");
+    assert!(description.contains("jq is installed: use it to read and filter JSON."), "{description}");
+}

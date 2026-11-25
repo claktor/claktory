@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::locking::lock;
 use crate::encoding::{hex, same, unhex};
 use crate::factory::Factory;
 use crate::transcript::now_ms;
@@ -400,10 +401,10 @@ struct Worker {
     /// What to tell the peer of this side's liaison, once the pipe flows:
     /// the latest only, never queued.
     liaison: Mutex<Option<Liaison>>,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// The connection this side dialed to the peer, shared with the
+    /// websites it opens there (`share_stream`), so their streams and the
+    /// pipe's frames ride one connection, frames first.
+    connection: Mutex<Option<Connection>>,
 }
 
 /// One pipe's link to its peer (`pipe_links`).
@@ -584,6 +585,10 @@ struct Payload {
     /// end. Whatever the peer put here is checked (`heard_liaison`).
     #[serde(skip_serializing_if = "Option::is_none")]
     until_ms: Option<serde_json::Value>,
+    /// share: the port it serves on the sharer's computer, which the
+    /// receiving side uses for its own address when it's free there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -630,6 +635,12 @@ const KIND_CLOSE: &str = "close";
 /// a Claktory from before (which answers "bad").
 const KIND_WAITING: &str = "waiting";
 const KIND_AWAKE: &str = "awake";
+/// A website this side shares over the pipe (`pipes::shares`): its id
+/// (msg_id), name (text) and port; and its end. Queued as controls, in
+/// order, with msg_id `share:<id>` or `unshare:<id>`; a Claktory from
+/// before answers "bad", and the share is dropped for that pipe.
+const KIND_SHARE: &str = "share";
+const KIND_UNSHARE: &str = "unshare";
 
 /// This Claktory's tunnel key, which signs its frames.
 fn key(factory: &Factory) -> Result<&SecretKey, PipeError> {
@@ -658,8 +669,11 @@ fn frame(key: &SecretKey, payload: &Payload, files: &[Vec<u8>]) -> Vec<u8> {
 
 /// Reads a frame's payload from `peer`, checking its signature and sizes;
 /// its files follow, read by `read_files` once the payload is allowed.
-async fn read_payload(receive: &mut RecvStream, peer: &EndpointId) -> Result<Payload, String> {
-    let length = receive.read_u32().await.map_err(|error| error.to_string())? as usize;
+/// `first`: its first byte, read already (`serve`).
+async fn read_payload(receive: &mut RecvStream, peer: &EndpointId, first: u8) -> Result<Payload, String> {
+    let mut rest = [0_u8; 3];
+    receive.read_exact(&mut rest).await.map_err(|error| error.to_string())?;
+    let length = u32::from_be_bytes([first, rest[0], rest[1], rest[2]]) as usize;
     if length > MAX_PAYLOAD {
         return Err("too large".to_owned());
     }
@@ -700,8 +714,9 @@ async fn read_frame(
     receive: &mut RecvStream,
     peer: &EndpointId,
     pinned: bool,
+    first: u8,
 ) -> Result<(Payload, Vec<Vec<u8>>), String> {
-    let payload = read_payload(receive, peer).await?;
+    let payload = read_payload(receive, peer, first).await?;
     if !pinned && (payload.kind != KIND_JOIN || !payload.files.is_empty()) {
         return Err("not a pipe's peer".to_owned());
     }
@@ -1147,6 +1162,18 @@ pub async fn join(factory: &Arc<Factory>, pipe: &str, code: &str, mine: &Side) -
 
 /// Queues a control for the peer (`kind`), after `change`s the link.
 fn control(factory: &Arc<Factory>, pipe: &str, kind: &str, change: impl FnOnce(&mut Link)) -> Result<(), PipeError> {
+    control_saying(factory, pipe, kind, change, "", |_| {})
+}
+
+/// `control`, with a msg_id kept in the queue and more said in the frame.
+fn control_saying(
+    factory: &Arc<Factory>,
+    pipe: &str,
+    kind: &str,
+    change: impl FnOnce(&mut Link),
+    msg_id: &str,
+    say: impl FnOnce(&mut Payload),
+) -> Result<(), PipeError> {
     let key = key(factory)?;
     {
         let mut db = factory.store.db();
@@ -1158,7 +1185,7 @@ fn control(factory: &Arc<Factory>, pipe: &str, kind: &str, change: impl FnOnce(&
             return Err(PipeError::NotOpen);
         }
         change(&mut link);
-        let payload = Payload {
+        let mut payload = Payload {
             v: 1,
             wire: link.wire.clone(),
             kind: kind.to_owned(),
@@ -1166,11 +1193,14 @@ fn control(factory: &Arc<Factory>, pipe: &str, kind: &str, change: impl FnOnce(&
             sent_at: now_ms(),
             ..Payload::default()
         };
+        say(&mut payload);
         let bytes = frame(key, &payload, &[]);
         link.next_cseq += 1;
         let transaction = db.transaction().map_err(other)?;
         link.save(&transaction).map_err(other)?;
-        transaction.execute("INSERT INTO pipe_outbox (pipe, control, frame) VALUES (?1, 1, ?2)", params![pipe, bytes]).map_err(other)?;
+        transaction
+            .execute("INSERT INTO pipe_outbox (pipe, control, msg_id, frame) VALUES (?1, 1, ?2, ?3)", params![pipe, msg_id, bytes])
+            .map_err(other)?;
         transaction.commit().map_err(other)?;
     }
     wake(factory, pipe);
@@ -1261,11 +1291,65 @@ pub fn send(factory: &Arc<Factory>, pipe: &str, message: Outgoing) -> Result<u64
 
 /// Nothing goes either way until `resume`; the peer is told.
 pub fn pause(factory: &Arc<Factory>, pipe: &str) -> Result<(), PipeError> {
-    control(factory, pipe, KIND_PAUSE, |link| link.paused = true)
+    control(factory, pipe, KIND_PAUSE, |link| link.paused = true)?;
+    crate::pipes::shares::paused(factory, pipe);
+    Ok(())
 }
 
 pub fn resume(factory: &Arc<Factory>, pipe: &str) -> Result<(), PipeError> {
-    control(factory, pipe, KIND_RESUME, |link| link.paused = false)
+    control(factory, pipe, KIND_RESUME, |link| link.paused = false)?;
+    crate::pipes::shares::resumed(factory, pipe);
+    Ok(())
+}
+
+/// Offers a website this side shares (`pipes::shares`) to the peer, or
+/// takes it back: in order with the pipe's other controls.
+pub(crate) fn share(factory: &Arc<Factory>, pipe: &str, id: &str, offer: Option<(&str, u16)>) -> Result<(), PipeError> {
+    match offer {
+        Some((name, port)) => control_saying(factory, pipe, KIND_SHARE, |_| {}, &format!("share:{id}"), |payload| {
+            payload.msg_id = id.to_owned();
+            payload.text = name.to_owned();
+            payload.port = Some(port);
+        }),
+        None => control_saying(factory, pipe, KIND_UNSHARE, |_| {}, &format!("unshare:{id}"), |payload| {
+            payload.msg_id = id.to_owned();
+        }),
+    }
+}
+
+/// Tests: `pipe`'s peer is pinned to `key` now.
+#[doc(hidden)]
+pub fn repin_for_test(factory: &Factory, pipe: &str, key: &str) {
+    factory.store.db().execute("UPDATE pipe_links SET peer = ?2 WHERE pipe = ?1", params![pipe, key]).expect("repinned");
+}
+
+/// The key pinned for `pipe`'s peer, while it has one and isn't closed.
+pub(crate) fn pinned(factory: &Factory, pipe: &str) -> Option<String> {
+    load(factory, pipe).filter(|link| !link.closed && !link.peer.is_empty()).map(|link| link.peer)
+}
+
+/// Opens a stream for a website the peer shares (`pipes::shares`), on the
+/// connection this side's worker dialed, or a new one: never ahead of the
+/// pipe's own frames (a lower priority).
+pub(crate) async fn share_stream(factory: &Arc<Factory>, pipe: &str) -> Result<(SendStream, RecvStream), String> {
+    let link = load(factory, pipe).filter(|link| link.flowing()).ok_or("The pipe isn't open.")?;
+    let worker = {
+        let workers = lock(&factory.remote.pipes.workers);
+        workers.get(pipe).cloned()
+    };
+    let alive = |connection: &Connection| connection.close_reason().is_none();
+    let mut connection = worker.as_ref().and_then(|worker| lock(&worker.connection).clone()).filter(alive);
+    if connection.is_none() {
+        let dialed = dial(factory, &link.peer, &link.relays, &link.addresses).await.map_err(|error| error.to_string())?;
+        if let Some(worker) = &worker {
+            *lock(&worker.connection) = Some(dialed.clone());
+        }
+        connection = Some(dialed);
+    }
+    let connection = connection.ok_or("The other Claktory can't be reached.")?;
+    let (send, receive) = connection.open_bi().await.map_err(|error| error.to_string())?;
+    let _ = send.set_priority(-1);
+    Ok((send, receive))
 }
 
 /// Ends the pipe: the peer is told if it can be (for a week), its key
@@ -1287,6 +1371,7 @@ pub fn close(factory: &Arc<Factory>, pipe: &str) {
     if let Err(error) = closing {
         tracing::error!(%error, "could not close a pipe");
     }
+    crate::pipes::shares::closed(factory, pipe);
     if let Err(error) = factory.store.db().execute("DELETE FROM pipe_outbox WHERE pipe = ?1 AND control = 0", [pipe]) {
         tracing::error!(%error, "could not drop a closed pipe's queue");
     }
@@ -1311,6 +1396,7 @@ fn forget(factory: &Arc<Factory>, pipe: &str) {
     lock(&factory.remote.pipes.workers).remove(pipe);
     lock(&factory.remote.pipes.liaison_heard).remove(pipe);
     reload(factory);
+    crate::pipes::shares::closed(factory, pipe);
 }
 
 /// The next frame to send: the first control, or else, while messages
@@ -1413,8 +1499,17 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
             connection = None;
         }
         if connection.is_none() {
+            // One a website's stream dialed meanwhile (`share_stream`).
+            let shared = lock(&worker.connection).clone().filter(|connection| connection.close_reason().is_none());
+            if shared.is_some() {
+                connection = shared;
+                pinged = false;
+            }
+        }
+        if connection.is_none() {
             match dial(&strong, &link.peer, &link.relays, &link.addresses).await {
                 Ok(dialed) => {
+                    *lock(&worker.connection) = Some(dialed.clone());
                     connection = Some(dialed);
                     pinged = false;
                 }
@@ -1510,6 +1605,7 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
         }
         if let (Some(identity), Some(store)) = (reply.identity.as_deref(), store()) {
             store.identity(&strong, &pipe, &link.peer, identity);
+            crate::pipes::shares::identity_heard(&strong, &pipe);
         }
         if let Some(told) = liaison {
             // Heard, or a Claktory from before that can't take it ("bad"):
@@ -1539,7 +1635,20 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
             pinged = true;
         }
         let Some((n, msg_id, _)) = next else { continue };
+        let shared = msg_id.strip_prefix("share:").or_else(|| msg_id.strip_prefix("unshare:"));
         match reply.code.as_str() {
+            // A website's offer or end: heard, or a Claktory from before
+            // that can't take it (once, never again).
+            "ok" | "bad" if shared.is_some() => {
+                if let Err(error) = strong.store.db().execute("DELETE FROM pipe_outbox WHERE n = ?1", [n]) {
+                    tracing::error!(%error, "could not take a delivered frame off a pipe's queue");
+                }
+                if reply.code == "bad"
+                    && let Some(id) = msg_id.strip_prefix("share:")
+                {
+                    crate::pipes::shares::too_old(&strong, &pipe, id);
+                }
+            }
             "ok" | "refused" => {
                 if let Err(error) = strong.store.db().execute("DELETE FROM pipe_outbox WHERE n = ?1", [n]) {
                     tracing::error!(%error, "could not take a delivered frame off a pipe's queue");
@@ -1572,7 +1681,9 @@ const STREAMS_AT_ONCE: usize = 8;
 const UNPINNED_STREAMS: usize = 8;
 
 /// Serves a peer's connection on the pipes' ALPN: each stream one frame,
-/// answered.
+/// answered, or a website this side shares (`pipes::shares`), told apart
+/// by its first byte: a frame's length is under 256 KB, so its first byte
+/// is 0, and a website's stream starts "share ".
 pub(crate) async fn serve(connection: Connection, factory: Weak<Factory>) {
     let peer = connection.remote_id();
     let reading = Arc::new(tokio::sync::Semaphore::new(STREAMS_AT_ONCE));
@@ -1594,11 +1705,20 @@ pub(crate) async fn serve(connection: Connection, factory: Weak<Factory>) {
                 return;
             }
         }
-        let Ok(permit) = reading.clone().acquire_owned().await else { return };
         let factory = factory.clone();
+        let reading = reading.clone();
+        let connection = connection.clone();
         tokio::spawn(async move {
-            let _reading = permit;
-            if let Err(error) = answer(factory, peer, pinned, send, receive).await {
+            let mut receive = receive;
+            let Ok(Ok(first)) = tokio::time::timeout(ANSWER, receive.read_u8()).await else { return };
+            if first == b's' {
+                if pinned {
+                    crate::pipes::shares::serve(factory, &connection, peer, send, receive).await;
+                }
+                return;
+            }
+            let Ok(_reading) = reading.acquire_owned().await else { return };
+            if let Err(error) = answer(factory, peer, pinned, first, send, receive).await {
                 tracing::debug!(%error, "a pipe's frame failed");
             }
         });
@@ -1609,11 +1729,12 @@ async fn answer(
     factory: Weak<Factory>,
     peer: EndpointId,
     pinned: bool,
+    first: u8,
     mut send: SendStream,
     mut receive: RecvStream,
 ) -> std::io::Result<()> {
     let patience = ANSWER + Duration::from_secs(MAX_FILE / 1_000_000);
-    let read = tokio::time::timeout(patience, read_frame(&factory, &mut receive, &peer, pinned)).await;
+    let read = tokio::time::timeout(patience, read_frame(&factory, &mut receive, &peer, pinned, first)).await;
     let (payload, files) = match read {
         Ok(Ok(read)) => read,
         Ok(Err(error)) => {
@@ -1711,6 +1832,7 @@ async fn received(factory: &Arc<Factory>, peer: &str, payload: Payload, files: V
             let store = store();
             if let (Some(identity), Some(store)) = (payload.identity.as_deref(), &store) {
                 store.identity(factory, &pipe, &link.peer, identity);
+                crate::pipes::shares::identity_heard(factory, &pipe);
             }
             // Ours back, from a Claktory that says who it is.
             let identity = payload.identity.is_some().then(|| store.and_then(|store| store.own_identity(factory))).flatten();
@@ -1744,9 +1866,30 @@ async fn received(factory: &Arc<Factory>, peer: &str, payload: Payload, files: V
                         _ => store.peer_resumed(factory, &pipe),
                     }
                 }
+                match payload.kind.as_str() {
+                    KIND_PAUSE => crate::pipes::shares::paused(factory, &pipe),
+                    KIND_RESUME => crate::pipes::shares::resumed(factory, &pipe),
+                    _ => {}
+                }
                 wake(factory, &pipe);
                 return Reply::code("ok");
             }
+        }
+        KIND_SHARE | KIND_UNSHARE => {
+            if payload.seq as i64 > link.received_cseq {
+                link.received_cseq = payload.seq as i64;
+                if let Err(error) = link.save_received(&factory.store.db()) {
+                    tracing::error!(%error, "could not save a pipe's link");
+                    return Reply::code("later");
+                }
+                if payload.kind == KIND_SHARE {
+                    let port = payload.port.unwrap_or(0);
+                    crate::pipes::shares::offered(factory, &pipe, &link.peer, &payload.msg_id, &payload.text, port);
+                } else {
+                    crate::pipes::shares::withdrawn(factory, &pipe, &payload.msg_id);
+                }
+            }
+            Reply::code("ok")
         }
         KIND_MESSAGE => {
             if payload.seq as i64 <= link.received_seq {

@@ -543,10 +543,17 @@ impl Registry {
     }
 
     /// The base url and auth of the provider's first account, to read its
-    /// model list with; None when it isn't signed in (or its sign-ins are
-    /// locked away), or it's signed in at another address.
-    async fn listing_auth(&self, id: &str) -> Result<Option<(String, RequestAuth)>, String> {
+    /// model list with, and the account's id when it's a sign-in (OAuth);
+    /// None when it isn't signed in (or its sign-ins are locked away), or
+    /// it's signed in at another address.
+    async fn listing_auth(&self, id: &str) -> Result<Option<(String, RequestAuth, Option<String>)>, String> {
         let Some(provider) = self.provider(id) else { return Ok(None) };
+        let signed_in = match self.inner.store.accounts(id).await {
+            Ok(accounts) => {
+                accounts.into_iter().next().filter(|first| matches!(first.credential, Credential::Oauth { .. })).map(|first| first.id)
+            }
+            Err(_) => None,
+        };
         let resolved = match resolve_account_auth(provider, &self.inner.store, &self.inner.env, None, &CancellationToken::new()).await {
             Err(error) if error.is_locked() => return Ok(None),
             resolved => resolved.map_err(|error| error.to_string())?,
@@ -556,7 +563,7 @@ impl Registry {
         if base_url.trim_end_matches('/') != provider.base_url.trim_end_matches('/') {
             return Ok(None);
         }
-        Ok(Some((base_url, resolved.auth)))
+        Ok(Some((base_url, resolved.auth, signed_in)))
     }
 
     /// Reads the provider's model list from the provider, as it came; None
@@ -569,8 +576,18 @@ impl Registry {
         if id == "openrouter" && crate::providers::catalog::qa_models() {
             return crate::providers::catalog::fetch_openrouter().await.map(Some);
         }
-        let Some((base_url, auth)) = self.listing_auth(id).await? else { return Ok(None) };
-        crate::providers::listing::fetch(id, &base_url, &auth).await.map(Some)
+        let Some((base_url, auth, signed_in)) = self.listing_auth(id).await? else { return Ok(None) };
+        let provider = self.provider(id).ok_or("no such provider")?;
+        let listing = |base_url: String, auth: RequestAuth| -> futures_util::future::BoxFuture<'static, Result<Vec<u8>, Error>> {
+            let id = provider.id;
+            Box::pin(async move { crate::providers::listing::fetch(id, &base_url, &auth).await })
+        };
+        // A sign-in's token the provider didn't take is refreshed once, as for usage reads.
+        let fetched = match signed_in {
+            Some(account) => self.calling(provider, &account, base_url, auth, listing).await,
+            None => listing(base_url, auth).await,
+        };
+        fetched.map(Some).map_err(|error| error.to_string())
     }
 
     /// Takes a list `fetch_models` brought, checked whole, in place of the
@@ -597,7 +614,7 @@ impl Registry {
             let body = crate::providers::catalog::fetch_openrouter().await?;
             return crate::providers::catalog::openrouter_model(&body, model).map(Some);
         }
-        let Some((base_url, auth)) = self.listing_auth(id).await? else {
+        let Some((base_url, auth, _)) = self.listing_auth(id).await? else {
             return Err(format!("Sign in to {who} first, in Settings → Providers."));
         };
         crate::providers::listing::check(id, &base_url, &auth, model).await.map(Some)
@@ -940,8 +957,8 @@ impl Registry {
     pub async fn account_usage(&self, id: &str, account: Option<&str>) -> Result<Option<AccountUsage>, Error> {
         let Some(provider) = self.provider(id) else { return Ok(None) };
         let Some(limits) = provider.limits else { return Ok(None) };
-        let Some((base_url, auth)) = self.subscription_auth(provider, account).await? else { return Ok(None) };
-        limits(base_url, auth).await.map(Some)
+        let Some((base_url, auth, stored)) = self.subscription_auth(provider, account).await? else { return Ok(None) };
+        self.calling(provider, &stored, base_url, auth, limits).await.map(Some)
     }
 
     /// Uses one of the usage resets of one of the provider's accounts (None:
@@ -952,7 +969,7 @@ impl Registry {
     pub async fn use_reset(&self, id: &str, account: Option<&str>, reset: UsageReset) -> Result<Option<ResetAnswer>, Error> {
         let Some(provider) = self.provider(id) else { return Ok(None) };
         let Some(use_reset) = provider.reset else { return Ok(None) };
-        let Some((base_url, auth)) = self.subscription_auth(provider, account).await? else { return Ok(None) };
+        let Some((base_url, auth, _)) = self.subscription_auth(provider, account).await? else { return Ok(None) };
         let answer = use_reset(base_url, auth, reset).await?;
         if answer.reset {
             let stored = credential_result(self.inner.store.accounts(id).await, "read", id)?;
@@ -984,7 +1001,7 @@ impl Registry {
     pub async fn account_plan(&self, id: &str, account: Option<&str>) -> Result<Option<String>, Error> {
         let Some(provider) = self.provider(id) else { return Ok(None) };
         let Some(plan) = provider.plan else { return Ok(None) };
-        let Some((base_url, auth)) = self.subscription_auth(provider, account).await? else { return Ok(None) };
+        let Some((base_url, auth, signed_in)) = self.subscription_auth(provider, account).await? else { return Ok(None) };
         if let Some(identify) = provider.identity {
             let stored = credential_result(self.inner.store.accounts(id).await, "read", id)?;
             let unnamed = match account {
@@ -1003,7 +1020,7 @@ impl Registry {
                 }
             }
         }
-        plan(base_url, auth).await.map(Some)
+        self.calling(provider, &signed_in, base_url, auth, plan).await.map(Some)
     }
 
     async fn name_account(&self, id: &str, account: &str, identity: crate::limits::Identity) -> Result<(), Error> {
@@ -1079,8 +1096,9 @@ impl Registry {
         generate(base_url, resolved.auth, request).await
     }
 
-    /// The base url and auth of a provider's account signed in with a subscription; None when it isn't.
-    async fn subscription_auth(&self, provider: &Provider, account: Option<&str>) -> Result<Option<(String, RequestAuth)>, Error> {
+    /// The base url and auth of a provider's account signed in with a
+    /// subscription, and the account's id; None when it isn't.
+    async fn subscription_auth(&self, provider: &Provider, account: Option<&str>) -> Result<Option<(String, RequestAuth, String)>, Error> {
         let Some(oauth) = &provider.oauth else { return Ok(None) };
         let accounts = match self.inner.store.accounts(provider.id).await {
             // Nothing to read until they open.
@@ -1110,7 +1128,67 @@ impl Registry {
         };
         let Some(resolution) = resolution else { return Ok(None) };
         let base_url = resolution.auth.base_url.clone().unwrap_or_else(|| provider.base_url.to_owned());
-        Ok(Some((base_url, resolution.auth)))
+        Ok(Some((base_url, resolution.auth, stored)))
+    }
+
+    /// Calls `call` with a sign-in's base url and auth. When the provider
+    /// doesn't take its access token (401: expired before its time, or
+    /// ended), the sign-in is refreshed once (`renew`) and `call` asked again
+    /// with the new token; only a refresh the provider refuses, or a new
+    /// token it doesn't take either, marks the sign-in to sign in to again.
+    async fn calling<T>(
+        &self,
+        provider: &Provider,
+        account: &str,
+        base_url: String,
+        auth: RequestAuth,
+        call: impl Fn(String, RequestAuth) -> futures_util::future::BoxFuture<'static, Result<T, Error>>,
+    ) -> Result<T, Error> {
+        let used = auth.api_key.clone().unwrap_or_default();
+        let error = match call(base_url, auth).await {
+            Err(error) if error.is_unauthorized() => error,
+            other => return other,
+        };
+        tracing::warn!(provider = provider.id, %account, %error, "the provider didn't take a sign-in's access token; refreshing it");
+        let (base_url, auth) = self.renew(provider, account, &used, &error).await?;
+        match call(base_url, auth).await {
+            Err(again) if again.is_unauthorized() => {
+                tracing::warn!(provider = provider.id, %account, error = %again, "the provider didn't take a refreshed sign-in either; it needs signing in again");
+                self.refuse(provider.id, account).await?;
+                let message = format!("{} didn't take this sign-in, even refreshed ({again}). Sign in again.", self.noun(provider.id));
+                Err(Error::Models { code: crate::errors::REFUSED, message })
+            }
+            other => other,
+        }
+    }
+
+    /// Refreshes a sign-in whose access token `used` the provider didn't
+    /// take (`refused`, its answer), once, whatever its stored expiry
+    /// (`auth::refresh_after_refusal`: single-flight, so parallel callers
+    /// spend the refresh token once). Its new base url and auth; a refresh
+    /// the provider refuses marks the sign-in to sign in to again, and says
+    /// why (`REFUSED`). A refresh that fails otherwise (no network) changes
+    /// nothing.
+    async fn renew(&self, provider: &Provider, account: &str, used: &str, refused: &Error) -> Result<(String, RequestAuth), Error> {
+        match crate::auth::refresh_after_refusal(provider, &self.inner.store, account, used, &CancellationToken::new()).await {
+            Ok(Some(resolved)) => {
+                let base_url = resolved.auth.base_url.clone().unwrap_or_else(|| provider.base_url.to_owned());
+                Ok((base_url, resolved.auth))
+            }
+            // Signed out, or out of the store, meanwhile.
+            Ok(None) => Err(Error::Models { code: crate::errors::UNAUTHORIZED, message: refused.to_string() }),
+            Err(error) if error.is_refused() => {
+                let outcome = crate::auth::refresh_outcome(&error);
+                tracing::warn!(provider = provider.id, %account, %outcome, "the provider refused to refresh a sign-in; skipping it until it's signed in to again");
+                self.refuse(provider.id, account).await?;
+                let message = format!(
+                    "{} stopped taking this sign-in, and refused to refresh it ({outcome}). Sign in again.",
+                    self.noun(provider.id)
+                );
+                Err(Error::Models { code: crate::errors::REFUSED, message })
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn get_auth(&self, model: &Model) -> Result<Option<AuthResult>, Error> {
@@ -1384,6 +1462,9 @@ impl Registry {
             tokio::spawn(async move {
                 let pool = Pool::of_model(&model);
                 let mut tried = Vec::new();
+                // Sign-ins refreshed after the provider didn't take their
+                // token: each once per request.
+                let mut renewed: Vec<String> = Vec::new();
                 loop {
                     let accounts = match registry.candidates(&model.provider).await {
                         Ok(accounts) => accounts,
@@ -1463,12 +1544,23 @@ impl Registry {
                     // before anything but its start: held until something else comes.
                     let (mut held, mut forwarding) = (None, false);
                     let (mut gone, mut done) = (None, false);
+                    // The provider didn't take a sign-in's access token
+                    // before anything came: refreshed once, and asked again.
+                    let renewable = chosen
+                        .as_ref()
+                        .filter(|chosen| matches!(chosen.credential, Credential::Oauth { .. }) && !renewed.contains(&chosen.id))
+                        .map(|chosen| chosen.id.clone());
+                    let mut unauthorized = None;
                     while let Some(mut event) = inner.next().await {
                         if !forwarding {
                             match &event {
                                 StreamEvent::Start { .. } => {
                                     held = Some(event);
                                     continue;
+                                }
+                                StreamEvent::Error { error, .. } if renewable.is_some() && refused(error).is_some() => {
+                                    unauthorized = Some(event);
+                                    break;
                                 }
                                 StreamEvent::Error { error, .. } if account.is_some() && spent(error, pool).is_some() => {
                                     gone = spent(error, pool);
@@ -1499,6 +1591,41 @@ impl Registry {
                             _ => {}
                         }
                         sink.push(event);
+                    }
+                    if let (Some(mut event), Some(renewing), Some(chosen)) = (unauthorized, renewable, chosen.as_ref()) {
+                        renewed.push(renewing.clone());
+                        let Credential::Oauth { access, .. } = &chosen.credential else { return };
+                        let provider = registry.provider(&model.provider).expect("the model's provider");
+                        let said = match &event {
+                            StreamEvent::Error { error, .. } => error.error_message.clone().unwrap_or_default(),
+                            _ => String::new(),
+                        };
+                        tracing::warn!(provider = %model.provider, account = %renewing, error = %said, "the provider didn't take a sign-in's access token; refreshing it");
+                        let refused_token = Error::Models { code: crate::errors::UNAUTHORIZED, message: said };
+                        match registry.renew(provider, &renewing, access, &refused_token).await {
+                            // Asked again on the same account, with its new token.
+                            Ok(_) => continue,
+                            // Refused: marked to sign in to again; the next account, if any.
+                            Err(error) if error.is_refused() => {
+                                if let Some(notes) = &notes {
+                                    notes(AccountNote::Changed);
+                                }
+                                tried.push(renewing);
+                                continue;
+                            }
+                            // No refresh to be had now (no network): the request fails as it came.
+                            Err(error) => {
+                                tracing::warn!(provider = %model.provider, account = %renewing, %error, "could not refresh a sign-in");
+                                if let Some(start) = held {
+                                    sink.push(start);
+                                }
+                                if let StreamEvent::Error { error, .. } = &mut event {
+                                    mark_refused(error, &refused_by(Some(chosen)));
+                                }
+                                sink.push(event);
+                                return;
+                            }
+                        }
                     }
                     let (Some(gone), Some(account)) = (gone, account) else {
                         if let Some(start) = held {

@@ -168,7 +168,7 @@ pub(crate) fn app(view: &View) -> v1::AppInfo {
 }
 
 /// Installs the app at `version`, reviewed and approved.
-async fn install(client: &mut Client, version: &str) {
+pub(crate) async fn install(client: &mut Client, version: &str) {
     let bundle = clapp(&manifest(version), b"\0asm\x01\0\0\0 data", &SigningKey::from_bytes(&[11; 32]));
     let ask = |approve: bool, sha256: &str| {
         Request::InstallLocalApp(v1::InstallLocalApp { approve, sha256: sha256.into(), content: bundle.clone(), ..Default::default() })

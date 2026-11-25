@@ -41,6 +41,12 @@ class AppDelegate: FlutterAppDelegate {
     return true
   }
 
+  /// Quitting stops this Mac's Claktory first when the person chose that
+  /// (friend bug #27): the window's Dart says when it's done.
+  override func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    return Engine.shouldTerminate(sender)
+  }
+
   override func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
     return true
   }

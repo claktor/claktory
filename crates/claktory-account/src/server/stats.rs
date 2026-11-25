@@ -358,9 +358,10 @@ fn export_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
             })?
             .collect()
     };
+    // Claktories, and the accounts behind them (users, #411 follow-up).
     let in_touch = by_day(
-        "SELECT day, count(DISTINCT claktory_id) FROM seen_days WHERE day >= ?1 AND day <= ?2 GROUP BY day",
-        1,
+        "SELECT day, count(DISTINCT claktory_id), count(DISTINCT account_id) FROM seen_days WHERE day >= ?1 AND day <= ?2 GROUP BY day",
+        2,
         &[&first_day, &today_day],
     )?;
     let usage = by_day(
@@ -402,16 +403,18 @@ fn export_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
     for &start in days.iter().chain([&today]) {
         let date = day(start);
         add(start, "day", "contact_claktories", of(&in_touch, &date, 0));
+        add(start, "day", "contact_users", of(&in_touch, &date, 1));
         // The 30 days ending with this one, counted once each: never a
         // sum of the days'. Only for completed days.
         if start != today {
             let since = day(start - 29 * DAY);
-            let rolling: i64 = conn.query_row(
-                "SELECT count(DISTINCT claktory_id) FROM seen_days WHERE day >= ?1 AND day <= ?2",
+            let (claktories, users): (i64, i64) = conn.query_row(
+                "SELECT count(DISTINCT claktory_id), count(DISTINCT account_id) FROM seen_days WHERE day >= ?1 AND day <= ?2",
                 [&since, &date],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            add(start, "rolling30", "contact_claktories", rolling);
+            add(start, "rolling30", "contact_claktories", claktories);
+            add(start, "rolling30", "contact_users", users);
         }
         // Registered at the day's end, and not removed by then.
         let end = start + DAY;
@@ -421,6 +424,15 @@ fn export_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
             |row| row.get(0),
         )?;
         add(start, "day", "registered_claktories", registered);
+        // Accounts at the day's end, and those made that day; deleted
+        // accounts are gone from both, every day.
+        let (users, new): (i64, i64) = conn.query_row(
+            "SELECT count(*), coalesce(sum(created >= ?1), 0) FROM accounts WHERE created < ?2",
+            [start, end],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        add(start, "day", "registered_users", users);
+        add(start, "day", "new_users", new);
         for (at, metric) in ["requests", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"].into_iter().enumerate() {
             add(start, "day", metric, of(&usage, &date, at));
         }
@@ -439,6 +451,59 @@ fn export_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
     )?;
     add(yesterday, "snapshot", "model_connected_claktories", model);
     add(yesterday, "snapshot", "first_run_claktories", ran);
+    // Claktories per user, of the same Claktories, as now: the users who
+    // have one, the average, and how many have how many.
+    let mut statement =
+        conn.prepare("SELECT count(*) FROM claktories WHERE revoked_at IS NULL AND created < ?1 GROUP BY account_id")?;
+    let per_user: Vec<i64> = statement.query_map([today], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let users = per_user.len() as i64;
+    let claktories: i64 = per_user.iter().sum();
+    add(yesterday, "snapshot", "users_with_claktories", users);
+    add(yesterday, "snapshot", "claktories_per_user_x100", if users > 0 { (claktories * 100 + users / 2) / users } else { 0 });
+    for (label, value) in claktory_counts(&per_user) {
+        rows.push(Row {
+            published: now,
+            start: yesterday,
+            end: today,
+            window: "snapshot".into(),
+            metric: "users_with_claktories".into(),
+            dimension: "claktory_count".into(),
+            label: label.into(),
+            value: Some(value),
+            status: "ok".into(),
+        });
+    }
+    // Users and Claktories by country now, for the map (Bruno 29945):
+    // those in touch in the 30 days ending yesterday, as rolling30's are
+    // counted; a Claktory in its own country, a user in their Claktory's.
+    let since = day(today - 30 * DAY);
+    let mut statement = conn.prepare(
+        "SELECT seen.claktory_id, claktories.country, 1
+         FROM (SELECT DISTINCT claktory_id FROM seen_days WHERE day >= ?1 AND day < ?2) AS seen
+         LEFT JOIN claktories ON claktories.id = seen.claktory_id",
+    )?;
+    let claktories: Vec<Found> =
+        statement.query_map([&since, &today_day], |row| Ok((row.get(0)?, row.get(1)?, vec![row.get(2)?])))?.collect::<rusqlite::Result<_>>()?;
+    for (metric, found) in [("contact_users", users_in_touch(conn, &since, &today_day)?), ("contact_claktories", claktories)] {
+        let mut countries = std::collections::BTreeMap::<String, Part>::new();
+        for (_, country, values) in found {
+            countries.entry(canonical_country(country.as_deref())).or_default().add(&values);
+        }
+        for (label, part) in breakdown(countries, None) {
+            rows.push(Row {
+                published: now,
+                start: yesterday,
+                end: today,
+                window: "rolling30".into(),
+                metric: metric.into(),
+                dimension: "country".into(),
+                label,
+                value: part.values.first().copied(),
+                status: "ok".into(),
+            });
+        }
+    }
+    rows.extend(hour_rows(conn, now)?);
     // The latest months published, as they were published.
     let mut statement = conn.prepare("SELECT month, published_at, rows FROM analytics_months ORDER BY month DESC LIMIT ?1")?;
     let months: Vec<(String, i64, String)> =
@@ -465,12 +530,80 @@ fn export_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
     Ok(rows)
 }
 
+/// Users by how many Claktories they have: `1`, `2`, `3-5` and `6+`,
+/// exact, small ones included (Matt's decision, Bruno 29945: the export
+/// is his alone).
+fn claktory_counts(per_user: &[i64]) -> Vec<(&'static str, i64)> {
+    let count = |range: std::ops::RangeInclusive<i64>| per_user.iter().filter(|n| range.contains(n)).count() as i64;
+    vec![("1", count(1..=1)), ("2", count(2..=2)), ("3-5", count(3..=5)), ("6+", count(6..=i64::MAX))]
+}
+
+/// The hours an export covers: the last 28 days', the current one with
+/// them, never by any dimension.
+pub const EXPORT_HOURS: i64 = 28 * 24;
+const HOUR: i64 = 3_600;
+
+/// Each UTC hour of the last [`EXPORT_HOURS`] (#411 follow-up): Claktories
+/// whose check-in reached the service in it, Claktories and users whose
+/// agents worked in it, and how many agents worked at once on average
+/// (agent minutes over 60, times 100), over all of them; exact, small
+/// numbers included (Matt, Bruno 29945). The two latest hours are partial:
+/// an hour's work reaches the service at the check-in after it.
+fn hour_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
+    use std::collections::HashMap;
+    let current = now - now.rem_euclid(HOUR);
+    let first = current - (EXPORT_HOURS - 1) * HOUR;
+    let by_hour = |sql: &str| -> rusqlite::Result<HashMap<i64, Vec<i64>>> {
+        let mut statement = conn.prepare(sql)?;
+        let columns = statement.column_count();
+        statement
+            .query_map([first], |row| {
+                let numbers = (1..columns).map(|column| row.get::<_, Option<i64>>(column).map(Option::unwrap_or_default));
+                Ok((row.get(0)?, numbers.collect::<rusqlite::Result<Vec<i64>>>()?))
+            })?
+            .collect()
+    };
+    let online = by_hour(
+        "SELECT received - received % 3600, count(DISTINCT claktory_id) FROM periods WHERE received >= ?1 GROUP BY received - received % 3600",
+    )?;
+    // Deleted accounts' work (Claktory '') adds to the agents and to no
+    // one's count.
+    let working = by_hour(
+        "SELECT hour - hour % 3600, count(DISTINCT CASE WHEN activity.claktory_id != '' THEN activity.claktory_id END),
+                count(DISTINCT claktories.account_id), sum(agent_minutes)
+         FROM activity LEFT JOIN claktories ON claktories.id = activity.claktory_id
+         WHERE hour >= ?1 AND (agent_minutes > 0 OR runs > 0) GROUP BY hour - hour % 3600",
+    )?;
+    let mut rows = Vec::new();
+    for start in (0..EXPORT_HOURS).map(|at| first + at * HOUR) {
+        let of = |map: &HashMap<i64, Vec<i64>>, at: usize| map.get(&start).map_or(0, |numbers| numbers[at]);
+        let status = if start >= current - HOUR { "partial" } else { "ok" };
+        for (metric, value) in [
+            ("online_claktories", of(&online, 0)),
+            ("working_claktories", of(&working, 0)),
+            ("working_users", of(&working, 1)),
+            ("agents_working_avg_x100", of(&working, 2) * 100 / 60),
+        ] {
+            rows.push(Row {
+                published: now,
+                start,
+                end: start + HOUR,
+                window: "hour".into(),
+                metric: metric.into(),
+                dimension: "none".into(),
+                label: "All".into(),
+                value: Some(value),
+                status: status.into(),
+            });
+        }
+    }
+    Ok(rows)
+}
+
 // ---- Monthly publications (#411, slice 2) ----
 
-/// The fewest distinct Claktories behind a category for it to be
-/// published on its own (Fugo): fewer, it's folded into Other.
-pub const SUPPORT: usize = 5;
-/// The most labels a breakdown has, Other among them.
+/// The most labels a breakdown other than countries has, Other among
+/// them: the smallest past them are added up as Other.
 pub const MAX_LABELS: usize = 12;
 /// The most publications an export carries, the latest.
 pub const EXPORT_MONTHS: i64 = 6;
@@ -509,71 +642,6 @@ const BACKEND_PLATFORMS: &[&str] = &["macos-arm64", "macos-x86_64", "linux-arm64
 /// Device systems and kinds, as the apps name them.
 const DEVICE_PLATFORMS: &[&str] = &["macos", "ios", "ipados", "android", "linux", "windows"];
 const DEVICE_KINDS: &[&str] = &["desktop", "laptop", "phone", "tablet"];
-/// Countries with a label of their own, as the GeoIP database names them
-/// in English; any other is Other.
-const COUNTRIES: &[&str] = &[
-    "Argentina",
-    "Australia",
-    "Austria",
-    "Bangladesh",
-    "Belgium",
-    "Brazil",
-    "Bulgaria",
-    "Canada",
-    "Chile",
-    "China",
-    "Colombia",
-    "Croatia",
-    "Czechia",
-    "Denmark",
-    "Egypt",
-    "Estonia",
-    "Finland",
-    "France",
-    "Germany",
-    "Greece",
-    "Hong Kong",
-    "Hungary",
-    "India",
-    "Indonesia",
-    "Ireland",
-    "Israel",
-    "Italy",
-    "Japan",
-    "Kenya",
-    "Latvia",
-    "Lithuania",
-    "Luxembourg",
-    "Malaysia",
-    "Mexico",
-    "Netherlands",
-    "New Zealand",
-    "Nigeria",
-    "Norway",
-    "Pakistan",
-    "Peru",
-    "Philippines",
-    "Poland",
-    "Portugal",
-    "Romania",
-    "Serbia",
-    "Singapore",
-    "Slovakia",
-    "Slovenia",
-    "South Africa",
-    "South Korea",
-    "Spain",
-    "Sweden",
-    "Switzerland",
-    "Taiwan",
-    "Thailand",
-    "Türkiye",
-    "Ukraine",
-    "United Arab Emirates",
-    "United Kingdom",
-    "United States",
-    "Vietnam",
-];
 
 /// The label a raw value is published under: itself when it's on `list`,
 /// Unknown when there's none, else Other. Decided before anything is
@@ -585,6 +653,19 @@ fn canonical(raw: Option<&str>, list: &[&str]) -> String {
     }
 }
 
+/// A country's label: its name as the GeoIP file has it in English
+/// ("Netherlands"; the only place one comes from), Unknown when there's
+/// none, else Other when it isn't a country's name in form (letters,
+/// spaces and `.,'()-`, 60 characters at most). Every country gets its
+/// own, for the map (Matt, Bruno 29402); never a region or city.
+fn canonical_country(raw: Option<&str>) -> String {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty() && *raw != "unknown") else { return "Unknown".to_owned() };
+    let named = raw.chars().count() <= 60
+        && raw.chars().next().is_some_and(char::is_alphabetic)
+        && raw.chars().all(|char| char.is_alphabetic() || " .,'()-".contains(char));
+    if named { raw.to_owned() } else { "Other".to_owned() }
+}
+
 /// A version's label: "v" and three numbers ("v0.1.20"), Unknown when
 /// there's none, else Other. A fixed form, never free text.
 fn canonical_version(raw: Option<&str>) -> String {
@@ -594,78 +675,43 @@ fn canonical_version(raw: Option<&str>) -> String {
     if numbers { raw.to_owned() } else { "Other".to_owned() }
 }
 
-/// One category of a breakdown: its amounts (one per metric) and the
-/// Claktories behind them. Anonymous totals (deleted accounts', id '')
-/// add to the amounts and to no one's support.
+/// One category of a breakdown: its amounts, one per metric.
 #[derive(Default, Clone)]
 struct Part {
     values: Vec<i64>,
-    behind: std::collections::HashSet<String>,
 }
 
 impl Part {
-    fn add(&mut self, claktory: &str, values: &[i64]) {
+    fn add(&mut self, values: &[i64]) {
         if self.values.len() < values.len() {
             self.values.resize(values.len(), 0);
         }
         for (sum, value) in self.values.iter_mut().zip(values) {
             *sum += value;
         }
-        if !claktory.is_empty() {
-            self.behind.insert(claktory.to_owned());
-        }
-    }
-
-    fn absorb(&mut self, other: Part) {
-        if self.values.len() < other.values.len() {
-            self.values.resize(other.values.len(), 0);
-        }
-        for (sum, value) in self.values.iter_mut().zip(&other.values) {
-            *sum += value;
-        }
-        self.behind.extend(other.behind);
     }
 }
 
-/// A breakdown as published (Fugo's rules, analytics-charts.md §3): at
-/// most [`MAX_LABELS`] labels, the rest folded into Other; then every
-/// category with fewer than [`SUPPORT`] distinct Claktories behind it
-/// folded into Other too; then, while Other has fewer, the next smallest
-/// category absorbed into it. When even all of it together has too few,
-/// None: it's suppressed, and only the global total stands.
-fn disclosed(parts: std::collections::BTreeMap<String, Part>) -> Option<Vec<(String, Part)>> {
-    if parts.is_empty() {
-        return Some(Vec::new());
-    }
+/// A breakdown as published: every label with its exact amounts, small
+/// ones included, the largest first (Matt's decision, Bruno 29402 and
+/// 29945: the export is his alone). Past `most` labels, the smallest are
+/// added up as Other, last.
+fn breakdown(parts: std::collections::BTreeMap<String, Part>, most: Option<usize>) -> Vec<(String, Part)> {
     let mut other: Option<Part> = None;
-    let fold = |other: &mut Option<Part>, part: Part| other.get_or_insert_with(Part::default).absorb(part);
     let mut named: Vec<(String, Part)> = Vec::new();
     for (label, part) in parts {
-        if label == "Other" { fold(&mut other, part) } else { named.push((label, part)) }
+        if label == "Other" { other = Some(part) } else { named.push((label, part)) }
     }
-    // Largest first: by Claktories behind, then the first amount, then label.
-    let order = |a: &(String, Part), b: &(String, Part)| {
-        b.1.behind.len().cmp(&a.1.behind.len()).then(b.1.values.first().cmp(&a.1.values.first())).then(a.0.cmp(&b.0))
-    };
-    named.sort_by(order);
-    if named.len() + usize::from(other.is_some()) > MAX_LABELS {
-        for (_, part) in named.split_off(MAX_LABELS - 1) {
-            fold(&mut other, part);
+    named.sort_by(|a, b| b.1.values.first().cmp(&a.1.values.first()).then(a.0.cmp(&b.0)));
+    if let Some(most) = most
+        && named.len() + usize::from(other.is_some()) > most
+    {
+        for (_, part) in named.split_off(most - 1) {
+            other.get_or_insert_with(Part::default).add(&part.values);
         }
     }
-    let (kept, small): (Vec<_>, Vec<_>) = named.into_iter().partition(|(_, part)| part.behind.len() >= SUPPORT);
-    named = kept;
-    for (_, part) in small {
-        fold(&mut other, part);
-    }
-    while other.as_ref().is_some_and(|other| other.behind.len() < SUPPORT) {
-        let smallest = named.pop()?;
-        fold(&mut other, smallest.1);
-    }
-    if let Some(other) = other {
-        named.push(("Other".to_owned(), other));
-    }
-    Some(named)
+    named.extend(other.map(|other| ("Other".to_owned(), other)));
+    named
 }
 
 /// A publication's row: bucketed by its month, timed by the publication.
@@ -747,7 +793,20 @@ pub fn publish(conn: &mut Connection, month: &str, now: i64) -> Result<(), Strin
 /// totals), its raw label, and its amounts.
 type Found = (String, Option<String>, Vec<i64>);
 
-/// A month's rows: global totals, then each breakdown as disclosed.
+/// The users in touch from day `first` to before day `after`, each once,
+/// with the country of their Claktory last in touch (one still registered
+/// first), as now: (account, country, [1]).
+fn users_in_touch(conn: &Connection, first: &str, after: &str) -> rusqlite::Result<Vec<Found>> {
+    let mut statement = conn.prepare(
+        "SELECT seen.account_id,
+                (SELECT country FROM claktories WHERE claktories.account_id = seen.account_id
+                 ORDER BY revoked_at IS NOT NULL, last_seen DESC LIMIT 1)
+         FROM (SELECT DISTINCT account_id FROM seen_days WHERE day >= ?1 AND day < ?2) AS seen",
+    )?;
+    statement.query_map([first, after], |row| Ok((row.get(0)?, row.get(1)?, vec![1])))?.collect()
+}
+
+/// A month's rows: global totals, then each breakdown.
 fn month_rows(conn: &Connection, start: i64, end: i64) -> rusqlite::Result<Vec<Published>> {
     use std::collections::BTreeMap;
     let (first, after) = (day(start), day(end));
@@ -783,11 +842,13 @@ fn month_rows(conn: &Connection, start: i64, end: i64) -> rusqlite::Result<Vec<P
     };
     let group = |found: &[Found], label: &dyn Fn(Option<&str>) -> String| {
         let mut parts: BTreeMap<String, Part> = BTreeMap::new();
-        for (claktory, raw, values) in found {
-            parts.entry(label(raw.as_deref())).or_default().add(claktory, values);
+        for (_, raw, values) in found {
+            parts.entry(label(raw.as_deref())).or_default().add(values);
         }
         parts
     };
+    let users = users_in_touch(conn, &first, &after)?;
+    total("contact_users", users.len() as i64);
     let mut breakdowns: Vec<(&[&str], &str, BTreeMap<String, Part>)> = Vec::new();
 
     let by = |column: &str| {
@@ -835,7 +896,8 @@ fn month_rows(conn: &Connection, start: i64, end: i64) -> rusqlite::Result<Vec<P
     total("backend_claktories", versions.len() as i64);
     breakdowns.push((&["backend_claktories"], "backend_version", group(&versions, &canonical_version)));
     breakdowns.push((&["backend_claktories"], "backend_platform", group(&census("platform")?, &|raw| canonical(raw, BACKEND_PLATFORMS))));
-    breakdowns.push((&["backend_claktories"], "country", group(&census("country")?, &|raw| canonical(raw, COUNTRIES))));
+    breakdowns.push((&["backend_claktories"], "country", group(&census("country")?, &canonical_country)));
+    breakdowns.push((&["contact_users"], "country", group(&users, &canonical_country)));
     let devices = |column: &str| {
         read(
             &format!(
@@ -853,32 +915,18 @@ fn month_rows(conn: &Connection, start: i64, end: i64) -> rusqlite::Result<Vec<P
     breakdowns.push((&["reported_devices"], "app_version", group(&devices("app_version")?, &canonical_version)));
 
     for (metrics, dimension, parts) in breakdowns {
-        match disclosed(parts) {
-            Some(shown) => {
-                for (label, part) in shown {
-                    for (at, metric) in metrics.iter().enumerate() {
-                        rows.push(Published {
-                            window: "month".into(),
-                            metric: (*metric).into(),
-                            dimension: dimension.into(),
-                            label: label.clone(),
-                            value: Some(part.values.get(at).copied().unwrap_or_default()),
-                            status: "ok".into(),
-                        });
-                    }
-                }
-            }
-            None => {
-                for metric in metrics {
-                    rows.push(Published {
-                        window: "month".into(),
-                        metric: (*metric).into(),
-                        dimension: dimension.into(),
-                        label: "Other".into(),
-                        value: None,
-                        status: "suppressed".into(),
-                    });
-                }
+        // Every country its own label, for the map.
+        let most = if dimension == "country" { None } else { Some(MAX_LABELS) };
+        for (label, part) in breakdown(parts, most) {
+            for (at, metric) in metrics.iter().enumerate() {
+                rows.push(Published {
+                    window: "month".into(),
+                    metric: (*metric).into(),
+                    dimension: dimension.into(),
+                    label: label.clone(),
+                    value: Some(part.values.get(at).copied().unwrap_or_default()),
+                    status: "ok".into(),
+                });
             }
         }
     }
@@ -889,70 +937,69 @@ fn month_rows(conn: &Connection, start: i64, end: i64) -> rusqlite::Result<Vec<P
 mod tests {
     use super::*;
 
-    /// A breakdown of `(label, claktories behind it, amount)`.
-    fn parts(of: &[(&str, &[&str], i64)]) -> std::collections::BTreeMap<String, Part> {
+    fn shown(of: &[(&str, i64)], most: Option<usize>) -> Vec<(String, i64)> {
         let mut parts = std::collections::BTreeMap::<String, Part>::new();
-        for (label, behind, amount) in of {
-            let part = parts.entry((*label).to_owned()).or_default();
-            if behind.is_empty() {
-                part.add("", &[*amount]);
-            }
-            for (at, claktory) in behind.iter().enumerate() {
-                part.add(claktory, &[if at == 0 { *amount } else { 0 }]);
-            }
+        for (label, amount) in of {
+            parts.entry((*label).to_owned()).or_default().add(&[*amount]);
         }
-        parts
-    }
-
-    fn shown(parts: std::collections::BTreeMap<String, Part>) -> Option<Vec<(String, usize, i64)>> {
-        disclosed(parts).map(|shown| shown.into_iter().map(|(label, part)| (label, part.behind.len(), part.values[0])).collect())
+        breakdown(parts, most).into_iter().map(|(label, part)| (label, part.values[0])).collect()
     }
 
     #[test]
-    fn a_category_needs_five_claktories_and_overlaps_count_once() {
-        let five = ["a", "b", "c", "d", "e"];
-        // Two groups of three that overlap are four Claktories, not six:
-        // too few, together or apart.
-        assert_eq!(shown(parts(&[("x", &["a", "b", "c"], 10), ("y", &["b", "c", "d"], 20)])), None);
-        // Five behind it: its own label.
-        assert_eq!(shown(parts(&[("x", &five, 7)])), Some(vec![("x".into(), 5, 7)]));
-        // A small one folds into Other, which, still too small, takes in the
-        // next smallest until it's safe.
-        let folded = shown(parts(&[("big", &["a", "b", "c", "d", "e", "f"], 60), ("mid", &five, 50), ("tiny", &["z"], 1)]));
-        assert_eq!(folded, Some(vec![("big".into(), 6, 60), ("Other".into(), 6, 51)]));
+    fn a_breakdown_shows_every_label_exactly_the_largest_first() {
+        // One is its own label; Other comes last.
+        let all = shown(&[("x", 1), ("y", 20), ("Other", 3), ("x", 1)], Some(MAX_LABELS));
+        assert_eq!(all, [("y".into(), 20), ("x".into(), 2), ("Other".into(), 3)]);
     }
 
     #[test]
-    fn anonymous_totals_count_in_amounts_but_never_toward_five() {
-        let four = ["a", "b", "c", "d"];
-        assert_eq!(shown(parts(&[("x", &four, 10), ("x", &[], 1000)])), None);
-        let five = ["a", "b", "c", "d", "e"];
-        assert_eq!(shown(parts(&[("x", &five, 10), ("x", &[], 1000)])), Some(vec![("x".into(), 5, 1010)]));
-    }
-
-    #[test]
-    fn a_breakdown_has_twelve_labels_at_most() {
-        let mut map = std::collections::BTreeMap::<String, Part>::new();
-        for at in 0..15_i64 {
-            for one in 0..5 {
-                map.entry(format!("label{at:02}")).or_default().add(&format!("{at}-{one}"), &[at]);
-            }
-        }
-        let shown = shown(map).expect("shown");
-        assert_eq!(shown.len(), MAX_LABELS);
-        assert_eq!(shown.last().map(|(label, behind, _)| (label.as_str(), *behind)), Some(("Other", 20)));
+    fn a_breakdown_has_twelve_labels_at_most_but_countries_all_theirs() {
+        let many: Vec<(String, i64)> = (0..15_i64).map(|at| (format!("label{at:02}"), at + 1)).collect();
+        let many: Vec<(&str, i64)> = many.iter().map(|(label, amount)| (label.as_str(), *amount)).collect();
+        let capped = shown(&many, Some(MAX_LABELS));
+        assert_eq!(capped.len(), MAX_LABELS);
+        // The four smallest, 1 to 4, added up.
+        assert_eq!(capped.last(), Some(&("Other".into(), 10)));
+        assert_eq!(shown(&many, None).len(), 15);
     }
 
     #[test]
     fn only_listed_labels_are_published() {
         assert_eq!(canonical(Some("anthropic"), PROVIDERS), "anthropic");
         assert_eq!(canonical(Some("my-own-proxy"), PROVIDERS), "Other");
-        assert_eq!(canonical(None, COUNTRIES), "Unknown");
+        assert_eq!(canonical(None, PROVIDERS), "Unknown");
+        for (raw, label) in [
+            (Some("Netherlands"), "Netherlands"),
+            (Some("Türkiye"), "Türkiye"),
+            (Some("Bosnia and Herzegovina"), "Bosnia and Herzegovina"),
+            (Some("Congo (Kinshasa)"), "Congo (Kinshasa)"),
+            (Some("Côte d'Ivoire"), "Côte d'Ivoire"),
+            (None, "Unknown"),
+            (Some(""), "Unknown"),
+            (Some("Amsterdam, 1012 AB"), "Other"),
+            (Some("<b>x</b>"), "Other"),
+            (Some("-x"), "Other"),
+        ] {
+            assert_eq!(canonical_country(raw), label, "{raw:?}");
+        }
+        assert_eq!(canonical_country(Some(&"a".repeat(61))), "Other");
         assert_eq!(canonical(Some("unknown"), DEVICE_KINDS), "Unknown");
         assert_eq!(canonical_version(Some("v0.1.20")), "v0.1.20");
         for odd in ["2026.11.19-1958", "v0.1.20-dev", "v0.1", "v1.2.3.4", "v0.1.20 x", "v00000.1.2"] {
             assert_eq!(canonical_version(Some(odd)), "Other", "{odd}");
         }
+    }
+
+    /// Users with each of `counts` Claktories.
+    fn users(counts: &[(i64, usize)]) -> Vec<i64> {
+        counts.iter().flat_map(|(claktories, users)| std::iter::repeat_n(*claktories, *users)).collect()
+    }
+
+    #[test]
+    fn claktories_per_user_are_exact_small_ones_included() {
+        let counts = claktory_counts(&users(&[(1, 9), (2, 1), (3, 2), (5, 3), (6, 1), (10, 4)]));
+        assert_eq!(counts, [("1", 9), ("2", 1), ("3-5", 5), ("6+", 5)]);
+        assert_eq!(claktory_counts(&[]), [("1", 0), ("2", 0), ("3-5", 0), ("6+", 0)]);
     }
 
     #[test]

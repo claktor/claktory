@@ -5,6 +5,7 @@
 //! agent such as Rivet, with pipes_group (`crate::extensions::pipes`).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use factory_protocol::v1;
 use rusqlite::{OptionalExtension, params};
@@ -90,7 +91,7 @@ pub(crate) fn members(factory: &Factory) -> HashMap<String, String> {
         let db = factory.store.db();
         // Pipes deleted since leave their rows behind: never counted.
         let mut statement = db.prepare("SELECT m.pipe, m.grp FROM pipe_group_members m JOIN pipes p ON p.id = m.pipe")?;
-        statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect()
+        statement.query_map([], crate::store::row2)?.collect()
     };
     read().unwrap_or_default()
 }
@@ -140,7 +141,7 @@ fn changed(factory: &Factory) {
 
 /// CreatePipeGroup: a new group at the end of the project's, with `pipe`
 /// moved into it when given (New group… from a pipe's menu).
-pub(crate) fn create(factory: &Factory, project: &str, name: &str, pipe: &str) -> Result<Group, RequestError> {
+pub(crate) fn create(factory: &Arc<Factory>, project: &str, name: &str, pipe: &str) -> Result<Group, RequestError> {
     if factory.lock().config.project(project).is_none() {
         return Err(RequestError::UnknownProject(project.to_owned()));
     }
@@ -149,6 +150,7 @@ pub(crate) fn create(factory: &Factory, project: &str, name: &str, pipe: &str) -
     if !pipe.is_empty() {
         pipe_in(factory, pipe, project)?;
     }
+    let before = members(factory).remove(pipe).unwrap_or_default();
     let group = {
         let mut db = factory.store.db();
         let db = db.transaction()?;
@@ -174,6 +176,10 @@ pub(crate) fn create(factory: &Factory, project: &str, name: &str, pipe: &str) -
         group
     };
     tracing::info!(group = %group.id, project, "a pipe group was made");
+    if !pipe.is_empty() {
+        // Out of its group: that group's websites stop reaching it.
+        super::shares::moved(factory, pipe, &before, &group.id);
+    }
     changed(factory);
     Ok(group)
 }
@@ -191,6 +197,8 @@ pub(crate) fn rename(factory: &Factory, id: &str, name: &str) -> Result<Group, R
 /// DeletePipeGroup: its pipes stay, outside any group. How many there were.
 pub(crate) fn delete(factory: &Factory, id: &str) -> Result<(Group, usize), RequestError> {
     let group = known(factory, id)?;
+    // Its websites stay with the pipes they reach now.
+    super::shares::group_deleted(factory, id);
     let pipes = {
         let db = factory.store.db();
         let pipes: i64 = db.query_row(
@@ -218,8 +226,9 @@ fn pipe_in(factory: &Factory, pipe: &str, project: &str) -> Result<super::Record
 
 /// SetPipeGroup: moves a pipe into a group of its own project, or out of
 /// any (an empty `group`). The group it's in now, if any.
-pub(crate) fn set(factory: &Factory, pipe: &str, group: &str) -> Result<Option<Group>, RequestError> {
+pub(crate) fn set(factory: &Arc<Factory>, pipe: &str, group: &str) -> Result<Option<Group>, RequestError> {
     let record = factory.pipes.get(pipe).ok_or_else(|| RequestError::NoPipe(pipe.to_owned()))?;
+    let before = members(factory).remove(pipe).unwrap_or_default();
     let group = if group.is_empty() {
         factory.store.db().execute("DELETE FROM pipe_group_members WHERE pipe = ?1", [pipe])?;
         None
@@ -232,6 +241,9 @@ pub(crate) fn set(factory: &Factory, pipe: &str, group: &str) -> Result<Option<G
         )?;
         Some(found)
     };
+    // The websites of the group it left stop reaching it; those of the one
+    // it joined reach it.
+    super::shares::moved(factory, pipe, &before, group.as_ref().map_or("", |group| group.id.as_str()));
     changed(factory);
     Ok(group)
 }

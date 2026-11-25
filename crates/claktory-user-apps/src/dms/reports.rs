@@ -164,18 +164,18 @@ pub fn answer(db: &mut Connection, keys: &Keys, method: &str, account: &str, byt
     Ok(answer)
 }
 
-/// A control character but a line break, or one that changes direction or
-/// hides.
-fn hidden(c: char) -> bool {
-    (c.is_control() && c != '\n')
-        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}')
+/// The characters of `text` that are controls but line breaks, or change
+/// direction or hide (the set DM names are checked against), a variation
+/// selector anywhere but after a visible character included.
+fn hidden(text: &str) -> impl Iterator<Item = char> + '_ {
+    claktory_dm_crypto::certificate::hidden_in(text).filter(|c| *c != '\n')
 }
 
 /// The clean note: trimmed, at most 1000 characters, no control characters
 /// but line breaks, nothing that changes direction or hides.
 fn clean_note(note: &str) -> Result<Option<String>, Refusal> {
     let note = note.trim();
-    if note.chars().any(hidden) || note.chars().count() > MAX_NOTE {
+    if hidden(note).next().is_some() || note.chars().count() > MAX_NOTE {
         return Err(invalid("A note has at most 1000 characters, and no hidden or direction-changing ones."));
     }
     Ok((!note.is_empty()).then(|| note.to_owned()))
@@ -409,13 +409,7 @@ pub fn review(db: &mut Connection, keys: &Keys, operator: &str, now_ms: i64) -> 
 fn labelled(evidence: &mut Value) {
     let Some(messages) = evidence.get_mut("messages").and_then(Value::as_array_mut) else { return };
     for message in messages.iter_mut() {
-        let codes: Vec<String> = message["text"]
-            .as_str()
-            .unwrap_or_default()
-            .chars()
-            .filter(|c| hidden(*c))
-            .map(|c| format!("U+{:04X}", u32::from(c)))
-            .collect();
+        let codes: Vec<String> = hidden(message["text"].as_str().unwrap_or_default()).map(|c| format!("U+{:04X}", u32::from(c))).collect();
         if !codes.is_empty() {
             message["hidden"] = json!(codes);
         }
@@ -562,6 +556,17 @@ mod tests {
     }
 
     #[test]
+    fn a_note_with_anything_hidden_is_refused_but_an_emoji_is_kept() {
+        for note in ["a\u{202E}b", "a\u{E0065}b", "a\u{61C}b", "Ana\u{3164}", "a\u{FE0F}\u{FE0F}", "\u{FE0F}a", "a\tb"] {
+            assert!(clean_note(note).is_err(), "{note:?}");
+        }
+        assert_eq!(
+            clean_note(" two\nlines, thanks \u{2764}\u{FE0F} ").ok().flatten().as_deref(),
+            Some("two\nlines, thanks \u{2764}\u{FE0F}")
+        );
+    }
+
+    #[test]
     fn reports_go_after_30_days_with_their_keys_and_outlast_the_reporter() {
         let mut world = World::new();
         let request = requested(&mut world);
@@ -595,7 +600,12 @@ mod tests {
         let ask =
             |n: u32, messages: Value| json!({"action_id": action(n), "contact_id": contact, "reason": "harassment", "messages": messages});
         // Kept as the device shows them, a direction change too.
-        let chosen = json!([said(3, "you again", "them"), said(4, "stop", "you"), said(7, "no\u{202E}won", "them")]);
+        let chosen = json!([
+            said(3, "you again", "them"),
+            said(4, "stop", "you"),
+            said(7, "no\u{202E}won", "them"),
+            said(8, "hi\u{3164}\u{E0065}\u{61C} \u{2764}\u{FE0F}", "them")
+        ]);
         let (status, report) = world.call("bo", "POST", "reports", ask(1, chosen.clone()));
         assert_eq!(status, 200, "{report}");
         let id = report["id"].as_str().expect("id").to_owned();
@@ -613,6 +623,8 @@ mod tests {
             (evidence["messages"][2]["text"].as_str(), &evidence["messages"][2]["hidden"]),
             (Some("no\u{202E}won"), &json!(["U+202E"]))
         );
+        // Every hidden character named, an emoji's own selector not.
+        assert_eq!(evidence["messages"][3]["hidden"], json!(["U+3164", "U+E0065", "U+061C"]));
         // Without messages, no label.
         let plain = world.call("bo", "POST", "reports", ask(2, json!([]))).1["id"].clone();
         let shown = review(&mut world.db, &world.keys, "lena", world.now).expect("reviewed");

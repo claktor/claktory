@@ -2066,6 +2066,9 @@ dependencies = [
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "htmd",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "ignore",
  "image",
  "iroh",
@@ -3266,8 +3269,6 @@ checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
 [[package]]
 name = "iroh"
 version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40ac5d8330439176254581b6db4bc6f1d947d7cc741fda4e04b96d758addf1db"
 dependencies = [
  "axum",
  "backon",

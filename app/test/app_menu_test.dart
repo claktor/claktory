@@ -201,6 +201,71 @@ void main() {
       expect(_sent(transport)['context'], {'value': 'a41'});
     });
 
+    testWidgets('a click opens it with the search field taking the keys, '
+        'the rows starting whole under it', (tester) async {
+      _on(TargetPlatform.macOS);
+      await _show(tester, _page(30, selected: 17));
+      // Something on the page has the keys already, as in the app (the
+      // button itself, after Tab): the field takes them all the same.
+      Focus.of(tester.element(find.text('Agent: All'))).requestFocus();
+      await tester.pump();
+      expect(FocusManager.instance.primaryFocus, isNotNull);
+      await tester.tap(find.text('Agent: All'));
+      await tester.pumpAndSettle();
+      final field = find.descendant(
+        of: find.byType(AppMenuList),
+        matching: find.byType(EditableText),
+      );
+      expect(
+        tester.widget<EditableText>(field).focusNode.hasFocus,
+        isTrue,
+        reason: 'typing at once filters',
+      );
+      // Opened at the chosen one, the list's first row whole: never half
+      // under the field.
+      final list = find.descendant(
+        of: find.byType(AppMenuList),
+        matching: find.byType(SingleChildScrollView),
+      );
+      final top = tester.getRect(list).top;
+      final rows = [
+        for (var i = 0; i < 30; i++)
+          if (find.text('agent $i').evaluate().isNotEmpty)
+            tester.getRect(
+              find
+                  .ancestor(
+                    of: find.text('agent $i'),
+                    matching: find.byType(Semantics),
+                  )
+                  .first,
+            ),
+      ];
+      expect(rows, isNotEmpty);
+      for (final row in rows) {
+        expect(
+          row.top >= top - 0.5 || row.bottom <= top + 0.5,
+          isTrue,
+          reason: 'a row cut by the list\'s top: $row, the list at $top',
+        );
+      }
+    });
+
+    testWidgets('typing at once after a click filters', (tester) async {
+      _on(TargetPlatform.macOS);
+      await _show(tester, _page(12, selected: 7));
+      await tester.tap(find.text('Agent: All'));
+      await tester.pumpAndSettle();
+      final field = find.descendant(
+        of: find.byType(AppMenuList),
+        matching: find.byType(EditableText),
+      );
+      final state = tester.state<EditableTextState>(field);
+      state.updateEditingValue(const TextEditingValue(text: 'zo'));
+      await tester.pumpAndSettle();
+      expect(find.text('Zoë'), findsOneWidget);
+      expect(find.text('agent 7'), findsNothing);
+    });
+
     testWidgets('nothing matching says so', (tester) async {
       _on(TargetPlatform.macOS);
       await _show(tester, _page(20));

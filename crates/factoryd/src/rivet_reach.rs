@@ -147,6 +147,8 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         // models_set checks a model the provider's list doesn't have, and
         // puts an agent waiting on a limit on another provider's model.
         Body::AddModel(_) | Body::ContinueOnAlternative(_) | Body::SwitchBack(_) => vec![Tool(&["models_set"])],
+        // Which subscription is spent first: Rivet puts one last when asked.
+        Body::MoveAccount(_) => vec![Tool(&[crate::extensions::models::ORDER_TOOL])],
         // A pipe: only who sends has a tool so far.
         Body::UpdatePipe(request) => update_pipe(request),
         // Only the person, on purpose.
@@ -154,7 +156,6 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         | Body::AnswerLogin(_)
         | Body::CancelLogin(_)
         | Body::SignOut(_)
-        | Body::MoveAccount(_)
         | Body::UpdateAccount(_)
         | Body::AccountSignIn(_)
         | Body::AccountVerify(_)
@@ -200,6 +201,12 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         | Body::ConfirmMove(_)
         | Body::SetOnboarding(_) => vec![Person(CARD)],
         Body::SetReportReader(_) | Body::SetSpendCap(_) => vec![Person(PIPE_PERSON)],
+        // Only the person shares a website, and only they open one shared
+        // with them (pipe-port-sharing.md); an agent may propose one later.
+        Body::SharePipeWebsite(_) | Body::StopPipeShare(_) | Body::OpenPipeShare(_) | Body::HidePipeShare(_) => {
+            vec![Person("only the person shares a website from this computer, or opens one shared with it")]
+        }
+        Body::CheckPipeSharePort(_) => vec![View],
         Body::SendMessage(_)
         | Body::RetryVoiceMessage(_)
         | Body::DiscardVoiceMessage(_)
@@ -245,6 +252,8 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::RestoreBackendService(_) => {
             vec![Person("it restarts Claktory under its background service, from the Mac it runs on, on the person's word")]
         }
+        // Stopping Claktory on its Mac (friend bug #27).
+        Body::StopEngine(_) => vec![Person("it stops Claktory itself, from its app on the Mac it runs on")],
         // Through a card the person approves (#423, Bruno 28259); a pipe
         // narrowed at once.
         Body::SetUsageAutoContinue(_) => vec![Tool(&["models_auto_continue"])],
@@ -322,6 +331,7 @@ fn update_settings(request: &v1::UpdateSettings) -> Vec<Reach> {
         notifications: _,
         checklist: _,
         notification_change: _,
+        when_app_quits: _,
     } = request;
     vec![
         Config(&[
@@ -350,6 +360,8 @@ fn update_settings(request: &v1::UpdateSettings) -> Vec<Reach> {
         // settings tool (#422), but for where the push relay sends them.
         Tool(&["settings"]),
         Person("where the push relay sends notifications is the person's: an agent could send them elsewhere"),
+        // when_app_quits (friend bug #27).
+        Person("whether Claktory stops when its app quits is the person's, asked in the Mac app"),
     ]
 }
 

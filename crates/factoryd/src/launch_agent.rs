@@ -2,7 +2,9 @@
 //! after an update, once. scripts/install-release.sh writes it at install
 //! time, and an update never runs the installer, so what a newer installer
 //! writes (`ProcessType Interactive`: without it launchd throttles Factory and
-//! everything agents run) reaches older installs only here.
+//! everything agents run) reaches older installs only here. Each round of
+//! WANTED is tried once (`ROUND`): AssociatedBundleIdentifiers came in
+//! round 2, so Login Items names the job after the app (friend bug #28).
 //!
 //! The backend checks the plist once it's past any update's trial. Only a
 //! plist that runs this Factory's own supervisor counts (the dev Factory isn't
@@ -32,8 +34,23 @@ use crate::home::Home;
 
 pub(crate) const LABEL: &str = "dev.factory.factoryd";
 
-/// What the plist must say, as installers write it now.
-const WANTED: [(&str, &str); 1] = [("ProcessType", "Interactive")];
+/// The Mac app's bundle id: the job's AssociatedBundleIdentifiers, so
+/// Login Items shows it as Claktory (friend bug #28).
+pub(crate) const APP_BUNDLE_ID: &str = "dev.factory.app";
+
+/// What the plist must say, as installers write it now: each key's value
+/// as JSON.
+const WANTED: [(&str, &str); 2] =
+    [("ProcessType", r#""Interactive""#), ("AssociatedBundleIdentifiers", concat!(r#"[""#, "dev.factory.app", r#""]"#))];
+
+/// Which WANTED the marker's update tried: 1 had only ProcessType; 2 adds
+/// AssociatedBundleIdentifiers (friend bug #28). Each round is tried once.
+const ROUND: u64 = 2;
+
+/// The keys of WANTED `plist` doesn't have as wanted.
+fn missing(plist: &Value) -> Vec<(&'static str, &'static str)> {
+    WANTED.into_iter().filter(|(key, value)| serde_json::from_str::<Value>(value).ok().as_ref() != Some(&plist[*key])).collect()
+}
 
 /// Where the job lives and how to reach launchd.
 pub(crate) struct Job {
@@ -85,7 +102,11 @@ pub(crate) fn read(plist: &Path) -> Result<Value, String> {
 /// Makes the up-to-date plist beside the job's and marks the update tried;
 /// Ok(None) when there's nothing to do.
 pub(crate) fn prepare(home: &Home, job: &Job) -> Result<Option<PathBuf>, String> {
-    if !job.plist.is_file() || marker(home).exists() {
+    // A marker from before rounds was round 1.
+    let tried = std::fs::read_to_string(marker(home))
+        .ok()
+        .map(|text| serde_json::from_str::<Value>(&text).ok().and_then(|marker| marker["round"].as_u64()).unwrap_or(1));
+    if !job.plist.is_file() || tried.is_some_and(|round| round >= ROUND) {
         return Ok(None);
     }
     let current = read(&job.plist)?;
@@ -96,18 +117,18 @@ pub(crate) fn prepare(home: &Home, job: &Job) -> Result<Option<PathBuf>, String>
     if current["Label"] != LABEL || !ours {
         return Ok(None);
     }
-    let missing: Vec<(&str, &str)> = WANTED.into_iter().filter(|(key, value)| current[*key].as_str() != Some(*value)).collect();
+    let missing = missing(&current);
     if missing.is_empty() {
         return Ok(None);
     }
     let new = home.root().join("bin/launch-agent.plist");
     std::fs::copy(&job.plist, &new).map_err(|error| format!("Can't copy {}: {error}", job.plist.display()))?;
     for (key, value) in &missing {
-        plutil(&["-replace".as_ref(), key.as_ref(), "-string".as_ref(), value.as_ref(), new.as_os_str()])?;
+        plutil(&["-replace".as_ref(), key.as_ref(), "-json".as_ref(), value.as_ref(), new.as_os_str()])?;
     }
     plutil(&["-lint".as_ref(), "-s".as_ref(), new.as_os_str()])?;
     let keys: Vec<&str> = missing.iter().map(|(key, _)| *key).collect();
-    let record = serde_json::json!({"version": crate::update::VERSION, "time": crate::transcript::now_ms(), "added": keys});
+    let record = serde_json::json!({"version": crate::update::VERSION, "time": crate::transcript::now_ms(), "added": keys, "round": ROUND});
     std::fs::write(marker(home), record.to_string()).map_err(|error| format!("Can't write {}: {error}", marker(home).display()))?;
     Ok(Some(new))
 }
@@ -226,7 +247,7 @@ pub(crate) fn prepare_supervisor(home: &Home, job: &Job) -> Result<Option<NewSup
     let arguments = Value::Array(arguments).to_string();
     plutil(&["-replace".as_ref(), "ProgramArguments".as_ref(), "-json".as_ref(), arguments.as_ref(), plist.as_os_str()])?;
     for (key, value) in WANTED {
-        plutil(&["-replace".as_ref(), key.as_ref(), "-string".as_ref(), value.as_ref(), plist.as_os_str()])?;
+        plutil(&["-replace".as_ref(), key.as_ref(), "-json".as_ref(), value.as_ref(), plist.as_os_str()])?;
     }
     plutil(&["-lint".as_ref(), "-s".as_ref(), plist.as_os_str()])?;
     Ok(Some(NewSupervisor { plist, staged }))
@@ -245,6 +266,9 @@ stopped() {
 cp -p "$plist" "$plist.previous" || exit 1
 "$lc" bootout "$domain/$label"
 stopped
+# A disabled job (stop mode, friend bug #27) won't load; the backend
+# disables it again as it starts.
+"$lc" enable "$domain/$label"
 rm -rf "$app.previous"
 if [ -d "$app" ]; then mv "$app" "$app.previous" || exit 1; fi
 if ! { mv "$staged" "$app" && cp "$new" "$plist.next" && mv -f "$plist.next" "$plist"; }; then
@@ -320,6 +344,9 @@ cp "$new" "$plist.next" && mv -f "$plist.next" "$plist" || { rm -f "$plist.next"
 "$lc" bootout "$domain/$label"
 i=0
 while "$lc" print "$domain/$label" >/dev/null 2>&1 && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+# A disabled job (stop mode, friend bug #27) won't load; the backend
+# disables it again as it starts.
+"$lc" enable "$domain/$label"
 if "$lc" bootstrap "$domain" "$plist"; then
   rm -f "$plist.previous" "$new"
   echo "reloaded $label with the updated plist"
@@ -478,15 +505,30 @@ exit 0
         let new = prepare(&home, &job).expect("prepared").expect("something to do");
         reload(&home, &job, &new).expect("reload");
         let calls = wait_for(&dir.join("calls"), "bootstrap");
-        assert_eq!(calls, format!("bootout gui/501/{LABEL}\nprint gui/501/{LABEL}\nbootstrap gui/501 {}\n", plist.display()));
+        assert_eq!(
+            calls,
+            format!("bootout gui/501/{LABEL}\nprint gui/501/{LABEL}\nenable gui/501/{LABEL}\nbootstrap gui/501 {}\n", plist.display())
+        );
         wait_for(&home.root().join("bin/launch-agent.log"), "reloaded");
         let updated = read(&plist).expect("read");
         assert_eq!(updated["ProcessType"], "Interactive");
+        assert_eq!(updated["AssociatedBundleIdentifiers"], serde_json::json!([APP_BUNDLE_ID]), "named after the app");
         assert_eq!(updated["EnvironmentVariables"]["PATH"], "/opt/homebrew/bin:/usr/bin:/bin", "the rest is kept");
         assert!(!dir.join(format!("{LABEL}.plist.previous")).exists());
 
         // Once: tried, it's never tried again, whatever the plist says.
         old_plist(&dir, &home.root().join("bin/factoryd-supervisor"));
+        assert_eq!(prepare(&home, &job).expect("again"), None);
+
+        // An install that had round 1 (ProcessType only, its marker from
+        // before rounds) gets round 2 once.
+        std::fs::write(marker(&home), r#"{"version":"v0.1.20","time":1,"added":["ProcessType"]}"#).expect("marker");
+        plutil(&["-replace".as_ref(), "ProcessType".as_ref(), "-string".as_ref(), "Interactive".as_ref(), plist.as_os_str()])
+            .expect("edit");
+        let new = prepare(&home, &job).expect("prepared").expect("round 2");
+        assert_eq!(read(&new).expect("read")["AssociatedBundleIdentifiers"], serde_json::json!([APP_BUNDLE_ID]));
+        let tried: Value = serde_json::from_str(&std::fs::read_to_string(marker(&home)).expect("marker")).expect("json");
+        assert_eq!((tried["round"].as_u64(), &tried["added"]), (Some(ROUND), &serde_json::json!(["AssociatedBundleIdentifiers"])));
         assert_eq!(prepare(&home, &job).expect("again"), None);
     }
 
@@ -600,7 +642,7 @@ exit 0
         let bootstraps = |calls: &str| calls.lines().filter(|line| line.starts_with("bootstrap")).count();
         let calls = wait_until(&dir.join("calls"), |calls| bootstraps(calls) == 2 && calls.ends_with('\n'));
         let order: Vec<&str> = calls.lines().filter_map(|line| line.split(' ').next()).filter(|call| *call != "print").collect();
-        assert_eq!(order, ["bootout", "bootstrap", "bootout", "bootstrap"], "{calls}");
+        assert_eq!(order, ["bootout", "enable", "bootstrap", "bootout", "bootstrap"], "{calls}");
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(std::fs::read(&plist).expect("read"), before, "the old plist is back");
         assert_eq!(std::fs::read_to_string(&installed).expect("installed"), "older", "and the old app");
@@ -673,8 +715,9 @@ exit 0
         assert_eq!(prepare(&home, &job(other.clone())).expect("other"), None);
         assert_eq!(prepare(&home, &job(dir.join("missing.plist"))).expect("missing"), None);
         let current = old_plist(&dir, &home.root().join("bin/factoryd-supervisor"));
-        plutil(&["-replace".as_ref(), "ProcessType".as_ref(), "-string".as_ref(), "Interactive".as_ref(), current.as_os_str()])
-            .expect("edit");
+        for (key, value) in WANTED {
+            plutil(&["-replace".as_ref(), key.as_ref(), "-json".as_ref(), value.as_ref(), current.as_os_str()]).expect("edit");
+        }
         assert_eq!(prepare(&home, &job(current)).expect("current"), None);
         assert!(!marker(&home).exists(), "nothing tried");
     }

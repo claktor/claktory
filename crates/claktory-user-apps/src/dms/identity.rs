@@ -130,10 +130,8 @@ pub(super) fn random<const N: usize>() -> [u8; N] {
 /// make it read as something else. None if that leaves nothing, or it's
 /// longer.
 pub fn clean_name(name: &str) -> Option<String> {
-    let hidden = |c: char| {
-        c.is_control() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}')
-    };
-    if name.chars().any(hidden) {
+    // The set DM certificates' names are checked against.
+    if claktory_dm_crypto::certificate::hidden_in(name).next().is_some() {
         return None;
     }
     let clean = name.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -622,8 +620,24 @@ mod tests {
     fn names_are_kept_plain() {
         assert_eq!(clean_name("  Matt   Smith "), Some("Matt Smith".into()));
         assert_eq!(clean_name("Zoë 🌙"), Some("Zoë 🌙".into()));
+        assert_eq!(clean_name("Ana \u{2764}\u{FE0F}"), Some("Ana \u{2764}\u{FE0F}".into()), "an emoji's own selector");
         assert_eq!(clean_name(&"a".repeat(80)), Some("a".repeat(80)));
-        for bad in ["", "   ", "Matt\u{202E}htiM", "Ma\u{200B}tt", "Matt\nAdmin", &"a".repeat(81), "\u{2066}x"] {
+        let long = "a".repeat(81);
+        for bad in [
+            "",
+            "   ",
+            "Matt\u{202E}htiM",
+            "Ma\u{200B}tt",
+            "Matt\nAdmin",
+            &long,
+            "\u{2066}x",
+            "Matt\u{E0065}",
+            "Ma\u{3164}tt",
+            "Ma\u{061C}tt",
+            "\u{FE0F}Matt",
+            "Matt \u{FE0F}",
+            "Ma\u{2764}\u{FE0F}\u{FE0F}",
+        ] {
             assert_eq!(clean_name(bad), None, "{bad:?}");
         }
     }

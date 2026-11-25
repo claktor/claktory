@@ -208,6 +208,23 @@ async fn checks_fire_when_their_condition_becomes_true() {
     assert!(list.contains("m1 flag — check `test -f flag` every 30s, fires on success · done: it fired · fired 1"), "{list}");
 }
 
+/// A monitor that fired as many times as it was set to says so in plain
+/// words, not in the name of the option.
+#[tokio::test]
+async fn a_monitor_done_after_its_fires_says_so_plainly() {
+    let (_dir, factory, mut client, mut view) = setup().await;
+    let add = r#"{"monitors":[{"name":"once","prompt":"Look.","when":{"every":"1h"},"max_fires":1},
+        {"name":"twice","prompt":"Look.","when":{"every":"1h"},"max_fires":2}]}"#;
+    call(&mut client, &mut view, "lead", "monitors_add", add).await;
+    factory.advance_monitor_clock(Duration::from_secs(3600));
+    view.follow(&mut client, |view| fires(view).len() == 2 && idle(view, "lead")).await;
+    factory.advance_monitor_clock(Duration::from_secs(3600));
+    view.follow(&mut client, |view| fires(view).len() == 3 && idle(view, "lead")).await;
+    let list = call(&mut client, &mut view, "lead", "monitors_list", r#"{"all":true}"#).await;
+    assert!(list.contains("done: it fired once, as it was set to"), "{list}");
+    assert!(list.contains("done: it fired 2 times, as it was set to"), "{list}");
+}
+
 #[tokio::test]
 async fn files_and_watches_fire_on_what_they_see() {
     let (dir, factory, mut client, mut view) = setup().await;
@@ -530,6 +547,15 @@ async fn the_overview_lists_every_agents_monitors_and_their_history() {
     let kinds: Vec<v1::MonitorEventKind> = workers.events.iter().map(|event| event.kind()).collect();
     assert_eq!(kinds, [v1::MonitorEventKind::Paused, v1::MonitorEventKind::Created]);
     assert_eq!((workers.events[0].actor.as_str(), workers.events[0].detail.as_str()), ("", "by the person"));
+    // Resuming says who did, as pausing does.
+    let resume = v1::ChangeMonitor { agent_id: "worker".into(), monitor_id: 1, action: v1::MonitorAction::Resume.into() };
+    apply_request(&mut client, &mut view, client_message::Body::ChangeMonitor(resume)).await;
+    let Body::MonitorHistory(latest) = history(&mut client, &mut view, "worker", 1, 0, 1).await else { panic!("a page") };
+    let resumed = &latest.events[0];
+    assert_eq!(
+        (resumed.kind(), resumed.actor.as_str(), resumed.detail.as_str()),
+        (v1::MonitorEventKind::Resumed, "", "by the person")
+    );
     match history(&mut client, &mut view, "worker", 9, 0, 0).await {
         Body::Error(error) => assert_eq!((error.code(), error.message.as_str()), (v1::ErrorCode::NotFound, "worker has no monitor m9.")),
         other => panic!("expected an error, got {other:?}"),

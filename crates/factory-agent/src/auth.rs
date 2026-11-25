@@ -225,6 +225,50 @@ fn resolve_api_key(id: &str, api_key: &dyn ApiKeyAuth, env: &Env, credential: Op
     api_key.resolve(env, credential).map_err(|error| models_error("auth", format!("API key auth failed for provider {id}"), Some(&error)))
 }
 
+/// Why a refresh failed, for the log: the token endpoint's own code when it
+/// gave a known one, never anything that could hold a token.
+pub fn refresh_outcome(error: &Error) -> &'static str {
+    let text = error.to_string();
+    const CODES: [&str; 6] = [
+        "refresh_token_reused",
+        "refresh_token_expired",
+        "refresh_token_invalidated",
+        "app_session_terminated",
+        "invalid_grant",
+        "invalid_client",
+    ];
+    if let Some(code) = CODES.into_iter().find(|code| text.contains(code)) {
+        return code;
+    }
+    if error.is_refused() { "refused" } else { "failed" }
+}
+
+/// Refreshes `current` with the provider's token endpoint, within its time,
+/// logging the attempt and how it went (never a token). `why` says what
+/// asked for it: "expires soon", "the provider didn't take the access token".
+async fn refresh_now(
+    oauth: &dyn OAuthFlow,
+    id: &str,
+    account: &str,
+    current: Credential,
+    why: &str,
+    cancel: &CancellationToken,
+) -> Result<Credential, Error> {
+    tracing::info!(provider = id, %account, %why, "refreshing a sign-in");
+    let refreshed = match tokio::time::timeout(OAUTH_REFRESH_TIMEOUT, oauth.refresh(current, cancel.clone())).await {
+        Ok(Ok(refreshed)) => {
+            tracing::info!(provider = id, %account, outcome = "refreshed", "refreshed a sign-in");
+            return Ok(refreshed);
+        }
+        Ok(Err(error)) => error,
+        Err(_) => Error::Other("The operation was aborted due to timeout".into()),
+    };
+    let outcome = refresh_outcome(&refreshed);
+    tracing::warn!(provider = id, %account, %outcome, "a sign-in's refresh failed");
+    let code = if refreshed.is_refused() { crate::errors::REFUSED } else { "oauth" };
+    Err(models_error(code, format!("OAuth refresh failed for {id}"), Some(&refreshed)))
+}
+
 /// Tokens within five minutes of expiry refresh once under the store lock; the rotated credential is written before release.
 async fn resolve_stored_oauth(
     store: &FileCredentialStore,
@@ -241,17 +285,7 @@ async fn resolve_stored_oauth(
                 let Some(current) = current.filter(|current| matches!(current, Credential::Oauth { .. }) && expires_soon(current)) else {
                     return Ok(None);
                 };
-                match tokio::time::timeout(OAUTH_REFRESH_TIMEOUT, oauth.refresh(current, cancel.clone())).await {
-                    Ok(Ok(refreshed)) => Ok(Some(refreshed)),
-                    Ok(Err(error)) => {
-                        let code = if error.is_refused() { crate::errors::REFUSED } else { "oauth" };
-                        Err(models_error(code, format!("OAuth refresh failed for {id}"), Some(&error)))
-                    }
-                    Err(_) => {
-                        let timeout = Error::Other("The operation was aborted due to timeout".into());
-                        Err(models_error("oauth", format!("OAuth refresh failed for {id}"), Some(&timeout)))
-                    }
-                }
+                refresh_now(oauth, id, account, current, "it expires soon", cancel).await.map(Some)
             })
             .await
             .map_err(|error| match error {
@@ -264,5 +298,44 @@ async fn resolve_stored_oauth(
     let auth = oauth
         .to_auth(&credential)
         .map_err(|error| models_error("oauth", format!("OAuth auth derivation failed for {id}"), Some(&error)))?;
+    Ok(Some(AuthResult { auth, source: "OAuth".into() }))
+}
+
+/// After the provider answered 401 to a sign-in's access token (expired
+/// before its time, say): refreshes it once, whatever its stored expiry,
+/// and returns the auth to try again with. Single-flight: under the store's
+/// lock, and only while the stored access token is still `refused_access`;
+/// a caller that finds it already replaced (another refreshed it meanwhile)
+/// uses the new one, so parallel callers spend the refresh token once (the
+/// providers rotate them: a second use is refused). A refusal is
+/// `Error::Models` with the `REFUSED` code; None when the account is gone or
+/// isn't a sign-in.
+pub async fn refresh_after_refusal(
+    provider: &Provider,
+    store: &FileCredentialStore,
+    account: &str,
+    refused_access: &str,
+    cancel: &CancellationToken,
+) -> Result<Option<AuthResult>, Error> {
+    let Some(oauth) = &provider.oauth else { return Ok(None) };
+    let (id, oauth) = (provider.id, oauth.as_ref());
+    let post = store
+        .modify_account(id, account, |current| async move {
+            let Some(current @ Credential::Oauth { .. }) = current else { return Ok(None) };
+            let Credential::Oauth { access, .. } = &current else { return Ok(None) };
+            if access != refused_access {
+                tracing::info!(provider = id, %account, "a sign-in was refreshed meanwhile; using it");
+                return Ok(None);
+            }
+            refresh_now(oauth, id, account, current, "the provider didn't take its access token", cancel).await.map(Some)
+        })
+        .await
+        .map_err(|error| match error {
+            Error::Models { .. } => error,
+            other => models_error("auth", format!("Credential store modify failed for {id}"), Some(&other)),
+        })?;
+    let Some(post @ Credential::Oauth { .. }) = post else { return Ok(None) };
+    let auth =
+        oauth.to_auth(&post).map_err(|error| models_error("oauth", format!("OAuth auth derivation failed for {id}"), Some(&error)))?;
     Ok(Some(AuthResult { auth, source: "OAuth".into() }))
 }

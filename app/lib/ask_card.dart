@@ -42,10 +42,15 @@ class AskPersonCard extends StatefulWidget {
     super.key,
     required this.agentId,
     required this.seq,
+    this.from = AskAnsweredFrom.ASK_ANSWERED_FROM_NEEDS_YOU,
   });
 
   final AskPerson ask;
   final String agentId;
+
+  /// Where it shows, so its agent hears where the person answered: Needs
+  /// you, unless its conversation says otherwise.
+  final AskAnsweredFrom from;
 
   /// The entry's seq in the agent's conversation.
   final int seq;
@@ -127,6 +132,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
         dismiss: dismiss,
         step: step,
         revision: seen,
+        from: widget.from,
       ),
       () => _answer(dismiss: dismiss, step: step, again: true, revision: seen),
       again: again,
@@ -146,8 +152,29 @@ class _AskPersonCardState extends State<AskPersonCard> {
         text: text,
         reply: true,
         revision: seen,
+        from: widget.from,
       ),
       () => _reply(again: true, revision: seen),
+      again: again,
+    );
+  }
+
+  /// Ends a card with a thread, deciding nothing: what's typed goes as
+  /// the person's last words on it.
+  Future<void> _resolve({bool again = false, int? revision}) async {
+    if (_busy) return;
+    final text = _text.text.trim();
+    final seen = revision ?? widget.ask.revision;
+    await _send(
+      (backend) => backend.answerAsk(
+        widget.agentId,
+        widget.seq,
+        text: text,
+        resolve: true,
+        revision: seen,
+        from: widget.from,
+      ),
+      () => _resolve(again: true, revision: seen),
       again: again,
     );
   }
@@ -198,6 +225,9 @@ class _AskPersonCardState extends State<AskPersonCard> {
     var now = false;
     try {
       await request(backend);
+      // Sent: should its agent reply and reopen the card, the field starts
+      // empty under the thread, which now holds these words.
+      if (mounted) _text.clear();
     } on RequestFailure catch (failure) {
       if (!mounted) return;
       if (again && failure.message.startsWith('This question was already')) {
@@ -338,6 +368,12 @@ class _AskPersonCardState extends State<AskPersonCard> {
               reason: ask.updateReason,
             ),
           ],
+          // The talk on it so far, oldest first: the person's words and
+          // its agent's replies, above the card's buttons.
+          if (ask.thread.isNotEmpty) ...[
+            const SizedBox(height: Space.m),
+            AskThread(thread: ask.thread, agent: agent, name: name),
+          ],
           const SizedBox(height: Space.m),
           // Taken back by its agent (#407): nothing to answer, and never
           // the person's dismissal.
@@ -458,8 +494,37 @@ class _AskPersonCardState extends State<AskPersonCard> {
           onSubmit: _reply,
           keep: _keep(name),
         ),
+      if (widget.ask.thread.isNotEmpty) ..._talk(type, reply: wantsText),
     ];
   }
+
+  /// Under a card with a thread, beneath its own buttons: Reply, for a
+  /// card whose typed words are otherwise its answer (an approval's are a
+  /// reply already, Submit), and Resolve, which ends it deciding nothing.
+  List<Widget> _talk(TypeScale type, {required bool reply}) => [
+    const SizedBox(height: Space.s),
+    CommentTyped(
+      controller: _text,
+      builder: (context, typed) => ActionLine(
+        lead: Text(
+          reply
+              ? 'Reply to keep talking, or resolve it with no decision.'
+              : 'Resolve ends it with no decision.',
+          style: type.caption.copyWith(color: Palette.of(context).textFaint),
+        ),
+        action: ControlsLine(
+          children: [
+            if (reply)
+              Button(
+                label: 'Reply',
+                onPressed: _busy || !typed ? null : _reply,
+              ),
+            Button(label: 'Resolve', onPressed: _busy ? null : _resolve),
+          ],
+        ),
+      ),
+    ),
+  ];
 
   /// A procedure (ask_person's steps): one step at a time, "Step 2 of 6",
   /// with Done and Can't do this…, the steps finished counted above it
@@ -582,6 +647,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
             onSubmitted: () => _answer(dismiss: false, step: at),
             keep: _keep(name),
           ),
+          if (ask.thread.isNotEmpty) ..._talk(type, reply: true),
         ],
       ];
     }
@@ -589,10 +655,18 @@ class _AskPersonCardState extends State<AskPersonCard> {
     final stopped = steps.indexed
         .where((each) => each.$2.state == AskStepState.ASK_STEP_STATE_CANT)
         .firstOrNull;
+    // Talked through: a reply (the steps left as they were until its agent
+    // answers) or Resolve, never every step done.
+    final talked = ask.replied || ask.resolved;
     final allDone =
         ask.state == AskPersonState.ASK_PERSON_STATE_ANSWERED &&
-        stopped == null;
-    final outcome = allDone
+        stopped == null &&
+        !talked;
+    final outcome = ask.resolved
+        ? 'Resolved'
+        : ask.replied
+        ? 'Replied'
+        : allDone
         ? steps.length == 2
               ? 'Both steps done'
               : 'All ${steps.length} steps done'
@@ -612,7 +686,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
                   TextSpan(
                     text: outcome,
                     style: TextStyle(
-                      color: allDone ? color : palette.textMuted,
+                      color: allDone || talked ? color : palette.textMuted,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
@@ -629,6 +703,11 @@ class _AskPersonCardState extends State<AskPersonCard> {
           ),
         ],
       ),
+      // The person's words: their reply, or their last word on resolving.
+      if (talked && ask.answer.isNotEmpty) ...[
+        const SizedBox(height: Space.xs),
+        Text(ask.answer, style: type.body.copyWith(color: palette.text)),
+      ],
       // What was in the way.
       if (stopped != null && stopped.$2.comment.isNotEmpty) ...[
         const SizedBox(height: Space.xs),
@@ -671,7 +750,10 @@ class _AskPersonCardState extends State<AskPersonCard> {
                   TextSpan(
                     // A reply (#370): the person's words, neither a yes
                     // nor a no.
-                    text: ask.replied
+                    // Ended with no decision, after talking it through.
+                    text: ask.resolved
+                        ? 'Resolved'
+                        : ask.replied
                         ? 'Replied'
                         : dismissed
                         ? 'Left to $name'
@@ -709,6 +791,102 @@ class _AskPersonCardState extends State<AskPersonCard> {
         ),
       ],
     ];
+  }
+}
+
+/// When [entry] began waiting, for Needs you's order and its age: a card
+/// its agent replied on (and so reopened) by its thread's last message,
+/// anything else by when it came; 0 for none.
+int waitingSince(Entry? entry) {
+  if (entry == null) return 0;
+  if (entry.hasAskPerson() && entry.askPerson.thread.isNotEmpty) {
+    final last = entry.askPerson.thread.last.atMs.toInt();
+    if (last > 0) return last;
+  }
+  return entry.timestampMs.toInt();
+}
+
+/// The talk on a card (AskPerson.thread), oldest first and compact: each
+/// message after its writer's 16px avatar (the person's, or the agent's
+/// character), "You · 14:02" or "June · 14:05" in caption, and its words
+/// as Markdown in body `text`, what reorders text shown by its code. A
+/// hairline sets it off from the card's own words above.
+class AskThread extends StatelessWidget {
+  const AskThread({
+    super.key,
+    required this.thread,
+    required this.agent,
+    required this.name,
+  });
+
+  final List<AskThreadMessage> thread;
+
+  /// The card's agent, when the app knows it, and its name.
+  final Agent? agent;
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final agent = this.agent;
+    return Container(
+      padding: const EdgeInsets.only(top: Space.s),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: palette.hairline)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final (i, message) in thread.indexed)
+            Padding(
+              padding: EdgeInsets.only(top: i == 0 ? 0 : Space.s),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 1),
+                    child: message.fromAgent && agent != null
+                        ? AgentCharacter(agent: agent, size: 16)
+                        : message.fromAgent
+                        ? const SizedBox.square(dimension: 16)
+                        : const PersonAvatar(size: 16),
+                  ),
+                  const SizedBox(width: Space.xs + 2),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text.rich(
+                          TextSpan(
+                            children: [
+                              TextSpan(
+                                text: message.fromAgent ? name : 'You',
+                                style: TextStyle(
+                                  color: palette.textMuted,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              if (message.atMs > 0)
+                                TextSpan(
+                                  text:
+                                      ' · ${cardTime(context, message.atMs.toInt())}',
+                                  style: TextStyle(color: palette.textFaint),
+                                ),
+                            ],
+                          ),
+                          style: type.caption,
+                        ),
+                        Markdown(proseCodes(message.text), color: palette.text),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }
 

@@ -59,6 +59,7 @@ pub mod pipe_link;
 pub mod pipes;
 mod presentation;
 mod previews;
+mod proposal_grants;
 mod proposals;
 mod provider_waits;
 pub mod remote;

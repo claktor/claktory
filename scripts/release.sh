@@ -168,11 +168,14 @@ fi
 # claktory-video-preview (a Mac helper, #379) is one of them once the source has it.
 VIDEO_PREVIEW=false
 [[ -f "$SRC_ROOT/app/macos/VideoPreview/main.swift" ]] && VIDEO_PREVIEW=true
-# Agents' tools (ripgrep, tools/rg) ship with the backend once the source pins one.
+# Agents' tools (ripgrep and jq, tools/rg and tools/jq) ship with the
+# backend once the source pins them.
 RG=false
 [[ -f "$SRC_ROOT/scripts/build-rg.sh" ]] && RG=true
+JQ=false
+[[ -f "$SRC_ROOT/scripts/build-jq.sh" ]] && JQ=true
 if [[ -n "$PREVIOUS" && -f "$PREVIOUS/factoryd" && -f "$PREVIOUS/claktory-apps" && -f "$PREVIOUS/claktory-speech" && -f "$PREVIOUS/backend-version" && "$(cat "$PREVIOUS/backend-fingerprint" 2>/dev/null)" == "$FINGERPRINT" ]] &&
-   { ! $VIDEO_PREVIEW || [[ -f "$PREVIOUS/claktory-video-preview" ]]; } && { ! $RG || [[ -f "$PREVIOUS/tools/rg" ]]; }; then
+   { ! $VIDEO_PREVIEW || [[ -f "$PREVIOUS/claktory-video-preview" ]]; } && { ! $RG || [[ -f "$PREVIOUS/tools/rg" ]]; } && { ! $JQ || [[ -f "$PREVIOUS/tools/jq" ]]; }; then
   BACKEND="$PREVIOUS"
   BACKEND_VERSION="$(cat "$PREVIOUS/backend-version")"
   echo "backend unchanged since $BACKEND_VERSION; this release only updates the app"
@@ -187,6 +190,10 @@ else
     "$SRC_ROOT/scripts/build-rg.sh" mac "$BACKEND/tools/rg"
     "$SRC_ROOT/scripts/build-rg.sh" licenses "$BACKEND/tools/LICENSES/ripgrep"
   fi
+  if $JQ; then
+    "$SRC_ROOT/scripts/build-jq.sh" mac "$BACKEND/tools/jq"
+    "$SRC_ROOT/scripts/build-jq.sh" licenses "$BACKEND/tools/LICENSES/jq"
+  fi
   BACKEND_VERSION="$FACTORY_VERSION"
 fi
 # Finder's version too (Info.plist takes numbers only: v0.1.3 is 0.1.3).
@@ -199,7 +206,7 @@ rm -rf "$partial"
 mkdir -p "$partial"
 cp "$BACKEND/factoryd" "$BACKEND/claktory-apps" "$BACKEND/claktory-speech" "$partial/"
 if $VIDEO_PREVIEW; then cp "$BACKEND/claktory-video-preview" "$partial/"; fi
-if $RG; then cp -R "$BACKEND/tools" "$partial/tools"; fi
+if $RG || $JQ; then cp -R "$BACKEND/tools" "$partial/tools"; fi
 echo "$BACKEND_VERSION" >"$partial/backend-version"
 echo "$FINGERPRINT" >"$partial/backend-fingerprint"
 # What it was built from, for scripts/publish.sh --built: the commit, and the

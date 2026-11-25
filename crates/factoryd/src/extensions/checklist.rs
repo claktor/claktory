@@ -661,7 +661,7 @@ pub(crate) fn update(store: &Store, agent: &str, actor: &str, updates: &[Update]
             .query_row(
                 "SELECT status, blocked_kind, blocked_ref FROM checklist_items WHERE agent = ?1 AND id = ?2",
                 params![agent, update.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                crate::store::row3,
             )
             .optional()?;
         let Some((was, was_kind, was_ref)) = was else {
@@ -886,7 +886,7 @@ pub(crate) fn cards_about(factory: &Factory, agent: &str, key: &str) -> Vec<Card
         &factory.store.db(),
         "SELECT kind, card FROM card_items WHERE agent = ?1 AND item = ?2 ORDER BY rowid",
         params![agent, key],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        crate::store::row2,
     )
     .unwrap_or_default();
     for (kind, id) in linked {
@@ -1032,7 +1032,7 @@ pub(crate) fn just_blocked(factory: &Factory, agent: &str, now: i64) -> Option<(
          WHERE status = 'blocked' AND blocked_kind IN ('person_decision', 'person_action') AND updated >= ?2
          AND ((agent = ?1 AND owner IN ('', ?1)) OR owner = ?1)",
         params![agent, now - JUST_BLOCKED_MS],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        crate::store::row3,
     )
     .ok()?;
     let mut unasked = rows.into_iter().filter(|(whose, id, _)| !asked_about(factory, agent, &item_key(whose, *id)));
@@ -1054,12 +1054,10 @@ pub(crate) fn reply_target(factory: &Factory, receiver: &str, checklist: &str, i
     let found: Option<(String, String)> = factory
         .store
         .db()
-        .query_row("SELECT text, owner FROM checklist_items WHERE agent = ?1 AND id = ?2", params![checklist, id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
+        .query_row("SELECT text, owner FROM checklist_items WHERE agent = ?1 AND id = ?2", params![checklist, id], crate::store::row2)
         .optional()
         .map_err(failed)?;
-    let name = |agent: &str| factory.lock().config.agent(agent).map_or_else(|| agent.to_owned(), |agent| agent.name.clone());
+    let name = |agent: &str| factory.agent_name(agent);
     let Some((text, owner)) = found else {
         return Err(format!("That item is no longer on {}'s checklist.", name(checklist)));
     };
@@ -1140,7 +1138,7 @@ pub(crate) fn finished(factory: &Arc<Factory>, agent: &str, id: u32, status: Sta
         let mut statement = db.prepare(
             "SELECT agent, id, text, owner FROM checklist_items WHERE status = 'blocked' AND blocked_kind = 'item' AND blocked_ref = ?1",
         )?;
-        let rows = statement.query_map([&key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
+        let rows = statement.query_map([&key], crate::store::row4)?;
         rows.collect::<Result<_, _>>()?
     };
     if waiting.is_empty() {
@@ -1169,7 +1167,7 @@ pub(crate) fn finished(factory: &Arc<Factory>, agent: &str, id: u32, status: Sta
 /// Tells agent `on` that `agent`'s #`id` waits on it: no reply needed.
 fn waited_on(factory: &Arc<Factory>, agent: &str, id: u32, on: &str) {
     let Some(text) = text_of(&factory.store, &item_key(agent, id)) else { return };
-    let name = factory.lock().config.agent(agent).map_or_else(|| agent.to_owned(), |config| config.name.clone());
+    let name = factory.agent_name(agent);
     let said = format!(
         "{name} is waiting on you for its #{id} \"{text}\". Nothing to answer if you already know; when what it needs is ready, tell {name}."
     );
@@ -1192,7 +1190,7 @@ pub(crate) fn decided(factory: &Factory, key: &str, dismissed: bool, kind: &str)
         .query_row(
             "SELECT text, blocked_kind FROM checklist_items WHERE agent = ?1 AND id = ?2 AND status = 'blocked'",
             params![agent, id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            crate::store::row2,
         )
         .optional()?;
     let Some((text, wait)) = row else { return Ok(None) };
@@ -1934,7 +1932,7 @@ struct UpdateArg {
 
 /// How texts name `agent`: its name, or its id once it's gone.
 pub(crate) fn name_of(factory: &Factory, agent: &str) -> String {
-    factory.lock().config.agent(agent).map_or_else(|| agent.to_owned(), |config| config.name.clone())
+    factory.agent_name(agent)
 }
 
 /// The item `reference` names, as its key ("agent#12"): "12" or "#12" on
@@ -2009,7 +2007,7 @@ fn waitable(factory: &Factory, from: &str, on: &str) -> Result<(), String> {
             .query_row(
                 "SELECT status, blocked_kind, blocked_ref FROM checklist_items WHERE agent = ?1 AND id = ?2",
                 params![agent, id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                crate::store::row3,
             )
             .optional()
             .ok()
@@ -2090,7 +2088,7 @@ fn run_update(factory: &Arc<Factory>, agent: &str, args: serde_json::Value) -> R
                 .query_row(
                     "SELECT status, blocked_kind, blocked_ref FROM checklist_items WHERE agent = ?1 AND id = ?2",
                     params![agent, id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    crate::store::row3,
                 )
                 .optional()
                 .ok()
@@ -2168,8 +2166,8 @@ fn run_update(factory: &Arc<Factory>, agent: &str, args: serde_json::Value) -> R
                 item.id
             )
         } else {
-            let name = factory.lock().config.agent(asker).map_or_else(|| asker.to_owned(), |owner| owner.name.clone());
-            let mine = factory.lock().config.agent(agent).map_or_else(|| agent.to_owned(), |me| me.name.clone());
+            let name = factory.agent_name(asker);
+            let mine = factory.agent_name(agent);
             write!(
                 text,
                 " #{0} doesn't show in {person}'s Needs you until {name}, its owner, asks: ask_person with item {mine}#{0}, one question (or secrets_request or propose_to_rivet with that item, if it waits on a secret or on Rivet).",
@@ -2200,7 +2198,7 @@ fn run_update(factory: &Arc<Factory>, agent: &str, args: serde_json::Value) -> R
                     status.name()
                 )
             } else {
-                let name = factory.lock().config.agent(asker).map_or_else(|| asker.to_owned(), |owner| owner.name.clone());
+                let name = factory.agent_name(asker);
                 write!(
                     text,
                     " #{} is {}, yet {name}'s {named} about it still {wait} for {person}: tell {name}, so it takes {them} back if {they} no longer {apply}.",

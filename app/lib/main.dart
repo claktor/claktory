@@ -10,6 +10,7 @@ import 'browser/browser_view.dart' show BrowserHost, BrowserScope;
 import 'connections.dart';
 import 'drafts.dart';
 import 'drop.dart';
+import 'engine.dart' show EngineControl;
 import 'identity.dart';
 import 'ipad/workbench.dart' show WorkbenchFocus, WorkbenchScope;
 import 'licenses.dart';
@@ -137,6 +138,8 @@ class _FactoryAppState extends State<FactoryApp> {
 
   void _startSetup({bool ask = true}) {
     final channel = _channel;
+    _engine?.dispose();
+    _engine = null;
     _setup?.dispose();
     _setup = null;
     if (channel == null || !_claktories.localBackend) return;
@@ -148,8 +151,13 @@ class _FactoryAppState extends State<FactoryApp> {
       ask: ask,
       elsewhere: () => _claktories.setLocalBackend(false),
     );
+    // Quitting, and the app menu's Stop or Start Claktory (friend bug #27).
+    _engine = EngineControl(backend: local.backend, setup: setup);
     unawaited(setup.start());
   }
+
+  /// This Mac's Claktory stopped and started from the app, with [_setup].
+  EngineControl? _engine;
 
   /// Keeps the person's choice: this Mac runs a Claktory of its own, or
   /// only shows others. Chosen here after all, it's set up.
@@ -160,6 +168,8 @@ class _FactoryAppState extends State<FactoryApp> {
       setState(() => _startSetup(ask: false));
     } else if (_setup?.stage != SetupStage.done) {
       setState(() {
+        _engine?.dispose();
+        _engine = null;
         _setup?.dispose();
         _setup = null;
       });
@@ -239,6 +249,7 @@ class _FactoryAppState extends State<FactoryApp> {
   void dispose() {
     _window.remove();
     _window.dispose();
+    _engine?.dispose();
     _setup?.dispose();
     _notifications?.dispose();
     _pushes?.dispose();
@@ -423,7 +434,14 @@ final nativeDevMark = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
 /// paints nothing: the window draws it ([nativeDevMark]).
 class DevMark extends StatelessWidget {
   DevMark({super.key, required this.child, bool? enabled})
-    : enabled = enabled ?? (isDevBuild && !nativeDevMark);
+    : enabled = enabled ?? (isDevBuild && !nativeDevMark && _devMarkShown);
+
+  /// `--dart-define=DEV_MARK=false` leaves the mark off: the claktory.com
+  /// film's phone camera, whose frames must look like the shipping app.
+  static const _devMarkShown = bool.fromEnvironment(
+    'DEV_MARK',
+    defaultValue: true,
+  );
 
   final Widget child;
   final bool enabled;

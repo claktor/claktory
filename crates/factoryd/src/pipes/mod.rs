@@ -23,6 +23,8 @@ pub mod identity;
 pub(crate) mod lead;
 pub(crate) mod quarantine;
 pub(crate) mod senders;
+pub(crate) mod share_listener;
+pub mod shares;
 pub(crate) mod spend;
 pub(crate) mod start;
 pub(crate) mod waiting;
@@ -512,6 +514,7 @@ pub(crate) fn start(factory: &Arc<Factory>) {
     // A pipe with agents and no lead (from before every pipe had one) gets one.
     lead::settle_all(factory);
     handoff::start(factory);
+    shares::start(factory);
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
         runtime.spawn(start::expire(Arc::downgrade(factory)));
         runtime.spawn(waiting::watch(Arc::downgrade(factory)));
@@ -1706,7 +1709,7 @@ fn checked_send_only(
     lead: &str,
     bound: &str,
 ) -> Result<Vec<String>, RequestError> {
-    let name = |id: &str| factory.lock().config.agent(id).map_or_else(|| id.to_owned(), |agent| agent.name.clone());
+    let name = |id: &str| factory.agent_name(id);
     let mut chosen = Vec::new();
     for id in ids {
         if !members.contains(id) {
@@ -2706,6 +2709,17 @@ pub fn receive_for_test(factory: &Arc<Factory>, pipe: &str, message: Incoming) -
 pub fn peer_says_for_test(factory: &Arc<Factory>, pipe: &str, side: &Side) {
     change(factory, pipe, |record| {
         record.peer = Some(PeerRecord::from_side(side, ""));
+        true
+    });
+}
+
+/// Tests: the pipe pins `endpoint` as the other side's key now.
+#[doc(hidden)]
+pub fn peer_key_for_test(factory: &Arc<Factory>, pipe: &str, endpoint: &str) {
+    change(factory, pipe, |record| {
+        if let Some(peer) = record.peer.as_mut() {
+            peer.endpoint_id = endpoint.to_owned();
+        }
         true
     });
 }

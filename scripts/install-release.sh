@@ -8,7 +8,7 @@
 #   ~/.factory/bin/claktory-apps  the apps host beside it, which runs apps
 #   ~/.factory/bin/claktory-speech  the speech host, which writes what voice
 #                               messages say
-#   ~/.factory/tools/rg         ripgrep, first on agents' PATH
+#   ~/.factory/tools/rg, jq     ripgrep and jq, first on agents' PATH
 #   ~/.factory/bin/Claktory Agents.app  the supervisor, which keeps it
 #                               running and undoes updates that don't start; a
 #                               LaunchAgent runs it. An app, so it can be added
@@ -87,15 +87,17 @@ if [[ -f "$RELEASE/claktory-speech" ]]; then
   chmod 755 "$HOME_DIR/bin/claktory-speech.new"
   mv -f "$HOME_DIR/bin/claktory-speech.new" "$HOME_DIR/bin/claktory-speech"
 fi
-# Agents' tools (ripgrep), in <home>/tools, which factoryd puts first on
-# agents' PATH (releases before it have none). Its licenses go with it.
-if [[ -f "$RELEASE/tools/rg" ]]; then
-  mkdir -p "$HOME_DIR/tools"
-  cp "$RELEASE/tools/rg" "$HOME_DIR/tools/rg.new"
-  chmod 755 "$HOME_DIR/tools/rg.new"
-  mv -f "$HOME_DIR/tools/rg.new" "$HOME_DIR/tools/rg"
-  if [[ -d "$RELEASE/tools/LICENSES" ]]; then rm -rf "$HOME_DIR/tools/LICENSES"; cp -R "$RELEASE/tools/LICENSES" "$HOME_DIR/tools/LICENSES"; fi
-fi
+# Agents' tools (ripgrep, jq), in <home>/tools, which factoryd puts first on
+# agents' PATH (releases before them have none). Their licenses go with them.
+for tool in rg jq; do
+  if [[ -f "$RELEASE/tools/$tool" ]]; then
+    mkdir -p "$HOME_DIR/tools"
+    cp "$RELEASE/tools/$tool" "$HOME_DIR/tools/$tool.new"
+    chmod 755 "$HOME_DIR/tools/$tool.new"
+    mv -f "$HOME_DIR/tools/$tool.new" "$HOME_DIR/tools/$tool"
+  fi
+done
+if [[ -d "$RELEASE/tools/LICENSES" ]]; then rm -rf "$HOME_DIR/tools/LICENSES"; cp -R "$RELEASE/tools/LICENSES" "$HOME_DIR/tools/LICENSES"; fi
 # The video preview helper (#379), beside them on a Mac (releases before it have none).
 if [[ -f "$RELEASE/claktory-video-preview" ]]; then
   cp "$RELEASE/claktory-video-preview" "$HOME_DIR/bin/claktory-video-preview.new"
@@ -151,6 +153,7 @@ cat >"$AGENT_PLIST" <<PLIST
   <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>$HOME_DIR/factoryd.log</string>
   <key>StandardErrorPath</key><string>$HOME_DIR/factoryd.log</string>
+  <key>AssociatedBundleIdentifiers</key><array><string>dev.factory.app</string></array>
 </dict>
 </plist>
 PLIST
@@ -163,6 +166,16 @@ if $HOLD; then
   echo "Claktory installed but not started (--hold)."
   exit 0
 fi
+# macOS lists the job under Login Items' Background App Activity as the app
+# it names (AssociatedBundleIdentifiers: "Claktory", friend bug #28), not as
+# the developer, when it knows that app as it first sees the job: register it
+# with Launch Services first. It keeps whichever it chose for good.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" 2>/dev/null || true
+# Enabled first: a person who stopped Claktory (Settings, or quitting the app
+# in stop mode, friend bug #27) left the job disabled, and launchd refuses to
+# bootstrap a disabled job. The backend disables it again as it starts, in
+# stop mode.
+launchctl enable "gui/$(id -u)/$LABEL"
 launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST"
 if $OPEN; then
   open "$APP"
